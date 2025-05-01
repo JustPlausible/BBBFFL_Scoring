@@ -1,0 +1,13 @@
+# Ignore credentials and Clasp settings
+.clasp.json
+.classpath
+.project
+.settings/
+node_modules/
+.vscode/
+.env
+.DS_Store
+
+# Ignore build or temp files if using TypeScript or bundlers
+dist/
+build/

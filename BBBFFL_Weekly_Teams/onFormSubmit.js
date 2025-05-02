@@ -55,13 +55,10 @@ function onFormSubmit(e) {
   logAction(`⏱ Match Start: ${formatTime(earlyGameTime)}`, LOG_LEVELS.DEBUG);
   logAction(`🕒 Submission Time: ${formatTime(submissionTimestamp)}`, LOG_LEVELS.DEBUG);
 
-  // 🚫 Handle too-late early game submission
-  if (hasEarlyGamePlayers && submissionTimestamp > earlyGameTime) {
-    logAction(`⏳ Late submission from ${team} (Round ${round}) after first match start`, LOG_LEVELS.WARN);
-    holdLateSubmission(row);
-    notifyCoachOfLateSubmission(team, round, earlyGameInfo, submissionTimestamp);
-    return;
-  }
+// ⏳ Already handled by validateTeamSubmission — no extra check needed here
+if (hasEarlyGamePlayers && submissionTimestamp > earlyGameTime) {
+  logAction(`⏩ Late submission detected — but validated as safe (locked players unchanged)`, LOG_LEVELS.INFO);
+}
 
   // ⏰ Final timing check: late after second match start (even if player hasn't started yet)
   const secondGameInfo = getSecondAFLGameForRound(round);
@@ -71,17 +68,17 @@ function onFormSubmit(e) {
 
   if (secondGameInfo) {
     const secondGameTime = new Date(secondGameInfo.localTime);
-
-    logAction(`🎯 Second match: ${secondGameInfo.homeTeam} vs ${secondGameInfo.awayTeam} at ${secondGameTime}`, LOG_LEVELS.INFO);
-
+  
+    logAction(`🎯 Second match: ${secondGameInfo.homeTeam} vs ${secondGameInfo.awayTeam} at ${formatTime(secondGameTime)}`, LOG_LEVELS.INFO);
+  
     if (submissionTimestamp > secondGameTime) {
-      logAction(`⏳ Submission too late for ${team} (Round ${round}) — after second match started`, LOG_LEVELS.WARN);
-      holdLateSubmission(row);
-      notifyCoachOfLateSubmission(team, round, secondGameTime, submissionTimestamp);
+      logAction(`⏳ Submission received after second match started — full lockout active.`, LOG_LEVELS.WARN);
+      holdLateSubmission(row, "Submission received after full team lockout");
+      notifyCoachOfLateSubmission(team, round, secondGameInfo, submissionTimestamp);
       return;
     }
   }
-
+  
   // ✅ Valid submission
   try {
     consolidateWeeklyTeams();

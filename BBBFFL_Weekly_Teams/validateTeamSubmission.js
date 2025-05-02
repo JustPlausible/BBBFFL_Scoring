@@ -32,34 +32,52 @@ function validateTeamSubmission(row) {
     };
   }
 
-  // Check player hasn't already started
-  const prior = getPreviousSubmission(row[2], parseInt(row[3])); // row[2]=team, row[3]=round
+  // Check if locked players (whose matches have started) were changed
+  const prior = getPreviousSubmission(row[2], parseInt(row[3])); // team, round
   const positions = ["Forward1", "Forward2", "Forward3", "Midfield1", "Midfield2", "Midfield3", "Ruck", "Tackler", "Interchange"];
-  
-  for (let i = 0; i < playerInfo.length; i++) {
-    const p = playerInfo[i];
-    if (playerAlreadyStarted(p.id, row[3])) {
-      const currentInput = row[i + 4]; // raw input string (e.g., "Isaac Heeney [1053]")
-      const previousInput = prior?.[i];
-  
-      if (!previousInput || previousInput !== currentInput) {
-        holdLateSubmission(row, `❌ Player ${p.name} in ${positions[i]} has already played and was changed or removed.`);
+
+  for (let i = 0; i < positions.length; i++) {
+    const position = positions[i];
+    const currentInput = row[i + 4];       // e.g. "Nicholas Martin [745]"
+    const previousInput = prior?.[i] || "";
+    const { id, name } = extractIdAndName(currentInput);
+
+    if (!id) continue;
+
+    if (playerAlreadyStarted(id, row[3])) {
+      logAction(`🔒 Checking locked player in ${position}:`, LOG_LEVELS.DEBUG);
+      logAction(`➡️ Current Input: "${currentInput}" | Previous Input: "${previousInput}"`, LOG_LEVELS.DEBUG);
+
+      const currentId = extractIdAndName(currentInput).id;
+      const previousId = extractIdAndName(previousInput).id;
+
+      if (currentId !== previousId) {
+        logAction(`🚫 Submission rejected — player ID changed after game started: ${name} in ${position}`, LOG_LEVELS.WARN);
+        holdLateSubmission(row, `❌ Player ${name} in ${position} has already played and was changed or removed.`);
         return {
           isValid: false,
-          reason: `❌ Cannot change ${p.name} in ${positions[i]} — their game has started.`,
+          reason: `❌ Cannot change ${name} in ${position} — their game has started.`,
           playerInfo
         };
       }
     }
   }
-  
-  // ⏳ [Placeholder] Future checks like submission timing or invalid AFL teams can go here
-  // if (!isTeamEligibleThisWeek(playerInfo)) {
-  //   result.isValid = false;
-  //   result.reason = "❌ Team includes player(s) from a team on a bye.";
-  //   return result;
-  // }
 
+  // Late submission check — only enforce if no prior entry exists
+  const playerIds = playerInfo.map(p => p.id);
+  if (isLateSubmission(row[2], row[3], playerIds)) {
+    if (!prior) {
+      holdLateSubmission(row, "Late submission (no prior entry)");
+      return {
+        isValid: false,
+        reason: "⏳ Submission received after the first match, and no earlier entry exists.",
+        playerInfo
+      };
+    }
+    logAction(`⏩ Late submission allowed — all locked players are unchanged`, LOG_LEVELS.INFO);
+  }
+
+  // ✅ Passed all checks
   return {
     isValid: true,
     playerInfo
@@ -67,10 +85,18 @@ function validateTeamSubmission(row) {
 }
 
 function extractIdAndName(input) {
-  const match = input?.match(/^(.+?)\s*\[(\d+)\]$/);
+  const str = String(input || "");
+  const match = str.match(/^(.+?)\s*\[(\d+)\]$/);
+
   if (match) {
     return { name: match[1].trim(), id: match[2] };
   }
+
+  // Handle input that's *just* an ID, like "745"
+  if (/^\d+$/.test(str)) {
+    return { name: "", id: str };
+  }
+
   return { name: "", id: "" };
 }
 

@@ -1,4 +1,4 @@
-// Updated 23/3/2025
+// Updated 15/6/2025
 // Scheduling tool for further script execution
 
 function monitorMatchStatus() {
@@ -15,7 +15,7 @@ function monitorMatchStatus() {
   }
 
   const dashboardData = dashboardSheet.getDataRange().getValues();
-  const gameScheduleData = gameScheduleSheet.getDataRange().getValues(); // ✅ Define this early
+  const gameScheduleData = gameScheduleSheet.getDataRange().getValues();
   const headers = gameScheduleData[0];
   const gameIdIdx = headers.indexOf("Game ID");
   const localTimeIdx = headers.indexOf("Local Time");
@@ -25,6 +25,7 @@ function monitorMatchStatus() {
 
   const now = new Date();
 
+  // Get time of last fetchAFLGameSchedule
   let lastFetch = null;
   for (let i = 1; i < dashboardData.length; i++) {
     const scriptName = dashboardData[i][0];
@@ -40,64 +41,35 @@ function monitorMatchStatus() {
   }
   const minutesSinceLastFetch = (now - lastFetch) / 1000 / 60;
 
-  // ✅ Use Game Schedule data to determine match relevance
-  const isMatchDay = gameScheduleData.some((row, i) => {
-    if (i === 0) return false; // Skip header
-    const localTime = new Date(row[localTimeIdx]);
-    return localTime.toDateString() === now.toDateString();
-  });
-
-  // Determine if a game is within 6 hours
-  const isWithin6Hours = gameScheduleData.some((row, i) => {
-    if (i === 0) return false; // Skip header
-    const localTime = new Date(row[localTimeIdx]);
-    const minutesToGame = (localTime - now) / 1000 / 60;
-    return minutesToGame >= 0 && minutesToGame <= 360;
-  });
-
-  // Define frequency rules
-  const needsUpdate = isMatchDay || isWithin6Hours || minutesSinceLastFetch >= 360; // 6 hours
-
-  if (needsUpdate) {
-    Logger.log("📅 Match-relevant time. Running fetchAFLGameSchedule...");
-    fetchAFLGameSchedule();
-    updateDashboard("fetchAFLGameSchedule", "Updated Game Schedule (via monitorMatchStatus)");
-  } else {
-    Logger.log(`⏳ Skipping fetchAFLGameSchedule. Last update ${Math.round(minutesSinceLastFetch)} mins ago.`);
-  }
-
-  const data = gameScheduleSheet.getDataRange().getValues();
-  const headers2 = data[0];
-  const statusIdx2 = headers2.indexOf("Status");
-  const gameIdIdx2 = headers2.indexOf("Game ID");
-  const localTimeIdx2 = headers2.indexOf("Local Time");
-  const roundIdx2 = headers2.indexOf("Round");
-  const dateIdx2 = headers2.indexOf("Date");
-
   const isLiveStatus = ["Q1", "Q2", "Q3", "Q4", "QT", "HT", "LIVE"];
+
   const liveGames = [];
   const upcomingGames = [];
   let currentRound = null;
 
-  for (let i = 1; i < data.length; i++) {
-    const gameId = data[i][gameIdIdx2];
-    const localTime = new Date(data[i][localTimeIdx2]);
-    const round = Number(data[i][roundIdx2]);
-    const status = data[i][statusIdx2];
+  for (let i = 1; i < gameScheduleData.length; i++) {
+    const row = gameScheduleData[i];
+    const status = row[statusIdx];
+    const gameId = row[gameIdIdx];
+    const round = Number(row[roundIdx]);
+    const localTimeRaw = row[localTimeIdx];
+    const gameDateRaw = row[dateIdx];
 
-    const timeToStart = (localTime - now) / 1000 / 60; // in minutes
+    // Filter: skip games with missing or TBC status/times
+    if (!localTimeRaw || status === "TBC" || localTimeRaw === "") continue;
 
-    // Update current round if game is today or in progress
-    if (!currentRound && ["NS", ...isLiveStatus, "FT"].includes(status)) {
-      const gameDay = new Date(data[i][dateIdx2]);
-      if (gameDay.toDateString() === now.toDateString()) {
-        currentRound = round;
-      }
+    const localTime = new Date(localTimeRaw);
+    const gameDate = new Date(gameDateRaw);
+    const timeToGame = (localTime - now) / 1000 / 60;
+
+    // Detect current round by today's match
+    if (!currentRound && gameDate.toDateString() === now.toDateString()) {
+      currentRound = round;
     }
 
     if (isLiveStatus.includes(status)) {
       liveGames.push(gameId.toString());
-    } else if (status === "NS" && timeToStart >= 0 && timeToStart <= 60) {
+    } else if (status === "NS" && timeToGame >= 0 && timeToGame <= 60) {
       upcomingGames.push(gameId.toString());
     }
   }
@@ -105,6 +77,14 @@ function monitorMatchStatus() {
   Logger.log(`🟢 Found ${liveGames.length} live matches.`);
   Logger.log(`🕒 Upcoming Matches: ${JSON.stringify(upcomingGames)}`);
   Logger.log(`📆 Current Round: ${currentRound}`);
+
+  if (minutesSinceLastFetch >= 360 || liveGames.length > 0 || upcomingGames.length > 0) {
+    Logger.log("📅 Match-relevant time. Running fetchAFLGameSchedule...");
+    fetchAFLGameSchedule();
+    updateDashboard("fetchAFLGameSchedule", "Updated Game Schedule (via monitorMatchStatus)");
+  } else {
+    Logger.log(`⏳ Skipping fetchAFLGameSchedule. Last update ${Math.round(minutesSinceLastFetch)} mins ago.`);
+  }
 
   if (upcomingGames.length > 0) {
     Logger.log("🔁 Running fetchAFLPlayerNames() for upcoming games...");
@@ -116,11 +96,12 @@ function monitorMatchStatus() {
     fetchLiveAFLPlayerStats(liveGames);
   }
 
-  if (currentRound) {
-    Logger.log("📋 Running fetchAFLStats() for FT or LIVE updates...");
+  if (currentRound && liveGames.length === 0) {
+    Logger.log(`📋 No live games. Running fetchAFLStats() for Round ${currentRound}...`);
     fetchAFLStats(currentRound, false);
-  } else if (liveGames.length === 0 && upcomingGames.length === 0) {
-    Logger.log("🟢 No live or imminent matches found. No action taken.");
+  } else if (liveGames.length > 0) {
+    Logger.log("⏳ Skipping fetchAFLStats() — live matches still running.");
   }
+
   updateDashboard("monitorMatchStatus", "Live games and upcoming matches checked");
 }

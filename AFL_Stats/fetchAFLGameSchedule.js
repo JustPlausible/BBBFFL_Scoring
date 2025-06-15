@@ -1,5 +1,5 @@
 //Fetch round info from new api
-//Updated 25/5/2025
+//Updated 15/6/2025
 function fetchAFLGameSchedule() {
   const config = getConfig();
   const apiKey = config.afl_apiKey;
@@ -204,6 +204,7 @@ function getStatusShortCode(label) {
 
   if (label === "FULL TIME") return "FT";
   if (label === "NOT STARTED" || label === "NS") return "NS";
+  if (label === "TBC" || label === "TBA") return "NS";
   if (label === "Q1") return "Q1";
   if (label === "QUARTER TIME" || label === "QT") return "QT";
   if (label === "Q2") return "Q2";

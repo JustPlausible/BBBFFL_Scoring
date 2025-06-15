@@ -1,9 +1,9 @@
-// Updated 1/5/2025
-// Function to track only all matches for a given round and shift Live Stats sheet to final
+// Updated for custom AFL API – 15/6/2025
+// Fetches final stats only for completed (FT) matches in the given round
 
 function fetchAFLStats(roundNumber, forceUpdate = false) {
   const config = getConfig();
-  const apiKey = config.apiKey;
+  const apiKey = config.afl_apiKey;
   const ss = SpreadsheetApp.getActiveSpreadsheet();
 
   const gameSheet = ss.getSheetByName('Game Schedule');
@@ -12,43 +12,33 @@ function fetchAFLStats(roundNumber, forceUpdate = false) {
   const roundSheetName = "Round " + roundNumber;
   let roundSheet = ss.getSheetByName(roundSheetName);
 
-const expectedHeaders = [
-  "Game ID", "Player ID", "Player Name", "AFL Team", "Jumper No.",
-  "Kicks", "Handballs", "Disposals", "Marks", "Hitouts", "Tackles",
-  "Goals", "Behinds", "Clearances", "Free Kicks For", "Free Kicks Against",
-  "Status", "FT Timestamp", "Last Updated"
-];
+  const expectedHeaders = [
+    "Game ID", "Player ID", "Player Name", "AFL Team", "Jumper No.",
+    "Kicks", "Handballs", "Disposals", "Marks", "Hitouts", "Tackles",
+    "Goals", "Behinds", "Clearances", "Free Kicks For", "Free Kicks Against",
+    "Status", "FT Timestamp", "Last Updated"
+  ];
 
-if (!roundSheet) {
-  roundSheet = ss.insertSheet(roundSheetName);
-}
+  if (!roundSheet) {
+    roundSheet = ss.insertSheet(roundSheetName);
+  }
 
-const existingHeaders = roundSheet.getRange(1, 1, 1, expectedHeaders.length).getValues()[0];
-const isHeaderMissing = existingHeaders.some((v, i) => v !== expectedHeaders[i]);
-
-if (isHeaderMissing) {
-  roundSheet.clear(); 
-  roundSheet.getRange(1, 1, 1, expectedHeaders.length).setValues([expectedHeaders]);
-}
+  const existingHeaders = roundSheet.getRange(1, 1, 1, expectedHeaders.length).getValues()[0];
+  const isHeaderMismatch = existingHeaders.some((v, i) => v !== expectedHeaders[i]);
+  if (isHeaderMismatch) {
+    roundSheet.clear();
+    roundSheet.getRange(1, 1, 1, expectedHeaders.length).setValues([expectedHeaders]);
+  }
 
   const now = new Date();
   const lastUpdated = Utilities.formatDate(now, Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
 
-  // Build player lookup
-  const playerLookup = {};
-  const playerData = playerSheet.getDataRange().getValues();
-  for (let i = 1; i < playerData.length; i++) {
-    if (playerData[i][0]) playerLookup[playerData[i][0]] = playerData[i][1];
-  }
-
-  // Check existing Round data
   const roundExisting = roundSheet.getDataRange().getValues();
   const roundMap = new Set();
   for (let i = 1; i < roundExisting.length; i++) {
     roundMap.add(roundExisting[i][0] + "_" + roundExisting[i][1]);
   }
 
-  // Only check Game Schedule for FT games in the round
   const gameData = gameSheet.getDataRange().getValues();
   const gameIDs = [];
   const gameStatuses = {};
@@ -59,11 +49,10 @@ if (isHeaderMissing) {
     if (Number(round) !== roundNumber || status !== "FT") continue;
 
     const start = new Date(localTime);
-    const ftEstimate = new Date(start.getTime() + 2.5 * 3600000); // +2.5h
+    const ftEstimate = new Date(start.getTime() + 2.5 * 3600000); // FT assumed 2.5h after start
     const timeSinceFT = (now - ftEstimate) / (1000 * 60);
     const alreadyStored = [...roundMap].some(k => k.startsWith(gameId + "_"));
 
-    //if (forceUpdate || timeSinceFT <= 60 || !alreadyStored) {
     if (status === "FT" && (forceUpdate || timeSinceFT <= 60)) {
       gameIDs.push(gameId);
       gameStatuses[gameId] = "FT";
@@ -78,69 +67,74 @@ if (isHeaderMissing) {
 
   if (forceUpdate) clearRoundSheetFast(roundSheet);
 
-  // Fetch and process FT stats only
   const roundBatch = [];
   let apiCalls = 0;
 
   gameIDs.forEach(gameId => {
-    const url = `https://v1.afl.api-sports.io/games/statistics/players?id=${gameId}`;
-    const options = { method: "GET", headers: { "x-apisports-key": apiKey } };
+    const url = `https://afl-api.thehardinghams.net/api/player-stats?match_id=${gameId}`;
+    const options = {
+      method: "GET",
+      headers: { "x-api-key": apiKey },
+      muteHttpExceptions: true
+    };
 
     try {
       const response = UrlFetchApp.fetch(url, options);
-      if (!checkApiQuota(response)) return;
-      apiCalls++;
+      const code = response.getResponseCode();
+      if (code !== 200) {
+        Logger.log(`❌ Failed to fetch stats for match ${gameId}: HTTP ${code}`);
+        return;
+      }
 
-      const stats = JSON.parse(response.getContentText());
-      const teams = stats.response?.[0]?.teams;
-      if (!teams) return;
+      const data = JSON.parse(response.getContentText());
+      if (!Array.isArray(data)) {
+        Logger.log(`⚠️ Unexpected format for Game ID ${gameId}`);
+        return;
+      }
 
-      teams.forEach(team => {
-        const teamId = team.team.id;
-        const teamName = getTeamShortName(teamId);
-
-        team.players.forEach(player => {
-          const playerId = player.player.id;
-          const playerName = playerLookup[playerId] || player.player.name || "Unknown";
-          const key = `${gameId}_${playerId}`;
-
-          //const row = [
-          //  gameId, playerId, playerName, teamName, player.player.number || "",
-          //  player.kicks || 0, player.handballs || 0, player.disposals || 0, player.marks || 0,
-          //  player.hitouts || 0, player.tackles || 0, player.goals?.total || 0, player.behinds || 0,
-          //  player.clearances || 0, player.free_kicks?.for || 0, player.free_kicks?.against || 0,
-          //  "FT", ftTimestamps[gameId] || "", lastUpdated
-          //];
-
-          //roundBatch.push(row);
-
-          if (!roundMap.has(key)) {
-            roundBatch.push([
-              gameId, playerId, playerName, teamName, player.player.number || "",
-              player.kicks || 0, player.handballs || 0, player.disposals || 0, player.marks || 0,
-              player.hitouts || 0, player.tackles || 0, player.goals?.total || 0, player.behinds || 0,
-              player.clearances || 0, player.free_kicks?.for || 0, player.free_kicks?.against || 0,
-              "FT", ftTimestamps[gameId] || "", lastUpdated
-            ]);
-          }
-        });
+      data.forEach(stat => {
+        const key = `${stat.match_id}_${stat.afl_id}`;
+        if (!roundMap.has(key)) {
+          roundBatch.push([
+            stat.match_id,
+            stat.afl_id,
+            stat.player_name,
+            stat.team_code,
+            stat.jumper_number || "",
+            stat.kicks || 0,
+            stat.handballs || 0,
+            stat.disposals || 0,
+            stat.marks || 0,
+            stat.hitouts || 0,
+            stat.tackles || 0,
+            stat.goals || 0,
+            stat.behinds || 0,
+            stat.clearances || 0,
+            stat.free_kicks_for || 0,
+            stat.free_kicks_against || 0,
+            stat.status || "FT",
+            ftTimestamps[gameId] || "",
+            lastUpdated
+          ]);
+        }
       });
 
       Logger.log(`✅ Stats processed for Game ID: ${gameId}`);
+      apiCalls++;
+
     } catch (e) {
-      Logger.log(`❌ Error on Game ID ${gameId}: ${e}`);
+      Logger.log(`❌ Error fetching stats for Game ID ${gameId}: ${e}`);
     }
   });
 
-  // ✅ After writing FT stats, clean them from Live Stats if they are recent (<= 60 mins old)
   if (roundBatch.length > 0) {
     roundSheet.getRange(roundSheet.getLastRow() + 1, 1, roundBatch.length, roundBatch[0].length).setValues(roundBatch);
     Logger.log(`📥 ${roundBatch.length} FT stats written to ${roundSheetName}`);
 
-    // 🔁 Clean up matching FT entries from Live Stats (only those we just handled)
+    // 🔁 Clean from Live Stats if recently handled
     const liveData = liveSheet.getDataRange().getValues();
     const headers = liveData[0];
-    const cleanedRows = [headers]; // Preserve header
+    const cleanedRows = [headers];
     let removedCount = 0;
 
     for (let i = 1; i < liveData.length; i++) {
@@ -148,8 +142,6 @@ if (isHeaderMissing) {
       const gameId = row[0];
       const playerId = row[1];
       const key = `${gameId}_${playerId}`;
-
-      // Only remove if we just wrote this FT game AND it's recent
       const ftTimestamp = ftTimestamps[gameId];
       const isFTHandled = gameStatuses[gameId] === "FT";
       const isRecent = ftTimestamp && ((now - new Date(ftTimestamp)) / 1000 / 60 <= 60);

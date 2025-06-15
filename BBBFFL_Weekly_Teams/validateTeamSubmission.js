@@ -159,29 +159,27 @@ function getSecondAFLGameForRound(roundNumber) {
 
 function isLateSubmission(team, round, playerIds) {
   const config = getConfig();
+
+  // Step 1: Get all upcoming matches for the round
   const scheduleSheet = SpreadsheetApp.openById(config.aflStatsSheetId).getSheetByName("Game Schedule");
   const scheduleData = scheduleSheet.getDataRange().getValues();
-
   const roundMatches = scheduleData.filter(row => row[3] === round && row[7] === "NS"); // Round & Not Started
-  if (roundMatches.length === 0) return false; // No games, allow
+  if (roundMatches.length === 0) return false;
 
-  // Find first scheduled match (by Local Time)
+  // Step 2: Find the first match by Local Time (col 2)
   roundMatches.sort((a, b) => new Date(a[2]) - new Date(b[2]));
   const firstMatch = roundMatches[0];
-  const firstMatchTime = new Date(firstMatch[2]); // Local Time column
-  const earlyTeams = [firstMatch[4], firstMatch[5]]; // Home Team, Away Team
+  const firstMatchTime = new Date(firstMatch[2]);
+  const earlyTeams = [firstMatch[4], firstMatch[5]]; // Home + Away
 
-  // Get AFL team mapping
-  const playerSheet = SpreadsheetApp.openById(config.aflStatsSheetId).getSheetByName("Player Names");
-  const playerMap = {};
-  const playerData = playerSheet.getDataRange().getValues();
-  for (let i = 1; i < playerData.length; i++) {
-    playerMap[playerData[i][0]] = playerData[i][2]; // PlayerID → AFL Team
-  }
+  // Step 3: Load Mapped AFL Players data
+  const playerTeams = playerIds.map(id => {
+    const player = lookupAFLPlayer(id);
+    return player?.aflTeam || null;
+  }).filter(team => team !== null);
 
-  // Find any submitted players in early teams
   const now = new Date();
-  const late = playerIds.some(id => earlyTeams.includes(playerMap[id]));
+  const late = playerTeams.some(team => earlyTeams.includes(team));
   const isLate = late && now > firstMatchTime;
 
   return isLate;
@@ -189,28 +187,21 @@ function isLateSubmission(team, round, playerIds) {
 
 function playerAlreadyStarted(playerId, roundNumber) {
   const config = getConfig();
-  const playerSheet = SpreadsheetApp.openById(config.aflStatsSheetId).getSheetByName("Player Names");
+  const player = lookupAFLPlayer(playerId);
+  if (!player || !player.aflTeam) return false;
+
+  const aflTeam = player.aflTeam;
+
   const scheduleSheet = SpreadsheetApp.openById(config.aflStatsSheetId).getSheetByName("Game Schedule");
-
-  // Get player's AFL team
-  const playerData = playerSheet.getDataRange().getValues();
-  let aflTeam = null;
-  for (let i = 1; i < playerData.length; i++) {
-    if (String(playerData[i][0]) === String(playerId)) {
-      aflTeam = playerData[i][4]; // AFL Team is in col E (index 4)
-      break;
-    }
-  }
-  if (!aflTeam) return false;
-
-  // Search for any match involving that team in the current round
   const scheduleData = scheduleSheet.getDataRange().getValues();
+
   for (let i = 1; i < scheduleData.length; i++) {
-    const round = scheduleData[i][3]; // Round
-    const homeTeam = scheduleData[i][4];
-    const awayTeam = scheduleData[i][5];
-    const status = scheduleData[i][7]; // Status
-    const localTimeStr = scheduleData[i][2]; // Local Time string
+    const row = scheduleData[i];
+    const round = row[3];
+    const homeTeam = row[4];
+    const awayTeam = row[5];
+    const status = row[7];
+    const localTimeStr = row[2];
 
     if (parseInt(round) !== parseInt(roundNumber)) continue;
     if (homeTeam !== aflTeam && awayTeam !== aflTeam) continue;
@@ -219,7 +210,7 @@ function playerAlreadyStarted(playerId, roundNumber) {
     const now = new Date();
 
     if (status !== "NS" || now > matchStartTime) {
-      return true; // Match has started or is in progress
+      return true;
     }
   }
 

@@ -1,5 +1,96 @@
-//Updated 17/3/2025
+//Fetch round info from new api
+//Updated 25/5/2025
 function fetchAFLGameSchedule() {
+  const config = getConfig();
+  const apiKey = config.afl_apiKey;
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  const roundUrl = "https://afl-api.thehardinghams.net/api/rounds";
+  const matchUrl = "https://afl-api.thehardinghams.net/api/matches";
+
+  const options = {
+    method: "GET",
+    headers: {
+      "x-api-key": apiKey
+    },
+    muteHttpExceptions: true
+  };
+
+  const sheetName = "Game Schedule";
+  let sheet = ss.getSheetByName(sheetName);
+  if (!sheet) sheet = ss.insertSheet(sheetName);
+
+  const headers = [
+    "Game ID", "Date", "Local Time", "Round", "Round ID",
+    "Home Team", "Away Team", "Venue", "Status", "Home Score", "Away Score", "Last Updated"
+  ];
+  sheet.clear();
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+
+  const now = new Date();
+  const lastUpdated = Utilities.formatDate(now, Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+
+  try {
+    // Step 1: Get round_id → round_label map
+    const roundRes = UrlFetchApp.fetch(roundUrl, options);
+    const roundsData = JSON.parse(roundRes.getContentText());
+    const roundMap = {};
+    roundsData.forEach(r => {
+      roundMap[r.round_id] = r.round_label || "??";
+    });
+
+    // Step 2: Get all match data
+    const matchRes = UrlFetchApp.fetch(matchUrl, options);
+    const matches = JSON.parse(matchRes.getContentText());
+
+    const rows = matches.map(match => {
+      const gameId = match.match_id;
+      const roundId = match.round_id;
+      const roundLabel = roundMap[roundId] || "??";
+
+      const startUtc = new Date(match.start_time_utc);
+      const localDate = Utilities.formatDate(startUtc, Session.getScriptTimeZone(), "yyyy-MM-dd");
+      const localTime = Utilities.formatDate(startUtc, Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm");
+
+      return [
+        gameId,
+        localDate,
+        localTime,
+        roundLabel === "OR" ? 0 : roundLabel.replace(/\D/g, "") || "??",
+        roundId,
+        match.home_team,
+        match.away_team,
+        match.venue,
+        getStatusShortCode(match.match_time_label),
+        match.score_home || 0,
+        match.score_away || 0,
+        lastUpdated
+      ];
+    });
+
+    // Step 3: Write to sheet
+    if (rows.length > 0) {
+      sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
+      Logger.log(`✅ Game schedule loaded with ${rows.length} entries.`);
+      // ✅ Multi-level sort: first by Round (column 4), then by Local Time (column 3)
+      sheet.getRange(2, 1, rows.length, headers.length).sort([
+        { column: 4, ascending: true },  // Round
+        { column: 3, ascending: true }   // Local Time
+      ]);
+      sheet.setFrozenRows(1);
+    } else {
+      Logger.log("⚠️ No matches returned from API.");
+    }
+
+  } catch (err) {
+    Logger.log(`❌ Error fetching schedule: ${err}`);
+  }
+
+  updateDashboard("fetchAFLGameSchedule", "Updated Game Schedule");
+}
+
+//Updated 17/3/2025
+function fetchAFLGameScheduleFromOldApi() {
     var config = getConfig();
     var apiKey = config.apiKey;
     var seasonYear = config.seasonYear;
@@ -25,9 +116,9 @@ function fetchAFLGameSchedule() {
             return;
         }
 
-        var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Game Schedule');
+        var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Game Schedule-old');
         if (!sheet) {
-            sheet = SpreadsheetApp.getActiveSpreadsheet().insertSheet('Game Schedule');
+            sheet = SpreadsheetApp.getActiveSpreadsheet().insertSheet('Game Schedule-old');
         }
 
         var headers = ["Game ID", "Date", "Local Time", "Round", "Home Team", "Away Team", "Venue", "Status", "Home Score", "Away Score", "Last Updated"];
@@ -103,4 +194,27 @@ function convertUTCToLocal(utcDateTime) {
  */
 function formatDateTime(date) {
     return Utilities.formatDate(date, Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+}
+
+
+function getStatusShortCode(label) {
+  if (!label) return "NS";
+
+  label = label.toUpperCase().trim();
+
+  if (label === "FULL TIME") return "FT";
+  if (label === "NOT STARTED" || label === "NS") return "NS";
+  if (label === "Q1") return "Q1";
+  if (label === "QUARTER TIME" || label === "QT") return "QT";
+  if (label === "Q2") return "Q2";
+  if (label === "HALF TIME" || label === "HT") return "HT";
+  if (label === "Q3") return "Q3";
+  if (label === "3 QTR TIME" || label === "3QT") return "3QT";
+  if (label === "Q4" || label === "4Q") return "Q4";
+
+  // Matches local time like "5:30pmAWST"
+  if (label.match(/^\d{1,2}:\d{2}(AM|PM)?AWST$/i)) return "NS";
+
+  // Fallback: treat unknown-but-present as LIVE
+  return "LIVE";
 }

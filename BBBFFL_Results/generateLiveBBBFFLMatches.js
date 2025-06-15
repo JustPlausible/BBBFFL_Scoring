@@ -144,43 +144,51 @@ function generateLiveBBBFFLMatches(roundNumber) {
     logAction(`📋 Loaded override stats for ${count} player(s)`, LOG_LEVELS.INFO);
   }
 
+  function getHeaderIndexes(headerRow) {
+    return {
+      playerIdIdx: headerRow.indexOf("Player ID"),
+      statusIdx: headerRow.indexOf("Status"),
+      kicksIdx: headerRow.indexOf("Kicks"),
+      handballsIdx: headerRow.indexOf("Handballs"),
+      disposalsIdx: headerRow.indexOf("Disposals"),
+      marksIdx: headerRow.indexOf("Marks"),
+      hitoutsIdx: headerRow.indexOf("Hitouts"),
+      tacklesIdx: headerRow.indexOf("Tackles"),
+      goalsIdx: headerRow.indexOf("Goals"),
+      behindsIdx: headerRow.indexOf("Behinds"),
+      // ...add any others you need
+    };
+  }
+
   function processStats(data, label, sourceKey) {
     let added = 0;
-
+    const headerIndexes = getHeaderIndexes(data[0]);
     for (let i = 1; i < data.length; i++) {
       const row = data[i];
-      const playerId = String(row[1]);
+      const playerId = String(row[headerIndexes.playerIdIdx]);
+      const playerStatus = row[headerIndexes.statusIdx];
 
-      // ✅ Skip if already added by override
-      if (combinedStats[playerId]?.['_source'] === 'override') {
-        logAction(`🔒 Skipping ${playerId} – already set via override`, LOG_LEVELS.DEBUG);
-        continue;
-      }
+      // Only use live stats for players with "LIVE" status
+      if (sourceKey === "live" && playerStatus !== "LIVE") continue;
+      // Only use round stats for players with "FT" status (or "NS" for not started)
+      if (sourceKey === "round" && playerStatus !== "FT") continue;
 
-      const aflTeam = row[3];
-
+      // ...rest of your code as before
       const stats = {
-        disposals: row[7] || 0,
-        marks: row[8] || 0,
-        hitouts: row[9] || 0,
-        tackles: row[10] || 0,
-        goals: row[11] || 0,
-        behinds: row[12] || 0,
+        disposals: row[headerIndexes.disposalsIdx] || 0,
+        marks: row[headerIndexes.marksIdx] || 0,
+        hitouts: row[headerIndexes.hitoutsIdx] || 0,
+        tackles: row[headerIndexes.tacklesIdx] || 0,
+        goals: row[headerIndexes.goalsIdx] || 0,
+        behinds: row[headerIndexes.behindsIdx] || 0,
         _source: sourceKey
       };
 
-      // 🚫 Skip adding player if all stat values are zero
-      if (Object.values(stats).every(val => val === 0)) {
-        logAction(`⏭️ Skipping empty stats for Player ${playerId}`, LOG_LEVELS.DEBUG);
-        continue;
-      }
-
       combinedStats[playerId] = stats;
-      aflTeamMap[playerId] = aflTeam;
+      aflTeamMap[playerId] = row[3]; // Or use mapped index
       added++;
     }
-
-    logAction(`🧮 ${label} stats processed: ${Object.keys(combinedStats).length} players`, LOG_LEVELS.INFO);
+    logAction(`🧮 ${label} stats processed: ${added} players`, LOG_LEVELS.INFO);
   }
 
   function processByeStats(byeTeamsForRound) {

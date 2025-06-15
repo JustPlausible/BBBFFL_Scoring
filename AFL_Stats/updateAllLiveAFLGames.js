@@ -1,20 +1,31 @@
-function updateAllLiveAFLGames() {
-    var config = getConfig();
-    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Game Schedule");
+// updateAllLiveAFLGames
+// Update 1/6/2025
 
+function updateAllLiveAFLGames() {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Game Schedule");
     if (!sheet) {
         Logger.log("⚠ No Game Schedule sheet found.");
         return;
     }
 
     var data = sheet.getDataRange().getValues();
-    var liveStatuses = ["Q1", "Q2", "Q3", "Q4", "HT", "QT"]; // Live game statuses
+    if (data.length < 2) {
+        Logger.log("⚠ No data in Game Schedule.");
+        return;
+    }
+
+    // Map headers to indexes for robust code
+    var headers = data[0];
+    var colIndex = {};
+    headers.forEach(function(title, i) { colIndex[title.trim()] = i; });
+
+    var liveStatuses = ["Q1", "Q2", "Q3", "3QT", "Q4", "HT", "QT"];
     var liveGames = [];
 
     for (var i = 1; i < data.length; i++) { // Skip headers
-        var gameId = data[i][0]; // Game ID
-        var status = data[i][7]; // Status column
-
+        var row = data[i];
+        var status = row[colIndex["Status"]];
+        var gameId = row[colIndex["Game ID"]];
         if (liveStatuses.includes(status)) {
             liveGames.push(gameId);
         }
@@ -25,10 +36,6 @@ function updateAllLiveAFLGames() {
         return;
     }
 
-    liveGames.forEach(function(gameId) {
-        Logger.log("🔄 Updating live stats for Game ID: " + gameId);
-        updateAFLGameStatus(gameId); // Calls your existing function
-    });
-
-    Logger.log("✅ All live games updated!");
+    Logger.log("🔄 Live games found: " + liveGames.join(", "));
+    fetchLiveAFLPlayerStats(liveGames); // ← This is now your main action!
 }

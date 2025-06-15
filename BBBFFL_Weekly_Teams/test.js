@@ -1,8 +1,8 @@
 function test() {
-  consolidateWeeklyTeams;
+  //consolidateWeeklyTeams;
   //generatePreFilledLinks(6);
-  renderPreFilledLinksSheet(6);
+  //renderPreFilledLinksSheet(6);
   //emailPreFilledLinksToCoaches(6);
-  //reviewHeldSubmissions();
+  reviewHeldSubmissions();
   //insertPreviousRoundAsOverride("Plague", 3);
 }

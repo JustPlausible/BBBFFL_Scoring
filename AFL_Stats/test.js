@@ -1,5 +1,5 @@
 function myFunction() {
-  //fetchLiveAFLPlayerStats([3078]);
-  //updateAFLGameStatus(3069);
-  updateInjurySheet();
+  //fetchLiveAFLPlayerStats([7070]);
+  updateAFLGameStatus(7070);
+  //updateInjurySheet();
 }

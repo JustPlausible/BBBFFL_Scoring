@@ -33,31 +33,46 @@ function buildPreFilledBBBFFLLink(team, round, playerIds, playerNames = []) {
 }
 
 // Lookup players from AFL Players sheets using an ID
-function lookupAFLPlayer(playerId) {
-  const config = getConfig();
-  const playerSources = [
-    { sheetName: "Player Names", source: "API" },
-    { sheetName: "Player Names Manual", source: "Manual" }
-  ];
+const lookupAFLPlayer = (() => {
+  let playerMap = null;
 
-  for (let source of playerSources) {
-    const sheet = SpreadsheetApp.openById(config.aflStatsSheetId).getSheetByName(source.sheetName);
-    if (!sheet) continue;
+  return function(playerId) {
+    if (!playerMap) {
+      const config = getConfig();
+      const sheet = SpreadsheetApp.openById(config.aflStatsSheetId).getSheetByName("Mapped AFL Players");
 
-    const data = sheet.getDataRange().getValues();
-    for (let i = 1; i < data.length; i++) {
-      if (String(data[i][0]) === String(playerId)) {
-        return {
-          id: playerId,
-          name: data[i][1],
-          firstName: data[i][2],
-          lastName: data[i][3],
-          aflTeam: data[i][4],
-          source: source.source
+      if (!sheet) {
+        Logger.log("❌ Mapped AFL Players sheet not found.");
+        return null;
+      }
+
+      const data = sheet.getDataRange().getValues();
+      const headers = data[0];
+
+      const aflIdIndex = headers.indexOf("AFL ID");
+      const cdIdIndex = headers.indexOf("CD_id");
+      const fullNameIndex = headers.indexOf("Full Name");
+      const firstNameIndex = headers.indexOf("First Name");
+      const lastNameIndex = headers.indexOf("Last Name");
+      const clubIndex = headers.indexOf("Club");
+
+      playerMap = {};
+
+      for (let i = 1; i < data.length; i++) {
+        const row = data[i];
+        const rowId = String(row[aflIdIndex]);
+        playerMap[rowId] = {
+          id: rowId,
+          cdId: row[cdIdIndex],
+          fullName: row[fullNameIndex],
+          firstName: row[firstNameIndex],
+          lastName: row[lastNameIndex],
+          aflTeam: row[clubIndex],
+          source: "Mapped AFL Players"
         };
       }
     }
-  }
 
-  return null; // Player not found
-}
+    return playerMap[String(playerId)] || null;
+  };
+})();

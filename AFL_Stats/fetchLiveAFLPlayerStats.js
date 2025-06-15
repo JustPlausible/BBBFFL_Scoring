@@ -1,6 +1,3 @@
-// Updated 23/3/2025
-// Function to track only live matches and update to Live Stats sheet
-
 function fetchLiveAFLPlayerStats(gameIds) {
   if (!Array.isArray(gameIds) || gameIds.length === 0) {
     Logger.log("⚠️ No live game IDs provided.");
@@ -8,28 +5,12 @@ function fetchLiveAFLPlayerStats(gameIds) {
   }
 
   const config = getConfig();
-  const apiKey = config.apiKey;
+  const apiKey = config.afl_apiKey;
   const now = new Date();
   const lastUpdated = Utilities.formatDate(now, Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
 
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const statsSheet = ss.getSheetByName("Live Stats") || ss.insertSheet("Live Stats");
-  const teamSheet = ss.getSheetByName("Teams");
-  const playerSheet = ss.getSheetByName("Player Names");
-
-  // Load Team Names
-  const teamData = teamSheet.getDataRange().getValues();
-  const teamMap = {};
-  for (let i = 1; i < teamData.length; i++) {
-    teamMap[teamData[i][0].toString()] = teamData[i][2]; // Team ID → Short Name
-  }
-
-  // Load Player Names
-  const playerData = playerSheet.getDataRange().getValues();
-  const playerMap = {};
-  for (let i = 1; i < playerData.length; i++) {
-    playerMap[playerData[i][0].toString()] = playerData[i][1]; // Player ID → Name
-  }
 
   // Prepare headers
   const headers = [
@@ -44,30 +25,26 @@ function fetchLiveAFLPlayerStats(gameIds) {
 
   let totalGames = gameIds.length;
   let gamesUpdated = 0;
-  let gamesSkippedDueToQuota = 0;
   let gamesWithNoData = 0;
 
   gameIds.forEach(gameId => {
-    const url = "https://v1.afl.api-sports.io/games/statistics/players?id=" + gameId;
+    const url = "https://afl-api.thehardinghams.net/api/player-stats?match_id=" + gameId;
     const options = {
       method: "GET",
-      headers: { "x-apisports-key": apiKey }
+      headers: { "x-api-key": apiKey },
+      muteHttpExceptions: true
     };
 
     try {
       const response = UrlFetchApp.fetch(url, options);
-
-      // ✅ Check API quota before proceeding
-      if (!checkApiQuota(response)) return;
-
-      if (!checkApiQuota(response)) {
-        gamesSkippedDueToQuota++;
+      const code = response.getResponseCode();
+      if (code !== 200) {
+        Logger.log(`❌ Failed to fetch stats for match ${gameId}: HTTP ${code}`);
         return;
       }
 
       const data = JSON.parse(response.getContentText());
-
-      if (!data.response || !data.response.length) {
+      if (!Array.isArray(data) || data.length === 0) {
         Logger.log(`⚠️ No valid stats found for Game ID: ${gameId}`);
         gamesWithNoData++;
         return;
@@ -75,46 +52,29 @@ function fetchLiveAFLPlayerStats(gameIds) {
 
       let rowsAddedForGame = 0;
 
-      data.response.forEach(gameData => {
-        if (!gameData?.teams?.length) return;
+      data.forEach(stat => {
+        const row = [
+          stat.match_id,
+          stat.afl_id,
+          stat.player_name,
+          stat.team_code,
+          stat.jumper_number || "",
+          stat.kicks || 0,
+          stat.handballs || 0,
+          stat.disposals || 0,
+          stat.marks || 0,
+          stat.hitouts || 0,
+          stat.tackles || 0,
+          stat.goals || 0,
+          stat.behinds || 0,
+          stat.clearances || 0,
+          "", "", // Free Kicks For/Against (not yet included)
+          stat.status || "LIVE",
+          lastUpdated
+        ];
 
-        gameData.teams.forEach(teamData => {
-          const teamId = teamData.team?.id?.toString();
-          const teamName = teamMap[teamId] || "Unknown";
-
-          teamData.players.forEach(player => {
-            const playerId = player.player?.id?.toString();
-            const playerName = playerMap[playerId] || "Unknown";
-
-            const row = [
-              gameId,
-              playerId,
-              playerName,
-              teamName,
-              player.player.number || "",
-              player.kicks || 0,
-              player.handballs || 0,
-              player.disposals || 0,
-              player.marks || 0,
-              player.hitouts || 0,
-              player.tackles || 0,
-              player.goals?.total || 0,
-              player.behinds || 0,
-              player.clearances || 0,
-              player.free_kicks?.for || 0,
-              player.free_kicks?.against || 0,
-              "LIVE",
-              lastUpdated
-            ];
-
-            if (row.length !== headers.length) {
-              Logger.log(`❌ Row length mismatch for Player ${playerName}: expected ${headers.length}, got ${row.length}`);
-            }
-
-            allRows.push(row);
-            rowsAddedForGame++;
-          });
-        });
+        allRows.push(row);
+        rowsAddedForGame++;
       });
 
       if (rowsAddedForGame > 0) {
@@ -135,10 +95,10 @@ function fetchLiveAFLPlayerStats(gameIds) {
   } else {
     Logger.log("⚠️ No player rows written to Live Stats.");
   }
+
   Logger.log(`📊 Live Stats Fetch Summary:
   🏉 Total Games Attempted: ${totalGames}
   ✅ Games Successfully Updated: ${gamesUpdated}
-  ⚠️ Games Skipped Due to Quota: ${gamesSkippedDueToQuota}
   ⚠️ Games With No Valid Data: ${gamesWithNoData}`);
 
   updateDashboard("fetchLiveAFLPlayerStats", "Updated Live Matches");

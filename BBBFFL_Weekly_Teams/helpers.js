@@ -7,7 +7,7 @@
  * @param {string[]} playerNames - Optional array of player names (for display as "Name [ID]").
  * @returns {string} - Pre-filled form URL.
  */
-function buildPreFilledBBBFFLLink(team, round, playerIds, playerNames = []) {
+function buildPreFilledBBBFFLLink(team, round, playerIds, playerNames = [], isSuperScore = false) {
   const config = getConfig();
   const formIDs = config.bbbfflFormLinks;
   const entryMappings = config.bbbfflEntryMappings;
@@ -18,7 +18,10 @@ function buildPreFilledBBBFFLLink(team, round, playerIds, playerNames = []) {
 
   const baseURL = `https://docs.google.com/forms/d/e/${formId}/viewform?usp=pp_url`;
 
-  let params = `&${encodeURIComponent(mappings.teamName)}=${encodeURIComponent(team)}&${encodeURIComponent(mappings.round)}=${round}`;
+  // SuperScore round label (e.g. "SS1") or regular round number
+  const roundLabel = isSuperScore ? `SS${round - 20}` : round;
+
+  let params = `&${encodeURIComponent(mappings.teamName)}=${encodeURIComponent(team)}&${encodeURIComponent(mappings.round)}=${encodeURIComponent(roundLabel)}`;
 
   for (let i = 0; i < playerIds.length; i++) {
     const id = playerIds[i];

@@ -7,7 +7,7 @@ function validateTeamSubmission(row) {
   const duplicates = [];
   const playerInfo = [];
 
-  // Check for duplicates
+  // Step 1: Check for duplicate player IDs
   rawSelections.forEach(input => {
     const { id, name } = extractIdAndName(input);
     if (!id) return;
@@ -32,41 +32,46 @@ function validateTeamSubmission(row) {
     };
   }
 
-  // Check if locked players (whose matches have started) were changed
-  const prior = getPreviousSubmission(row[2], parseInt(row[3])); // team, round
+  const team = row[2];
+  const round = parseInt(row[3]);
+  const prior = getPreviousSubmission(team, round); // returns array or null
   const positions = ["Forward1", "Forward2", "Forward3", "Midfield1", "Midfield2", "Midfield3", "Ruck", "Tackler", "Interchange"];
 
+  // Step 2: Check for changes to locked players
   for (let i = 0; i < positions.length; i++) {
     const position = positions[i];
-    const currentInput = row[i + 4];       // e.g. "Nicholas Martin [745]"
+    const currentInput = row[i + 4];
     const previousInput = prior?.[i] || "";
-    const { id, name } = extractIdAndName(currentInput);
 
-    if (!id) continue;
+    const { id: currentId, name: currentName } = extractIdAndName(currentInput);
+    const { id: previousId } = extractIdAndName(previousInput);
 
-    if (playerAlreadyStarted(id, row[3])) {
-      logAction(`🔒 Checking locked player in ${position}:`, LOG_LEVELS.DEBUG);
-      logAction(`➡️ Current Input: "${currentInput}" | Previous Input: "${previousInput}"`, LOG_LEVELS.DEBUG);
+    if (!currentId) continue;
 
-      const currentId = extractIdAndName(currentInput).id;
-      const previousId = extractIdAndName(previousInput).id;
+    const matchStarted = playerAlreadyStarted(currentId, round);
 
-      if (currentId !== previousId) {
-        logAction(`🚫 Submission rejected — player ID changed after game started: ${name} in ${position}`, LOG_LEVELS.WARN);
-        holdLateSubmission(row, `❌ Player ${name} in ${position} has already played and was changed or removed.`);
+    logAction(`${position}: previous=${previousId || "none"}, current=${currentId}, started=${matchStarted}`, LOG_LEVELS.DEBUG);
+
+    if (matchStarted) {
+      if (previousId && currentId !== previousId) {
+        logAction(`🚫 Submission rejected — player ID changed after game started: ${currentName} in ${position}`, LOG_LEVELS.WARN);
+        holdLateSubmission(row, `❌ Cannot change ${currentName} in ${position} — their game has started.`);
         return {
           isValid: false,
-          reason: `❌ Cannot change ${name} in ${position} — their game has started.`,
+          reason: `❌ Cannot change ${currentName} in ${position} — their game has started.`,
           playerInfo
         };
+      } else {
+        logAction(`🔒 ${position} locked but unchanged: ${currentName}`, LOG_LEVELS.DEBUG);
       }
     }
   }
 
-  // Late submission check — only enforce if no prior entry exists
+  // Step 3: Late submission check — only flag if there's no prior submission
   const playerIds = playerInfo.map(p => p.id);
-  if (isLateSubmission(row[2], row[3], playerIds)) {
+  if (isLateSubmission(team, round, playerIds)) {
     if (!prior) {
+      logAction(`🛑 Holding submission for review: first submission by ${team} after Round ${round} started`, LOG_LEVELS.WARN);
       holdLateSubmission(row, "Late submission (no prior entry)");
       return {
         isValid: false,
@@ -369,17 +374,6 @@ function notifyCoachOfDeclinedSubmission(team, round, reason) {
 }
 
 // Functions to manage additional processing of submissions
-function saveToHoldingSheet(row, reason) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const holdingSheet = ss.getSheetByName("Holding Submissions") || ss.insertSheet("Holding Submissions");
-
-  if (holdingSheet.getLastRow() === 0) {
-    holdingSheet.appendRow(["Timestamp", "Entered by", "BBBFFL Team", "Round", "Forward1", "Forward2", "Forward3", "Midfield1", "Midfield2", "Midfield3", "Ruck", "Tackler", "Interchange", "Reason"]);
-  }
-
-  holdingSheet.appendRow([...row, reason]);
-}
-
 function holdLateSubmission(row, reason = "Late submission") {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName("Holding Sheet") || ss.insertSheet("Holding Sheet");

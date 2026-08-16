@@ -1,7 +1,7 @@
 // Updated 29/3/2025
 // Generates pre-filled links to the Google Form of each team's weekly naming sheet
 
-function generatePreFilledDataRows(roundNumber) {
+function generatePreFilledDataRows(roundNumber, isSuperScoreRound = false) {
   const config = getConfig();
   const formIDs = config.bbbfflFormLinks;
   const entryMappings = config.bbbfflEntryMappings;
@@ -29,14 +29,33 @@ function generatePreFilledDataRows(roundNumber) {
     const playerNotes = rowNotes.slice(4, 13);
     const fullLink = buildPreFilledBBBFFLLink(team, round, playerIDs, playerNotes);
     const formula = `=HYPERLINK("${fullLink}", "${team} Round ${roundNumber}")`;
-    rows.push([team, round, formula, timestamp]);
+
+    const rowData = [team, round, formula, timestamp];
+
+    if (isSuperScoreRound) {
+      const ssLink = buildPreFilledBBBFFLLink(team, roundNumber, new Array(9).fill(""), new Array(9).fill(""), true);
+      const ssFormula = `=HYPERLINK("${ssLink}", "${team} SS${roundNumber - 20}")`;
+      rowData.push(ssFormula);
+    }
+
+    rows.push(rowData);
   }
 
+  // Handle any teams who haven't submitted yet
   Object.keys(formIDs).forEach(team => {
     if (!includedTeams.has(team)) {
       const fullLink = buildPreFilledBBBFFLLink(team, roundNumber, new Array(9).fill(""), new Array(9).fill(""));
       const formula = `=HYPERLINK("${fullLink}", "${team} Round ${roundNumber}")`;
-      rows.push([team, roundNumber, formula, ""]);
+
+      const rowData = [team, roundNumber, formula, ""];
+
+      if (isSuperScoreRound) {
+        const ssLink = buildPreFilledBBBFFLLink(team, roundNumber, new Array(9).fill(""), new Array(9).fill(""), true);
+        const ssFormula = `=HYPERLINK("${ssLink}", "${team} SS${roundNumber - 20}")`;
+        rowData.push(ssFormula);
+      }
+
+      rows.push(rowData);
     }
   });
 
@@ -52,25 +71,27 @@ function renderPreFilledLinksSheet(roundNumber) {
     sheet.clear();
   }
 
+  const isSuperScoreRound = roundNumber >= 21 && roundNumber <= 24;
   const headers = ["BBBFFL Team", "Round", "Pre-Filled Link", "Generated At"];
+  if (isSuperScoreRound) headers.push("SuperScore Link");
   sheet.appendRow(headers);
-  sheet.getRange("A1:D1").setFontWeight("bold").setBackground("#f1f3f4");
+  sheet.getRange(1, 1, 1, headers.length).setFontWeight("bold").setBackground("#f1f3f4");
 
-  const rows = generatePreFilledDataRows(roundNumber);
+  const rows = generatePreFilledDataRows(roundNumber, isSuperScoreRound);
   if (rows.length > 0) {
     sheet.getRange(2, 1, rows.length, rows[0].length).setValues(rows);
   }
 
   // Basic formatting
   sheet.getDataRange().setFontFamily("Arial");
-  sheet.autoResizeColumns(1, 4);
+  sheet.autoResizeColumns(1, headers.length);
   sheet.setColumnWidth(2, 65);
   sheet.setFrozenRows(1);
 
   // Zebra striping
   for (let i = 2; i <= sheet.getLastRow(); i++) {
     const background = i % 2 === 0 ? "#ffffff" : "#f9f9f9";
-    sheet.getRange(i, 1, 1, 4).setBackground(background);
+    sheet.getRange(i, 1, 1, headers.length).setBackground(background);
   }
 
   // Timestamp
@@ -85,16 +106,17 @@ function runGenerateLinksFromButton() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName("Pre-Filled Links");
   const roundCell = sheet.getRange("B13");
-  const roundValue = parseInt(roundCell.getValue(), 10);
+  const roundRaw = roundCell.getValue().toString().trim();
 
-  if (!roundValue || isNaN(roundValue)) {
-    SpreadsheetApp.getUi().alert("⚠ Please select a valid round number in cell B13.");
+  const roundValue = parseInt(roundRaw, 10);
+
+  if (isNaN(roundValue) || roundValue < 1 || roundValue > 24) {
+    SpreadsheetApp.getUi().alert("⚠ Please select a valid round number between 1 and 24.");
     return;
   }
 
   consolidateWeeklyTeams();
-  renderPreFilledLinksSheet(roundValue);
-  //emailPreFilledLinksToCoaches(roundValue, false); // Optional: can remove this if you want manual control
+  renderPreFilledLinksSheet(roundValue); // <-- this handles SuperScore rounds based on round number
 }
 
 function suggestCurrentRoundScorerReview() {

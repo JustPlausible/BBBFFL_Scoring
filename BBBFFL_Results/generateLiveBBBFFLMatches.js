@@ -3,6 +3,11 @@
 
 function generateLiveBBBFFLMatches(roundNumber) {
   const config = getConfig();
+  if (!SEASON_MONITORING_ENABLED) {
+    logAction('monitorAFLStatus: Season monitoring disabled, exiting early.', LOG_LEVELS.INFO);
+    return;
+  }
+  
   const ss = SpreadsheetApp.openById(config.bbbfflResultsSheetId);
 
   const aflStatsSS = SpreadsheetApp.openById(config.aflStatsSheetId);
@@ -383,6 +388,23 @@ function generateLiveBBBFFLMatches(roundNumber) {
     Object.assign(allNameMap, nameMap);
   }
 
+  // Safeguard: no results, nothing to write
+  if (!liveResults || !Array.isArray(liveResults) || liveResults.length === 0) {
+    logAction(
+      `ℹ️ No live BBBFFL results to write for Round ${roundNumber} (liveResults is empty or undefined).`,
+      LOG_LEVELS.INFO
+    );
+    return;
+  }
+
+  // Optionally, also protect against a missing header row structure
+  if (!Array.isArray(liveResults[0]) || liveResults[0].length === 0) {
+    logAction(
+      `⚠️ liveResults[0] is missing or not an array for Round ${roundNumber}, skipping write to '${sheetName}'.`,
+      LOG_LEVELS.WARN
+    );
+    return;
+  }
   sheet.getRange(1, 1, liveResults.length, liveResults[0].length).setValues(liveResults);
   logAction(`✅ Live BBBFFL results for Round ${roundNumber} written to '${sheetName}'`, LOG_LEVELS.INFO);
 

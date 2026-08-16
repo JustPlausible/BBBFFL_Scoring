@@ -1,6 +1,7 @@
 function getConfig() {
   var scriptProperties = PropertiesService.getScriptProperties();
   return {
+    SEASON_MONITORING_ENABLED: scriptProperties.getProperty("SEASON_MONITORING_ENABLED") === "true",
     seasonYear: scriptProperties.getProperty("SEASON_YEAR"),
     aflStatsSheetId: "1Y_GGnSQvhKW2nXSgx2krd9zwuAArT-KdbG_H8Cl9sKM",
     bbbfflStatsSheetId: "1kF6ipWdktnMTJrKUzlnenKc-2apzGibyzh2T0bqNWPo",

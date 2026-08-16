@@ -4,6 +4,11 @@
 function monitorAFLStatus() {
   const config = getConfig();
 
+  if (!config.SEASON_MONITORING_ENABLED) {
+    logAction("monitorAFLStatus: Season monitoring disabled in config, exiting.", LOG_LEVELS.INFO);
+    return;
+  }
+  
   const aflStatsSS = SpreadsheetApp.openById(config.aflStatsSheetId);
   const aflDashboard = aflStatsSS.getSheetByName("Dashboard");
   const liveAFLSheet = aflStatsSS.getSheetByName("Live Stats");

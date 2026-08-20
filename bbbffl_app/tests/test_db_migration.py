@@ -112,3 +112,48 @@ def test_a_new_competition_key_on_the_migrated_db_starts_clean():
     superscore = DecisionsRepository(conn, competition_key="superscore:2026:20")
     assert superscore.get_dnp_map() == {}
     assert superscore.get_matchup_state().finalized is False
+
+
+def test_pre_snapshot_legacy_db_migrates_without_losing_the_finalized_row():
+    """A database created before finalized_snapshot existed at all (an even
+    older legacy generation than _legacy_conn's) must still migrate
+    cleanly: _migrate_legacy_schema() runs before init_db()'s own
+    finalized_snapshot compatibility ALTER TABLE, so the migration's copy
+    step needs the column to already exist on the old table it's reading
+    from, not just the new one it's writing to."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE slot_dnp (
+            team_key TEXT NOT NULL, slot TEXT NOT NULL, dnp INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL, PRIMARY KEY (team_key, slot)
+        );
+        CREATE TABLE interchange_assignment (
+            team_key TEXT PRIMARY KEY, target_position TEXT, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE score_override (
+            team_key TEXT NOT NULL, position TEXT NOT NULL, override_score REAL, reason TEXT,
+            updated_at TEXT NOT NULL, PRIMARY KEY (team_key, position)
+        );
+        CREATE TABLE matchup_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            finalized INTEGER NOT NULL DEFAULT 0,
+            finalized_at TEXT,
+            finalized_note TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO matchup_state (id, finalized, finalized_at, finalized_note) "
+        "VALUES (1, 1, '2026-01-01T00:00:00+00:00', 'pre-snapshot signoff')"
+    )
+    conn.commit()
+
+    init_db(conn)  # must not raise OperationalError: no such column: finalized_snapshot
+
+    repo = DecisionsRepository(conn)
+    state = repo.get_matchup_state()
+    assert state.finalized is True
+    assert state.finalized_note == "pre-snapshot signoff"
+    assert state.snapshot is None

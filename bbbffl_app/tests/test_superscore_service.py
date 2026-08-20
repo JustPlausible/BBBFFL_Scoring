@@ -199,6 +199,34 @@ def test_superscore_stays_live_while_a_match_is_in_progress(ten_entries, supersc
     assert result.status == "LIVE"
 
 
+def test_superscore_requests_the_configured_round_not_afl_apis_current_round(
+    ten_entries, superscore_decisions, match
+):
+    """Regression: afl-api's 'current round' can move on (round rollover) or
+    lag a freshly deployed config. SuperScore must always score the round
+    declared in its own config (AFL_ROUND=20 here), never whatever afl-api
+    happens to consider current (21 here) -- otherwise the leaderboard could
+    score/finalize the wrong round's matches under this round's
+    competition_key."""
+    players = _players_for(ten_entries)
+    client = FakeAflClient([match], players, {500: {}}, current_round_number=21, year=SEASON)
+
+    build_superscore_state(client, ten_entries, superscore_decisions, SEASON, AFL_ROUND)
+
+    assert client.get_round_calls == [(client._season.season_id, AFL_ROUND)]
+
+
+def test_superscore_rejects_a_season_year_mismatch(ten_entries, superscore_decisions, match):
+    """A stale SuperScore config (e.g. still declaring last year's season)
+    must be rejected rather than silently scored against afl-api's actual
+    current season."""
+    players = _players_for(ten_entries)
+    client = FakeAflClient([match], players, {500: {}}, year=SEASON + 1)
+
+    with pytest.raises(RuntimeError):
+        build_superscore_state(client, ten_entries, superscore_decisions, SEASON, AFL_ROUND)
+
+
 def test_get_superscore_view_serves_frozen_snapshot_after_finalize(ten_entries, superscore_decisions):
     from app.afl_client import AflApiError
 

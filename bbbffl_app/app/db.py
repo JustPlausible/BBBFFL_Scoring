@@ -166,6 +166,13 @@ def _migrate_legacy_schema(conn: sqlite3.Connection) -> None:
     if _table_exists(conn, "matchup_state") and "competition_key" not in _table_columns(
         conn, "matchup_state"
     ):
+        # A pre-finalized_snapshot database (older than that column) would
+        # otherwise make the SELECT below fail with "no such column:
+        # finalized_snapshot" -- add it to the *old* table first, while it's
+        # still named matchup_state, so the copy always has something to
+        # select regardless of which legacy schema generation this is.
+        if "finalized_snapshot" not in _table_columns(conn, "matchup_state"):
+            conn.execute("ALTER TABLE matchup_state ADD COLUMN finalized_snapshot TEXT")
         conn.executescript(
             """
             ALTER TABLE matchup_state RENAME TO matchup_state_legacy;

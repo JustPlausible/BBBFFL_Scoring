@@ -188,13 +188,37 @@ def build_matchup_state(
     teams: list[TeamConfig],
     decisions: DecisionsRepository,
     identity_cache: PlayerIdentityCache | None = None,
+    season_year: int | None = None,
+    round_number: int | None = None,
 ) -> MatchupResult:
+    """Scores `teams` against one AFL round.
+
+    By default (season_year and round_number both None -- every Grand Final
+    call site) this resolves "whichever round afl-api currently considers
+    current", exactly as before. A caller with its own declared season/round
+    -- SuperScore, via build_superscore_state below -- passes round_number
+    explicitly so it always scores *that* round, not whatever afl-api
+    happens to consider current at the moment (e.g. immediately after round
+    rollover, or if a stale config is still deployed). When season_year is
+    also given and afl-api's current season exposes a year, a mismatch is
+    rejected rather than silently scoring the wrong season's round.
+    """
     identity_cache = identity_cache or PlayerIdentityCache(afl_client)
 
     season = afl_client.get_current_season()
-    if season.current_round_number is None:
-        raise RuntimeError("afl-api current season has no current_round_number")
-    round_ = afl_client.get_round(season.season_id, season.current_round_number)
+    if round_number is not None:
+        afl_year = getattr(season, "year", None)
+        if season_year is not None and afl_year is not None and afl_year != season_year:
+            raise RuntimeError(
+                f"Configured season {season_year} does not match afl-api's current "
+                f"season (year={afl_year}); refusing to score round {round_number} "
+                "against the wrong season."
+            )
+        round_ = afl_client.get_round(season.season_id, round_number)
+    else:
+        if season.current_round_number is None:
+            raise RuntimeError("afl-api current season has no current_round_number")
+        round_ = afl_client.get_round(season.season_id, season.current_round_number)
     matches = afl_client.get_matches(round_.round_id)
     # Matched on team_id, not name -- names are display-only and afl-api
     # does not guarantee they're a stable join key the way team_id is.
@@ -496,8 +520,15 @@ def build_superscore_state(
     deliberately does not synthesise head-to-head matches: all entries are
     compared directly, and the lifecycle/finalisation semantics (LIVE ->
     AWAITING_SCORER_SIGNOFF -> FINAL) come unchanged from build_matchup_state.
+
+    Always scores the *configured* (season, afl_round) round explicitly --
+    never whatever afl-api's current season/round happens to be at call time
+    -- so a round rollover or a stale deployed config can't silently score
+    (and potentially finalise) the wrong round under this competition_key.
     """
-    matchup = build_matchup_state(afl_client, entries, decisions, identity_cache)
+    matchup = build_matchup_state(
+        afl_client, entries, decisions, identity_cache, season_year=season, round_number=afl_round
+    )
     return SuperScoreResult(
         status=matchup.status,
         season=season,

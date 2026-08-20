@@ -112,7 +112,7 @@ def client():
 
 def test_get_current_season_reads_seasons_wrapper_and_season_id(client):
     season = client.get_current_season()
-    assert season == Season(season_id=85, is_current=True, current_round_number=24)
+    assert season == Season(season_id=85, is_current=True, current_round_number=24, year=2026)
 
 
 def test_get_round_reads_rounds_wrapper_and_round_id(client):

@@ -31,6 +31,7 @@ class FakeAflClient:
         self.players = players
         self.stats_by_match = stats_by_match or {}
         self.stats_fetch_calls = []
+        self.get_player_calls = []
 
     def get_current_season(self):
         return FakeSeason()
@@ -42,6 +43,7 @@ class FakeAflClient:
         return self.matches
 
     def get_player(self, canonical_player_id):
+        self.get_player_calls.append(canonical_player_id)
         return self.players[canonical_player_id]
 
     def get_match_player_stats(self, match_id):
@@ -86,6 +88,19 @@ TEAM_B_ROSTER = {
 def teams():
     return [
         TeamConfig(team_key="team_a", name="Alpha", roster=dict(TEAM_A_ROSTER)),
+        TeamConfig(team_key="team_b", name="Bravo", roster=dict(TEAM_B_ROSTER)),
+    ]
+
+
+@pytest.fixture
+def partial_teams():
+    """team_a mirrors the Thursday-night Interchange loophole: only the
+    Interchange is named, the rest of the lineup awaits Friday team news.
+    team_b is fully named, so tests can check named/unnamed coexist fine."""
+    partial_roster = dict.fromkeys(TEAM_A_ROSTER)
+    partial_roster["Interchange"] = TEAM_A_ROSTER["Interchange"]
+    return [
+        TeamConfig(team_key="team_a", name="Alpha", roster=partial_roster),
         TeamConfig(team_key="team_b", name="Bravo", roster=dict(TEAM_B_ROSTER)),
     ]
 

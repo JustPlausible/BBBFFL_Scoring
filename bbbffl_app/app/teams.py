@@ -3,6 +3,14 @@
 This is a simple checked-in JSON file, not a database -- it represents the
 coach-declared selection and is deliberately kept separate from scorer
 decisions (which live in SQLite, see db.py). It is not mutated at runtime.
+
+A roster slot's value may be `null` when the coach hasn't named a player
+for it yet -- e.g. the Thursday-night Interchange loophole, where an early
+Interchange pick is locked in while most of the starting lineup still
+depends on Friday team announcements. `null` means "not yet named /
+currently vacant"; it is a coach-declared-selection concept and is
+distinct from DNP, which is a scorer decision about a player who *was*
+named but didn't take the field (see db.py / service.py).
 """
 
 import json
@@ -16,7 +24,7 @@ from app.scoring import ROSTER_SLOTS
 class TeamConfig:
     team_key: str
     name: str
-    roster: dict[str, int]  # position/slot -> canonical_player_id
+    roster: dict[str, int | None]  # position/slot -> canonical_player_id, or None if not yet named
 
 
 class TeamConfigError(ValueError):
@@ -54,7 +62,12 @@ def load_teams(path: str) -> list[TeamConfig]:
             TeamConfig(
                 team_key=team_key,
                 name=name,
-                roster={slot: int(roster[slot]) for slot in ROSTER_SLOTS},
+                # None -> not yet named (still validated "as before" otherwise:
+                # any non-null value must be coercible to int).
+                roster={
+                    slot: (None if roster[slot] is None else int(roster[slot]))
+                    for slot in ROSTER_SLOTS
+                },
             )
         )
     return teams

@@ -16,6 +16,7 @@
     --completed: #4caf7d;
     --dnp: #e05a5a;
     --vacant: #e07a3f;
+    --unnamed: #6b7280;
   }
   * { box-sizing: border-box; }
   body {
@@ -72,6 +73,7 @@
   .dot.completed { background: var(--completed); }
   .dot.dnp { background: var(--dnp); }
   .dot.vacant { background: var(--vacant); }
+  .dot.unnamed { background: var(--unnamed); }
   .dot.yet_to_play { background: var(--border); }
   .badge {
     font-size: 0.7rem;
@@ -101,6 +103,7 @@ const STATE_LABEL = {
   completed: "Final",
   dnp: "DNP",
   vacant: "Vacant",
+  unnamed: "Not yet named",
 };
 
 function fmtStatus(status) {

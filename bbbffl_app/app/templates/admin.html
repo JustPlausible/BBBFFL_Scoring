@@ -75,7 +75,7 @@ function renderTeam(team) {
         <label><input type="checkbox" data-team="${team.team_key}" data-slot="${p.position}"
           class="dnp-toggle" ${p.starting_dnp ? 'checked' : ''}> DNP</label>
       </td>
-      <td>${p.player_name || '<em>vacant</em>'} ${p.slot_source === 'interchange' ? '<span class="pill">IR</span>' : ''}</td>
+      <td>${p.player_name || (p.slot_source === 'unnamed' ? '<em>not yet named</em>' : '<em>vacant</em>')} ${p.slot_source === 'interchange' ? '<span class="pill">IR</span>' : ''}</td>
       <td>${p.match_state}${p.recommended_interchange ? '<div class="recommend">↪ recommend interchange here</div>' : ''}</td>
       <td>calc: ${p.calculated_score}</td>
       <td class="override-cell">

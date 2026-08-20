@@ -7,9 +7,11 @@ from fastapi.responses import JSONResponse
 from app.afl_client import AflApiClient, AflApiError
 from app.config import get_settings
 from app.db import DecisionsRepository, connect, init_db
-from app.routes import admin, health, public
+from app.routes import admin, health, public, superscore as superscore_routes
 from app.service import PlayerIdentityCache
-from app.teams import get_teams
+from app.superscore import competition_key as superscore_competition_key
+from app.superscore import get_superscore_config
+from app.teams import TeamConfigError, get_teams
 
 logger = logging.getLogger("bbbffl.startup")
 
@@ -43,6 +45,36 @@ async def lifespan(app: FastAPI):
     app.state.identity_cache = PlayerIdentityCache(afl_client)
     app.state.teams = teams
 
+    # SuperScore is entirely opt-in (see config.py). A missing/unset path
+    # means disabled, matching current behaviour exactly. A configured but
+    # malformed file is logged and disabled rather than crashing startup --
+    # a broken SuperScore trial config must never take down the live Grand
+    # Final. It gets its own DecisionsRepository, scoped by a
+    # season+round-derived competition_key so its DNP/interchange/override/
+    # finalisation state can never collide with the Grand Final's (or with
+    # another SuperScore round's), even sharing the same database file.
+    app.state.superscore_config = None
+    app.state.superscore_decisions = None
+    if settings.superscore_config_path:
+        try:
+            superscore_config = get_superscore_config(settings.superscore_config_path)
+            app.state.superscore_config = superscore_config
+            app.state.superscore_decisions = DecisionsRepository(
+                conn, superscore_competition_key(superscore_config.season, superscore_config.afl_round)
+            )
+            logger.info(
+                "SuperScore enabled (season=%s, round=%s, entries=%s)",
+                superscore_config.season,
+                superscore_config.afl_round,
+                [e.team_key for e in superscore_config.entries],
+            )
+        except (TeamConfigError, OSError, ValueError) as exc:
+            logger.error(
+                "SuperScore config at %s failed to load; SuperScore disabled: %s",
+                settings.superscore_config_path,
+                exc,
+            )
+
     logger.info(
         "BBBFFL Grand Final prototype starting up (teams=%s, afl_api=%s)",
         [t.team_key for t in teams],
@@ -61,6 +93,8 @@ app.include_router(health.router)
 app.include_router(public.router)
 app.include_router(admin.router)
 app.include_router(admin.page_router)
+app.include_router(superscore_routes.router)
+app.include_router(superscore_routes.page_router)
 
 
 @app.exception_handler(AflApiError)

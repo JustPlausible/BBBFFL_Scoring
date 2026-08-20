@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BBBFFL SuperScore</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #2a2f3a;
+    --text: #e7e9ee;
+    --muted: #9aa3b2;
+    --live: #f5c944;
+    --completed: #4caf7d;
+    --dnp: #e05a5a;
+    --vacant: #e07a3f;
+    --unnamed: #6b7280;
+    --gold: #e0b93f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 12px;
+  }
+  h1 { font-size: 1.3rem; margin: 4px 0 2px; }
+  .status-banner { font-size: 0.85rem; color: var(--muted); margin-bottom: 10px; }
+  .summary {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 14px;
+    margin-bottom: 14px;
+    font-size: 0.9rem;
+  }
+  .board {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  @media (min-width: 760px) {
+    .board { grid-template-columns: 1fr 1fr; }
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    cursor: pointer;
+  }
+  .card.leader { border-color: var(--gold); }
+  .card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 14px;
+    gap: 8px;
+  }
+  .rank { font-weight: 700; color: var(--muted); width: 1.8em; flex: none; }
+  .card.leader .rank { color: var(--gold); }
+  .who { flex: 1 1 auto; min-width: 0; }
+  .who .name { font-weight: 600; font-size: 1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .who .meta { font-size: 0.72rem; color: var(--muted); }
+  .total { font-size: 1.3rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .dots { display: flex; gap: 3px; padding: 0 14px 10px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+  .dot.live { background: var(--live); }
+  .dot.completed { background: var(--completed); }
+  .dot.dnp { background: var(--dnp); }
+  .dot.vacant { background: var(--vacant); }
+  .dot.unnamed { background: var(--unnamed); }
+  .dot.yet_to_play { background: var(--border); }
+  .detail { border-top: 1px solid var(--border); padding: 4px 0; display: none; }
+  .card.expanded .detail { display: block; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  th, td { padding: 6px 8px; text-align: left; }
+  thead th { color: var(--muted); font-weight: 500; font-size: 0.75rem; text-transform: uppercase; }
+  tbody tr:not(:last-child) { border-bottom: 1px solid var(--border); }
+  .score { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .badge { font-size: 0.7rem; padding: 1px 6px; border-radius: 6px; border: 1px solid var(--border); color: var(--muted); margin-left: 6px; }
+  .recommend { color: var(--vacant); }
+  .interchange-row { background: rgba(255, 255, 255, 0.02); }
+  .ir-target, .potential { font-size: 0.75rem; color: var(--muted); margin-top: 2px; }
+  footer { margin-top: 14px; font-size: 0.75rem; color: var(--muted); text-align: center; }
+</style>
+</head>
+<body>
+  <h1>BBBFFL SuperScore</h1>
+  <div class="status-banner" id="status-banner">Loading…</div>
+  <div class="summary" id="summary"></div>
+  <div class="board" id="board"></div>
+  <footer>Auto-refreshes every {{ poll_interval_seconds }}s. Tap/click a team for its full lineup. Ranked by current effective score; a tied top score is shown as a tie -- there is no tiebreaker. "Potential" scores for the interchange are informational only and are not part of any total.</footer>
+
+<script>
+const POLL_INTERVAL_MS = {{ poll_interval_seconds }} * 1000;
+let expandedKey = null;
+
+const STATE_LABEL = {
+  yet_to_play: "Yet to play",
+  live: "Live",
+  completed: "Final",
+  dnp: "DNP",
+  vacant: "Vacant",
+  unnamed: "Not yet named",
+};
+
+function fmtStatus(status) {
+  return {
+    LIVE: "Live",
+    AWAITING_SCORER_SIGNOFF: "Awaiting scorer sign-off",
+    FINAL: "FINAL",
+  }[status] || status;
+}
+
+function formatPotential(potential) {
+  if (!potential) return '';
+  return `<div class="potential">Potential: F ${potential.forward} · M ${potential.midfield} · R ${potential.ruck} · T ${potential.tackler}</div>`;
+}
+
+function renderDetail(team) {
+  const rows = team.positions.map(p => `
+    <tr>
+      <td>${p.position.replace(/(\d)/, ' $1')}</td>
+      <td><span class="dot ${p.match_state}"></span>${p.player_name || '—'}${p.slot_source === 'interchange' ? '<span class="badge">IR</span>' : ''}</td>
+      <td>${p.afl_club || ''}</td>
+      <td>${STATE_LABEL[p.match_state] || p.match_state}${p.recommended_interchange ? '<div class="recommend">Recommend IR</div>' : ''}</td>
+      <td class="score">${p.effective_score}</td>
+    </tr>
+  `).join('');
+
+  const ir = team.interchange;
+  const irTarget = ir.target_position
+    ? `<div class="ir-target">→ ${ir.target_position.replace(/(\d)/, ' $1')}</div>`
+    : '';
+  const interchangeRow = `
+    <tr class="interchange-row">
+      <td>Interchange</td>
+      <td>
+        <span class="dot ${ir.match_state}"></span>${ir.player_name || '—'}
+        ${irTarget}
+        ${formatPotential(ir.potential_scores)}
+      </td>
+      <td>${ir.afl_club || ''}</td>
+      <td>${STATE_LABEL[ir.match_state] || ir.match_state}</td>
+      <td class="score">—</td>
+    </tr>
+  `;
+
+  return `
+    <table>
+      <thead><tr><th>Pos</th><th>Player</th><th>Club</th><th>State</th><th class="score">Pts</th></tr></thead>
+      <tbody>${rows}${interchangeRow}</tbody>
+    </table>
+  `;
+}
+
+function renderCard(standing, team, isLeader) {
+  const dots = team.positions.map(p => `<span class="dot ${p.match_state}" title="${p.position}: ${STATE_LABEL[p.match_state] || p.match_state}"></span>`).join('');
+  const expanded = expandedKey === team.team_key;
+  return `
+    <div class="card ${isLeader ? 'leader' : ''} ${expanded ? 'expanded' : ''}" data-team="${team.team_key}">
+      <div class="card-head">
+        <span class="rank">${standing.rank}.</span>
+        <span class="who">
+          <div class="name">${team.name}</div>
+        </span>
+        <span class="total">${team.total_score}</span>
+      </div>
+      <div class="dots">${dots}</div>
+      <div class="detail">${expanded ? renderDetail(team) : ''}</div>
+    </div>
+  `;
+}
+
+async function refresh() {
+  try {
+    const res = await fetch('/api/public/superscore/state');
+    if (!res.ok) throw new Error('bad response');
+    const data = await res.json();
+
+    let banner = fmtStatus(data.status) + ` — SuperScore Round ${data.afl_round}`;
+    document.getElementById('status-banner').textContent = banner;
+
+    document.getElementById('summary').textContent =
+      `Live: ${data.counts.live} · Final: ${data.counts.completed} · Yet to play: ${data.counts.yet_to_play} · DNP: ${data.counts.dnp} · Vacant: ${data.counts.vacant}`;
+
+    const teamByKey = Object.fromEntries(data.teams.map(t => [t.team_key, t]));
+    const topScore = data.standings.length ? data.standings[0].total_score : null;
+
+    document.getElementById('board').innerHTML = data.standings.map(s =>
+      renderCard(s, teamByKey[s.team_key], s.total_score === topScore)
+    ).join('');
+
+    document.querySelectorAll('.card').forEach(el => {
+      el.onclick = () => {
+        expandedKey = expandedKey === el.dataset.team ? null : el.dataset.team;
+        refresh();
+      };
+    });
+  } catch (e) {
+    document.getElementById('status-banner').textContent = 'Unable to refresh — retrying…';
+  }
+}
+
+refresh();
+setInterval(refresh, POLL_INTERVAL_MS);
+</script>
+</body>
+</html>

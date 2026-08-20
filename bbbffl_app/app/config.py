@@ -29,6 +29,11 @@ class Settings:
     admin_token: str | None
     poll_interval_seconds: int
     log_level: str
+    # SuperScore is entirely opt-in: unset (the default), the app behaves
+    # exactly as it does today -- no SuperScore state, routes still exist
+    # but report disabled. Set BBBFFL_SUPERSCORE_CONFIG_PATH to a checked-in
+    # JSON entries file (see data/superscore_teams.example.json) to enable it.
+    superscore_config_path: str | None
 
 
 def get_settings() -> Settings:
@@ -43,4 +48,5 @@ def get_settings() -> Settings:
         admin_token=os.getenv("BBBFFL_ADMIN_TOKEN") or None,
         poll_interval_seconds=int(os.getenv("BBBFFL_POLL_INTERVAL_SECONDS", "25")),
         log_level=os.getenv("BBBFFL_LOG_LEVEL", "INFO"),
+        superscore_config_path=os.getenv("BBBFFL_SUPERSCORE_CONFIG_PATH") or None,
     )

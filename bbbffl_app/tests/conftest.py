@@ -2,21 +2,24 @@ import sqlite3
 
 import pytest
 
-from app.afl_client import Match, Player, PlayerStatLine
+from app.afl_client import Match, Player, PlayerStatLine, Team
 from app.db import DecisionsRepository, init_db
 from app.teams import TeamConfig
+
+CATS = Team(team_id=1001, name="Cats")
+PIES = Team(team_id=1002, name="Pies")
 
 
 class FakeSeason:
     def __init__(self, season_id=1, round_number=1):
-        self.id = season_id
+        self.season_id = season_id
         self.is_current = True
         self.current_round_number = round_number
 
 
 class FakeRound:
     def __init__(self, round_id=1, round_number=1):
-        self.id = round_id
+        self.round_id = round_id
         self.round_number = round_number
 
 
@@ -89,16 +92,16 @@ def teams():
 
 @pytest.fixture
 def single_match():
-    return Match(id=100, home_team="Cats", away_team="Pies", status="LIVE")
+    return Match(match_id=100, home_team=CATS, away_team=PIES, status="LIVE")
 
 
 @pytest.fixture
 def players_on_one_match():
     """All 18 rostered players resolved to one of the two clubs in `single_match`."""
     players = {}
-    for slot_ids, club in ((TEAM_A_ROSTER.values(), "Cats"), (TEAM_B_ROSTER.values(), "Pies")):
+    for slot_ids, team in ((TEAM_A_ROSTER.values(), CATS), (TEAM_B_ROSTER.values(), PIES)):
         for pid in slot_ids:
-            players[pid] = Player(canonical_player_id=pid, name=f"Player {pid}", current_team=club)
+            players[pid] = Player(canonical_player_id=pid, name=f"Player {pid}", current_team=team)
     return players
 
 

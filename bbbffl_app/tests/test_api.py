@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from app.afl_client import Match, Player
 from app.service import PlayerIdentityCache
-from tests.conftest import TEAM_A_ROSTER, TEAM_B_ROSTER, FakeAflClient
+from tests.conftest import CATS, PIES, TEAM_A_ROSTER, TEAM_B_ROSTER, FakeAflClient
 
 
 @pytest.fixture
@@ -30,18 +30,18 @@ def client(tmp_path, monkeypatch):
 
     with TestClient(app) as test_client:
         players = {}
-        for ids, club in ((TEAM_A_ROSTER.values(), "Cats"), (TEAM_B_ROSTER.values(), "Pies")):
+        for ids, team in ((TEAM_A_ROSTER.values(), CATS), (TEAM_B_ROSTER.values(), PIES)):
             for pid in ids:
-                players[pid] = Player(canonical_player_id=pid, name=f"Player {pid}", current_team=club)
+                players[pid] = Player(canonical_player_id=pid, name=f"Player {pid}", current_team=team)
 
         # The sample team config uses different (100xxx) player IDs; register those too.
         for team in app.state.teams:
             for pid in team.roster.values():
                 players.setdefault(
-                    pid, Player(canonical_player_id=pid, name=f"Player {pid}", current_team="Cats")
+                    pid, Player(canonical_player_id=pid, name=f"Player {pid}", current_team=CATS)
                 )
 
-        match = Match(id=100, home_team="Cats", away_team="Pies", status="LIVE")
+        match = Match(match_id=100, home_team=CATS, away_team=PIES, status="LIVE")
         fake = FakeAflClient([match], players, {100: {}})
         app.state.afl_client = fake
         app.state.identity_cache = PlayerIdentityCache(fake)
@@ -105,7 +105,7 @@ def test_full_scorer_workflow(client):
     from app.main import app as fastapi_app
 
     fastapi_app.state.fake_afl_client.matches = [
-        Match(id=100, home_team="Cats", away_team="Pies", status="FINAL")
+        Match(match_id=100, home_team=CATS, away_team=PIES, status="FINAL")
     ]
 
     r = client.post("/api/admin/finalize", json={"note": "confirmed"}, headers=ADMIN_HEADERS)
@@ -125,7 +125,7 @@ def test_finalized_result_survives_afl_api_outage(client):
     from app.main import app as fastapi_app
 
     fastapi_app.state.fake_afl_client.matches = [
-        Match(id=100, home_team="Cats", away_team="Pies", status="FINAL")
+        Match(match_id=100, home_team=CATS, away_team=PIES, status="FINAL")
     ]
     r = client.post("/api/admin/finalize", json={"note": "confirmed"}, headers=ADMIN_HEADERS)
     assert r.status_code == 200

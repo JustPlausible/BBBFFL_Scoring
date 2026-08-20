@@ -4,7 +4,7 @@ import pytest
 
 from app.afl_client import AflApiError, Match
 from app.service import build_matchup_state, get_matchup_view
-from tests.conftest import FakeAflClient, stat_line
+from tests.conftest import CATS, PIES, FakeAflClient, stat_line
 
 
 def _positions_by_name(team_result):
@@ -137,7 +137,7 @@ def test_matchup_stays_live_while_a_relevant_match_is_in_progress(
 def test_matchup_awaits_signoff_once_all_relevant_matches_are_final(
     teams, decisions, players_on_one_match
 ):
-    final_match = Match(id=100, home_team="Cats", away_team="Pies", status="FINAL")
+    final_match = Match(match_id=100, home_team=CATS, away_team=PIES, status="FINAL")
     client = FakeAflClient([final_match], players_on_one_match, {})
 
     result = build_matchup_state(client, teams, decisions)
@@ -146,7 +146,7 @@ def test_matchup_awaits_signoff_once_all_relevant_matches_are_final(
 
 
 def test_explicit_finalisation_moves_matchup_to_final(teams, decisions, players_on_one_match):
-    final_match = Match(id=100, home_team="Cats", away_team="Pies", status="FINAL")
+    final_match = Match(match_id=100, home_team=CATS, away_team=PIES, status="FINAL")
     client = FakeAflClient([final_match], players_on_one_match, {})
 
     decisions.finalize("Grand Final result confirmed by scorer")
@@ -185,7 +185,7 @@ def test_starting_dnp_flag_persists_even_when_interchange_covers_the_position(
 def test_get_matchup_view_serves_frozen_snapshot_after_finalize_without_calling_afl_api(
     teams, decisions, single_match, players_on_one_match
 ):
-    final_match = Match(id=100, home_team="Cats", away_team="Pies", status="FINAL")
+    final_match = Match(match_id=100, home_team=CATS, away_team=PIES, status="FINAL")
     stats = {100: {1: stat_line(1, goals=3, behinds=1)}}
     client = FakeAflClient([final_match], players_on_one_match, stats)
 

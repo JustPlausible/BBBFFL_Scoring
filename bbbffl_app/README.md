@@ -144,27 +144,28 @@ override / finalisation behaviour both at the orchestration layer
 (`test_service.py`, using a fake afl-api client -- no network) and through
 the HTTP API (`test_api.py`).
 
-## Known assumptions / blockers to confirm against the real afl-api
+## afl-api contract status
 
-These are documented in detail in `app/afl_client.py`'s module docstring;
-summarised here:
+`app/afl_client.py`'s module docstring documents the **confirmed** live
+`/api/v1` response shapes (from live integration testing against a deployed
+afl-api instance), including the `{"seasons": [...]}` / `{"rounds": [...]}`
+/ `{"matches": [...]}` wrapper keys, `season_id`/`round_id`/`match_id`,
+nested `home_team`/`away_team`/`current_team` team objects (matched on
+`team_id`, not name), `display_name`, and the nested `stats` object on
+`/matches/{id}/player-stats`. `tests/test_afl_client.py` proves the adapter
+parses these exact shapes. `afl_client.py` remains the single file to
+adjust if a field ever drifts.
 
-1. Exact JSON field names on `/seasons`, `/rounds`, `/matches`, `/players`,
-   `/player-stats` are inferred from the brief's prose, not a live schema.
-   `afl_client.py` is the single file to adjust if they differ.
-2. Match completion is assumed to be a `status` string
-   (`normalize_match_status` treats `FINAL`/`FT`/`COMPLETE`/`COMPLETED` as
-   final, `LIVE`/`IN_PROGRESS` as live, anything else as yet-to-play,
-   case-insensitively). Extend that function if the real API uses other
-   values.
-3. `data/grand_final_teams.json` currently contains **placeholder**
+## Remaining known assumptions / blockers
+
+1. `data/grand_final_teams.json` currently contains **placeholder**
    `canonical_player_id` values and must be replaced with the real
    coach-declared selection (and real team names) before Grand Final
    weekend.
-4. No authentication scheme for afl-api was confirmed beyond an optional
+2. No authentication scheme for afl-api was confirmed beyond an optional
    `x-api-key`-style header (`AFL_API_KEY`); adjust `afl_client.py` if the
    real deployment uses something else (e.g. bearer token).
-5. The admin interface is gated by a single shared `BBBFFL_ADMIN_TOKEN`
+3. The admin interface is gated by a single shared `BBBFFL_ADMIN_TOKEN`
    header, not per-user auth -- adequate for one trusted scorer on a
    private home-server network for one weekend, not a general access
    control model.

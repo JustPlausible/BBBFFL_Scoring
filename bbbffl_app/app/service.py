@@ -13,7 +13,7 @@ import logging
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from app.afl_client import Match, MatchState, Player, PlayerStatLine
+from app.afl_client import Match, MatchState, Player, PlayerStatLine, Team
 from app.db import DecisionsRepository
 from app.scoring import ROSTER_SLOTS, SCORABLE_POSITIONS, PlayerStats, score_position
 from app.teams import TeamConfig
@@ -102,6 +102,26 @@ class MatchupResult:
     counts: dict[PositionState, int]
 
 
+def _team_name(team_by_player: dict[int, Team], player_id: int | None) -> str | None:
+    if player_id is None:
+        return None
+    team = team_by_player.get(player_id)
+    return team.name if team else None
+
+
+def _match_for_player(
+    team_by_player: dict[int, Team],
+    matches_by_team_id: dict[int, Match],
+    player_id: int | None,
+) -> Match | None:
+    if player_id is None:
+        return None
+    team = team_by_player.get(player_id)
+    if team is None:
+        return None
+    return matches_by_team_id.get(team.team_id)
+
+
 def _stats_to_player_stats(stat_line: PlayerStatLine | None) -> PlayerStats:
     if stat_line is None:
         return PlayerStats()
@@ -126,12 +146,14 @@ def build_matchup_state(
     season = afl_client.get_current_season()
     if season.current_round_number is None:
         raise RuntimeError("afl-api current season has no current_round_number")
-    round_ = afl_client.get_round(season.id, season.current_round_number)
-    matches = afl_client.get_matches(round_.id)
-    matches_by_club: dict[str, Match] = {}
+    round_ = afl_client.get_round(season.season_id, season.current_round_number)
+    matches = afl_client.get_matches(round_.round_id)
+    # Matched on team_id, not name -- names are display-only and afl-api
+    # does not guarantee they're a stable join key the way team_id is.
+    matches_by_team_id: dict[int, Match] = {}
     for match in matches:
-        matches_by_club[match.home_team] = match
-        matches_by_club[match.away_team] = match
+        matches_by_team_id[match.home_team.team_id] = match
+        matches_by_team_id[match.away_team.team_id] = match
 
     dnp_map = decisions.get_dnp_map()
     interchange_assignments = decisions.get_interchange_assignments()
@@ -139,12 +161,12 @@ def build_matchup_state(
 
     # Resolve identity for every rostered player once, then work out which
     # unique AFL matches are actually needed before fetching any stats.
-    club_by_player: dict[int, str] = {}
+    team_by_player: dict[int, Team] = {}
     name_by_player: dict[int, str] = {}
     for team in teams:
         for player_id in team.roster.values():
             player = identity_cache.get(player_id)
-            club_by_player[player_id] = player.current_team
+            team_by_player[player_id] = player.current_team
             name_by_player[player_id] = player.name
 
     needed_match_ids: set[int] = set()
@@ -162,10 +184,9 @@ def build_matchup_state(
                 continue
             else:
                 effective_id = team.roster[position]
-            club = club_by_player.get(effective_id, "")
-            match = matches_by_club.get(club)
+            match = _match_for_player(team_by_player, matches_by_team_id, effective_id)
             if match:
-                needed_match_ids.add(match.id)
+                needed_match_ids.add(match.match_id)
 
     stats_by_match: dict[int, dict[int, PlayerStatLine]] = {
         match_id: afl_client.get_match_player_stats(match_id) for match_id in needed_match_ids
@@ -197,15 +218,16 @@ def build_matchup_state(
             if using_interchange:
                 slot_source: Literal["starting", "interchange", "vacant"] = "interchange"
                 player_id: int | None = interchange_id
+                club = _team_name(team_by_player, interchange_id)
                 if interchange_dnp:
                     match_state: PositionState = "dnp"
                     calculated_score = 0.0
-                    club = club_by_player.get(interchange_id)
                 else:
-                    club = club_by_player.get(interchange_id)
-                    match = matches_by_club.get(club or "")
+                    match = _match_for_player(team_by_player, matches_by_team_id, interchange_id)
                     match_state = match.state if match else "yet_to_play"
-                    stat_line = stats_by_match.get(match.id, {}).get(interchange_id) if match else None
+                    stat_line = (
+                        stats_by_match.get(match.match_id, {}).get(interchange_id) if match else None
+                    )
                     calculated_score = score_position(position, _stats_to_player_stats(stat_line))
                 recommended = False
             elif starting_dnp:
@@ -218,10 +240,10 @@ def build_matchup_state(
             else:
                 slot_source = "starting"
                 player_id = team.roster[position]
-                club = club_by_player.get(player_id)
-                match = matches_by_club.get(club or "")
+                club = _team_name(team_by_player, player_id)
+                match = _match_for_player(team_by_player, matches_by_team_id, player_id)
                 match_state = match.state if match else "yet_to_play"
-                stat_line = stats_by_match.get(match.id, {}).get(player_id) if match else None
+                stat_line = stats_by_match.get(match.match_id, {}).get(player_id) if match else None
                 calculated_score = score_position(position, _stats_to_player_stats(stat_line))
                 recommended = False
 
@@ -253,7 +275,7 @@ def build_matchup_state(
         interchange_info = InterchangeInfo(
             canonical_player_id=interchange_id,
             player_name=name_by_player.get(interchange_id, ""),
-            afl_club=club_by_player.get(interchange_id, ""),
+            afl_club=_team_name(team_by_player, interchange_id) or "",
             dnp=interchange_dnp,
             target_position=interchange_target,
         )

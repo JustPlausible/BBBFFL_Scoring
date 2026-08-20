@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BBBFFL Grand Final</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #2a2f3a;
+    --text: #e7e9ee;
+    --muted: #9aa3b2;
+    --live: #f5c944;
+    --completed: #4caf7d;
+    --dnp: #e05a5a;
+    --vacant: #e07a3f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 12px;
+  }
+  h1 { font-size: 1.3rem; margin: 4px 0 2px; }
+  .status-banner {
+    font-size: 0.85rem;
+    color: var(--muted);
+    margin-bottom: 10px;
+  }
+  .summary {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 14px;
+    margin-bottom: 14px;
+    font-size: 0.9rem;
+  }
+  .teams {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+  @media (min-width: 760px) {
+    .teams { grid-template-columns: 1fr 1fr; }
+  }
+  .team-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .team-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .team-header .name { font-weight: 600; font-size: 1.05rem; }
+  .team-header .total { font-size: 1.4rem; font-weight: 700; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  th, td { padding: 6px 8px; text-align: left; }
+  thead th { color: var(--muted); font-weight: 500; font-size: 0.75rem; text-transform: uppercase; }
+  tbody tr:not(:last-child) { border-bottom: 1px solid var(--border); }
+  .score { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .dot.live { background: var(--live); }
+  .dot.completed { background: var(--completed); }
+  .dot.dnp { background: var(--dnp); }
+  .dot.vacant { background: var(--vacant); }
+  .dot.yet_to_play { background: var(--border); }
+  .badge {
+    font-size: 0.7rem;
+    padding: 1px 6px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    margin-left: 6px;
+  }
+  .recommend { color: var(--vacant); }
+  footer { margin-top: 14px; font-size: 0.75rem; color: var(--muted); text-align: center; }
+</style>
+</head>
+<body>
+  <h1>BBBFFL Grand Final</h1>
+  <div class="status-banner" id="status-banner">Loading…</div>
+  <div class="summary" id="summary"></div>
+  <div class="teams" id="teams"></div>
+  <footer>Auto-refreshes every {{ poll_interval_seconds }}s. Effective scores shown are the official, scorer-confirmed totals.</footer>
+
+<script>
+const POLL_INTERVAL_MS = {{ poll_interval_seconds }} * 1000;
+
+const STATE_LABEL = {
+  yet_to_play: "Yet to play",
+  live: "Live",
+  completed: "Final",
+  dnp: "DNP",
+  vacant: "Vacant",
+};
+
+function fmtStatus(status) {
+  return {
+    LIVE: "Live",
+    AWAITING_SCORER_SIGNOFF: "Awaiting scorer sign-off",
+    FINAL: "FINAL",
+  }[status] || status;
+}
+
+function renderTeam(team) {
+  const rows = team.positions.map(p => `
+    <tr>
+      <td>${p.position.replace(/(\d)/, ' $1')}</td>
+      <td><span class="dot ${p.match_state}"></span>${p.player_name || '—'}${p.slot_source === 'interchange' ? '<span class="badge">IR</span>' : ''}</td>
+      <td>${p.afl_club || ''}</td>
+      <td>${STATE_LABEL[p.match_state] || p.match_state}${p.recommended_interchange ? '<div class="recommend">Recommend IR</div>' : ''}</td>
+      <td class="score">${p.effective_score}</td>
+    </tr>
+  `).join('');
+
+  return `
+    <div class="team-card">
+      <div class="team-header">
+        <span class="name">${team.name}</span>
+        <span class="total">${team.total_score}</span>
+      </div>
+      <table>
+        <thead><tr><th>Pos</th><th>Player</th><th>Club</th><th>State</th><th class="score">Pts</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+async function refresh() {
+  try {
+    const res = await fetch('/api/public/state');
+    if (!res.ok) throw new Error('bad response');
+    const data = await res.json();
+
+    let banner = fmtStatus(data.status);
+    if (data.leader_team_key) {
+      const leader = data.teams.find(t => t.team_key === data.leader_team_key);
+      banner += ` — ${leader.name} leads by ${data.margin}`;
+    } else {
+      banner += ' — scores level';
+    }
+    document.getElementById('status-banner').textContent = banner;
+
+    document.getElementById('summary').textContent =
+      `Live: ${data.counts.live} · Final: ${data.counts.completed} · Yet to play: ${data.counts.yet_to_play} · DNP: ${data.counts.dnp} · Vacant: ${data.counts.vacant}`;
+
+    document.getElementById('teams').innerHTML = data.teams.map(renderTeam).join('');
+  } catch (e) {
+    document.getElementById('status-banner').textContent = 'Unable to refresh — retrying…';
+  }
+}
+
+refresh();
+setInterval(refresh, POLL_INTERVAL_MS);
+</script>
+</body>
+</html>

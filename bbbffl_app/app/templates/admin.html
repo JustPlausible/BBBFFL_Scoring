@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BBBFFL Scorer Admin</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 12px; background: #0f1115; color: #e7e9ee; }
+  h1 { font-size: 1.2rem; }
+  h2 { font-size: 1rem; margin-top: 20px; }
+  .token-bar { display: flex; gap: 6px; margin-bottom: 14px; }
+  input, select, button { font-size: 0.9rem; padding: 5px 8px; border-radius: 6px; border: 1px solid #333a48; background: #171a21; color: inherit; }
+  button { cursor: pointer; }
+  button.primary { background: #3a6ea5; border-color: #3a6ea5; color: white; }
+  button.danger { background: #a53a3a; border-color: #a53a3a; color: white; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 8px; font-size: 0.85rem; }
+  th, td { padding: 6px; border-bottom: 1px solid #2a2f3a; text-align: left; vertical-align: middle; }
+  .team-block { background: #171a21; border: 1px solid #2a2f3a; border-radius: 10px; padding: 10px 14px; margin-bottom: 16px; }
+  .recommend { color: #e07a3f; font-size: 0.75rem; }
+  .pill { font-size: 0.7rem; padding: 1px 6px; border-radius: 6px; background: #2a2f3a; }
+  #status-line { margin-bottom: 10px; font-size: 0.9rem; }
+  .override-cell { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+  .override-cell input[type=number] { width: 70px; }
+  .override-cell input[type=text] { width: 140px; }
+  .finalize-box { margin-top: 20px; padding: 12px; border: 1px solid #a53a3a; border-radius: 10px; }
+</style>
+</head>
+<body>
+  <h1>BBBFFL Grand Final — Scorer Admin</h1>
+  <div class="token-bar">
+    <input type="password" id="token" placeholder="Admin token (if required)">
+    <button id="save-token">Save token</button>
+  </div>
+  <div id="status-line">Loading…</div>
+  <div id="teams"></div>
+
+  <div class="finalize-box">
+    <h2>Finalise Grand Final</h2>
+    <p>Only possible once every relevant AFL match is complete. This locks all decisions above.</p>
+    <input type="text" id="finalize-note" placeholder="Optional sign-off note">
+    <button class="danger" id="finalize-btn">Finalise result</button>
+  </div>
+
+<script>
+const POSITIONS = {{ positions | tojson }};
+
+function getToken() { return localStorage.getItem('bbbffl_admin_token') || ''; }
+
+document.getElementById('token').value = getToken();
+document.getElementById('save-token').onclick = () => {
+  localStorage.setItem('bbbffl_admin_token', document.getElementById('token').value);
+  refresh();
+};
+
+async function api(path, body) {
+  const res = await fetch(path, {
+    method: body ? 'POST' : 'GET',
+    headers: { 'Content-Type': 'application/json', 'X-Admin-Token': getToken() },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    alert('Error: ' + (err.detail || res.statusText));
+    throw new Error(err.detail);
+  }
+  return res.json();
+}
+
+function renderTeam(team) {
+  const rows = team.positions.map(p => `
+    <tr>
+      <td>${p.position}</td>
+      <td>
+        <label><input type="checkbox" data-team="${team.team_key}" data-slot="${p.position}"
+          class="dnp-toggle" ${p.starting_dnp ? 'checked' : ''}> DNP</label>
+      </td>
+      <td>${p.player_name || '<em>vacant</em>'} ${p.slot_source === 'interchange' ? '<span class="pill">IR</span>' : ''}</td>
+      <td>${p.match_state}${p.recommended_interchange ? '<div class="recommend">↪ recommend interchange here</div>' : ''}</td>
+      <td>calc: ${p.calculated_score}</td>
+      <td class="override-cell">
+        <input type="number" step="0.5" placeholder="override" data-team="${team.team_key}" data-position="${p.position}"
+          class="override-score" value="${p.override_score ?? ''}">
+        <input type="text" placeholder="reason" data-team="${team.team_key}" data-position="${p.position}"
+          class="override-reason" value="${p.override_reason ?? ''}">
+        <button data-team="${team.team_key}" data-position="${p.position}" class="apply-override">Set</button>
+        <button data-team="${team.team_key}" data-position="${p.position}" class="clear-override">Clear</button>
+      </td>
+      <td><strong>${p.effective_score}</strong></td>
+    </tr>
+  `).join('');
+
+  const interchangeOptions = ['<option value="">Unassigned</option>'].concat(
+    POSITIONS.map(pos => `<option value="${pos}" ${team.interchange.target_position === pos ? 'selected' : ''}>${pos}</option>`)
+  ).join('');
+
+  return `
+    <div class="team-block">
+      <h2>${team.name} — total: ${team.total_score}</h2>
+      <table>
+        <thead><tr><th>Pos</th><th>DNP</th><th>Player</th><th>Match state</th><th>Calc</th><th>Override</th><th>Effective</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div>
+        Interchange: <strong>${team.interchange.player_name}</strong> (${team.interchange.afl_club})
+        <label><input type="checkbox" class="ir-dnp-toggle" data-team="${team.team_key}" ${team.interchange.dnp ? 'checked' : ''}> DNP</label>
+        &nbsp; assign to:
+        <select class="ir-assign" data-team="${team.team_key}">${interchangeOptions}</select>
+      </div>
+    </div>
+  `;
+}
+
+function wireHandlers() {
+  document.querySelectorAll('.dnp-toggle').forEach(el => {
+    el.onchange = () => api('/api/admin/dnp', { team_key: el.dataset.team, slot: el.dataset.slot, dnp: el.checked }).then(refresh);
+  });
+  document.querySelectorAll('.ir-dnp-toggle').forEach(el => {
+    el.onchange = () => api('/api/admin/dnp', { team_key: el.dataset.team, slot: 'Interchange', dnp: el.checked }).then(refresh);
+  });
+  document.querySelectorAll('.ir-assign').forEach(el => {
+    el.onchange = () => api('/api/admin/interchange', { team_key: el.dataset.team, target_position: el.value || null }).then(refresh);
+  });
+  document.querySelectorAll('.apply-override').forEach(el => {
+    el.onclick = () => {
+      const row = el.closest('tr');
+      const scoreInput = row.querySelector('.override-score');
+      const reasonInput = row.querySelector('.override-reason');
+      const score = scoreInput.value === '' ? null : parseFloat(scoreInput.value);
+      api('/api/admin/override', { team_key: el.dataset.team, position: el.dataset.position, override_score: score, reason: reasonInput.value || null }).then(refresh);
+    };
+  });
+  document.querySelectorAll('.clear-override').forEach(el => {
+    el.onclick = () => api('/api/admin/override', { team_key: el.dataset.team, position: el.dataset.position, override_score: null, reason: null }).then(refresh);
+  });
+}
+
+document.getElementById('finalize-btn').onclick = () => {
+  if (!confirm('Finalise the Grand Final? This locks all scorer decisions.')) return;
+  api('/api/admin/finalize', { note: document.getElementById('finalize-note').value || null }).then(refresh);
+};
+
+async function refresh() {
+  try {
+    const data = await api('/api/admin/state');
+    document.getElementById('status-line').textContent =
+      `Status: ${data.status}` + (data.finalized_note ? ` — ${data.finalized_note}` : '');
+    document.getElementById('teams').innerHTML = data.teams.map(renderTeam).join('');
+    wireHandlers();
+  } catch (e) {
+    document.getElementById('status-line').textContent = 'Failed to load state — check admin token.';
+  }
+}
+
+refresh();
+</script>
+</body>
+</html>

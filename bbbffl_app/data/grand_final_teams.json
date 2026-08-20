@@ -1,0 +1,35 @@
+{
+  "_comment": "PLACEHOLDER DATA. canonical_player_id values below are not real afl-api identities -- replace them with the real canonical_player_id for each coach-declared Grand Final selection before this is used live. This file is the coach-declared selection only; it must not be edited to reflect scorer decisions (DNP/interchange/overrides), which live in SQLite instead.",
+  "teams": [
+    {
+      "team_key": "team_a",
+      "name": "Team A (replace with real name)",
+      "roster": {
+        "Forward1": 100001,
+        "Forward2": 100002,
+        "Forward3": 100003,
+        "Midfield1": 100004,
+        "Midfield2": 100005,
+        "Midfield3": 100006,
+        "Ruck": 100007,
+        "Tackler": 100008,
+        "Interchange": 100009
+      }
+    },
+    {
+      "team_key": "team_b",
+      "name": "Team B (replace with real name)",
+      "roster": {
+        "Forward1": 100011,
+        "Forward2": 100012,
+        "Forward3": 100013,
+        "Midfield1": 100014,
+        "Midfield2": 100015,
+        "Midfield3": 100016,
+        "Ruck": 100017,
+        "Tackler": 100018,
+        "Interchange": 100019
+      }
+    }
+  ]
+}

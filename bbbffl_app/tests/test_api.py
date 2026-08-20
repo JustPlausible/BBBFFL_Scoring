@@ -120,6 +120,23 @@ def test_full_scorer_workflow(client):
     assert r.status_code == 423
 
 
+def test_public_state_exposes_interchange_presentation_fields(client):
+    r = client.get("/api/public/state")
+    assert r.status_code == 200
+    ir = r.json()["teams"][0]["interchange"]
+    assert set(ir.keys()) == {
+        "player_name",
+        "afl_club",
+        "match_state",
+        "dnp",
+        "target_position",
+        "potential_scores",
+    }
+    assert ir["match_state"] in ("yet_to_play", "live", "completed", "unnamed")
+    # No AFL stats supplied by the test fixture -> neutral, not invented.
+    assert ir["potential_scores"] is None
+
+
 def test_finalized_result_survives_afl_api_outage(client):
     from app.afl_client import AflApiError
     from app.main import app as fastapi_app

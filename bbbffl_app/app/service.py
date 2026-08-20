@@ -25,6 +25,12 @@ MatchupStatus = Literal["LIVE", "AWAITING_SCORER_SIGNOFF", "FINAL"]
 # yet named by the coach) and is deliberately distinct from "vacant" (a
 # scorer has marked the named starter DNP). See teams.py's module docstring.
 PositionState = Literal["yet_to_play", "live", "completed", "dnp", "vacant", "unnamed"]
+# The Interchange row shows the *player's* own underlying AFL match state,
+# independent of any BBBFFL position it may be covering -- so it never
+# takes the "dnp"/"vacant" values, which describe a *position's* scoring
+# state, not a player's real-world match status. Scorer DNP is exposed
+# separately via InterchangeInfo.dnp.
+InterchangeMatchState = Literal["yet_to_play", "live", "completed", "unnamed"]
 
 
 class AflDataSource(Protocol):
@@ -77,12 +83,33 @@ class PositionResult:
 
 
 @dataclass(frozen=True)
+class InterchangePotentialScores:
+    """What the Interchange player's *current* AFL stats would score at each
+    BBBFFL position, via the same canonical score_position() used for every
+    other position -- informational only. Never added to any team total,
+    never used to choose or apply an assignment; the scorer decides that
+    (see InterchangeInfo.target_position / set_interchange_assignment)."""
+
+    forward: float
+    midfield: float
+    ruck: float
+    tackler: float
+
+
+@dataclass(frozen=True)
 class InterchangeInfo:
     canonical_player_id: int | None
     player_name: str
     afl_club: str
+    # The player's own underlying AFL match state, independent of whichever
+    # position (if any) they're currently assigned to cover.
+    match_state: InterchangeMatchState
     dnp: bool
     target_position: str | None
+    # None when unnamed, or when no AFL stats are available for this player
+    # yet (e.g. their match hasn't started) -- a neutral "no data" state
+    # rather than an invented all-zero line.
+    potential_scores: InterchangePotentialScores | None
 
 
 @dataclass(frozen=True)
@@ -123,6 +150,24 @@ def _match_for_player(
     if team is None:
         return None
     return matches_by_team_id.get(team.team_id)
+
+
+def _resolve_underlying_match(
+    team_by_player: dict[int, Team],
+    matches_by_team_id: dict[int, Match],
+    stats_by_match: dict[int, dict[int, PlayerStatLine]],
+    player_id: int | None,
+) -> tuple[InterchangeMatchState, PlayerStatLine | None]:
+    """A named player's own AFL match state and stat line, independent of
+    whichever BBBFFL position (if any) they're currently covering. Used for
+    the Interchange row, which must show its player's real-world match
+    status and potential scores even while unassigned."""
+    if player_id is None:
+        return "unnamed", None
+    match = _match_for_player(team_by_player, matches_by_team_id, player_id)
+    if match is None:
+        return "yet_to_play", None
+    return match.state, stats_by_match.get(match.match_id, {}).get(player_id)
 
 
 def _stats_to_player_stats(stat_line: PlayerStatLine | None) -> PlayerStats:
@@ -197,6 +242,18 @@ def build_matchup_state(
             if match:
                 needed_match_ids.add(match.match_id)
 
+    # A named Interchange player's own match is needed regardless of
+    # assignment -- for its potential-score display and for lifecycle
+    # relevance (see below). needed_match_ids is a set, so this is a no-op
+    # when the same match was already added above via an active assignment.
+    for team in teams:
+        interchange_id = team.roster["Interchange"]
+        if interchange_id is None:
+            continue
+        match = _match_for_player(team_by_player, matches_by_team_id, interchange_id)
+        if match:
+            needed_match_ids.add(match.match_id)
+
     stats_by_match: dict[int, dict[int, PlayerStatLine]] = {
         match_id: afl_client.get_match_player_stats(match_id) for match_id in needed_match_ids
     }
@@ -216,6 +273,19 @@ def build_matchup_state(
         interchange_target = assignment.target_position if assignment else None
         interchange_dnp = dnp_map.get((team.team_key, "Interchange"), False)
         interchange_id = team.roster["Interchange"]
+
+        interchange_match_state, interchange_stat_line = _resolve_underlying_match(
+            team_by_player, matches_by_team_id, stats_by_match, interchange_id
+        )
+        interchange_potential_scores = None
+        if interchange_stat_line is not None:
+            potential_stats = _stats_to_player_stats(interchange_stat_line)
+            interchange_potential_scores = InterchangePotentialScores(
+                forward=score_position("Forward1", potential_stats),
+                midfield=score_position("Midfield1", potential_stats),
+                ruck=score_position("Ruck", potential_stats),
+                tackler=score_position("Tackler", potential_stats),
+            )
 
         position_results: list[PositionResult] = []
         total_score = 0.0
@@ -309,8 +379,10 @@ def build_matchup_state(
                 name_by_player.get(interchange_id, "") if interchange_id is not None else "Unnamed"
             ),
             afl_club=_team_name(team_by_player, interchange_id) or "",
+            match_state=interchange_match_state,
             dnp=interchange_dnp,
             target_position=interchange_target,
+            potential_scores=interchange_potential_scores,
         )
 
         team_results.append(
@@ -326,12 +398,21 @@ def build_matchup_state(
     matchup_state = decisions.get_matchup_state()
 
     # A match "counts" toward finalisation only if some active (non-DNP,
-    # non-vacant) position actually depends on it.
+    # non-vacant/unnamed) position -- or a named, non-DNP Interchange,
+    # whether or not it's currently assigned to a position -- actually
+    # depends on it. This is a set of state *labels*, not a per-match
+    # counter, so folding in the Interchange's own match state alongside
+    # the position rows can't double-count it even when it's also
+    # contributing through an assigned position: adding "live" (say) twice
+    # is a no-op on a set.
     relevant_match_states: set[MatchState] = set()
     for team_result in team_results:
         for pos in team_result.positions:
             if pos.match_state in ("yet_to_play", "live", "completed"):
                 relevant_match_states.add(pos.match_state)
+        interchange = team_result.interchange
+        if not interchange.dnp and interchange.match_state in ("yet_to_play", "live", "completed"):
+            relevant_match_states.add(interchange.match_state)
 
     all_relevant_final = relevant_match_states.issubset({"completed"}) if relevant_match_states else True
 

@@ -16,9 +16,14 @@ remain historical/reference implementations.
 
 Per the brief, this prototype deliberately excludes: Google Forms/Sheets
 integration, coach authentication, full-season fixtures, the ladder,
-SuperScore, historical migration, projections, and AI commentary. AFL data
-collection and identity resolution live entirely in `afl-api`; this service
-only consumes `/api/v1`.
+squad-ownership validation of SuperScore/Grand Final selections, historical
+migration, projections, and AI commentary. AFL data collection and identity
+resolution live entirely in `afl-api`; this service only consumes
+`/api/v1`.
+
+SuperScore (see below) is an **experimental, opt-in** extension being
+trialled alongside the Grand Final during the same live round -- when not
+configured, the application behaves exactly as before.
 
 ## Architecture
 
@@ -29,15 +34,33 @@ bbbffl_app/
                      # touch if a response field name differs from what's
                      # assumed here -- see the module docstring)
     scoring.py       # canonical BBBFFL scoring formulas (pure functions)
-    teams.py         # loads the coach-declared team JSON (read-only)
+    teams.py         # loads the coach-declared Grand Final team JSON
+                      # (read-only); also home to parse_roster(), the
+                      # lineup-schema validator shared with superscore.py
+    superscore.py     # loads the coach-declared SuperScore entries JSON
+                       # (read-only); reuses teams.TeamConfig/parse_roster --
+                       # there is no separate SuperScore lineup schema
     db.py            # SQLite store for scorer decisions (DNP, interchange,
-                      # overrides, finalisation) -- separate from teams.py
+                      # overrides, finalisation), scoped per competition
+                      # instance via competition_key -- separate from
+                      # teams.py/superscore.py
     service.py        # orchestration: AFL data + team config + scorer
-                       # decisions -> the official scoreboard
-    routes/            # health, public (read-only), admin (scorer-gated)
-    templates/           # server-rendered public + admin pages, JS polling
+                       # decisions -> the official scoreboard. The core
+                       # build_matchup_state() scores an arbitrary list of
+                       # entries and is shared, unmodified in its scoring
+                       # logic, by both the Grand Final (2 teams) and
+                       # SuperScore (N entries, ranked instead of compared)
+    routes/            # health, public (read-only), admin (scorer-gated),
+                        # superscore (public + admin, opt-in, 404s when
+                        # SuperScore isn't configured)
+    templates/           # server-rendered public + admin + superscore
+                          # pages, JS polling
   data/
-    grand_final_teams.json   # coach-declared selection (edit before use!)
+    grand_final_teams.json          # coach-declared selection (edit before use!)
+    superscore_teams.example.json   # SuperScore trial entries template --
+                                     # copy it, fill in real player IDs, and
+                                     # point BBBFFL_SUPERSCORE_CONFIG_PATH at
+                                     # the copy to opt in
   tests/
 ```
 
@@ -127,6 +150,48 @@ positions per team (unchanged shape/semantics from before this feature) --
 Interchange is not folded in as a pretend 9th scoring position. Its state
 is available separately via each team's `interchange.match_state`.
 
+## SuperScore (experimental, opt-in)
+
+During the final four rounds of the BBBFFL season, all coaches also compete
+in SuperScore: independent entries (not head-to-head matches) compared
+directly on total score for that round, with tied top scores standing as
+ties (no tiebreaker). SuperScore uses **exactly the same scoring engine,
+DNP/interchange/override decisions, and LIVE -> AWAITING_SCORER_SIGNOFF ->
+FINAL lifecycle** as the Grand Final -- `app/service.py`'s
+`build_superscore_state()` calls the same `build_matchup_state()` the Grand
+Final uses for every entry, then ranks the results. No separate scoring
+logic exists for SuperScore.
+
+**Enabling it:** copy `data/superscore_teams.example.json`, fill in real
+`canonical_player_id`s per coach, and set `BBBFFL_SUPERSCORE_CONFIG_PATH` to
+the copy's path. Leaving the variable unset (the default) disables
+SuperScore entirely -- `/superscore` and `/api/*/superscore/*` all 404, and
+nothing else about the app changes. A configured-but-malformed file is
+logged and disabled at startup rather than crashing the app, so a SuperScore
+config mistake can never take down the live Grand Final.
+
+**Isolation:** a coach can have both a Grand Final entry and a SuperScore
+entry the same round, potentially sharing some of the same AFL players.
+Their scorer decisions (DNP, interchange, overrides) and finalisation state
+never leak between the two, because every decision row is scoped by a
+`competition_key` in `app/db.py` -- `"grand_final"` for the Grand Final,
+`"superscore:<season>:<round>"` for SuperScore (also keeping each
+SuperScore round's decisions/result independently addressable for future
+historical reporting, without a separate SuperScore table). This holds even
+if a Grand Final and a SuperScore entry ever reused the same `team_key`.
+
+**Pages:** `/superscore` (public leaderboard -- two columns of compact
+scorecards ranked live by score, click a card for its full lineup, same
+data shape as the Grand Final's team view) and `/admin/superscore` (scorer
+controls, same DNP/interchange/override/finalise UI as `/admin`, one block
+per entry).
+
+**Not implemented yet** (deliberately, per the trial scope): squad-ownership
+validation of SuperScore selections, previous-week lineup carry-forward, an
+enforced exactly-10-entries count, prize-money split, and a polished
+historical results view across rounds -- the `competition_key` scoping
+above is what keeps that last one cheap to add later.
+
 ## Running locally
 
 ```bash
@@ -141,6 +206,9 @@ set -a && source .env && set +a
 - Public scoreboard: http://localhost:8000/
 - Scorer admin: http://localhost:8000/admin
 - Health check: http://localhost:8000/health
+- SuperScore (only if `BBBFFL_SUPERSCORE_CONFIG_PATH` is set): public
+  leaderboard at http://localhost:8000/superscore, scorer admin at
+  http://localhost:8000/admin/superscore
 
 ## Running with Docker (home server)
 
@@ -189,7 +257,8 @@ adjust if a field ever drifts.
 1. `data/grand_final_teams.json` currently contains **placeholder**
    `canonical_player_id` values and must be replaced with the real
    coach-declared selection (and real team names) before Grand Final
-   weekend.
+   weekend. Same for `data/superscore_teams.example.json` if/when
+   SuperScore is enabled for a round.
 2. No authentication scheme for afl-api was confirmed beyond an optional
    `x-api-key`-style header (`AFL_API_KEY`); adjust `afl_client.py` if the
    real deployment uses something else (e.g. bearer token).

@@ -92,6 +92,11 @@ class Season:
     season_id: int
     is_current: bool
     current_round_number: int | None
+    # Populated from afl-api's "year" field. Lets a caller that has a
+    # season/round declared elsewhere (e.g. a SuperScore config) detect a
+    # stale configuration -- e.g. still declaring last year's season after
+    # year rollover -- before scoring against the wrong season's data.
+    year: int | None = None
 
 
 @dataclass(frozen=True)
@@ -164,6 +169,7 @@ class AflApiClient:
                     season_id=entry["season_id"],
                     is_current=True,
                     current_round_number=entry.get("current_round_number"),
+                    year=entry.get("year"),
                 )
         raise AflApiError("afl-api /api/v1/seasons returned no season with is_current=true")
 

@@ -1,0 +1,98 @@
+{
+  "_comment": "PLACEHOLDER DATA for the SuperScore trial. canonical_player_id values below are not real afl-api identities -- replace them with each coach's real SuperScore selection before this is used live. 'lineup' uses exactly the same roster schema as data/grand_final_teams.json's 'roster' (the same nine BBBFFL slots, same null-for-not-yet-named convention) -- SuperScore does not have a separate lineup schema. This file is the coach-declared selection only; it must not be edited to reflect scorer decisions (DNP/interchange/overrides), which live in SQLite instead. Copy this file to superscore_teams.json (or any path) and point BBBFFL_SUPERSCORE_CONFIG_PATH at it to enable SuperScore -- leaving it unset keeps SuperScore fully disabled.",
+  "season": 2026,
+  "afl_round": 20,
+  "competition_type": "SUPERSCORE",
+  "entries": [
+    {
+      "team_key": "team_1",
+      "coach": "Coach 1 (replace with real name)",
+      "lineup": {
+        "Forward1": 200101, "Forward2": 200102, "Forward3": 200103,
+        "Midfield1": 200104, "Midfield2": 200105, "Midfield3": 200106,
+        "Ruck": 200107, "Tackler": 200108, "Interchange": 200109
+      }
+    },
+    {
+      "team_key": "team_2",
+      "coach": "Coach 2 (replace with real name)",
+      "lineup": {
+        "Forward1": 200201, "Forward2": 200202, "Forward3": 200203,
+        "Midfield1": 200204, "Midfield2": 200205, "Midfield3": 200206,
+        "Ruck": 200207, "Tackler": 200208, "Interchange": 200209
+      }
+    },
+    {
+      "team_key": "team_3",
+      "coach": "Coach 3 (replace with real name)",
+      "lineup": {
+        "Forward1": 200301, "Forward2": 200302, "Forward3": 200303,
+        "Midfield1": 200304, "Midfield2": 200305, "Midfield3": 200306,
+        "Ruck": 200307, "Tackler": 200308, "Interchange": 200309
+      }
+    },
+    {
+      "team_key": "team_4",
+      "coach": "Coach 4 (replace with real name)",
+      "lineup": {
+        "Forward1": 200401, "Forward2": 200402, "Forward3": 200403,
+        "Midfield1": 200404, "Midfield2": 200405, "Midfield3": 200406,
+        "Ruck": 200407, "Tackler": 200408, "Interchange": 200409
+      }
+    },
+    {
+      "team_key": "team_5",
+      "coach": "Coach 5 (replace with real name)",
+      "lineup": {
+        "Forward1": 200501, "Forward2": 200502, "Forward3": 200503,
+        "Midfield1": 200504, "Midfield2": 200505, "Midfield3": 200506,
+        "Ruck": 200507, "Tackler": 200508, "Interchange": 200509
+      }
+    },
+    {
+      "team_key": "team_6",
+      "coach": "Coach 6 (replace with real name)",
+      "lineup": {
+        "Forward1": 200601, "Forward2": 200602, "Forward3": 200603,
+        "Midfield1": 200604, "Midfield2": 200605, "Midfield3": 200606,
+        "Ruck": 200607, "Tackler": 200608, "Interchange": 200609
+      }
+    },
+    {
+      "team_key": "team_7",
+      "coach": "Coach 7 (replace with real name)",
+      "lineup": {
+        "Forward1": 200701, "Forward2": 200702, "Forward3": 200703,
+        "Midfield1": 200704, "Midfield2": 200705, "Midfield3": 200706,
+        "Ruck": 200707, "Tackler": 200708, "Interchange": 200709
+      }
+    },
+    {
+      "team_key": "team_8",
+      "coach": "Coach 8 (replace with real name)",
+      "lineup": {
+        "Forward1": 200801, "Forward2": 200802, "Forward3": 200803,
+        "Midfield1": 200804, "Midfield2": 200805, "Midfield3": 200806,
+        "Ruck": 200807, "Tackler": 200808, "Interchange": 200809
+      }
+    },
+    {
+      "team_key": "team_9",
+      "coach": "Coach 9 (replace with real name)",
+      "lineup": {
+        "Forward1": 200901, "Forward2": 200902, "Forward3": 200903,
+        "Midfield1": 200904, "Midfield2": 200905, "Midfield3": 200906,
+        "Ruck": 200907, "Tackler": 200908, "Interchange": 200909
+      }
+    },
+    {
+      "team_key": "team_10",
+      "coach": "Coach 10 (replace with real name)",
+      "lineup": {
+        "Forward1": 201001, "Forward2": 201002, "Forward3": 201003,
+        "Midfield1": 201004, "Midfield2": 201005, "Midfield3": 201006,
+        "Ruck": 201007, "Tackler": 201008, "Interchange": 201009
+      }
+    }
+  ]
+}

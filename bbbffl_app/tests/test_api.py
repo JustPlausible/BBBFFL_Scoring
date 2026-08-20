@@ -52,6 +52,19 @@ def client(tmp_path, monkeypatch):
 ADMIN_HEADERS = {"X-Admin-Token": "secret123"}
 
 
+def test_grand_final_still_resolves_afl_apis_current_round_by_default(client):
+    """Grand Final never declares its own season/round, so build_matchup_state
+    must keep resolving whichever round afl-api currently considers current
+    -- the new season_year/round_number override added for SuperScore is
+    opt-in and must not change this default path."""
+    from app.main import app as fastapi_app
+
+    fake = fastapi_app.state.fake_afl_client
+    r = client.get("/api/public/state")
+    assert r.status_code == 200
+    assert fake.get_round_calls == [(fake._season.season_id, fake._season.current_round_number)]
+
+
 def test_health(client):
     assert client.get("/health").json() == {"status": "ok"}
 

@@ -31,6 +31,24 @@ class TeamConfigError(ValueError):
     pass
 
 
+def parse_roster(roster: dict, context: str) -> dict[str, int | None]:
+    """Validates and normalises a raw roster/lineup dict against
+    ROSTER_SLOTS. Shared by the Grand Final loader below and by
+    superscore.py's entry loader, so both competition types are guaranteed
+    to accept exactly the same lineup shape -- there is deliberately no
+    separate SuperScore roster schema."""
+    missing = [slot for slot in ROSTER_SLOTS if slot not in roster]
+    if missing:
+        raise TeamConfigError(f"'{context}' is missing roster slots: {missing}")
+    extra = [slot for slot in roster if slot not in ROSTER_SLOTS]
+    if extra:
+        raise TeamConfigError(f"'{context}' has unknown roster slots: {extra}")
+
+    # None -> not yet named (still validated "as before" otherwise: any
+    # non-null value must be coercible to int).
+    return {slot: (None if roster[slot] is None else int(roster[slot])) for slot in ROSTER_SLOTS}
+
+
 def load_teams(path: str) -> list[TeamConfig]:
     with open(path, encoding="utf-8") as f:
         raw = json.load(f)
@@ -51,23 +69,11 @@ def load_teams(path: str) -> list[TeamConfig]:
             raise TeamConfigError(f"Duplicate team_key: {team_key}")
         seen_keys.add(team_key)
 
-        missing = [slot for slot in ROSTER_SLOTS if slot not in roster]
-        if missing:
-            raise TeamConfigError(f"Team '{team_key}' is missing roster slots: {missing}")
-        extra = [slot for slot in roster if slot not in ROSTER_SLOTS]
-        if extra:
-            raise TeamConfigError(f"Team '{team_key}' has unknown roster slots: {extra}")
-
         teams.append(
             TeamConfig(
                 team_key=team_key,
                 name=name,
-                # None -> not yet named (still validated "as before" otherwise:
-                # any non-null value must be coercible to int).
-                roster={
-                    slot: (None if roster[slot] is None else int(roster[slot]))
-                    for slot in ROSTER_SLOTS
-                },
+                roster=parse_roster(roster, f"Team '{team_key}'"),
             )
         )
     return teams

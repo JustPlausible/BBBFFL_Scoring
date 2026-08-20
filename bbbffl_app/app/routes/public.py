@@ -46,8 +46,14 @@ def serialize_public(state: dict) -> dict:
                 "interchange": {
                     "player_name": team["interchange"]["player_name"],
                     "afl_club": team["interchange"]["afl_club"],
+                    "match_state": team["interchange"]["match_state"],
                     "dnp": team["interchange"]["dnp"],
                     "target_position": team["interchange"]["target_position"],
+                    # Informational only -- what this player's current AFL
+                    # stats would score at each position. Never part of any
+                    # team total; None when there's no AFL stat line yet
+                    # (e.g. their match hasn't started).
+                    "potential_scores": team["interchange"]["potential_scores"],
                 },
             }
             for team in state["teams"]

@@ -84,6 +84,8 @@
     margin-left: 6px;
   }
   .recommend { color: var(--vacant); }
+  .interchange-row { background: rgba(255, 255, 255, 0.02); }
+  .ir-target, .potential { font-size: 0.75rem; color: var(--muted); margin-top: 2px; }
   footer { margin-top: 14px; font-size: 0.75rem; color: var(--muted); text-align: center; }
 </style>
 </head>
@@ -92,7 +94,7 @@
   <div class="status-banner" id="status-banner">Loading…</div>
   <div class="summary" id="summary"></div>
   <div class="teams" id="teams"></div>
-  <footer>Auto-refreshes every {{ poll_interval_seconds }}s. Effective scores shown are the official, scorer-confirmed totals.</footer>
+  <footer>Auto-refreshes every {{ poll_interval_seconds }}s. Effective scores shown are the official, scorer-confirmed totals. Interchange "Potential" scores are informational only and are not part of any team total.</footer>
 
 <script>
 const POLL_INTERVAL_MS = {{ poll_interval_seconds }} * 1000;
@@ -114,6 +116,11 @@ function fmtStatus(status) {
   }[status] || status;
 }
 
+function formatPotential(potential) {
+  if (!potential) return '';
+  return `<div class="potential">Potential: F ${potential.forward} · M ${potential.midfield} · R ${potential.ruck} · T ${potential.tackler}</div>`;
+}
+
 function renderTeam(team) {
   const rows = team.positions.map(p => `
     <tr>
@@ -125,6 +132,24 @@ function renderTeam(team) {
     </tr>
   `).join('');
 
+  const ir = team.interchange;
+  const irTarget = ir.target_position
+    ? `<div class="ir-target">→ ${ir.target_position.replace(/(\d)/, ' $1')}</div>`
+    : '';
+  const interchangeRow = `
+    <tr class="interchange-row">
+      <td>Interchange</td>
+      <td>
+        <span class="dot ${ir.match_state}"></span>${ir.player_name || '—'}
+        ${irTarget}
+        ${formatPotential(ir.potential_scores)}
+      </td>
+      <td>${ir.afl_club || ''}</td>
+      <td>${STATE_LABEL[ir.match_state] || ir.match_state}</td>
+      <td class="score">—</td>
+    </tr>
+  `;
+
   return `
     <div class="team-card">
       <div class="team-header">
@@ -133,7 +158,7 @@ function renderTeam(team) {
       </div>
       <table>
         <thead><tr><th>Pos</th><th>Player</th><th>Club</th><th>State</th><th class="score">Pts</th></tr></thead>
-        <tbody>${rows}</tbody>
+        <tbody>${rows}${interchangeRow}</tbody>
       </table>
     </div>
   `;

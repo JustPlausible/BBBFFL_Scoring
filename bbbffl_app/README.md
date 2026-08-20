@@ -95,9 +95,37 @@ See `tests/test_service.py` and `tests/test_api.py`.
 
 `LIVE -> AWAITING_SCORER_SIGNOFF -> FINAL`. The transition to
 `AWAITING_SCORER_SIGNOFF` happens automatically once every AFL match that
-an *active* (non-DNP, non-vacant) roster position depends on is complete.
-Moving to `FINAL` always requires an explicit `POST /api/admin/finalize`
-call -- the system never finalises itself.
+an *active* (non-DNP, non-vacant, non-unnamed) roster position depends on
+is complete. A **named Interchange player counts here too, even while
+unassigned to a scoring position** -- it's genuinely playing a live AFL
+match right now, even though it isn't yet contributing to the official
+score, so its match state must not be ignored when deciding whether the
+matchup is still LIVE. A scorer-marked-DNP Interchange is excluded from
+this, the same as a DNP starter. Moving to `FINAL` always requires an
+explicit `POST /api/admin/finalize` call -- the system never finalises
+itself.
+
+## Interchange presentation
+
+The public/admin API's `interchange` object exposes, independent of any
+current assignment: `match_state` (the player's own underlying AFL match
+state: `yet_to_play` / `live` / `completed` / `unnamed`) and
+`potential_scores` (`{forward, midfield, ruck, tackler}` -- what their
+*current* AFL stats would score at each position, computed via the same
+`score_position()` used everywhere else; `null` when there's no AFL stat
+line yet rather than an invented zero). Both are informational: they never
+affect any team total, and assigning Interchange to a position remains an
+explicit scorer decision regardless of which potential score is highest.
+
+The public page renders Interchange as a 9th row per team (after Tackler)
+showing this information, plus `→ <position>` when assigned -- but its
+points column always shows `—`; the actual contribution appears once, on
+the assigned position's own row.
+
+`counts` in the public API deliberately still covers only the 8 scoring
+positions per team (unchanged shape/semantics from before this feature) --
+Interchange is not folded in as a pretend 9th scoring position. Its state
+is available separately via each team's `interchange.match_state`.
 
 ## Running locally
 

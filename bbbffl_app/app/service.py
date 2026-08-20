@@ -21,7 +21,10 @@ from app.teams import TeamConfig
 logger = logging.getLogger("bbbffl.service")
 
 MatchupStatus = Literal["LIVE", "AWAITING_SCORER_SIGNOFF", "FINAL"]
-PositionState = Literal["yet_to_play", "live", "completed", "dnp", "vacant"]
+# "unnamed" is a coach-declared-selection state (roster slot is null -- not
+# yet named by the coach) and is deliberately distinct from "vacant" (a
+# scorer has marked the named starter DNP). See teams.py's module docstring.
+PositionState = Literal["yet_to_play", "live", "completed", "dnp", "vacant", "unnamed"]
 
 
 class AflDataSource(Protocol):
@@ -56,7 +59,7 @@ class PlayerIdentityCache:
 @dataclass(frozen=True)
 class PositionResult:
     position: str
-    slot_source: Literal["starting", "interchange", "vacant"]
+    slot_source: Literal["starting", "interchange", "vacant", "unnamed"]
     canonical_player_id: int | None
     player_name: str | None
     afl_club: str | None
@@ -75,7 +78,7 @@ class PositionResult:
 
 @dataclass(frozen=True)
 class InterchangeInfo:
-    canonical_player_id: int
+    canonical_player_id: int | None
     player_name: str
     afl_club: str
     dnp: bool
@@ -159,12 +162,17 @@ def build_matchup_state(
     interchange_assignments = decisions.get_interchange_assignments()
     overrides = decisions.get_overrides()
 
-    # Resolve identity for every rostered player once, then work out which
-    # unique AFL matches are actually needed before fetching any stats.
+    # Resolve identity for every *named* rostered player once, then work out
+    # which unique AFL matches are actually needed before fetching any
+    # stats. A null roster slot (not yet named by the coach) is skipped
+    # entirely here -- it must never reach afl-api, e.g. as a request for
+    # /api/v1/players/None.
     team_by_player: dict[int, Team] = {}
     name_by_player: dict[int, str] = {}
     for team in teams:
         for player_id in team.roster.values():
+            if player_id is None:
+                continue
             player = identity_cache.get(player_id)
             team_by_player[player_id] = player.current_team
             name_by_player[player_id] = player.name
@@ -174,16 +182,17 @@ def build_matchup_state(
         assignment = interchange_assignments.get(team.team_key)
         interchange_dnp = dnp_map.get((team.team_key, "Interchange"), False)
         for position in SCORABLE_POSITIONS:
+            starting_player_id = team.roster[position]
             starting_dnp = dnp_map.get((team.team_key, position), False)
             using_interchange = assignment and assignment.target_position == position
             if using_interchange:
                 effective_id = team.roster["Interchange"]
-                if interchange_dnp:
+                if interchange_dnp or effective_id is None:
                     continue
-            elif starting_dnp:
+            elif starting_player_id is None or starting_dnp:
                 continue
             else:
-                effective_id = team.roster[position]
+                effective_id = starting_player_id
             match = _match_for_player(team_by_player, matches_by_team_id, effective_id)
             if match:
                 needed_match_ids.add(match.match_id)
@@ -199,6 +208,7 @@ def build_matchup_state(
         "completed": 0,
         "dnp": 0,
         "vacant": 0,
+        "unnamed": 0,
     }
 
     for team in teams:
@@ -211,25 +221,46 @@ def build_matchup_state(
         total_score = 0.0
 
         for position in SCORABLE_POSITIONS:
+            starting_player_id = team.roster[position]
             starting_dnp = dnp_map.get((team.team_key, position), False)
             using_interchange = interchange_target == position
             override = overrides.get((team.team_key, position))
 
             if using_interchange:
-                slot_source: Literal["starting", "interchange", "vacant"] = "interchange"
-                player_id: int | None = interchange_id
-                club = _team_name(team_by_player, interchange_id)
-                if interchange_dnp:
-                    match_state: PositionState = "dnp"
+                slot_source: Literal["starting", "interchange", "vacant", "unnamed"] = "interchange"
+                if interchange_id is None:
+                    # Assigned to this position, but the Interchange slot
+                    # itself has no named player -- nothing to score yet.
+                    player_id: int | None = None
+                    club = None
+                    match_state: PositionState = "unnamed"
                     calculated_score = 0.0
                 else:
-                    match = _match_for_player(team_by_player, matches_by_team_id, interchange_id)
-                    match_state = match.state if match else "yet_to_play"
-                    stat_line = (
-                        stats_by_match.get(match.match_id, {}).get(interchange_id) if match else None
-                    )
-                    calculated_score = score_position(position, _stats_to_player_stats(stat_line))
+                    player_id = interchange_id
+                    club = _team_name(team_by_player, interchange_id)
+                    if interchange_dnp:
+                        match_state = "dnp"
+                        calculated_score = 0.0
+                    else:
+                        match = _match_for_player(team_by_player, matches_by_team_id, interchange_id)
+                        match_state = match.state if match else "yet_to_play"
+                        stat_line = (
+                            stats_by_match.get(match.match_id, {}).get(interchange_id)
+                            if match
+                            else None
+                        )
+                        calculated_score = score_position(position, _stats_to_player_stats(stat_line))
                 recommended = False
+            elif starting_player_id is None:
+                # Not yet named by the coach -- distinct from DNP (a scorer
+                # decision about a player who *was* named). Contributes zero
+                # points and never blocks other named players from scoring.
+                slot_source = "unnamed"
+                player_id = None
+                club = None
+                match_state = "unnamed"
+                calculated_score = 0.0
+                recommended = interchange_target is None and not interchange_dnp
             elif starting_dnp:
                 slot_source = "vacant"
                 player_id = None
@@ -239,7 +270,7 @@ def build_matchup_state(
                 recommended = interchange_target is None and not interchange_dnp
             else:
                 slot_source = "starting"
-                player_id = team.roster[position]
+                player_id = starting_player_id
                 club = _team_name(team_by_player, player_id)
                 match = _match_for_player(team_by_player, matches_by_team_id, player_id)
                 match_state = match.state if match else "yet_to_play"
@@ -274,7 +305,9 @@ def build_matchup_state(
 
         interchange_info = InterchangeInfo(
             canonical_player_id=interchange_id,
-            player_name=name_by_player.get(interchange_id, ""),
+            player_name=(
+                name_by_player.get(interchange_id, "") if interchange_id is not None else "Unnamed"
+            ),
             afl_club=_team_name(team_by_player, interchange_id) or "",
             dnp=interchange_dnp,
             target_position=interchange_target,

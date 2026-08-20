@@ -164,6 +164,94 @@ def test_stats_fetched_once_per_unique_match_not_per_player(
     assert client.stats_fetch_calls == [100]
 
 
+def test_unnamed_position_does_not_trigger_afl_api_player_lookup(
+    partial_teams, decisions, single_match, players_on_one_match
+):
+    """The Thursday-night loophole: team_a only has its Interchange named.
+    Nothing about the other eight null slots may reach afl-api -- e.g. as a
+    request for /api/v1/players/None."""
+    client = FakeAflClient([single_match], players_on_one_match, {})
+
+    build_matchup_state(client, partial_teams, decisions)
+
+    assert None not in client.get_player_calls
+    assert 1 not in client.get_player_calls  # team_a's unnamed Forward1 slot
+    assert 9 in client.get_player_calls  # team_a's named Interchange
+
+
+def test_unnamed_position_scores_zero(partial_teams, decisions, single_match, players_on_one_match):
+    client = FakeAflClient([single_match], players_on_one_match, {})
+
+    result = build_matchup_state(client, partial_teams, decisions)
+
+    team_a = next(t for t in result.teams if t.team_key == "team_a")
+    fwd1 = _positions_by_name(team_a)["Forward1"]
+    assert fwd1.slot_source == "unnamed"
+    assert fwd1.match_state == "unnamed"
+    assert fwd1.canonical_player_id is None
+    assert fwd1.calculated_score == 0
+    assert fwd1.effective_score == 0
+
+
+def test_named_players_alongside_unnamed_positions_resolve_and_score_normally(
+    partial_teams, decisions, single_match, players_on_one_match
+):
+    decisions.set_interchange_assignment("team_a", "Forward1")
+    stats = {100: {9: stat_line(9, goals=2, behinds=0)}}
+    client = FakeAflClient([single_match], players_on_one_match, stats)
+
+    result = build_matchup_state(client, partial_teams, decisions)
+
+    team_a = next(t for t in result.teams if t.team_key == "team_a")
+    positions = _positions_by_name(team_a)
+    fwd1 = positions["Forward1"]
+    assert fwd1.slot_source == "interchange"
+    assert fwd1.calculated_score == 12  # 6*2 goals
+    for pos_name, pos in positions.items():
+        if pos_name != "Forward1":
+            assert pos.slot_source == "unnamed"
+            assert pos.calculated_score == 0
+    assert team_a.total_score == 12
+
+    # team_b is fully named and resolves/scores completely normally,
+    # unaffected by team_a's gaps.
+    team_b = next(t for t in result.teams if t.team_key == "team_b")
+    assert all(pos.slot_source == "starting" for pos in team_b.positions)
+
+
+def test_unnamed_is_distinct_from_scorer_marked_dnp(
+    partial_teams, decisions, single_match, players_on_one_match
+):
+    # A *named* team_b position marked DNP by the scorer, for comparison.
+    decisions.set_dnp("team_b", "Forward1", True)
+    client = FakeAflClient([single_match], players_on_one_match, {})
+
+    result = build_matchup_state(client, partial_teams, decisions)
+
+    team_a = next(t for t in result.teams if t.team_key == "team_a")
+    team_b = next(t for t in result.teams if t.team_key == "team_b")
+    unnamed = _positions_by_name(team_a)["Forward1"]
+    dnp_vacant = _positions_by_name(team_b)["Forward1"]
+
+    assert unnamed.slot_source == "unnamed"
+    assert unnamed.match_state == "unnamed"
+    assert dnp_vacant.slot_source == "vacant"
+    assert dnp_vacant.match_state == "vacant"
+    assert unnamed.slot_source != dnp_vacant.slot_source
+    assert unnamed.match_state != dnp_vacant.match_state
+
+
+def test_lifecycle_ignores_unnamed_positions(partial_teams, decisions, players_on_one_match):
+    """team_a's eight unnamed positions must not keep the matchup stuck LIVE
+    once every AFL match that a *named* position depends on is final."""
+    final_match = Match(match_id=100, home_team=CATS, away_team=PIES, status="FINAL")
+    client = FakeAflClient([final_match], players_on_one_match, {})
+
+    result = build_matchup_state(client, partial_teams, decisions)
+
+    assert result.status == "AWAITING_SCORER_SIGNOFF"
+
+
 def test_starting_dnp_flag_persists_even_when_interchange_covers_the_position(
     teams, decisions, single_match, players_on_one_match
 ):

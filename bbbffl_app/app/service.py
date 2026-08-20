@@ -8,6 +8,7 @@ AFL statistics are treated as authoritative and are never modified here --
 a scorer override changes only the resulting BBBFFL point score.
 """
 
+import dataclasses
 import logging
 from dataclasses import dataclass
 from typing import Literal, Protocol
@@ -65,6 +66,11 @@ class PositionResult:
     override_reason: str | None
     effective_score: float
     recommended_interchange: bool
+    # The starting player's own DNP decision, independent of slot_source --
+    # e.g. still true even once an interchange has been assigned to cover
+    # this position, so the admin UI can render and clear it correctly
+    # without first having to remove the interchange assignment.
+    starting_dnp: bool
 
 
 @dataclass(frozen=True)
@@ -240,6 +246,7 @@ def build_matchup_state(
                     override_reason=override.reason if override else None,
                     effective_score=effective_score,
                     recommended_interchange=recommended,
+                    starting_dnp=starting_dnp,
                 )
             )
 
@@ -297,3 +304,25 @@ def build_matchup_state(
         margin=margin,
         counts=counts,
     )
+
+
+def get_matchup_view(
+    afl_client: AflDataSource,
+    teams: list[TeamConfig],
+    decisions: DecisionsRepository,
+    identity_cache: PlayerIdentityCache | None = None,
+) -> dict:
+    """The dict form of the matchup state that routes should serve.
+
+    Once the Grand Final has been finalised with a stored snapshot (see
+    routes/admin.py's finalize endpoint and db.py's finalize()), this is
+    served directly from that frozen snapshot and afl-api is never queried
+    again -- so a post-signoff stats correction, round/season rollover, or
+    afl-api outage cannot change or hide an already-FINAL result. Before
+    finalisation, this always reflects the live state.
+    """
+    matchup_state = decisions.get_matchup_state()
+    if matchup_state.finalized and matchup_state.snapshot is not None:
+        return matchup_state.snapshot
+    result = build_matchup_state(afl_client, teams, decisions, identity_cache)
+    return dataclasses.asdict(result)

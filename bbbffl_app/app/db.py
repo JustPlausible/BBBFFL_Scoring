@@ -8,6 +8,7 @@ survive a container restart, so the database file lives on a mounted volume
 (see Dockerfile / README).
 """
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -41,7 +42,8 @@ CREATE TABLE IF NOT EXISTS matchup_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     finalized INTEGER NOT NULL DEFAULT 0,
     finalized_at TEXT,
-    finalized_note TEXT
+    finalized_note TEXT,
+    finalized_snapshot TEXT
 );
 """
 
@@ -63,6 +65,12 @@ def connect(database_path: str) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    # CREATE TABLE IF NOT EXISTS won't add columns to a table that already
+    # existed before finalized_snapshot was introduced -- add it if missing
+    # so an in-place upgrade doesn't lose the ability to store a snapshot.
+    existing_columns = {row["name"] for row in conn.execute("PRAGMA table_info(matchup_state)")}
+    if "finalized_snapshot" not in existing_columns:
+        conn.execute("ALTER TABLE matchup_state ADD COLUMN finalized_snapshot TEXT")
     conn.execute(
         "INSERT OR IGNORE INTO matchup_state (id, finalized) VALUES (1, 0)"
     )
@@ -98,6 +106,7 @@ class MatchupState:
     finalized: bool
     finalized_at: str | None
     finalized_note: str | None
+    snapshot: dict | None = None
 
 
 class DecisionsRepository:
@@ -189,17 +198,39 @@ class DecisionsRepository:
     # -- Matchup lifecycle -------------------------------------------------
     def get_matchup_state(self) -> MatchupState:
         row = self.conn.execute(
-            "SELECT finalized, finalized_at, finalized_note FROM matchup_state WHERE id = 1"
+            "SELECT finalized, finalized_at, finalized_note, finalized_snapshot FROM matchup_state WHERE id = 1"
         ).fetchone()
+        snapshot = json.loads(row["finalized_snapshot"]) if row["finalized_snapshot"] else None
         return MatchupState(
             finalized=bool(row["finalized"]),
             finalized_at=row["finalized_at"],
             finalized_note=row["finalized_note"],
+            snapshot=snapshot,
         )
 
-    def finalize(self, note: str | None) -> None:
+    def finalize(self, note: str | None, snapshot: dict | None = None) -> None:
+        """Lock the matchup and, when a snapshot is supplied, freeze the
+        official result as it stood at sign-off time. Once finalized with a
+        snapshot, later reads are served from this frozen copy rather than
+        re-querying afl-api -- so a post-signoff upstream correction, round
+        rollover, or afl-api outage cannot change or hide an already-FINAL
+        result (see docs/plans/2027-grand-final-prototype-brief.md's
+        persistence/recovery requirements).
+        """
+        now = _now()
+        stored_snapshot = None
+        if snapshot is not None:
+            snapshot = dict(snapshot)
+            snapshot["status"] = "FINAL"
+            snapshot["finalized_at"] = now
+            snapshot["finalized_note"] = note
+            stored_snapshot = json.dumps(snapshot)
         with transaction(self.conn) as conn:
             conn.execute(
-                "UPDATE matchup_state SET finalized = 1, finalized_at = ?, finalized_note = ? WHERE id = 1",
-                (_now(), note),
+                """
+                UPDATE matchup_state
+                SET finalized = 1, finalized_at = ?, finalized_note = ?, finalized_snapshot = ?
+                WHERE id = 1
+                """,
+                (now, note, stored_snapshot),
             )

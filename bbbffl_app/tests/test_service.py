@@ -1,5 +1,9 @@
-from app.afl_client import Match
-from app.service import build_matchup_state
+import dataclasses
+
+import pytest
+
+from app.afl_client import AflApiError, Match
+from app.service import build_matchup_state, get_matchup_view
 from tests.conftest import FakeAflClient, stat_line
 
 
@@ -158,3 +162,58 @@ def test_stats_fetched_once_per_unique_match_not_per_player(
     client = FakeAflClient([single_match], players_on_one_match, {})
     build_matchup_state(client, teams, decisions)
     assert client.stats_fetch_calls == [100]
+
+
+def test_starting_dnp_flag_persists_even_when_interchange_covers_the_position(
+    teams, decisions, single_match, players_on_one_match
+):
+    """A scorer must be able to see and clear the starter's own DNP decision
+    independent of whatever the interchange is currently doing -- otherwise
+    the admin UI can't reverse it without first clearing the interchange."""
+    decisions.set_dnp("team_a", "Forward1", True)
+    decisions.set_interchange_assignment("team_a", "Forward1")
+    client = FakeAflClient([single_match], players_on_one_match, {})
+
+    result = build_matchup_state(client, teams, decisions)
+
+    team_a = next(t for t in result.teams if t.team_key == "team_a")
+    fwd1 = _positions_by_name(team_a)["Forward1"]
+    assert fwd1.slot_source == "interchange"
+    assert fwd1.starting_dnp is True
+
+
+def test_get_matchup_view_serves_frozen_snapshot_after_finalize_without_calling_afl_api(
+    teams, decisions, single_match, players_on_one_match
+):
+    final_match = Match(id=100, home_team="Cats", away_team="Pies", status="FINAL")
+    stats = {100: {1: stat_line(1, goals=3, behinds=1)}}
+    client = FakeAflClient([final_match], players_on_one_match, stats)
+
+    pre_finalize_result = build_matchup_state(client, teams, decisions)
+    assert pre_finalize_result.status == "AWAITING_SCORER_SIGNOFF"
+
+    snapshot = dataclasses.asdict(pre_finalize_result)
+    decisions.finalize("Signed off", snapshot)
+
+    class ExplodingClient:
+        def __getattr__(self, name):
+            def _boom(*args, **kwargs):
+                raise AflApiError(f"afl-api should not be called after finalize (called {name})")
+
+            return _boom
+
+    view = get_matchup_view(ExplodingClient(), teams, decisions)
+
+    assert view["status"] == "FINAL"
+    assert view["finalized_note"] == "Signed off"
+    team_a = next(t for t in view["teams"] if t["team_key"] == "team_a")
+    fwd1 = next(p for p in team_a["positions"] if p["position"] == "Forward1")
+    assert fwd1["effective_score"] == 19
+
+
+def test_get_matchup_view_stays_live_before_finalize(
+    teams, decisions, single_match, players_on_one_match
+):
+    client = FakeAflClient([single_match], players_on_one_match, {})
+    view = get_matchup_view(client, teams, decisions)
+    assert view["status"] == "LIVE"

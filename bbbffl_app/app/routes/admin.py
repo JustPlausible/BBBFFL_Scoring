@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 from app.config import BASE_DIR
 from app.scoring import ROSTER_SLOTS, SCORABLE_POSITIONS
-from app.service import build_matchup_state
+from app.service import build_matchup_state, get_matchup_view
 
 router = APIRouter(prefix="/api/admin")
 page_router = APIRouter()
@@ -73,8 +73,7 @@ def _ensure_not_finalized(request: Request) -> None:
 
 def _current_state(request: Request) -> dict:
     state = request.app.state
-    result = build_matchup_state(state.afl_client, state.teams, state.decisions, state.identity_cache)
-    return dataclasses.asdict(result)
+    return get_matchup_view(state.afl_client, state.teams, state.decisions, state.identity_cache)
 
 
 @router.get("/state", dependencies=[Depends(require_admin)])
@@ -118,8 +117,14 @@ def set_override(payload: OverrideRequest, request: Request):
 
 @router.post("/finalize", dependencies=[Depends(require_admin)])
 def finalize(payload: FinalizeRequest, request: Request):
-    state = _current_state(request)
-    if state["status"] != "AWAITING_SCORER_SIGNOFF":
+    state = request.app.state
+    # Compute live state exactly once here and reuse it as the frozen
+    # snapshot -- a second afl-api round trip after finalize() commits would
+    # mean a transient afl-api failure could make the endpoint report
+    # failure for an already-irreversible finalisation (and a retry would
+    # then 423, since the matchup is now locked).
+    result = build_matchup_state(state.afl_client, state.teams, state.decisions, state.identity_cache)
+    if result.status != "AWAITING_SCORER_SIGNOFF":
         raise HTTPException(
             status_code=409,
             detail=(
@@ -127,7 +132,8 @@ def finalize(payload: FinalizeRequest, request: Request):
                 "(status must be AWAITING_SCORER_SIGNOFF)."
             ),
         )
-    request.app.state.decisions.finalize(payload.note)
+    snapshot = dataclasses.asdict(result)
+    state.decisions.finalize(payload.note, snapshot)
     return _current_state(request)
 
 

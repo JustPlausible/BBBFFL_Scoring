@@ -118,3 +118,32 @@ def test_full_scorer_workflow(client):
         headers=ADMIN_HEADERS,
     )
     assert r.status_code == 423
+
+
+def test_finalized_result_survives_afl_api_outage(client):
+    from app.afl_client import AflApiError
+    from app.main import app as fastapi_app
+
+    fastapi_app.state.fake_afl_client.matches = [
+        Match(id=100, home_team="Cats", away_team="Pies", status="FINAL")
+    ]
+    r = client.post("/api/admin/finalize", json={"note": "confirmed"}, headers=ADMIN_HEADERS)
+    assert r.status_code == 200
+    assert r.json()["status"] == "FINAL"
+
+    class ExplodingClient:
+        def __getattr__(self, name):
+            def _boom(*args, **kwargs):
+                raise AflApiError(f"afl-api should not be called after finalize (called {name})")
+
+            return _boom
+
+    fastapi_app.state.afl_client = ExplodingClient()
+
+    r = client.get("/api/public/state")
+    assert r.status_code == 200
+    assert r.json()["status"] == "FINAL"
+
+    r = client.get("/api/admin/state", headers=ADMIN_HEADERS)
+    assert r.status_code == 200
+    assert r.json()["status"] == "FINAL"

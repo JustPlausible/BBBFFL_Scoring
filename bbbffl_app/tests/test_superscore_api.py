@@ -225,6 +225,28 @@ def test_full_superscore_scorer_workflow(client_with_superscore):
     assert r.status_code == 423
 
 
+def test_superscore_public_state_exposes_starting_player_identity_for_a_dnp_position(
+    client_with_superscore,
+):
+    """SuperScore reuses the same presentation model as the Grand Final --
+    a DNP'd entry must keep showing the coach's original selection here
+    too, per the DNP-visibility brief."""
+    client_with_superscore.post(
+        "/api/admin/superscore/dnp",
+        json={"team_key": "team_1", "slot": "Forward1", "dnp": True},
+        headers=ADMIN_HEADERS,
+    )
+
+    r = client_with_superscore.get("/api/public/superscore/state")
+    assert r.status_code == 200
+    team_1 = next(t for t in r.json()["teams"] if t["team_key"] == "team_1")
+    fwd1 = next(p for p in team_1["positions"] if p["position"] == "Forward1")
+    assert fwd1["slot_source"] == "vacant"
+    assert fwd1["player_name"] is None
+    assert fwd1["starting_dnp"] is True
+    assert fwd1["starting_player_name"] is not None
+
+
 # -- Isolation via the HTTP API ----------------------------------------------
 
 

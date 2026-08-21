@@ -92,6 +92,137 @@ def test_interchange_player_dnp_scores_zero_when_assigned(
     assert fwd1.calculated_score == 0
 
 
+def test_dnp_named_starter_retains_player_name_in_presentation_state(
+    teams, decisions, single_match, players_on_one_match
+):
+    """A named starter marked DNP must not lose their identity from the
+    resulting presentation model -- only the effective scoring identity
+    (player_name/canonical_player_id) is cleared, not the coach's original
+    selection."""
+    decisions.set_dnp("team_a", "Forward1", True)
+    client = FakeAflClient([single_match], players_on_one_match, {})
+
+    result = build_matchup_state(client, teams, decisions)
+
+    team_a = next(t for t in result.teams if t.team_key == "team_a")
+    fwd1 = _positions_by_name(team_a)["Forward1"]
+    assert fwd1.player_name is None
+    assert fwd1.canonical_player_id is None
+    assert fwd1.starting_player_id == 1
+    assert fwd1.starting_player_name == "Player 1"
+    assert fwd1.starting_dnp is True
+
+
+def test_dnp_named_starter_contributes_zero_without_interchange(
+    teams, decisions, single_match, players_on_one_match
+):
+    decisions.set_dnp("team_a", "Forward1", True)
+    client = FakeAflClient([single_match], players_on_one_match, {})
+
+    result = build_matchup_state(client, teams, decisions)
+
+    team_a = next(t for t in result.teams if t.team_key == "team_a")
+    fwd1 = _positions_by_name(team_a)["Forward1"]
+    assert fwd1.calculated_score == 0
+    assert fwd1.effective_score == 0
+
+
+def test_interchange_assigned_to_dnp_position_keeps_original_player_visible(
+    teams, decisions, single_match, players_on_one_match
+):
+    """When Interchange covers a DNP'd position: the interchange player
+    becomes the effective scorer, the original named starter remains
+    visible and flagged DNP, and only the interchange player's score
+    contributes."""
+    decisions.set_dnp("team_a", "Forward1", True)
+    decisions.set_interchange_assignment("team_a", "Forward1")
+    stats = {100: {9: stat_line(9, goals=2, behinds=1)}}
+    client = FakeAflClient([single_match], players_on_one_match, stats)
+
+    result = build_matchup_state(client, teams, decisions)
+
+    team_a = next(t for t in result.teams if t.team_key == "team_a")
+    fwd1 = _positions_by_name(team_a)["Forward1"]
+    assert fwd1.slot_source == "interchange"
+    assert fwd1.canonical_player_id == 9
+    assert fwd1.player_name == "Player 9"
+    assert fwd1.starting_player_id == 1
+    assert fwd1.starting_player_name == "Player 1"
+    assert fwd1.starting_dnp is True
+    assert fwd1.calculated_score == 13  # 6*2 + 1
+    assert fwd1.effective_score == 13
+
+
+def test_two_dnp_positions_only_the_assigned_interchange_target_scores(
+    teams, decisions, single_match, players_on_one_match
+):
+    """There is exactly one Interchange player per team, so the scorer may
+    assign it to only one of several unavailable positions -- every other
+    DNP position remains a zero-scoring vacancy, never auto-filled."""
+    decisions.set_dnp("team_a", "Forward1", True)
+    decisions.set_dnp("team_a", "Forward2", True)
+    decisions.set_interchange_assignment("team_a", "Forward1")
+    stats = {100: {9: stat_line(9, goals=2, behinds=1)}}
+    client = FakeAflClient([single_match], players_on_one_match, stats)
+
+    result = build_matchup_state(client, teams, decisions)
+
+    team_a = next(t for t in result.teams if t.team_key == "team_a")
+    positions = _positions_by_name(team_a)
+    fwd1 = positions["Forward1"]
+    fwd2 = positions["Forward2"]
+
+    assert fwd1.slot_source == "interchange"
+    assert fwd1.effective_score == 13
+    assert fwd1.starting_player_name == "Player 1"
+    assert fwd1.starting_dnp is True
+
+    assert fwd2.slot_source == "vacant"
+    assert fwd2.effective_score == 0
+    assert fwd2.starting_player_name == "Player 2"
+    assert fwd2.starting_dnp is True
+
+    assert team_a.total_score == 13
+
+
+def test_unnamed_slot_has_no_starting_player_identity(
+    partial_teams, decisions, single_match, players_on_one_match
+):
+    """An unnamed/loophole slot must never invent a coach selection --
+    distinct from a named-then-DNP slot, which retains its identity."""
+    client = FakeAflClient([single_match], players_on_one_match, {})
+
+    result = build_matchup_state(client, partial_teams, decisions)
+
+    team_a = next(t for t in result.teams if t.team_key == "team_a")
+    fwd1 = _positions_by_name(team_a)["Forward1"]
+    assert fwd1.slot_source == "unnamed"
+    assert fwd1.starting_player_id is None
+    assert fwd1.starting_player_name is None
+    assert fwd1.effective_score == 0
+
+
+def test_interchange_assignment_replaces_previous_target_not_adds_to_it(
+    teams, decisions, single_match, players_on_one_match
+):
+    """Exactly one Interchange player exists per team -- reassigning it
+    moves the single assignment to the new target rather than covering both
+    positions at once."""
+    decisions.set_interchange_assignment("team_a", "Forward1")
+    decisions.set_interchange_assignment("team_a", "Forward2")
+    stats = {100: {9: stat_line(9, goals=2, behinds=1)}}
+    client = FakeAflClient([single_match], players_on_one_match, stats)
+
+    result = build_matchup_state(client, teams, decisions)
+
+    team_a = next(t for t in result.teams if t.team_key == "team_a")
+    positions = _positions_by_name(team_a)
+    assert team_a.interchange.target_position == "Forward2"
+    assert positions["Forward1"].slot_source == "starting"
+    assert positions["Forward2"].slot_source == "interchange"
+    assert positions["Forward2"].effective_score == 13
+
+
 def test_score_override_changes_effective_but_not_calculated_score(
     teams, decisions, single_match, players_on_one_match
 ):

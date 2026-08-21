@@ -106,6 +106,9 @@
   .recommend { color: var(--vacant); font-size: 0.7rem; }
   .interchange-row { background: rgba(255, 255, 255, 0.02); }
   .ir-target, .potential { font-size: 0.75rem; color: var(--muted); margin-top: 2px; }
+  .player-cell .name em { font-style: italic; color: var(--muted); font-weight: 500; }
+  .dnp-badge { font-size: 0.65rem; padding: 1px 5px; border-radius: 6px; border: 1px solid var(--dnp); color: var(--dnp); margin-left: 5px; white-space: nowrap; }
+  .orig-line { font-size: 0.72rem; color: var(--muted); font-style: italic; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   footer { margin-top: 14px; font-size: 0.75rem; color: var(--muted); text-align: center; }
 </style>
 </head>
@@ -157,14 +160,35 @@ function scoreCell(p) {
   return `${p.football_line}${marker}<span class="pts">(${p.effective_score})</span>`;
 }
 
+// The coach's original selection for this position (p.starting_player_name)
+// must stay visible even once a scorer DNP and/or interchange assignment
+// means it's no longer who's effectively scoring -- see the DNP-visibility
+// brief. A genuinely unnamed/loophole slot has no starting_player_name and
+// falls straight through to the ordinary "—" treatment.
+function playerCell(p) {
+  const irBadge = p.slot_source === 'interchange' ? '<span class="badge">IR</span>' : '';
+  if (p.slot_source === 'vacant' && p.starting_player_name) {
+    // Named by the coach, marked DNP, no interchange covering it.
+    return `
+      <div class="name" title="${p.starting_player_name}"><em>${p.starting_player_name}</em><span class="dnp-badge">DNP</span></div>
+      <div class="club"></div>
+    `;
+  }
+  const origLine = (p.slot_source === 'interchange' && p.starting_player_name && p.starting_player_name !== p.player_name)
+    ? `<div class="orig-line" title="Coach's original selection">${p.starting_player_name}${p.starting_dnp ? '<span class="dnp-badge">DNP</span>' : ''}</div>`
+    : '';
+  return `
+    <div class="name" title="${p.player_name || ''}">${p.player_name || '—'}${irBadge}</div>
+    <div class="club" title="${p.afl_club || ''}">${p.afl_club || ''}</div>
+    ${origLine}
+  `;
+}
+
 function renderDetail(team) {
   const rows = team.positions.map(p => `
     <tr>
       <td>${p.position.replace(/(\d)/, ' $1')}</td>
-      <td class="player-cell">
-        <div class="name" title="${p.player_name || ''}">${p.player_name || '—'}${p.slot_source === 'interchange' ? '<span class="badge">IR</span>' : ''}</div>
-        <div class="club" title="${p.afl_club || ''}">${p.afl_club || ''}</div>
-      </td>
+      <td class="player-cell">${playerCell(p)}</td>
       <td>${statePill(p.match_state)}${p.recommended_interchange ? '<div class="recommend">Recommend IR</div>' : ''}</td>
       <td class="score">${scoreCell(p)}</td>
     </tr>

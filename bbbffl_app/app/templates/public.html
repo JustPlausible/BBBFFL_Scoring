@@ -153,8 +153,7 @@ function statePill(matchState) {
 }
 
 function scoreCell(p) {
-  const adjusted = p.position.startsWith('Forward') && p.display_is_actual_afl === false;
-  const marker = adjusted
+  const marker = p.display_adjusted_by_override
     ? `<span class="adj-marker" title="Scorer override -- goals/behinds adjusted to match the confirmed total">*</span>`
     : '';
   return `${p.football_line}${marker}<span class="pts">(${p.effective_score})</span>`;

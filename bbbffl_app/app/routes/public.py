@@ -47,6 +47,7 @@ def serialize_public(state: dict) -> dict:
                         "display_goals": p["display_goals"],
                         "display_behinds": p["display_behinds"],
                         "display_is_actual_afl": p["display_is_actual_afl"],
+                        "display_adjusted_by_override": p["display_adjusted_by_override"],
                         "football_line": p["football_line"],
                     }
                     for p in team["positions"]

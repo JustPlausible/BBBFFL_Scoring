@@ -16,7 +16,7 @@ from typing import Literal, Protocol
 from app.afl_client import Match, MatchState, Player, PlayerStatLine, Team
 from app.db import DecisionsRepository
 from app.presentation import Number, football_score_for_position, format_football_line
-from app.scoring import ROSTER_SLOTS, SCORABLE_POSITIONS, PlayerStats, score_position
+from app.scoring import FORWARD_POSITIONS, ROSTER_SLOTS, SCORABLE_POSITIONS, PlayerStats, score_position
 from app.teams import TeamConfig
 
 logger = logging.getLogger("bbbffl.service")
@@ -91,6 +91,12 @@ class PositionResult:
     # Forward whose override no longer matches their actual AFL stats.
     display_is_actual_afl: bool
     football_line: str
+    # True only when a scorer override on a Forward position is *why*
+    # display_is_actual_afl is False here -- i.e. there's something to
+    # flag to a viewer. An ordinary Forward with no stat line yet (unnamed/
+    # vacant/DNP/yet_to_play) also has display_is_actual_afl=False, but
+    # that's not an override artifact and must not be flagged as one.
+    display_adjusted_by_override: bool
 
 
 @dataclass(frozen=True)
@@ -410,6 +416,12 @@ def build_matchup_state(
                 stat_line.goals if stat_line is not None else None,
                 stat_line.behinds if stat_line is not None else None,
             )
+            adjusted_by_override = (
+                position in FORWARD_POSITIONS
+                and override is not None
+                and override.override_score is not None
+                and not football.is_actual_afl
+            )
             team_display_goals += football.goals
             team_display_behinds += football.behinds
 
@@ -431,6 +443,7 @@ def build_matchup_state(
                     display_behinds=football.behinds,
                     display_is_actual_afl=football.is_actual_afl,
                     football_line=football.line,
+                    display_adjusted_by_override=adjusted_by_override,
                 )
             )
 
@@ -581,6 +594,49 @@ def build_superscore_state(
     )
 
 
+def _backfill_football_display(snapshot: dict) -> dict:
+    """Adds the display_goals/display_behinds/display_is_actual_afl/
+    football_line/display_adjusted_by_override fields (see
+    app/presentation.py) to a stored FINAL snapshot recorded before this
+    presentation layer existed, so an already-finalised result stays
+    servable after upgrading rather than 500ing on a missing dict key.
+
+    A pre-upgrade snapshot never recorded the player's raw AFL stat line
+    (only the resulting calculated/effective score), so a legacy Forward
+    row can't be told apart from a legacy Midfield/Ruck/Tackler row here --
+    both fall back to the same divmod(effective_score, 6) conversion used
+    for a Forward with no stat line today. That's still internally
+    consistent (goals*6 + behinds == effective_score) and is the same
+    fallback the live code already uses whenever a Forward's actual AFL
+    goals/behinds aren't available. Only touches teams that are actually
+    missing the fields -- a snapshot written by the current code already
+    carries them and passes through unchanged.
+    """
+    for team in snapshot.get("teams", []):
+        if "football_line" in team:
+            continue
+        team_goals: Number = 0
+        team_behinds: Number = 0
+        for position in team.get("positions", []):
+            if "football_line" not in position:
+                football = football_score_for_position(position["position"], position["effective_score"])
+                position["display_goals"] = football.goals
+                position["display_behinds"] = football.behinds
+                position["display_is_actual_afl"] = football.is_actual_afl
+                position["football_line"] = football.line
+                position["display_adjusted_by_override"] = (
+                    position["position"] in FORWARD_POSITIONS
+                    and position.get("override_score") is not None
+                    and not football.is_actual_afl
+                )
+            team_goals += position["display_goals"]
+            team_behinds += position["display_behinds"]
+        team["display_goals"] = team_goals
+        team["display_behinds"] = team_behinds
+        team["football_line"] = format_football_line(team_goals, team_behinds)
+    return snapshot
+
+
 def get_superscore_view(
     afl_client: AflDataSource,
     entries: list[TeamConfig],
@@ -594,7 +650,7 @@ def get_superscore_view(
     served from the stored snapshot and afl-api is never queried again."""
     matchup_state = decisions.get_matchup_state()
     if matchup_state.finalized and matchup_state.snapshot is not None:
-        return matchup_state.snapshot
+        return _backfill_football_display(matchup_state.snapshot)
     result = build_superscore_state(afl_client, entries, decisions, season, afl_round, identity_cache)
     return dataclasses.asdict(result)
 
@@ -616,6 +672,6 @@ def get_matchup_view(
     """
     matchup_state = decisions.get_matchup_state()
     if matchup_state.finalized and matchup_state.snapshot is not None:
-        return matchup_state.snapshot
+        return _backfill_football_display(matchup_state.snapshot)
     result = build_matchup_state(afl_client, teams, decisions, identity_cache)
     return dataclasses.asdict(result)

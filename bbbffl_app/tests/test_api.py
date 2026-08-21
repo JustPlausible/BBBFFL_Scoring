@@ -172,6 +172,42 @@ def test_concluded_afl_match_renders_rostered_players_as_final_not_yet_to_play(c
         assert team["interchange"]["match_state"] in ("completed", "unnamed")
 
 
+def test_public_state_serves_a_pre_upgrade_finalized_snapshot_without_500ing(client):
+    """Regression: /api/public/state must keep serving an already-FINAL
+    Grand Final finalised before the football-style display fields (see
+    app/presentation.py) existed, rather than KeyError-ing on a dict that
+    predates them."""
+    from app.main import app as fastapi_app
+
+    fastapi_app.state.fake_afl_client.matches = [
+        Match(match_id=100, home_team=CATS, away_team=PIES, status="CONCLUDED")
+    ]
+    r = client.post("/api/admin/finalize", json={"note": "confirmed"}, headers=ADMIN_HEADERS)
+    assert r.status_code == 200
+    legacy_snapshot = r.json()
+    display_keys = (
+        "display_goals",
+        "display_behinds",
+        "display_is_actual_afl",
+        "display_adjusted_by_override",
+        "football_line",
+    )
+    for team in legacy_snapshot["teams"]:
+        for key in display_keys:
+            team.pop(key, None)
+        for position in team["positions"]:
+            for key in display_keys:
+                position.pop(key, None)
+    fastapi_app.state.decisions.finalize("confirmed (legacy)", legacy_snapshot)
+
+    r = client.get("/api/public/state")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "FINAL"
+    for position in body["teams"][0]["positions"]:
+        assert "football_line" in position
+
+
 def test_finalized_result_survives_afl_api_outage(client):
     from app.afl_client import AflApiError
     from app.main import app as fastapi_app

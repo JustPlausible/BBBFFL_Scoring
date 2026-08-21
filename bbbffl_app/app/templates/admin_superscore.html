@@ -97,7 +97,7 @@ function renderTeam(team) {
         <button data-team="${team.team_key}" data-position="${p.position}" class="apply-override">Set</button>
         <button data-team="${team.team_key}" data-position="${p.position}" class="clear-override">Clear</button>
       </td>
-      <td><strong>${p.effective_score}</strong> <span class="fb-line">${p.football_line}${p.position.startsWith('Forward') && p.display_is_actual_afl === false ? '<span class="fb-adj" title="Goals/behinds adjusted to match the overridden total">*</span>' : ''}</span></td>
+      <td><strong>${p.effective_score}</strong> <span class="fb-line">${p.football_line}${p.display_adjusted_by_override ? '<span class="fb-adj" title="Goals/behinds adjusted to match the overridden total">*</span>' : ''}</span></td>
     </tr>
   `).join('');
 

@@ -23,6 +23,7 @@ from app.config import BASE_DIR
 from app.routes.admin import DnpRequest, FinalizeRequest, InterchangeRequest, OverrideRequest, require_admin
 from app.scoring import ROSTER_SLOTS, SCORABLE_POSITIONS
 from app.service import build_superscore_state, get_superscore_view
+from app.superscore import superscore_round_label
 
 router = APIRouter(prefix="/api")
 page_router = APIRouter()
@@ -76,6 +77,9 @@ def serialize_public_superscore(state: dict) -> dict:
                 "team_key": team["team_key"],
                 "name": team["name"],
                 "total_score": team["total_score"],
+                "display_goals": team["display_goals"],
+                "display_behinds": team["display_behinds"],
+                "football_line": team["football_line"],
                 "positions": [
                     {
                         "position": p["position"],
@@ -85,6 +89,11 @@ def serialize_public_superscore(state: dict) -> dict:
                         "slot_source": p["slot_source"],
                         "effective_score": p["effective_score"],
                         "recommended_interchange": p["recommended_interchange"],
+                        "display_goals": p["display_goals"],
+                        "display_behinds": p["display_behinds"],
+                        "display_is_actual_afl": p["display_is_actual_afl"],
+                        "display_adjusted_by_override": p["display_adjusted_by_override"],
+                        "football_line": p["football_line"],
                     }
                     for p in team["positions"]
                 ],
@@ -108,10 +117,14 @@ def serialize_public_superscore(state: dict) -> dict:
 @page_router.get("/superscore", response_class=HTMLResponse, dependencies=[Depends(_require_superscore)])
 def superscore_page(request: Request):
     settings = request.app.state.settings
+    config = request.app.state.superscore_config
     return templates.TemplateResponse(
         request,
         "superscore.html",
-        {"poll_interval_seconds": settings.poll_interval_seconds},
+        {
+            "poll_interval_seconds": settings.poll_interval_seconds,
+            "superscore_round_label": superscore_round_label(config.afl_round),
+        },
     )
 
 
@@ -204,8 +217,13 @@ def finalize_superscore(payload: FinalizeRequest, request: Request):
     "/admin/superscore", response_class=HTMLResponse, dependencies=[Depends(_require_superscore)]
 )
 def admin_superscore_page(request: Request):
+    config = request.app.state.superscore_config
     return templates.TemplateResponse(
         request,
         "admin_superscore.html",
-        {"positions": list(SCORABLE_POSITIONS), "entries": request.app.state.superscore_config.entries},
+        {
+            "positions": list(SCORABLE_POSITIONS),
+            "entries": config.entries,
+            "superscore_round_label": superscore_round_label(config.afl_round),
+        },
     )

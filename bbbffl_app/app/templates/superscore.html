@@ -27,7 +27,18 @@
     color: var(--text);
     padding: 12px;
   }
+  .page-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
   h1 { font-size: 1.3rem; margin: 4px 0 2px; }
+  .comp-nav a {
+    font-size: 0.8rem;
+    color: var(--text);
+    text-decoration: none;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 4px 12px;
+  }
+  .comp-nav a:hover { border-color: var(--muted); }
   .status-banner { font-size: 0.85rem; color: var(--muted); margin-bottom: 10px; }
   .summary {
     background: var(--panel);
@@ -66,8 +77,9 @@
   .who .name { font-weight: 600; font-size: 1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .who .meta { font-size: 0.72rem; color: var(--muted); }
   .total { font-size: 1.3rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .total .pts { color: var(--muted); font-weight: 600; font-size: 0.95rem; margin-left: 3px; }
   .dots { display: flex; gap: 3px; padding: 0 14px 10px; }
-  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; }
   .dot.live { background: var(--live); }
   .dot.completed { background: var(--completed); }
   .dot.dnp { background: var(--dnp); }
@@ -76,36 +88,48 @@
   .dot.yet_to_play { background: var(--border); }
   .detail { border-top: 1px solid var(--border); padding: 4px 0; display: none; }
   .card.expanded .detail { display: block; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-  th, td { padding: 6px 8px; text-align: left; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; table-layout: fixed; }
+  th, td { padding: 6px 8px; text-align: left; overflow: hidden; }
   thead th { color: var(--muted); font-weight: 500; font-size: 0.75rem; text-transform: uppercase; }
   tbody tr:not(:last-child) { border-bottom: 1px solid var(--border); }
-  .score { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+  col.pos { width: 15%; }
+  col.player { width: 40%; }
+  col.state { width: 22%; }
+  col.score { width: 23%; }
+  .player-cell .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .player-cell .club { font-size: 0.72rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .score { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
+  .score .pts { color: var(--muted); font-weight: 500; margin-left: 3px; }
+  .score .adj-marker { color: var(--vacant); cursor: help; }
+  .state-pill { display: inline-flex; align-items: center; font-size: 0.75rem; white-space: nowrap; }
   .badge { font-size: 0.7rem; padding: 1px 6px; border-radius: 6px; border: 1px solid var(--border); color: var(--muted); margin-left: 6px; }
-  .recommend { color: var(--vacant); }
+  .recommend { color: var(--vacant); font-size: 0.7rem; }
   .interchange-row { background: rgba(255, 255, 255, 0.02); }
   .ir-target, .potential { font-size: 0.75rem; color: var(--muted); margin-top: 2px; }
   footer { margin-top: 14px; font-size: 0.75rem; color: var(--muted); text-align: center; }
 </style>
 </head>
 <body>
-  <h1>BBBFFL SuperScore</h1>
+  <div class="page-head">
+    <h1>BBBFFL SuperScore{% if superscore_round_label %} <small style="color:var(--muted); font-weight:500;">{{ superscore_round_label }}</small>{% endif %}</h1>
+    <div class="comp-nav"><a href="/">← Grand Final</a></div>
+  </div>
   <div class="status-banner" id="status-banner">Loading…</div>
   <div class="summary" id="summary"></div>
   <div class="board" id="board"></div>
-  <footer>Auto-refreshes every {{ poll_interval_seconds }}s. Tap/click a team for its full lineup. Ranked by current effective score; a tied top score is shown as a tie -- there is no tiebreaker. "Potential" scores for the interchange are informational only and are not part of any total.</footer>
+  <footer>Auto-refreshes every {{ poll_interval_seconds }}s. Tap/click a team for its full lineup. Scores are presented as Goals.Behinds (Total); Forward goals/behinds are actual AFL statistics, Midfield/Ruck/Tackler figures are a football-style conversion of their BBBFFL point total. Ranked by current effective score; a tied top score is shown as a tie -- there is no tiebreaker. "Potential" scores for the interchange are informational only and are not part of any total.</footer>
 
 <script>
 const POLL_INTERVAL_MS = {{ poll_interval_seconds }} * 1000;
 let expandedKey = null;
 
 const STATE_LABEL = {
-  yet_to_play: "Yet to play",
-  live: "Live",
-  completed: "Final",
-  dnp: "DNP",
-  vacant: "Vacant",
-  unnamed: "Not yet named",
+  yet_to_play: { short: "Upcoming", full: "Yet to play" },
+  live: { short: "Live", full: "Live" },
+  completed: { short: "Final", full: "Final" },
+  dnp: { short: "DNP", full: "Did not play" },
+  vacant: { short: "Vacant", full: "Vacant" },
+  unnamed: { short: "Unnamed", full: "Not yet named" },
 };
 
 function fmtStatus(status) {
@@ -121,14 +145,28 @@ function formatPotential(potential) {
   return `<div class="potential">Potential: F ${potential.forward} · M ${potential.midfield} · R ${potential.ruck} · T ${potential.tackler}</div>`;
 }
 
+function statePill(matchState) {
+  const label = STATE_LABEL[matchState] || { short: matchState, full: matchState };
+  return `<span class="state-pill" title="${label.full}"><span class="dot ${matchState}"></span>${label.short}</span>`;
+}
+
+function scoreCell(p) {
+  const marker = p.display_adjusted_by_override
+    ? `<span class="adj-marker" title="Scorer override -- goals/behinds adjusted to match the confirmed total">*</span>`
+    : '';
+  return `${p.football_line}${marker}<span class="pts">(${p.effective_score})</span>`;
+}
+
 function renderDetail(team) {
   const rows = team.positions.map(p => `
     <tr>
       <td>${p.position.replace(/(\d)/, ' $1')}</td>
-      <td><span class="dot ${p.match_state}"></span>${p.player_name || '—'}${p.slot_source === 'interchange' ? '<span class="badge">IR</span>' : ''}</td>
-      <td>${p.afl_club || ''}</td>
-      <td>${STATE_LABEL[p.match_state] || p.match_state}${p.recommended_interchange ? '<div class="recommend">Recommend IR</div>' : ''}</td>
-      <td class="score">${p.effective_score}</td>
+      <td class="player-cell">
+        <div class="name" title="${p.player_name || ''}">${p.player_name || '—'}${p.slot_source === 'interchange' ? '<span class="badge">IR</span>' : ''}</div>
+        <div class="club" title="${p.afl_club || ''}">${p.afl_club || ''}</div>
+      </td>
+      <td>${statePill(p.match_state)}${p.recommended_interchange ? '<div class="recommend">Recommend IR</div>' : ''}</td>
+      <td class="score">${scoreCell(p)}</td>
     </tr>
   `).join('');
 
@@ -139,27 +177,28 @@ function renderDetail(team) {
   const interchangeRow = `
     <tr class="interchange-row">
       <td>Interchange</td>
-      <td>
-        <span class="dot ${ir.match_state}"></span>${ir.player_name || '—'}
+      <td class="player-cell">
+        <div class="name">${ir.player_name || '—'}</div>
+        <div class="club">${ir.afl_club || ''}</div>
         ${irTarget}
         ${formatPotential(ir.potential_scores)}
       </td>
-      <td>${ir.afl_club || ''}</td>
-      <td>${STATE_LABEL[ir.match_state] || ir.match_state}</td>
+      <td>${statePill(ir.match_state)}</td>
       <td class="score">—</td>
     </tr>
   `;
 
   return `
     <table>
-      <thead><tr><th>Pos</th><th>Player</th><th>Club</th><th>State</th><th class="score">Pts</th></tr></thead>
+      <colgroup><col class="pos"><col class="player"><col class="state"><col class="score"></colgroup>
+      <thead><tr><th>Pos</th><th>Player</th><th>State</th><th class="score">G.B (Pts)</th></tr></thead>
       <tbody>${rows}${interchangeRow}</tbody>
     </table>
   `;
 }
 
 function renderCard(standing, team, isLeader) {
-  const dots = team.positions.map(p => `<span class="dot ${p.match_state}" title="${p.position}: ${STATE_LABEL[p.match_state] || p.match_state}"></span>`).join('');
+  const dots = team.positions.map(p => `<span class="dot ${p.match_state}" title="${p.position}: ${(STATE_LABEL[p.match_state] || {}).full || p.match_state}"></span>`).join('');
   const expanded = expandedKey === team.team_key;
   return `
     <div class="card ${isLeader ? 'leader' : ''} ${expanded ? 'expanded' : ''}" data-team="${team.team_key}">
@@ -168,7 +207,7 @@ function renderCard(standing, team, isLeader) {
         <span class="who">
           <div class="name">${team.name}</div>
         </span>
-        <span class="total">${team.total_score}</span>
+        <span class="total">${team.football_line} <span class="pts">(${team.total_score})</span></span>
       </div>
       <div class="dots">${dots}</div>
       <div class="detail">${expanded ? renderDetail(team) : ''}</div>

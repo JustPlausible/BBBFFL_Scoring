@@ -24,10 +24,20 @@
   .override-cell input[type=number] { width: 70px; }
   .override-cell input[type=text] { width: 140px; }
   .finalize-box { margin-top: 20px; padding: 12px; border: 1px solid #a53a3a; border-radius: 10px; }
+  .page-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  .comp-nav a { font-size: 0.8rem; color: inherit; text-decoration: none; background: #171a21; border: 1px solid #333a48; border-radius: 999px; padding: 4px 12px; }
+  .comp-nav a:hover { border-color: #666; }
+  .fb-line { color: #9aa3b2; font-weight: 500; }
+  .fb-adj { color: #e07a3f; cursor: help; }
 </style>
 </head>
 <body>
-  <h1>BBBFFL Grand Final — Scorer Admin</h1>
+  <div class="page-head">
+    <h1>BBBFFL Grand Final — Scorer Admin</h1>
+    {% if superscore_enabled %}
+    <div class="comp-nav"><a href="/admin/superscore">SuperScore Admin{% if superscore_round_label %} ({{ superscore_round_label }}){% endif %} →</a></div>
+    {% endif %}
+  </div>
   <div class="token-bar">
     <input type="password" id="token" placeholder="Admin token (if required)">
     <button id="save-token">Save token</button>
@@ -86,7 +96,7 @@ function renderTeam(team) {
         <button data-team="${team.team_key}" data-position="${p.position}" class="apply-override">Set</button>
         <button data-team="${team.team_key}" data-position="${p.position}" class="clear-override">Clear</button>
       </td>
-      <td><strong>${p.effective_score}</strong></td>
+      <td><strong>${p.effective_score}</strong> <span class="fb-line">${p.football_line}${p.display_adjusted_by_override ? '<span class="fb-adj" title="Goals/behinds adjusted to match the overridden total">*</span>' : ''}</span></td>
     </tr>
   `).join('');
 
@@ -96,7 +106,7 @@ function renderTeam(team) {
 
   return `
     <div class="team-block">
-      <h2>${team.name} — total: ${team.total_score}</h2>
+      <h2>${team.name} — total: ${team.football_line} (${team.total_score})</h2>
       <table>
         <thead><tr><th>Pos</th><th>DNP</th><th>Player</th><th>Match state</th><th>Calc</th><th>Override</th><th>Effective</th></tr></thead>
         <tbody>${rows}</tbody>

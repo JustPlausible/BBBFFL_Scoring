@@ -11,6 +11,7 @@ from fastapi.templating import Jinja2Templates
 
 from app.config import BASE_DIR
 from app.service import get_matchup_view
+from app.superscore import superscore_round_label
 
 router = APIRouter()
 templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
@@ -31,6 +32,9 @@ def serialize_public(state: dict) -> dict:
                 "team_key": team["team_key"],
                 "name": team["name"],
                 "total_score": team["total_score"],
+                "display_goals": team["display_goals"],
+                "display_behinds": team["display_behinds"],
+                "football_line": team["football_line"],
                 "positions": [
                     {
                         "position": p["position"],
@@ -40,6 +44,11 @@ def serialize_public(state: dict) -> dict:
                         "slot_source": p["slot_source"],
                         "effective_score": p["effective_score"],
                         "recommended_interchange": p["recommended_interchange"],
+                        "display_goals": p["display_goals"],
+                        "display_behinds": p["display_behinds"],
+                        "display_is_actual_afl": p["display_is_actual_afl"],
+                        "display_adjusted_by_override": p["display_adjusted_by_override"],
+                        "football_line": p["football_line"],
                     }
                     for p in team["positions"]
                 ],
@@ -69,10 +78,17 @@ def _build_state(request: Request) -> dict:
 @router.get("/", response_class=HTMLResponse)
 def public_page(request: Request):
     settings = request.app.state.settings
+    superscore_config = request.app.state.superscore_config
     return templates.TemplateResponse(
         request,
         "public.html",
-        {"poll_interval_seconds": settings.poll_interval_seconds},
+        {
+            "poll_interval_seconds": settings.poll_interval_seconds,
+            "superscore_enabled": superscore_config is not None,
+            "superscore_round_label": (
+                superscore_round_label(superscore_config.afl_round) if superscore_config else None
+            ),
+        },
     )
 
 

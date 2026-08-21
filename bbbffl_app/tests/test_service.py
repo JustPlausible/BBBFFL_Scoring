@@ -305,3 +305,191 @@ def test_get_matchup_view_stays_live_before_finalize(
     client = FakeAflClient([single_match], players_on_one_match, {})
     view = get_matchup_view(client, teams, decisions)
     assert view["status"] == "LIVE"
+
+
+def _strip_football_display_fields(snapshot: dict) -> dict:
+    """Mimics a FINAL snapshot recorded before the football-style display
+    fields existed -- dataclasses.asdict() of a MatchupResult built with an
+    older PositionResult/TeamResult that never had them."""
+    display_keys = (
+        "display_goals",
+        "display_behinds",
+        "display_is_actual_afl",
+        "display_adjusted_by_override",
+        "football_line",
+    )
+    for team in snapshot["teams"]:
+        for key in display_keys:
+            team.pop(key, None)
+        for position in team["positions"]:
+            for key in display_keys:
+                position.pop(key, None)
+    return snapshot
+
+
+def test_get_matchup_view_backfills_display_fields_onto_a_legacy_finalized_snapshot(
+    teams, decisions, single_match, players_on_one_match
+):
+    """A Grand Final finalised before this presentation layer existed must
+    keep serving from get_matchup_view() without a KeyError, and the
+    backfilled figures must stay internally consistent."""
+    stats = {100: {1: stat_line(1, goals=3, behinds=1)}}
+    client = FakeAflClient([single_match], players_on_one_match, stats)
+    pre = build_matchup_state(client, teams, decisions)
+
+    legacy_snapshot = _strip_football_display_fields(dataclasses.asdict(pre))
+    decisions.finalize("Signed off (legacy)", legacy_snapshot)
+
+    view = get_matchup_view(client, teams, decisions)
+
+    assert view["status"] == "FINAL"
+    team_a = next(t for t in view["teams"] if t["team_key"] == "team_a")
+    assert "football_line" in team_a
+    for position in team_a["positions"]:
+        assert "football_line" in position
+        assert 6 * position["display_goals"] + position["display_behinds"] == position["effective_score"]
+    assert (
+        sum(p["display_goals"] for p in team_a["positions"]),
+        sum(p["display_behinds"] for p in team_a["positions"]),
+    ) == (team_a["display_goals"], team_a["display_behinds"])
+
+
+# -- Football-style (Goals.Behinds/Total) presentation ------------------------
+
+
+def test_forward_position_display_uses_actual_afl_goals_and_behinds(
+    teams, decisions, single_match, players_on_one_match
+):
+    stats = {100: {1: stat_line(1, goals=3, behinds=1)}}
+    client = FakeAflClient([single_match], players_on_one_match, stats)
+
+    result = build_matchup_state(client, teams, decisions)
+
+    fwd1 = _positions_by_name(next(t for t in result.teams if t.team_key == "team_a"))["Forward1"]
+    assert fwd1.effective_score == 19
+    assert (fwd1.display_goals, fwd1.display_behinds) == (3, 1)
+    assert fwd1.display_is_actual_afl is True
+    assert fwd1.football_line == "3.1"
+
+
+def test_forward_override_inconsistent_with_actual_stats_stays_internally_consistent(
+    teams, decisions, single_match, players_on_one_match
+):
+    """A scorer override that no longer matches the Forward's actual AFL
+    goals/behinds must never leave the row showing G*6 + B != the displayed
+    effective total (see app/presentation.py's documented decision)."""
+    stats = {100: {1: stat_line(1, goals=3, behinds=1)}}  # actual: 3.1 == 19
+    client = FakeAflClient([single_match], players_on_one_match, stats)
+    decisions.set_override("team_a", "Forward1", 30.0, "corrected after review")
+
+    result = build_matchup_state(client, teams, decisions)
+
+    fwd1 = _positions_by_name(next(t for t in result.teams if t.team_key == "team_a"))["Forward1"]
+    assert fwd1.effective_score == 30.0
+    assert fwd1.display_is_actual_afl is False
+    assert 6 * fwd1.display_goals + fwd1.display_behinds == fwd1.effective_score
+    assert fwd1.football_line == "5.0"
+
+
+def test_team_football_totals_are_summed_from_player_display_rows_not_divmod_of_team_total(
+    teams, decisions, single_match, players_on_one_match
+):
+    """Regression for the worked example in the task brief: a team scoring
+    169 points from a realistic Forward/Midfield/Ruck/Tackler lineup must
+    read 26.13 (169), not divmod(169, 6) == 28.1."""
+    stats = {
+        100: {
+            1: stat_line(1, goals=4, behinds=0),  # Forward1: 4.0 (24)
+            2: stat_line(2, goals=1, behinds=4),  # Forward2: 1.4 (10)
+            3: stat_line(3, goals=3, behinds=2),  # Forward3: 3.2 (20)
+            4: stat_line(4, disposals=29),  # Midfield1: 29 -> 4.5
+            5: stat_line(5, disposals=24),  # Midfield2: 24 -> 4.0
+            6: stat_line(6, disposals=19),  # Midfield3: 19 -> 3.1
+            7: stat_line(7, marks=4, hitouts=21),  # Ruck: 25 -> 4.1
+            8: stat_line(8, tackles=3),  # Tackler: 18 -> 3.0
+        }
+    }
+    client = FakeAflClient([single_match], players_on_one_match, stats)
+
+    result = build_matchup_state(client, teams, decisions)
+
+    team_a = next(t for t in result.teams if t.team_key == "team_a")
+    assert team_a.total_score == 169
+    assert (team_a.display_goals, team_a.display_behinds) == (26, 13)
+    assert team_a.football_line == "26.13"
+    # The naive-but-wrong approach this guards against.
+    assert divmod(int(team_a.total_score), 6) != (team_a.display_goals, team_a.display_behinds)
+
+    # And the team total is exactly the sum of the position rows' own
+    # display goals/behinds, not an independent computation.
+    summed_goals = sum(p.display_goals for p in team_a.positions)
+    summed_behinds = sum(p.display_behinds for p in team_a.positions)
+    assert (summed_goals, summed_behinds) == (team_a.display_goals, team_a.display_behinds)
+
+
+def test_unadjusted_forward_with_no_stat_line_is_not_flagged_as_override_adjusted(
+    partial_teams, decisions, single_match, players_on_one_match
+):
+    """Regression: an ordinary Forward with no AFL stat line yet (unnamed,
+    vacant, DNP, or yet_to_play) has display_is_actual_afl=False just like
+    an override-adjusted row, but there was no override -- it must not be
+    flagged as one."""
+    client = FakeAflClient([single_match], players_on_one_match, {})
+
+    result = build_matchup_state(client, partial_teams, decisions)
+
+    fwd1 = _positions_by_name(next(t for t in result.teams if t.team_key == "team_a"))["Forward1"]
+    assert fwd1.slot_source == "unnamed"
+    assert fwd1.display_is_actual_afl is False
+    assert fwd1.display_adjusted_by_override is False
+
+
+def test_forward_override_inconsistent_with_stats_is_flagged_as_override_adjusted(
+    teams, decisions, single_match, players_on_one_match
+):
+    stats = {100: {1: stat_line(1, goals=3, behinds=1)}}
+    client = FakeAflClient([single_match], players_on_one_match, stats)
+    decisions.set_override("team_a", "Forward1", 30.0, "corrected after review")
+
+    result = build_matchup_state(client, teams, decisions)
+
+    fwd1 = _positions_by_name(next(t for t in result.teams if t.team_key == "team_a"))["Forward1"]
+    assert fwd1.display_adjusted_by_override is True
+
+
+def test_forward_override_that_still_matches_actual_stats_is_not_flagged(
+    teams, decisions, single_match, players_on_one_match
+):
+    """An override that merely reconfirms the existing total (6*3+1==19)
+    keeps showing the real goals/behinds -- nothing was adjusted."""
+    stats = {100: {1: stat_line(1, goals=3, behinds=1)}}
+    client = FakeAflClient([single_match], players_on_one_match, stats)
+    decisions.set_override("team_a", "Forward1", 19.0, "duplicate confirmation")
+
+    result = build_matchup_state(client, teams, decisions)
+
+    fwd1 = _positions_by_name(next(t for t in result.teams if t.team_key == "team_a"))["Forward1"]
+    assert fwd1.display_is_actual_afl is True
+    assert fwd1.display_adjusted_by_override is False
+
+
+def test_non_forward_positions_convert_points_to_football_style(
+    teams, decisions, single_match, players_on_one_match
+):
+    stats = {
+        100: {
+            4: stat_line(4, disposals=29),
+            5: stat_line(5, disposals=24),
+            6: stat_line(6, disposals=25),
+            7: stat_line(7, marks=0, hitouts=0),
+        }
+    }
+    client = FakeAflClient([single_match], players_on_one_match, stats)
+
+    result = build_matchup_state(client, teams, decisions)
+
+    positions = _positions_by_name(next(t for t in result.teams if t.team_key == "team_a"))
+    assert positions["Midfield1"].football_line == "4.5"  # 29 -> 4.5
+    assert positions["Midfield2"].football_line == "4.0"  # 24 -> 4.0
+    assert positions["Midfield3"].football_line == "4.1"  # 25 -> 4.1
+    assert positions["Ruck"].football_line == "0.0"  # 0 -> 0.0

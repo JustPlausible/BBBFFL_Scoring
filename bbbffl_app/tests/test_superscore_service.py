@@ -250,3 +250,42 @@ def test_get_superscore_view_serves_frozen_snapshot_after_finalize(ten_entries, 
     view = get_superscore_view(ExplodingClient(), ten_entries, superscore_decisions, SEASON, AFL_ROUND)
     assert view["status"] == "FINAL"
     assert view["standings"][0]["team_key"] == "team_10"
+
+
+def test_get_superscore_view_backfills_display_fields_onto_a_legacy_finalized_snapshot(
+    ten_entries, superscore_decisions
+):
+    """Same legacy-snapshot backward compatibility as the Grand Final's
+    get_matchup_view -- a SuperScore round finalised before the
+    football-style display fields existed must not 500 on upgrade."""
+    final_match = Match(match_id=500, home_team=CATS, away_team=PIES, status="CONCLUDED")
+    players = _players_for(ten_entries)
+    disposals = {f"team_{n}": n * 10 for n in range(1, 11)}
+    client = FakeAflClient([final_match], players, {500: _disposals_stats(ten_entries, disposals)})
+
+    pre = build_superscore_state(client, ten_entries, superscore_decisions, SEASON, AFL_ROUND)
+    import dataclasses
+
+    legacy_snapshot = dataclasses.asdict(pre)
+    display_keys = (
+        "display_goals",
+        "display_behinds",
+        "display_is_actual_afl",
+        "display_adjusted_by_override",
+        "football_line",
+    )
+    for team in legacy_snapshot["teams"]:
+        for key in display_keys:
+            team.pop(key, None)
+        for position in team["positions"]:
+            for key in display_keys:
+                position.pop(key, None)
+    superscore_decisions.finalize("Signed off (legacy)", legacy_snapshot)
+
+    view = get_superscore_view(client, ten_entries, superscore_decisions, SEASON, AFL_ROUND)
+
+    assert view["status"] == "FINAL"
+    for team in view["teams"]:
+        assert "football_line" in team
+        for position in team["positions"]:
+            assert 6 * position["display_goals"] + position["display_behinds"] == position["effective_score"]

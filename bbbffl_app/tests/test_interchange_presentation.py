@@ -141,7 +141,7 @@ def test_live_named_interchange_keeps_matchup_live(
 def test_yet_to_play_named_interchange_prevents_premature_signoff(
     partial_teams, decisions, players_on_one_match
 ):
-    scheduled_match = Match(match_id=100, home_team=CATS, away_team=PIES, status="SCHEDULED")
+    scheduled_match = Match(match_id=100, home_team=CATS, away_team=PIES, status="UPCOMING")
     client = FakeAflClient([scheduled_match], players_on_one_match, {})
 
     result = build_matchup_state(client, partial_teams, decisions)
@@ -153,7 +153,7 @@ def test_yet_to_play_named_interchange_prevents_premature_signoff(
 def test_completed_named_interchange_allows_signoff_when_everything_else_is_complete(
     partial_teams, decisions, players_on_one_match
 ):
-    final_match = Match(match_id=100, home_team=CATS, away_team=PIES, status="FINAL")
+    final_match = Match(match_id=100, home_team=CATS, away_team=PIES, status="CONCLUDED")
     client = FakeAflClient([final_match], players_on_one_match, {})
 
     result = build_matchup_state(client, partial_teams, decisions)

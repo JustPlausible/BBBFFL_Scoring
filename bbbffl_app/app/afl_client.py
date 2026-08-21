@@ -53,8 +53,13 @@ logger = logging.getLogger("bbbffl.afl_client")
 
 MatchState = Literal["yet_to_play", "live", "completed"]
 
-_COMPLETED_STATUSES = {"FINAL", "FT", "FULL_TIME", "COMPLETE", "COMPLETED"}
+# CONCLUDED/LIVE/UPCOMING are the canonical afl-api v1 lifecycle values (see
+# AFL-api/docs/api_v1_matches.md). The remaining entries are legacy/inferred
+# aliases kept for backwards compatibility with older fixtures and any
+# afl-api deployments still emitting them.
+_COMPLETED_STATUSES = {"CONCLUDED", "FINAL", "FT", "FULL_TIME", "COMPLETE", "COMPLETED"}
 _LIVE_STATUSES = {"LIVE", "IN_PROGRESS", "IN PROGRESS"}
+_UPCOMING_STATUSES = {"UPCOMING", "SCHEDULED", "NOT_STARTED"}
 
 
 def normalize_match_status(raw_status: str) -> MatchState:
@@ -63,6 +68,8 @@ def normalize_match_status(raw_status: str) -> MatchState:
         return "completed"
     if normalized in _LIVE_STATUSES:
         return "live"
+    if normalized in _UPCOMING_STATUSES:
+        return "yet_to_play"
     return "yet_to_play"
 
 

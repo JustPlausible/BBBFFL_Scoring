@@ -164,7 +164,7 @@ def test_superscore_scorer_decisions_are_independent_between_entries(
 def test_superscore_reaches_awaiting_signoff_once_matches_complete(
     ten_entries, superscore_decisions
 ):
-    final_match = Match(match_id=500, home_team=CATS, away_team=PIES, status="FINAL")
+    final_match = Match(match_id=500, home_team=CATS, away_team=PIES, status="CONCLUDED")
     players = _players_for(ten_entries)
     client = FakeAflClient([final_match], players, {500: {}})
 
@@ -174,7 +174,7 @@ def test_superscore_reaches_awaiting_signoff_once_matches_complete(
 
 
 def test_superscore_only_becomes_final_after_explicit_signoff(ten_entries, superscore_decisions):
-    final_match = Match(match_id=500, home_team=CATS, away_team=PIES, status="FINAL")
+    final_match = Match(match_id=500, home_team=CATS, away_team=PIES, status="CONCLUDED")
     players = _players_for(ten_entries)
     client = FakeAflClient([final_match], players, {500: {}})
 
@@ -230,7 +230,7 @@ def test_superscore_rejects_a_season_year_mismatch(ten_entries, superscore_decis
 def test_get_superscore_view_serves_frozen_snapshot_after_finalize(ten_entries, superscore_decisions):
     from app.afl_client import AflApiError
 
-    final_match = Match(match_id=500, home_team=CATS, away_team=PIES, status="FINAL")
+    final_match = Match(match_id=500, home_team=CATS, away_team=PIES, status="CONCLUDED")
     players = _players_for(ten_entries)
     disposals = {f"team_{n}": n * 10 for n in range(1, 11)}
     client = FakeAflClient([final_match], players, {500: _disposals_stats(ten_entries, disposals)})

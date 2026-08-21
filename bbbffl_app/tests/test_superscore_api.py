@@ -146,6 +146,27 @@ def test_superscore_public_state_lists_ten_entries_ranked(client_with_superscore
     assert body["afl_round"] == 20
 
 
+def test_concluded_afl_match_renders_superscore_players_as_final_not_yet_to_play(
+    client_with_superscore,
+):
+    """Regression for the Round 24 live incident: a match reported by
+    afl-api as status="CONCLUDED" must resolve to match_state="completed" on
+    the SuperScore screen too, not fall through to "yet_to_play"."""
+    from app.main import app as fastapi_app
+
+    fastapi_app.state.fake_afl_client.matches = [
+        Match(match_id=100, home_team=CATS, away_team=PIES, status="CONCLUDED")
+    ]
+
+    r = client_with_superscore.get("/api/public/superscore/state")
+    assert r.status_code == 200
+    body = r.json()
+    for team in body["teams"]:
+        for position in team["positions"]:
+            if position["slot_source"] in ("starting", "interchange"):
+                assert position["match_state"] == "completed"
+
+
 def test_superscore_page_and_admin_page_render(client_with_superscore):
     assert client_with_superscore.get("/superscore").status_code == 200
     assert client_with_superscore.get("/admin/superscore").status_code == 200
@@ -187,7 +208,7 @@ def test_full_superscore_scorer_workflow(client_with_superscore):
     from app.main import app as fastapi_app
 
     fastapi_app.state.fake_afl_client.matches = [
-        Match(match_id=100, home_team=CATS, away_team=PIES, status="FINAL")
+        Match(match_id=100, home_team=CATS, away_team=PIES, status="CONCLUDED")
     ]
 
     r = client_with_superscore.post(
@@ -232,7 +253,7 @@ def test_finalizing_superscore_does_not_finalize_grand_final(client_with_supersc
     from app.main import app as fastapi_app
 
     fastapi_app.state.fake_afl_client.matches = [
-        Match(match_id=100, home_team=CATS, away_team=PIES, status="FINAL")
+        Match(match_id=100, home_team=CATS, away_team=PIES, status="CONCLUDED")
     ]
 
     r = client_with_superscore.post(

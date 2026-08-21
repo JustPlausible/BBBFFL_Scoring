@@ -118,7 +118,7 @@ def test_full_scorer_workflow(client):
     from app.main import app as fastapi_app
 
     fastapi_app.state.fake_afl_client.matches = [
-        Match(match_id=100, home_team=CATS, away_team=PIES, status="FINAL")
+        Match(match_id=100, home_team=CATS, away_team=PIES, status="CONCLUDED")
     ]
 
     r = client.post("/api/admin/finalize", json={"note": "confirmed"}, headers=ADMIN_HEADERS)
@@ -150,12 +150,34 @@ def test_public_state_exposes_interchange_presentation_fields(client):
     assert ir["potential_scores"] is None
 
 
+def test_concluded_afl_match_renders_rostered_players_as_final_not_yet_to_play(client):
+    """Regression for the Round 24 live incident: afl-api's real v1 contract
+    reports a completed match as status="CONCLUDED" (not "FINAL"). Before the
+    normalizer recognised CONCLUDED, rostered players whose AFL team had
+    already finished still showed up as "Yet to play" on the public
+    Head-to-Head scoreboard."""
+    from app.main import app as fastapi_app
+
+    fastapi_app.state.fake_afl_client.matches = [
+        Match(match_id=100, home_team=CATS, away_team=PIES, status="CONCLUDED")
+    ]
+
+    r = client.get("/api/public/state")
+    assert r.status_code == 200
+    body = r.json()
+    for team in body["teams"]:
+        for position in team["positions"]:
+            if position["slot_source"] in ("starting", "interchange"):
+                assert position["match_state"] == "completed"
+        assert team["interchange"]["match_state"] in ("completed", "unnamed")
+
+
 def test_finalized_result_survives_afl_api_outage(client):
     from app.afl_client import AflApiError
     from app.main import app as fastapi_app
 
     fastapi_app.state.fake_afl_client.matches = [
-        Match(match_id=100, home_team=CATS, away_team=PIES, status="FINAL")
+        Match(match_id=100, home_team=CATS, away_team=PIES, status="CONCLUDED")
     ]
     r = client.post("/api/admin/finalize", json={"note": "confirmed"}, headers=ADMIN_HEADERS)
     assert r.status_code == 200

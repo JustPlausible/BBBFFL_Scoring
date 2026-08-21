@@ -10,7 +10,16 @@ still exercising the real AflApiClient parsing code end-to-end.
 import httpx
 import pytest
 
-from app.afl_client import AflApiClient, Match, Player, PlayerStatLine, Round, Season, Team
+from app.afl_client import (
+    AflApiClient,
+    Match,
+    Player,
+    PlayerStatLine,
+    Round,
+    Season,
+    Team,
+    normalize_match_status,
+)
 
 SEASONS_PAYLOAD = {
     "seasons": [
@@ -143,6 +152,42 @@ def test_get_player_unwraps_player_key_and_uses_display_name(client):
         name="Josh Daicos",
         current_team=Team(team_id=3, name="Collingwood"),
     )
+
+
+@pytest.mark.parametrize(
+    "raw_status,expected",
+    [
+        # Canonical afl-api v1 lifecycle values (AFL-api/docs/api_v1_matches.md).
+        ("UPCOMING", "yet_to_play"),
+        ("LIVE", "live"),
+        ("CONCLUDED", "completed"),
+        # Case-insensitivity on the canonical values.
+        ("concluded", "completed"),
+        ("live", "live"),
+        # Legacy/inferred aliases retained for backwards compatibility.
+        ("FINAL", "completed"),
+        ("FT", "completed"),
+        ("FULL_TIME", "completed"),
+        ("COMPLETE", "completed"),
+        ("COMPLETED", "completed"),
+        ("IN_PROGRESS", "live"),
+        ("IN PROGRESS", "live"),
+        ("SCHEDULED", "yet_to_play"),
+        ("NOT_STARTED", "yet_to_play"),
+        # Unrecognised/empty values fall back to yet_to_play, never completed.
+        ("", "yet_to_play"),
+        ("SOME_UNKNOWN_STATUS", "yet_to_play"),
+    ],
+)
+def test_normalize_match_status_maps_afl_api_v1_lifecycle_values(raw_status, expected):
+    assert normalize_match_status(raw_status) == expected
+
+
+def test_match_state_property_delegates_to_normalize_match_status():
+    concluded = Match(
+        match_id=1, home_team=Team(1, "Cats"), away_team=Team(2, "Pies"), status="CONCLUDED"
+    )
+    assert concluded.state == "completed"
 
 
 def test_get_match_player_stats_reads_players_wrapper_and_nested_stats(client):

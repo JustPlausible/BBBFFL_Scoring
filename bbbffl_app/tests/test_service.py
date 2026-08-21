@@ -137,7 +137,7 @@ def test_matchup_stays_live_while_a_relevant_match_is_in_progress(
 def test_matchup_awaits_signoff_once_all_relevant_matches_are_final(
     teams, decisions, players_on_one_match
 ):
-    final_match = Match(match_id=100, home_team=CATS, away_team=PIES, status="FINAL")
+    final_match = Match(match_id=100, home_team=CATS, away_team=PIES, status="CONCLUDED")
     client = FakeAflClient([final_match], players_on_one_match, {})
 
     result = build_matchup_state(client, teams, decisions)
@@ -146,7 +146,7 @@ def test_matchup_awaits_signoff_once_all_relevant_matches_are_final(
 
 
 def test_explicit_finalisation_moves_matchup_to_final(teams, decisions, players_on_one_match):
-    final_match = Match(match_id=100, home_team=CATS, away_team=PIES, status="FINAL")
+    final_match = Match(match_id=100, home_team=CATS, away_team=PIES, status="CONCLUDED")
     client = FakeAflClient([final_match], players_on_one_match, {})
 
     decisions.finalize("Grand Final result confirmed by scorer")
@@ -244,7 +244,7 @@ def test_unnamed_is_distinct_from_scorer_marked_dnp(
 def test_lifecycle_ignores_unnamed_positions(partial_teams, decisions, players_on_one_match):
     """team_a's eight unnamed positions must not keep the matchup stuck LIVE
     once every AFL match that a *named* position depends on is final."""
-    final_match = Match(match_id=100, home_team=CATS, away_team=PIES, status="FINAL")
+    final_match = Match(match_id=100, home_team=CATS, away_team=PIES, status="CONCLUDED")
     client = FakeAflClient([final_match], players_on_one_match, {})
 
     result = build_matchup_state(client, partial_teams, decisions)
@@ -273,7 +273,7 @@ def test_starting_dnp_flag_persists_even_when_interchange_covers_the_position(
 def test_get_matchup_view_serves_frozen_snapshot_after_finalize_without_calling_afl_api(
     teams, decisions, single_match, players_on_one_match
 ):
-    final_match = Match(match_id=100, home_team=CATS, away_team=PIES, status="FINAL")
+    final_match = Match(match_id=100, home_team=CATS, away_team=PIES, status="CONCLUDED")
     stats = {100: {1: stat_line(1, goals=3, behinds=1)}}
     client = FakeAflClient([final_match], players_on_one_match, stats)
 

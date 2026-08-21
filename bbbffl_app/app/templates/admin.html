@@ -29,6 +29,8 @@
   .comp-nav a:hover { border-color: #666; }
   .fb-line { color: #9aa3b2; font-weight: 500; }
   .fb-adj { color: #e07a3f; cursor: help; }
+  .dnp-pill { background: #a53a3a; color: white; }
+  .orig-line { font-size: 0.75rem; color: #9aa3b2; font-style: italic; margin-top: 2px; }
 </style>
 </head>
 <body>
@@ -77,6 +79,27 @@ async function api(path, body) {
   return res.json();
 }
 
+// Shows both the coach's original selection (p.starting_player_name) and
+// the effective scorer, so the scorer can see exactly who a DNP checkbox
+// refers to even once an interchange assignment has replaced them in this
+// position -- see the DNP-visibility brief.
+function adminPlayerCell(p) {
+  if (p.slot_source === 'unnamed') return '<em>not yet named</em>';
+  if (p.slot_source === 'vacant') {
+    return p.starting_player_name
+      ? `<em>${p.starting_player_name}</em> <span class="pill dnp-pill">DNP</span>`
+      : '<em>vacant</em>';
+  }
+  if (p.slot_source === 'interchange') {
+    const effective = p.player_name || '<em>unassigned</em>';
+    const orig = p.starting_player_name
+      ? `<div class="orig-line">${p.starting_player_name}${p.starting_dnp ? ' <span class="pill dnp-pill">DNP</span>' : ''}</div>`
+      : '';
+    return `${effective} <span class="pill">IR</span>${orig}`;
+  }
+  return p.player_name || '';
+}
+
 function renderTeam(team) {
   const rows = team.positions.map(p => `
     <tr>
@@ -85,7 +108,7 @@ function renderTeam(team) {
         <label><input type="checkbox" data-team="${team.team_key}" data-slot="${p.position}"
           class="dnp-toggle" ${p.starting_dnp ? 'checked' : ''}> DNP</label>
       </td>
-      <td>${p.player_name || (p.slot_source === 'unnamed' ? '<em>not yet named</em>' : '<em>vacant</em>')} ${p.slot_source === 'interchange' ? '<span class="pill">IR</span>' : ''}</td>
+      <td>${adminPlayerCell(p)}</td>
       <td>${p.match_state}${p.recommended_interchange ? '<div class="recommend">↪ recommend interchange here</div>' : ''}</td>
       <td>calc: ${p.calculated_score}</td>
       <td class="override-cell">

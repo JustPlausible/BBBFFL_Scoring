@@ -81,6 +81,17 @@ class PositionResult:
     # this position, so the admin UI can render and clear it correctly
     # without first having to remove the interchange assignment.
     starting_dnp: bool
+    # The coach's original roster selection for this position, independent
+    # of slot_source/player_name above -- which describe who (if anyone) is
+    # *effectively* scoring the position right now (the starting player, an
+    # interchange replacement, or nobody). These two stay populated with the
+    # coach's named selection even when the position is DNP'd and/or covered
+    # by the interchange, so that identity is never lost from the resulting
+    # presentation model -- only a genuinely unnamed/loophole slot (None
+    # here) has no coach selection to show. None when the coach never named
+    # anyone in this slot.
+    starting_player_id: int | None
+    starting_player_name: str | None
     # Display-only football-style presentation of effective_score (see
     # app/presentation.py). Never used for scoring, lifecycle, or ranking --
     # goals * 6 + behinds always equals effective_score on an official row.
@@ -439,6 +450,10 @@ def build_matchup_state(
                     effective_score=effective_score,
                     recommended_interchange=recommended,
                     starting_dnp=starting_dnp,
+                    starting_player_id=starting_player_id,
+                    starting_player_name=(
+                        name_by_player.get(starting_player_id) if starting_player_id else None
+                    ),
                     display_goals=football.goals,
                     display_behinds=football.behinds,
                     display_is_actual_afl=football.is_actual_afl,
@@ -637,6 +652,36 @@ def _backfill_football_display(snapshot: dict) -> dict:
     return snapshot
 
 
+def _backfill_starting_player_identity(snapshot: dict) -> dict:
+    """Adds starting_player_id/starting_player_name to a stored FINAL
+    snapshot recorded before the coach's original roster selection was kept
+    independently of slot_source (see PositionResult), so an
+    already-finalised result stays servable after upgrading rather than
+    500ing on a missing dict key. Only touches positions actually missing
+    the fields -- a snapshot written by the current code already carries
+    them and passes through unchanged.
+
+    For a legacy "starting"/"unnamed" row, canonical_player_id/player_name
+    already *are* the coach's original selection (nothing was ever
+    overwritten), so those are reused directly. A legacy "vacant"/
+    "interchange" row never recorded the original selection separately once
+    DNP/interchange overwrote it -- there is nothing to recover, so this
+    falls back to None rather than inventing an identity that wasn't
+    stored.
+    """
+    for team in snapshot.get("teams", []):
+        for position in team.get("positions", []):
+            if "starting_player_id" in position:
+                continue
+            if position.get("slot_source") in ("starting", "unnamed"):
+                position["starting_player_id"] = position.get("canonical_player_id")
+                position["starting_player_name"] = position.get("player_name")
+            else:
+                position["starting_player_id"] = None
+                position["starting_player_name"] = None
+    return snapshot
+
+
 def get_superscore_view(
     afl_client: AflDataSource,
     entries: list[TeamConfig],
@@ -650,7 +695,7 @@ def get_superscore_view(
     served from the stored snapshot and afl-api is never queried again."""
     matchup_state = decisions.get_matchup_state()
     if matchup_state.finalized and matchup_state.snapshot is not None:
-        return _backfill_football_display(matchup_state.snapshot)
+        return _backfill_starting_player_identity(_backfill_football_display(matchup_state.snapshot))
     result = build_superscore_state(afl_client, entries, decisions, season, afl_round, identity_cache)
     return dataclasses.asdict(result)
 
@@ -672,6 +717,6 @@ def get_matchup_view(
     """
     matchup_state = decisions.get_matchup_state()
     if matchup_state.finalized and matchup_state.snapshot is not None:
-        return _backfill_football_display(matchup_state.snapshot)
+        return _backfill_starting_player_identity(_backfill_football_display(matchup_state.snapshot))
     result = build_matchup_state(afl_client, teams, decisions, identity_cache)
     return dataclasses.asdict(result)

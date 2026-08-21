@@ -133,6 +133,49 @@ def test_full_scorer_workflow(client):
     assert r.status_code == 423
 
 
+def test_public_state_exposes_starting_player_identity_for_a_dnp_position(client):
+    """The public page must keep showing the coach's original selection for
+    a DNP'd position -- not just erase it -- per the DNP-visibility brief."""
+    team_key = client.get("/api/admin/state", headers=ADMIN_HEADERS).json()["teams"][0]["team_key"]
+    client.post(
+        "/api/admin/dnp",
+        json={"team_key": team_key, "slot": "Forward1", "dnp": True},
+        headers=ADMIN_HEADERS,
+    )
+
+    r = client.get("/api/public/state")
+    assert r.status_code == 200
+    fwd1 = next(p for p in r.json()["teams"][0]["positions"] if p["position"] == "Forward1")
+    assert fwd1["slot_source"] == "vacant"
+    assert fwd1["player_name"] is None
+    assert fwd1["starting_dnp"] is True
+    assert fwd1["starting_player_name"] is not None
+
+
+def test_public_state_exposes_starting_player_identity_when_interchange_covers_a_dnp_position(client):
+    team_key = client.get("/api/admin/state", headers=ADMIN_HEADERS).json()["teams"][0]["team_key"]
+    client.post(
+        "/api/admin/dnp",
+        json={"team_key": team_key, "slot": "Forward1", "dnp": True},
+        headers=ADMIN_HEADERS,
+    )
+    client.post(
+        "/api/admin/interchange",
+        json={"team_key": team_key, "target_position": "Forward1"},
+        headers=ADMIN_HEADERS,
+    )
+
+    r = client.get("/api/public/state")
+    assert r.status_code == 200
+    fwd1 = next(p for p in r.json()["teams"][0]["positions"] if p["position"] == "Forward1")
+    assert fwd1["slot_source"] == "interchange"
+    assert fwd1["starting_dnp"] is True
+    # The original coach-named starter's identity is still recoverable even
+    # though the interchange player is now the effective scorer.
+    assert fwd1["starting_player_name"] is not None
+    assert fwd1["starting_player_name"] != fwd1["player_name"]
+
+
 def test_public_state_exposes_interchange_presentation_fields(client):
     r = client.get("/api/public/state")
     assert r.status_code == 200

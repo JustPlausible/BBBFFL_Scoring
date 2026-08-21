@@ -89,6 +89,8 @@ def serialize_public_superscore(state: dict) -> dict:
                         "slot_source": p["slot_source"],
                         "effective_score": p["effective_score"],
                         "recommended_interchange": p["recommended_interchange"],
+                        "starting_dnp": p["starting_dnp"],
+                        "starting_player_name": p["starting_player_name"],
                         "display_goals": p["display_goals"],
                         "display_behinds": p["display_behinds"],
                         "display_is_actual_afl": p["display_is_actual_afl"],

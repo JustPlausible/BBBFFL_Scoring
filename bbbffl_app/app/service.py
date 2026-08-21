@@ -15,6 +15,7 @@ from typing import Literal, Protocol
 
 from app.afl_client import Match, MatchState, Player, PlayerStatLine, Team
 from app.db import DecisionsRepository
+from app.presentation import Number, football_score_for_position, format_football_line
 from app.scoring import ROSTER_SLOTS, SCORABLE_POSITIONS, PlayerStats, score_position
 from app.teams import TeamConfig
 
@@ -80,6 +81,16 @@ class PositionResult:
     # this position, so the admin UI can render and clear it correctly
     # without first having to remove the interchange assignment.
     starting_dnp: bool
+    # Display-only football-style presentation of effective_score (see
+    # app/presentation.py). Never used for scoring, lifecycle, or ranking --
+    # goals * 6 + behinds always equals effective_score on an official row.
+    display_goals: Number
+    display_behinds: Number
+    # True only for a Forward position showing its player's literal AFL
+    # goals/behinds; False for a Midfield/Ruck/Tackler conversion, or a
+    # Forward whose override no longer matches their actual AFL stats.
+    display_is_actual_afl: bool
+    football_line: str
 
 
 @dataclass(frozen=True)
@@ -119,6 +130,14 @@ class TeamResult:
     positions: list[PositionResult]
     interchange: InterchangeInfo
     total_score: float
+    # Sum of the nine position rows' own display_goals/display_behinds --
+    # deliberately not divmod(total_score, 6). See app/presentation.py and
+    # the worked example in the task brief: a team total of 169 points from
+    # Forward/Midfield/Ruck/Tackler rows that individually read
+    # 4.0/1.4/... etc. must aggregate to "26.13", not divmod(169, 6).
+    display_goals: Number
+    display_behinds: Number
+    football_line: str
 
 
 @dataclass(frozen=True)
@@ -313,12 +332,17 @@ def build_matchup_state(
 
         position_results: list[PositionResult] = []
         total_score = 0.0
+        team_display_goals: Number = 0
+        team_display_behinds: Number = 0
 
         for position in SCORABLE_POSITIONS:
             starting_player_id = team.roster[position]
             starting_dnp = dnp_map.get((team.team_key, position), False)
             using_interchange = interchange_target == position
             override = overrides.get((team.team_key, position))
+            # Only ever set for "interchange"/"starting" below -- stays None
+            # for unnamed/vacant/DNP rows, which have no AFL stat line.
+            stat_line = None
 
             if using_interchange:
                 slot_source: Literal["starting", "interchange", "vacant", "unnamed"] = "interchange"
@@ -380,6 +404,15 @@ def build_matchup_state(
             total_score += effective_score
             counts[match_state] += 1
 
+            football = football_score_for_position(
+                position,
+                effective_score,
+                stat_line.goals if stat_line is not None else None,
+                stat_line.behinds if stat_line is not None else None,
+            )
+            team_display_goals += football.goals
+            team_display_behinds += football.behinds
+
             position_results.append(
                 PositionResult(
                     position=position,
@@ -394,6 +427,10 @@ def build_matchup_state(
                     effective_score=effective_score,
                     recommended_interchange=recommended,
                     starting_dnp=starting_dnp,
+                    display_goals=football.goals,
+                    display_behinds=football.behinds,
+                    display_is_actual_afl=football.is_actual_afl,
+                    football_line=football.line,
                 )
             )
 
@@ -416,6 +453,9 @@ def build_matchup_state(
                 positions=position_results,
                 interchange=interchange_info,
                 total_score=total_score,
+                display_goals=team_display_goals,
+                display_behinds=team_display_behinds,
+                football_line=format_football_line(team_display_goals, team_display_behinds),
             )
         )
 

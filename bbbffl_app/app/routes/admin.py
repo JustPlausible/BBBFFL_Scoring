@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from app.config import BASE_DIR
 from app.scoring import ROSTER_SLOTS, SCORABLE_POSITIONS
 from app.service import build_matchup_state, get_matchup_view
+from app.superscore import superscore_round_label
 
 router = APIRouter(prefix="/api/admin")
 page_router = APIRouter()
@@ -139,8 +140,16 @@ def finalize(payload: FinalizeRequest, request: Request):
 
 @page_router.get("/admin", response_class=HTMLResponse)
 def admin_page(request: Request):
+    superscore_config = request.app.state.superscore_config
     return templates.TemplateResponse(
         request,
         "admin.html",
-        {"positions": list(SCORABLE_POSITIONS), "teams": request.app.state.teams},
+        {
+            "positions": list(SCORABLE_POSITIONS),
+            "teams": request.app.state.teams,
+            "superscore_enabled": superscore_config is not None,
+            "superscore_round_label": (
+                superscore_round_label(superscore_config.afl_round) if superscore_config else None
+            ),
+        },
     )

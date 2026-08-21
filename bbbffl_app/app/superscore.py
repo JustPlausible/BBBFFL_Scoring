@@ -27,6 +27,24 @@ class SuperScoreConfig:
     entries: list[TeamConfig]
 
 
+def superscore_round_label(afl_round: int, home_and_away_rounds: int = 24) -> str:
+    """The scorer-facing "SSn" label for a SuperScore round.
+
+    BBBFFL rule: SuperScore runs during the AFL home-and-away season's
+    final four rounds -- for a standard 24-round season that's rounds
+    21-24 -> SS1-SS4, with the Grand Final coinciding with round 24/SS4.
+    Expressed as an offset from the *last* home-and-away round (not a
+    hard-coded "round 24 means SS4" check) so the same navigation/labelling
+    concept keeps working if a future season's home-and-away length ever
+    changes, or for whichever of the four rounds is currently active --
+    not just the round the Grand Final happens to share.
+    """
+    index = afl_round - (home_and_away_rounds - 4)
+    if 1 <= index <= 4:
+        return f"SS{index}"
+    return f"SuperScore R{afl_round}"
+
+
 def competition_key(season: int, afl_round: int) -> str:
     """The DecisionsRepository scoping key for one SuperScore round. Keying
     by season+round (rather than a fixed constant, the way Grand Final uses

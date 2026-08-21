@@ -3,7 +3,7 @@ import json
 import pytest
 
 from app.scoring import ROSTER_SLOTS
-from app.superscore import load_superscore_config
+from app.superscore import load_superscore_config, superscore_round_label
 from app.teams import TeamConfigError
 
 
@@ -83,3 +83,28 @@ def test_missing_lineup_slot_is_rejected(tmp_path):
 def test_empty_entries_list_is_rejected(tmp_path):
     with pytest.raises(TeamConfigError):
         load_superscore_config(_write_config(tmp_path, entries=[]))
+
+
+# -- SS1-SS4 navigation labelling ---------------------------------------------
+
+
+def test_superscore_round_label_for_the_2026_final_four_rounds():
+    """2026 rule: Round 21 -> SS1 ... Round 24 -> SS4, for a standard
+    24-round home-and-away season (the default)."""
+    assert superscore_round_label(21) == "SS1"
+    assert superscore_round_label(22) == "SS2"
+    assert superscore_round_label(23) == "SS3"
+    assert superscore_round_label(24) == "SS4"
+
+
+def test_superscore_round_label_outside_the_final_four_is_not_mislabelled():
+    assert superscore_round_label(20) == "SuperScore R20"
+    assert superscore_round_label(1) == "SuperScore R1"
+
+
+def test_superscore_round_label_is_not_hardcoded_to_a_24_round_season():
+    """The label is derived from an offset off the last home-and-away
+    round, not a literal 'round == 24' check -- so a differently-sized
+    season still maps its own final four rounds to SS1-SS4."""
+    assert superscore_round_label(19, home_and_away_rounds=22) == "SS1"
+    assert superscore_round_label(22, home_and_away_rounds=22) == "SS4"

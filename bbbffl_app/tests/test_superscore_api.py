@@ -249,6 +249,74 @@ def test_superscore_dnp_does_not_affect_grand_final_state_for_the_same_team_key(
         assert ruck["match_state"] != "vacant"
 
 
+# -- Public/Admin navigation between Grand Final and SuperScore --------------
+
+
+def test_public_grand_final_page_links_to_superscore_when_enabled(client_with_superscore):
+    r = client_with_superscore.get("/")
+    assert r.status_code == 200
+    assert 'href="/superscore"' in r.text
+    assert "SuperScore" in r.text
+
+
+def test_public_grand_final_page_has_no_superscore_link_when_disabled(client_no_superscore):
+    r = client_no_superscore.get("/")
+    assert r.status_code == 200
+    assert 'href="/superscore"' not in r.text
+
+
+def test_public_superscore_page_links_back_to_grand_final(client_with_superscore):
+    r = client_with_superscore.get("/superscore")
+    assert r.status_code == 200
+    assert 'href="/"' in r.text
+    assert "Grand Final" in r.text
+
+
+def test_admin_page_links_to_superscore_admin_when_enabled(client_with_superscore):
+    r = client_with_superscore.get("/admin")
+    assert r.status_code == 200
+    assert 'href="/admin/superscore"' in r.text
+
+
+def test_admin_page_has_no_superscore_admin_link_when_disabled(client_no_superscore):
+    r = client_no_superscore.get("/admin")
+    assert r.status_code == 200
+    assert 'href="/admin/superscore"' not in r.text
+
+
+def test_admin_superscore_page_links_back_to_grand_final_admin(client_with_superscore):
+    r = client_with_superscore.get("/admin/superscore")
+    assert r.status_code == 200
+    assert 'href="/admin"' in r.text
+
+
+def test_public_pages_never_link_to_admin(client_with_superscore):
+    """Public -> Admin navigation must never be added (task brief #6/#7)."""
+    for path in ("/", "/superscore"):
+        r = client_with_superscore.get(path)
+        assert 'href="/admin"' not in r.text
+        assert 'href="/admin/superscore"' not in r.text
+
+
+def test_admin_navigation_does_not_weaken_admin_protection(client_with_superscore):
+    """Switching competition context in Admin is just a link between two
+    already-protected pages -- the underlying APIs must still require the
+    admin token in both directions."""
+    assert client_with_superscore.get("/api/admin/state").status_code == 401
+    assert (
+        client_with_superscore.get("/api/admin/superscore/state").status_code == 401
+    )
+    assert (
+        client_with_superscore.get("/api/admin/state", headers=ADMIN_HEADERS).status_code == 200
+    )
+    assert (
+        client_with_superscore.get(
+            "/api/admin/superscore/state", headers=ADMIN_HEADERS
+        ).status_code
+        == 200
+    )
+
+
 def test_finalizing_superscore_does_not_finalize_grand_final(client_with_superscore):
     from app.main import app as fastapi_app
 

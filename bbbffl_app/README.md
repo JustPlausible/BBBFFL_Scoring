@@ -119,20 +119,28 @@ See `tests/test_service.py` and `tests/test_api.py`.
 `LIVE -> AWAITING_SCORER_SIGNOFF -> FINAL`. The transition to
 `AWAITING_SCORER_SIGNOFF` happens automatically once every AFL match that
 an *active* (non-DNP, non-vacant, non-unnamed) roster position depends on
-is complete. A **named Interchange player counts here too, even while
-unassigned to a scoring position** -- it's genuinely playing a live AFL
-match right now, even though it isn't yet contributing to the official
-score, so its match state must not be ignored when deciding whether the
-matchup is still LIVE. A scorer-marked-DNP Interchange is excluded from
-this, the same as a DNP starter. Moving to `FINAL` always requires an
-explicit `POST /api/admin/finalize` call -- the system never finalises
-itself.
+is `completed` (afl-api `CONCLUDED`). A **named Interchange player counts
+here too, even while unassigned to a scoring position** -- it's genuinely
+playing a live AFL match right now, even though it isn't yet contributing
+to the official score, so its match state must not be ignored when
+deciding whether the matchup is still LIVE. A scorer-marked-DNP
+Interchange is excluded from this, the same as a DNP starter. Moving to
+`FINAL` always requires an explicit `POST /api/admin/finalize` call -- the
+system never finalises itself.
+
+A match in afl-api's `POSTGAME` status (siren has sounded, but statistics
+are not yet declared final) surfaces as its own `postgame` match/position
+state -- distinct from both `live` and `completed`. It is **not** treated
+as complete for sign-off purposes: a `postgame` match holds the matchup at
+`LIVE` the same way a `live` one does, since AFL stats can still be
+corrected before afl-api reports `CONCLUDED`. Only `completed` counts
+toward `AWAITING_SCORER_SIGNOFF`.
 
 ## Interchange presentation
 
 The public/admin API's `interchange` object exposes, independent of any
 current assignment: `match_state` (the player's own underlying AFL match
-state: `yet_to_play` / `live` / `completed` / `unnamed`) and
+state: `yet_to_play` / `live` / `postgame` / `completed` / `unnamed`) and
 `potential_scores` (`{forward, midfield, ruck, tackler}` -- what their
 *current* AFL stats would score at each position, computed via the same
 `score_position()` used everywhere else; `null` when there's no AFL stat

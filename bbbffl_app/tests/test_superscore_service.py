@@ -199,6 +199,26 @@ def test_superscore_stays_live_while_a_match_is_in_progress(ten_entries, supersc
     assert result.status == "LIVE"
 
 
+def test_superscore_postgame_match_interprets_the_same_as_grand_final(
+    ten_entries, superscore_decisions
+):
+    """SuperScore reuses build_matchup_state via build_superscore_state, so
+    a POSTGAME match must be interpreted identically to the Grand Final:
+    its own distinct "postgame" state, counted separately, and not treated
+    as final for lifecycle purposes."""
+    postgame_match = Match(match_id=500, home_team=CATS, away_team=PIES, status="POSTGAME")
+    players = _players_for(ten_entries)
+    client = FakeAflClient([postgame_match], players, {500: {}})
+
+    result = build_superscore_state(client, ten_entries, superscore_decisions, SEASON, AFL_ROUND)
+
+    assert result.status == "LIVE"
+    assert result.counts["postgame"] > 0
+    assert result.counts["completed"] == 0
+    team_1 = next(t for t in result.teams if t.team_key == "team_1")
+    assert next(p for p in team_1.positions if p.position == "Forward1").match_state == "postgame"
+
+
 def test_superscore_requests_the_configured_round_not_afl_apis_current_round(
     ten_entries, superscore_decisions, match
 ):
@@ -289,3 +309,25 @@ def test_get_superscore_view_backfills_display_fields_onto_a_legacy_finalized_sn
         assert "football_line" in team
         for position in team["positions"]:
             assert 6 * position["display_goals"] + position["display_behinds"] == position["effective_score"]
+
+
+def test_get_superscore_view_backfills_postgame_count_onto_a_legacy_finalized_snapshot(
+    ten_entries, superscore_decisions, match
+):
+    """A SuperScore round finalised before the postgame match state existed
+    stored a `counts` dict with no "postgame" key -- get_superscore_view()
+    must backfill it to 0 rather than serving `Postgame: undefined`."""
+    players = _players_for(ten_entries)
+    client = FakeAflClient([match], players, {500: {}})
+
+    pre = build_superscore_state(client, ten_entries, superscore_decisions, SEASON, AFL_ROUND)
+    import dataclasses
+
+    legacy_snapshot = dataclasses.asdict(pre)
+    del legacy_snapshot["counts"]["postgame"]
+    superscore_decisions.finalize("Signed off (legacy)", legacy_snapshot)
+
+    view = get_superscore_view(client, ten_entries, superscore_decisions, SEASON, AFL_ROUND)
+
+    assert view["status"] == "FINAL"
+    assert view["counts"]["postgame"] == 0

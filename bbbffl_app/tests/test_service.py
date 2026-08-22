@@ -287,6 +287,106 @@ def test_explicit_finalisation_moves_matchup_to_final(teams, decisions, players_
     assert result.finalized_note == "Grand Final result confirmed by scorer"
 
 
+def test_postgame_match_shows_postgame_not_live_or_final(
+    teams, decisions, players_on_one_match
+):
+    """A match that has finished play but whose stats afl-api has not yet
+    declared final (POSTGAME) must present as its own distinct state -- not
+    silently reinterpreted as still "live" nor prematurely shown as
+    "completed"/Final."""
+    postgame_match = Match(match_id=100, home_team=CATS, away_team=PIES, status="POSTGAME")
+    client = FakeAflClient([postgame_match], players_on_one_match, {})
+
+    result = build_matchup_state(client, teams, decisions)
+
+    team_a = next(t for t in result.teams if t.team_key == "team_a")
+    fwd1 = _positions_by_name(team_a)["Forward1"]
+    assert fwd1.match_state == "postgame"
+    assert fwd1.match_state != "live"
+    assert fwd1.match_state != "completed"
+
+
+def test_postgame_counted_separately_from_live_and_final(teams, decisions, players_on_one_match):
+    postgame_match = Match(match_id=100, home_team=CATS, away_team=PIES, status="POSTGAME")
+    client = FakeAflClient([postgame_match], players_on_one_match, {})
+
+    result = build_matchup_state(client, teams, decisions)
+
+    # 8 scoring positions x 2 teams == 16 rows (counts covers only the
+    # SCORABLE_POSITIONS, not Interchange -- see README's "Interchange
+    # presentation" section), all resolved to the one postgame match; none
+    # should have leaked into "live" or "completed".
+    assert result.counts["postgame"] == 16
+    assert result.counts["live"] == 0
+    assert result.counts["completed"] == 0
+
+
+def test_matchup_stays_live_not_awaiting_signoff_while_postgame(
+    teams, decisions, players_on_one_match
+):
+    """POSTGAME must not be treated as final for lifecycle purposes -- AFL
+    stats can still be corrected before afl-api reports CONCLUDED, so a
+    scorer must not be prompted to sign off yet."""
+    postgame_match = Match(match_id=100, home_team=CATS, away_team=PIES, status="POSTGAME")
+    client = FakeAflClient([postgame_match], players_on_one_match, {})
+
+    result = build_matchup_state(client, teams, decisions)
+
+    assert result.status == "LIVE"
+
+
+def test_postgame_scores_display_normally_without_implying_finality(
+    teams, decisions, players_on_one_match
+):
+    """POSTGAME is a presentation/finality state, not a different scoring
+    calculation -- the player's currently reported G.B and points must keep
+    displaying normally while postgame."""
+    postgame_match = Match(match_id=100, home_team=CATS, away_team=PIES, status="POSTGAME")
+    stats = {100: {1: stat_line(1, goals=3, behinds=1)}}
+    client = FakeAflClient([postgame_match], players_on_one_match, stats)
+
+    result = build_matchup_state(client, teams, decisions)
+
+    team_a = next(t for t in result.teams if t.team_key == "team_a")
+    fwd1 = _positions_by_name(team_a)["Forward1"]
+    assert fwd1.match_state == "postgame"
+    assert fwd1.calculated_score == 19  # 6*3 + 1, same as if the match were live
+    assert fwd1.effective_score == 19
+    assert fwd1.football_line == "3.1"
+
+
+def test_postgame_to_concluded_transition_moves_state_and_count_without_disturbing_dnp(
+    teams, decisions, players_on_one_match
+):
+    """Players must move from the postgame count to final automatically once
+    the underlying AFL match changes from POSTGAME to CONCLUDED -- and an
+    unrelated DNP position's own scorer-driven state must be untouched by
+    that transition."""
+    decisions.set_dnp("team_a", "Midfield1", True)
+
+    postgame_match = Match(match_id=100, home_team=CATS, away_team=PIES, status="POSTGAME")
+    client = FakeAflClient([postgame_match], players_on_one_match, {})
+    before = build_matchup_state(client, teams, decisions)
+    team_a_before = next(t for t in before.teams if t.team_key == "team_a")
+    assert _positions_by_name(team_a_before)["Forward1"].match_state == "postgame"
+    assert _positions_by_name(team_a_before)["Midfield1"].match_state == "vacant"
+    assert before.counts["postgame"] == 15  # 16 scoring-position rows minus the one DNP'd
+    assert before.counts["completed"] == 0
+    assert before.status == "LIVE"
+
+    concluded_match = Match(match_id=100, home_team=CATS, away_team=PIES, status="CONCLUDED")
+    client = FakeAflClient([concluded_match], players_on_one_match, {})
+    after = build_matchup_state(client, teams, decisions)
+    team_a_after = next(t for t in after.teams if t.team_key == "team_a")
+    assert _positions_by_name(team_a_after)["Forward1"].match_state == "completed"
+    # The unrelated DNP position's own scorer-driven state is unaffected by
+    # the underlying match's lifecycle transition.
+    assert _positions_by_name(team_a_after)["Midfield1"].match_state == "vacant"
+    assert after.counts["postgame"] == 0
+    assert after.counts["completed"] == 15
+    assert after.status == "AWAITING_SCORER_SIGNOFF"
+
+
 def test_stats_fetched_once_per_unique_match_not_per_player(
     teams, decisions, single_match, players_on_one_match
 ):
@@ -483,6 +583,26 @@ def test_get_matchup_view_backfills_display_fields_onto_a_legacy_finalized_snaps
         sum(p["display_goals"] for p in team_a["positions"]),
         sum(p["display_behinds"] for p in team_a["positions"]),
     ) == (team_a["display_goals"], team_a["display_behinds"])
+
+
+def test_get_matchup_view_backfills_postgame_count_onto_a_legacy_finalized_snapshot(
+    teams, decisions, single_match, players_on_one_match
+):
+    """A Grand Final finalised before the postgame match state existed
+    stored a `counts` dict with no "postgame" key -- get_matchup_view() must
+    backfill it to 0 rather than serving `Postgame: undefined` on the public
+    page."""
+    client = FakeAflClient([single_match], players_on_one_match, {})
+    pre = build_matchup_state(client, teams, decisions)
+
+    legacy_snapshot = dataclasses.asdict(pre)
+    del legacy_snapshot["counts"]["postgame"]
+    decisions.finalize("Signed off (legacy)", legacy_snapshot)
+
+    view = get_matchup_view(client, teams, decisions)
+
+    assert view["status"] == "FINAL"
+    assert view["counts"]["postgame"] == 0
 
 
 # -- Football-style (Goals.Behinds/Total) presentation ------------------------

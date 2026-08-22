@@ -13,6 +13,7 @@
     --text: #e7e9ee;
     --muted: #9aa3b2;
     --live: #f5c944;
+    --postgame: #f5a623;
     --completed: #4caf7d;
     --dnp: #e05a5a;
     --vacant: #e07a3f;
@@ -90,6 +91,7 @@
   .score .adj-marker { color: var(--vacant); cursor: help; }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; flex: none; }
   .dot.live { background: var(--live); }
+  .dot.postgame { background: var(--postgame); }
   .dot.completed { background: var(--completed); }
   .dot.dnp { background: var(--dnp); }
   .dot.vacant { background: var(--vacant); }
@@ -131,6 +133,7 @@ const POLL_INTERVAL_MS = {{ poll_interval_seconds }} * 1000;
 const STATE_LABEL = {
   yet_to_play: { short: "Upcoming", full: "Yet to play" },
   live: { short: "Live", full: "Live" },
+  postgame: { short: "Postgame", full: "Match finished -- stats not yet final" },
   completed: { short: "Final", full: "Final" },
   dnp: { short: "DNP", full: "Did not play" },
   vacant: { short: "Vacant", full: "Vacant" },
@@ -245,7 +248,7 @@ async function refresh() {
     document.getElementById('status-banner').textContent = banner;
 
     document.getElementById('summary').textContent =
-      `Live: ${data.counts.live} · Final: ${data.counts.completed} · Yet to play: ${data.counts.yet_to_play} · DNP: ${data.counts.dnp} · Vacant: ${data.counts.vacant}`;
+      `Live: ${data.counts.live} · Postgame: ${data.counts.postgame} · Final: ${data.counts.completed} · Yet to play: ${data.counts.yet_to_play} · DNP: ${data.counts.dnp} · Vacant: ${data.counts.vacant}`;
 
     document.getElementById('teams').innerHTML = data.teams.map(renderTeam).join('');
   } catch (e) {

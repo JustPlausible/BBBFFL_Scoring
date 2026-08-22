@@ -188,7 +188,7 @@ def test_public_state_exposes_interchange_presentation_fields(client):
         "target_position",
         "potential_scores",
     }
-    assert ir["match_state"] in ("yet_to_play", "live", "completed", "unnamed")
+    assert ir["match_state"] in ("yet_to_play", "live", "postgame", "completed", "unnamed")
     # No AFL stats supplied by the test fixture -> neutral, not invented.
     assert ir["potential_scores"] is None
 
@@ -213,6 +213,30 @@ def test_concluded_afl_match_renders_rostered_players_as_final_not_yet_to_play(c
             if position["slot_source"] in ("starting", "interchange"):
                 assert position["match_state"] == "completed"
         assert team["interchange"]["match_state"] in ("completed", "unnamed")
+
+
+def test_postgame_afl_match_renders_rostered_players_as_postgame_not_final(client):
+    """A POSTGAME match (siren sounded, stats not yet declared final by
+    afl-api) must render distinctly from both "Live" and "Final" over the
+    public API -- not collapsed into either, and not implying the scorer
+    should be prompted to sign off yet."""
+    from app.main import app as fastapi_app
+
+    fastapi_app.state.fake_afl_client.matches = [
+        Match(match_id=100, home_team=CATS, away_team=PIES, status="POSTGAME")
+    ]
+
+    r = client.get("/api/public/state")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "LIVE"
+    assert body["counts"]["postgame"] > 0
+    assert body["counts"]["completed"] == 0
+    for team in body["teams"]:
+        for position in team["positions"]:
+            if position["slot_source"] in ("starting", "interchange"):
+                assert position["match_state"] == "postgame"
+        assert team["interchange"]["match_state"] in ("postgame", "unnamed")
 
 
 def test_public_state_serves_a_pre_upgrade_finalized_snapshot_without_500ing(client):

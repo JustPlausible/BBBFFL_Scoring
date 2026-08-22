@@ -167,6 +167,31 @@ def test_concluded_afl_match_renders_superscore_players_as_final_not_yet_to_play
                 assert position["match_state"] == "completed"
 
 
+def test_postgame_afl_match_renders_superscore_players_as_postgame_not_final(
+    client_with_superscore,
+):
+    """The Grand Final and SuperScore share the same match/player state
+    mapping (build_matchup_state via build_superscore_state) -- a POSTGAME
+    match must resolve to match_state="postgame" here too, distinct from
+    both "live" and "completed", exactly as on the Grand Final screen."""
+    from app.main import app as fastapi_app
+
+    fastapi_app.state.fake_afl_client.matches = [
+        Match(match_id=100, home_team=CATS, away_team=PIES, status="POSTGAME")
+    ]
+
+    r = client_with_superscore.get("/api/public/superscore/state")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "LIVE"
+    assert body["counts"]["postgame"] > 0
+    assert body["counts"]["completed"] == 0
+    for team in body["teams"]:
+        for position in team["positions"]:
+            if position["slot_source"] in ("starting", "interchange"):
+                assert position["match_state"] == "postgame"
+
+
 def test_superscore_page_and_admin_page_render(client_with_superscore):
     assert client_with_superscore.get("/superscore").status_code == 200
     assert client_with_superscore.get("/admin/superscore").status_code == 200

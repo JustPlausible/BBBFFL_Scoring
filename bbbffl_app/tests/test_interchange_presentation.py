@@ -162,6 +162,22 @@ def test_completed_named_interchange_allows_signoff_when_everything_else_is_comp
     assert _team(result, "team_a").interchange.match_state == "completed"
 
 
+def test_postgame_named_interchange_prevents_premature_signoff(
+    partial_teams, decisions, players_on_one_match
+):
+    """Mirrors the yet_to_play/completed cases above: an Interchange whose
+    match is POSTGAME (finished, stats not yet final) must keep the matchup
+    at LIVE, same as yet_to_play -- it must not be treated as though its
+    match were complete."""
+    postgame_match = Match(match_id=100, home_team=CATS, away_team=PIES, status="POSTGAME")
+    client = FakeAflClient([postgame_match], players_on_one_match, {})
+
+    result = build_matchup_state(client, partial_teams, decisions)
+
+    assert result.status == "LIVE"
+    assert _team(result, "team_a").interchange.match_state == "postgame"
+
+
 def test_dnp_named_interchange_does_not_block_signoff(
     decisions, single_match, players_on_one_match
 ):

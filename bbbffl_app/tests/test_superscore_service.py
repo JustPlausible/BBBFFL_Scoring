@@ -309,3 +309,25 @@ def test_get_superscore_view_backfills_display_fields_onto_a_legacy_finalized_sn
         assert "football_line" in team
         for position in team["positions"]:
             assert 6 * position["display_goals"] + position["display_behinds"] == position["effective_score"]
+
+
+def test_get_superscore_view_backfills_postgame_count_onto_a_legacy_finalized_snapshot(
+    ten_entries, superscore_decisions, match
+):
+    """A SuperScore round finalised before the postgame match state existed
+    stored a `counts` dict with no "postgame" key -- get_superscore_view()
+    must backfill it to 0 rather than serving `Postgame: undefined`."""
+    players = _players_for(ten_entries)
+    client = FakeAflClient([match], players, {500: {}})
+
+    pre = build_superscore_state(client, ten_entries, superscore_decisions, SEASON, AFL_ROUND)
+    import dataclasses
+
+    legacy_snapshot = dataclasses.asdict(pre)
+    del legacy_snapshot["counts"]["postgame"]
+    superscore_decisions.finalize("Signed off (legacy)", legacy_snapshot)
+
+    view = get_superscore_view(client, ten_entries, superscore_decisions, SEASON, AFL_ROUND)
+
+    assert view["status"] == "FINAL"
+    assert view["counts"]["postgame"] == 0

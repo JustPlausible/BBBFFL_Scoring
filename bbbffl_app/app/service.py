@@ -693,6 +693,20 @@ def _backfill_starting_player_identity(snapshot: dict) -> dict:
     return snapshot
 
 
+def _backfill_counts(snapshot: dict) -> dict:
+    """Adds the "postgame" key (default 0) to a stored FINAL snapshot's
+    `counts` dict recorded before the postgame match state existed, so an
+    already-finalised result stays servable after upgrading rather than
+    rendering "Postgame: undefined" on the public/SuperScore pages. Only
+    touches a snapshot actually missing the key -- one written by the
+    current code already carries it and passes through unchanged.
+    """
+    counts = snapshot.get("counts")
+    if counts is not None and "postgame" not in counts:
+        counts["postgame"] = 0
+    return snapshot
+
+
 def get_superscore_view(
     afl_client: AflDataSource,
     entries: list[TeamConfig],
@@ -706,7 +720,9 @@ def get_superscore_view(
     served from the stored snapshot and afl-api is never queried again."""
     matchup_state = decisions.get_matchup_state()
     if matchup_state.finalized and matchup_state.snapshot is not None:
-        return _backfill_starting_player_identity(_backfill_football_display(matchup_state.snapshot))
+        return _backfill_counts(
+            _backfill_starting_player_identity(_backfill_football_display(matchup_state.snapshot))
+        )
     result = build_superscore_state(afl_client, entries, decisions, season, afl_round, identity_cache)
     return dataclasses.asdict(result)
 
@@ -728,6 +744,8 @@ def get_matchup_view(
     """
     matchup_state = decisions.get_matchup_state()
     if matchup_state.finalized and matchup_state.snapshot is not None:
-        return _backfill_starting_player_identity(_backfill_football_display(matchup_state.snapshot))
+        return _backfill_counts(
+            _backfill_starting_player_identity(_backfill_football_display(matchup_state.snapshot))
+        )
     result = build_matchup_state(afl_client, teams, decisions, identity_cache)
     return dataclasses.asdict(result)

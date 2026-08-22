@@ -585,6 +585,26 @@ def test_get_matchup_view_backfills_display_fields_onto_a_legacy_finalized_snaps
     ) == (team_a["display_goals"], team_a["display_behinds"])
 
 
+def test_get_matchup_view_backfills_postgame_count_onto_a_legacy_finalized_snapshot(
+    teams, decisions, single_match, players_on_one_match
+):
+    """A Grand Final finalised before the postgame match state existed
+    stored a `counts` dict with no "postgame" key -- get_matchup_view() must
+    backfill it to 0 rather than serving `Postgame: undefined` on the public
+    page."""
+    client = FakeAflClient([single_match], players_on_one_match, {})
+    pre = build_matchup_state(client, teams, decisions)
+
+    legacy_snapshot = dataclasses.asdict(pre)
+    del legacy_snapshot["counts"]["postgame"]
+    decisions.finalize("Signed off (legacy)", legacy_snapshot)
+
+    view = get_matchup_view(client, teams, decisions)
+
+    assert view["status"] == "FINAL"
+    assert view["counts"]["postgame"] == 0
+
+
 # -- Football-style (Goals.Behinds/Total) presentation ------------------------
 
 

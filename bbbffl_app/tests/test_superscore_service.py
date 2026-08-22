@@ -199,6 +199,26 @@ def test_superscore_stays_live_while_a_match_is_in_progress(ten_entries, supersc
     assert result.status == "LIVE"
 
 
+def test_superscore_postgame_match_interprets_the_same_as_grand_final(
+    ten_entries, superscore_decisions
+):
+    """SuperScore reuses build_matchup_state via build_superscore_state, so
+    a POSTGAME match must be interpreted identically to the Grand Final:
+    its own distinct "postgame" state, counted separately, and not treated
+    as final for lifecycle purposes."""
+    postgame_match = Match(match_id=500, home_team=CATS, away_team=PIES, status="POSTGAME")
+    players = _players_for(ten_entries)
+    client = FakeAflClient([postgame_match], players, {500: {}})
+
+    result = build_superscore_state(client, ten_entries, superscore_decisions, SEASON, AFL_ROUND)
+
+    assert result.status == "LIVE"
+    assert result.counts["postgame"] > 0
+    assert result.counts["completed"] == 0
+    team_1 = next(t for t in result.teams if t.team_key == "team_1")
+    assert next(p for p in team_1.positions if p.position == "Forward1").match_state == "postgame"
+
+
 def test_superscore_requests_the_configured_round_not_afl_apis_current_round(
     ten_entries, superscore_decisions, match
 ):

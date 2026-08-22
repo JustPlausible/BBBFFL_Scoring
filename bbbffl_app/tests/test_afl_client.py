@@ -160,10 +160,12 @@ def test_get_player_unwraps_player_key_and_uses_display_name(client):
         # Canonical afl-api v1 lifecycle values (AFL-api/docs/api_v1_matches.md).
         ("UPCOMING", "yet_to_play"),
         ("LIVE", "live"),
+        ("POSTGAME", "postgame"),
         ("CONCLUDED", "completed"),
         # Case-insensitivity on the canonical values.
         ("concluded", "completed"),
         ("live", "live"),
+        ("postgame", "postgame"),
         # Legacy/inferred aliases retained for backwards compatibility.
         ("FINAL", "completed"),
         ("FT", "completed"),
@@ -188,6 +190,19 @@ def test_match_state_property_delegates_to_normalize_match_status():
         match_id=1, home_team=Team(1, "Cats"), away_team=Team(2, "Pies"), status="CONCLUDED"
     )
     assert concluded.state == "completed"
+
+
+def test_postgame_is_distinct_from_live_and_completed():
+    """POSTGAME (siren sounded, stats not yet declared final) must never be
+    collapsed into either neighbouring state -- it is its own fourth normal
+    game state, not an alias for "live" (still playing) or "completed"
+    (stats final)."""
+    postgame = Match(
+        match_id=1, home_team=Team(1, "Cats"), away_team=Team(2, "Pies"), status="POSTGAME"
+    )
+    assert postgame.state == "postgame"
+    assert postgame.state != "live"
+    assert postgame.state != "completed"
 
 
 def test_get_match_player_stats_reads_players_wrapper_and_nested_stats(client):

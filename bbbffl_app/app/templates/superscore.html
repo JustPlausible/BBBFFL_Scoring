@@ -13,6 +13,7 @@
     --text: #e7e9ee;
     --muted: #9aa3b2;
     --live: #f5c944;
+    --postgame: #f5a623;
     --completed: #4caf7d;
     --dnp: #e05a5a;
     --vacant: #e07a3f;
@@ -81,6 +82,7 @@
   .dots { display: flex; gap: 3px; padding: 0 14px 10px; }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; }
   .dot.live { background: var(--live); }
+  .dot.postgame { background: var(--postgame); }
   .dot.completed { background: var(--completed); }
   .dot.dnp { background: var(--dnp); }
   .dot.vacant { background: var(--vacant); }
@@ -129,6 +131,7 @@ let expandedKey = null;
 const STATE_LABEL = {
   yet_to_play: { short: "Upcoming", full: "Yet to play" },
   live: { short: "Live", full: "Live" },
+  postgame: { short: "Postgame", full: "Match finished -- stats not yet final" },
   completed: { short: "Final", full: "Final" },
   dnp: { short: "DNP", full: "Did not play" },
   vacant: { short: "Vacant", full: "Vacant" },
@@ -249,7 +252,7 @@ async function refresh() {
     document.getElementById('status-banner').textContent = banner;
 
     document.getElementById('summary').textContent =
-      `Live: ${data.counts.live} · Final: ${data.counts.completed} · Yet to play: ${data.counts.yet_to_play} · DNP: ${data.counts.dnp} · Vacant: ${data.counts.vacant}`;
+      `Live: ${data.counts.live} · Postgame: ${data.counts.postgame} · Final: ${data.counts.completed} · Yet to play: ${data.counts.yet_to_play} · DNP: ${data.counts.dnp} · Vacant: ${data.counts.vacant}`;
 
     const teamByKey = Object.fromEntries(data.teams.map(t => [t.team_key, t]));
     const topScore = data.standings.length ? data.standings[0].total_score : null;

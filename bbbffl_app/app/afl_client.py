@@ -51,13 +51,22 @@ import httpx
 
 logger = logging.getLogger("bbbffl.afl_client")
 
-MatchState = Literal["yet_to_play", "live", "completed"]
+MatchState = Literal["yet_to_play", "live", "postgame", "completed"]
 
-# CONCLUDED/LIVE/UPCOMING are the canonical afl-api v1 lifecycle values (see
-# AFL-api/docs/api_v1_matches.md). The remaining entries are legacy/inferred
-# aliases kept for backwards compatibility with older fixtures and any
-# afl-api deployments still emitting them.
+# CONCLUDED/LIVE/UPCOMING/POSTGAME are the canonical afl-api v1 lifecycle
+# values (see AFL-api/docs/api_v1_matches.md). The remaining entries are
+# legacy/inferred aliases kept for backwards compatibility with older
+# fixtures and any afl-api deployments still emitting them.
+#
+# POSTGAME is deliberately kept distinct from CONCLUDED here rather than
+# folded into _COMPLETED_STATUSES: it means the match has finished play but
+# afl-api has not yet declared its statistics final, so treating it as
+# "completed" would let BBBFFL show a "Final" result that upstream stats
+# corrections could still change. See app/service.py's PositionState and
+# the module docstring there for how this stays a presentation-only
+# distinction, not a different scoring calculation.
 _COMPLETED_STATUSES = {"CONCLUDED", "FINAL", "FT", "FULL_TIME", "COMPLETE", "COMPLETED"}
+_POSTGAME_STATUSES = {"POSTGAME"}
 _LIVE_STATUSES = {"LIVE", "IN_PROGRESS", "IN PROGRESS"}
 _UPCOMING_STATUSES = {"UPCOMING", "SCHEDULED", "NOT_STARTED"}
 
@@ -66,6 +75,8 @@ def normalize_match_status(raw_status: str) -> MatchState:
     normalized = (raw_status or "").strip().upper()
     if normalized in _COMPLETED_STATUSES:
         return "completed"
+    if normalized in _POSTGAME_STATUSES:
+        return "postgame"
     if normalized in _LIVE_STATUSES:
         return "live"
     if normalized in _UPCOMING_STATUSES:

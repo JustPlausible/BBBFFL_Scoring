@@ -25,13 +25,13 @@ MatchupStatus = Literal["LIVE", "AWAITING_SCORER_SIGNOFF", "FINAL"]
 # "unnamed" is a coach-declared-selection state (roster slot is null -- not
 # yet named by the coach) and is deliberately distinct from "vacant" (a
 # scorer has marked the named starter DNP). See teams.py's module docstring.
-PositionState = Literal["yet_to_play", "live", "completed", "dnp", "vacant", "unnamed"]
+PositionState = Literal["yet_to_play", "live", "postgame", "completed", "dnp", "vacant", "unnamed"]
 # The Interchange row shows the *player's* own underlying AFL match state,
 # independent of any BBBFFL position it may be covering -- so it never
 # takes the "dnp"/"vacant" values, which describe a *position's* scoring
 # state, not a player's real-world match status. Scorer DNP is exposed
 # separately via InterchangeInfo.dnp.
-InterchangeMatchState = Literal["yet_to_play", "live", "completed", "unnamed"]
+InterchangeMatchState = Literal["yet_to_play", "live", "postgame", "completed", "unnamed"]
 
 
 class AflDataSource(Protocol):
@@ -322,6 +322,7 @@ def build_matchup_state(
     counts: dict[PositionState, int] = {
         "yet_to_play": 0,
         "live": 0,
+        "postgame": 0,
         "completed": 0,
         "dnp": 0,
         "vacant": 0,
@@ -500,12 +501,22 @@ def build_matchup_state(
     relevant_match_states: set[MatchState] = set()
     for team_result in team_results:
         for pos in team_result.positions:
-            if pos.match_state in ("yet_to_play", "live", "completed"):
+            if pos.match_state in ("yet_to_play", "live", "postgame", "completed"):
                 relevant_match_states.add(pos.match_state)
         interchange = team_result.interchange
-        if not interchange.dnp and interchange.match_state in ("yet_to_play", "live", "completed"):
+        if not interchange.dnp and interchange.match_state in (
+            "yet_to_play",
+            "live",
+            "postgame",
+            "completed",
+        ):
             relevant_match_states.add(interchange.match_state)
 
+    # POSTGAME deliberately does *not* count as final here: the match has
+    # finished play but afl-api has not yet declared its statistics final,
+    # so a scorer must not be prompted to sign off (and the matchup must not
+    # be presented as awaiting/possible FINAL) until every relevant match
+    # actually reaches "completed" (CONCLUDED).
     all_relevant_final = relevant_match_states.issubset({"completed"}) if relevant_match_states else True
 
     if matchup_state.finalized:

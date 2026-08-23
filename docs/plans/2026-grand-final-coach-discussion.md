@@ -6,6 +6,8 @@ Short discussion guide for the 2026 Grand Final gathering. Most BBBFFL behaviour
 
 This is not intended to turn BBBFFL into a formal rules-heavy competition. The aim is to remove the few ambiguities that software cannot safely guess.
 
+The 2026 scorer workbook has now also been audited, with a light consistency check against the 2021–2025 workbooks. Workbook-derived findings are tracked separately in `2026-workbook-findings.md`; only questions that genuinely need human confirmation are repeated here.
+
 ## Must decide or confirm today
 
 ### 1. 2027 rule changes
@@ -30,7 +32,30 @@ Confirm the edge case:
 
 Does the Interchange remain committed to the intentional loophole position, or move to the highest-scoring available DNP position?
 
-### 3. Team submission visibility
+### 3. Ordinary AFL byes
+
+The scorer workbooks explicitly annotate AFL bye rounds and historical record entries include `* denotes bye round`, so BBBFFL clearly continues to play during ordinary AFL bye periods.
+
+Confirm the intended rule wording:
+
+- a player whose AFL club has a scheduled bye is simply unavailable for that BBBFFL round;
+- an AFL bye is **not** a DNP and therefore does not activate the Interchange;
+- coaches are expected to select around byes using the players available from their squad;
+- there are no other ordinary-bye exceptions beyond any separately agreed Opening Round/deferred-stat rules.
+
+This is important to make explicit before software starts interpreting AFL availability states.
+
+### 4. What counts toward all-time records?
+
+The workbook maintains all-time BBBFFL records such as highest team score, positional records, largest winning margin, lowest winning score and highest losing score.
+
+Confirm the scope for the future automatic record book:
+
+- Do normal premiership finals scores count in the same all-time BBBFFL records as home-and-away rounds?
+- Do SuperScore performances count toward those same all-time team/positional records, or should SuperScore records be separate?
+- Should ordinary bye-affected rounds remain eligible for records, with a note/annotation if useful, as the legacy workbook currently suggests?
+
+### 5. Team submission visibility
 
 Today, WhatsApp means a team becomes visible to everyone as soon as the coach posts it.
 
@@ -40,7 +65,7 @@ Confirm whether the new system should preserve that behaviour:
 - once the coach presses Submit, the submitted team becomes visible to the league immediately;
 - it does not wait for lockout.
 
-### 4. Coach submission method
+### 6. Coach submission method
 
 Ask whether coaches would use a simple BBBFFL mobile/web team-selection page if it provided:
 
@@ -54,7 +79,7 @@ Ask whether coaches would use a simple BBBFFL mobile/web team-selection page if 
 
 WhatsApp can remain supported during transition, with the scorer able to enter a WhatsApp submission into BBBFFL.
 
-### 5. Notifications
+### 7. Notifications
 
 Gauge support for BBBFFL sending useful messages to the existing WhatsApp group and/or email, such as:
 
@@ -114,17 +139,19 @@ No decision is required for 2027, but ask whether coaches would enjoy choosing t
 - Any owned player can be used in any fantasy position.
 - Early-game players must be named before their AFL match starts and then remain locked in that position.
 - Main lockout freezes the remaining lineup.
-- Failure to submit defaults to the previous round's team.
+- Failure to submit defaults to the previous relevant lineup, with Round 1/SS1 exceptions handled through scorer-confirmed fallback rules.
 - DNP is confirmed by the scorer and is not inferred merely from zero statistics.
 - Interchange uses the scoring formula of the position it fills.
 - With multiple genuine DNP positions, Interchange normally goes to the highest-scoring available position, subject to scorer confirmation.
 - Five regular-season head-to-head matches per round.
-- Win 4, draw 2, loss 0; percentage breaks equal ladder points.
+- Win 4, draw 2, loss 0; ladder ordering uses premiership points, percentage, then Points For.
+- Tied finals are won for progression purposes by the team that finished higher on the home-and-away ladder, subject to scorer confirmation.
 - Top-five, four-week finals structure.
 - Four independent SuperScore rounds run during finals for all 10 coaches.
 - Mid-season draft uses reverse post-Round-9 ladder order and does not snake.
 - No normal player movement outside preseason and mid-season windows.
 - Scorer remains the final fantasy authority; software should recommend rather than overrule.
+- The 2026 workbook confirms the exact legacy nine-round fixture-number rotation; this does not need to be debated unless coaches want to change the draw system.
 
 ## Product idea to show interested coaches
 

@@ -1,0 +1,56 @@
+name: Claude PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+
+jobs:
+  auto-review:
+    # Runs automatically on every new/updated PR (any author, including Codex)
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          # anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # If using a Claude subscription OAuth token instead, swap the line above for:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Review this pull request. Read the full diff and relevant surrounding
+            code in the repo for context. Look for logic errors, security issues,
+            broken edge cases, and regressions. Check it against any CLAUDE.md
+            guidelines in the repo. Post your findings as a PR comment, with
+            inline comments on specific lines where possible. If the code looks
+            fine, say so briefly rather than inventing issues.
+          claude_args: |
+            --allowedTools "Read,Grep,Glob,Bash(git:*)"
+
+  mention-trigger:
+    # Runs when someone (you, or a bot like Codex) comments "@claude" on a PR/issue
+    if: github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude') && github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

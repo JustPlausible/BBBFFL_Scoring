@@ -14,9 +14,9 @@ This roadmap proposes **seven milestones and 40 candidate work packages**. The c
 
 The 2026 replay is a progressive acceptance gate:
 
-1. a first useful one-round replay starts after work packages **01–08, 16–17, 21–25, and 32**;
-2. edge-case and mid-season checkpoints follow after **26–29 and 33–34**;
-3. a complete 2026 season replay becomes feasible after **30–31, 35–36**, with historical AFL data supplied through the public `afl-api` contract.
+1. a first useful one-round replay starts after work packages **01–11, 16–18, 21–29, and 32** (coach authentication packages 19–20 are not needed for a service-level replay);
+2. the lockout/bye edge-case checkpoint follows after **33**, and the mid-season checkpoint follows after **30–31 and 34**;
+3. a complete 2026 season replay becomes feasible after **30–31, 35, and 37–38**, and is executed/triaged by work package **36**, with historical AFL data supplied through the public `afl-api` contract.
 
 Replay evidence must label each datum as **known fact, reconstructable behaviour, synthetic scenario, or unresolved scorer input**. Passing replay does not turn synthetic assumptions into league rules.
 
@@ -139,7 +139,7 @@ Milestone R is deliberately a cross-cutting release gate rather than a last-minu
 ### Critical paths
 
 - **Preseason draft:** 01 → 02 → 09 → 10 → 11 → 12 → 13 → 14 → 15.
-- **Playable Round 1:** 01 → 02 → 09 → 10 → 11 → 16 → 17 → 18 → 21 → 22 → 23 → 24 → 25 → 26 → 27 → 28 → 29.
+- **Playable Round 1:** 01 → 02 → 09 → 10 → 11 → 16 → 17 → 18 → 21 → 22 → 23 → 24; then **19 → 20** (which can be built in parallel with 16–18 and 21–24) → 25 → 26 → 27 → 28 → 29. Authentication and authorisation are on this path because the coach selection page cannot be operated safely without them.
 - **Mid-season draft:** playable-round result/final ladder through Round 9 → 30 → 31.
 - **Finals:** final regular ladder → 35 → 27–28 reused → 37 → season finalisation in 40.
 - **Production readiness:** 01–08 → 19–20 → core phase features → 39 → complete replay (36) → 40.

@@ -1,8 +1,8 @@
 """Canonical BBBFFL scoring engine.
 
 Rules recovered from the legacy Google Apps Script implementation
-(`BBBFFL_Results/fetchBBBFFLResults.js::calculateFantasyPoints` and
-`BBBFFL_Results/generateLiveBBBFFLMatches.js::getPositionScore`, both
+(`legacy/gas/BBBFFL_Results/fetchBBBFFLResults.js::calculateFantasyPoints` and
+`legacy/gas/BBBFFL_Results/generateLiveBBBFFLMatches.js::getPositionScore`, both
 confirmed identical on the `audit/google-apps-script-2026` branch and in
 `docs/reviews/2025-system-forensic-review.md` section 8). These are the
 league's established rules and are not being changed for this prototype.

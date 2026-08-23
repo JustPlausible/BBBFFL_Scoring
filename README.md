@@ -1,39 +1,32 @@
-# BBBFFL_Scoring
+# BBBFFL Scoring
 
-An automated scoring system for the **Big Bad Bustling Fantasy Football League (BBBFFL)** using Google Apps Script (GAS) and Google Sheets, with support tools written in Node.js and Bash.
+Application source for the **Big Bad Bustling Fantasy Football League
+(BBBFFL)**.
 
-## 💡 Overview
+## Repository structure
 
-This project automates the collection of AFL player stats and applies **BBBFFL custom scoring rules** to calculate fantasy results each round.
+- **`bbbffl_app/`** is the active, core application source and the primary
+  implementation target for the 2027 rebuild. Start with
+  [`bbbffl_app/README.md`](bbbffl_app/README.md) for local development,
+  architecture, configuration, and tests.
+- **`docs/plans/`** records the agreed 2027 direction and the evidence that
+  informs it.
+- **`legacy/gas/`** archives the former Google Apps Script, Google Forms, and
+  Google Sheets implementation. It is retained as migration and replay
+  evidence, not as the target for new feature development.
 
-It is structured around three subprojects (managed via [`clasp`](https://github.com/google/clasp)):
+New BBBFFL features should normally be implemented in `bbbffl_app/`. The
+archive must not be treated as a second active application or ported as part
+of unrelated work.
 
-- **`AFL_Stats/`** – Retrieves AFL match, player, and stat data via custom scraping scripts and stores them in Google Sheets.
-- **`BBBFFL_Weekly_Teams/`** – Processes weekly team submissions (via Google Forms) to generate valid team sheets per coach.
-- **`BBBFFL_Results/`** – Combines stats and team selections to automatically compute and validate weekly results.
+## Active development
 
-## 🔄 Project Tools
+The application CI runs the Python test suite from `bbbffl_app/` and builds
+that directory's Docker image. See the application README for the exact
+commands and current prototype scope.
 
-Includes helper scripts:
-- `pull-all.sh` – Pulls latest updates from Google Apps Script into local folders.
-- `push-all.sh` – Pushes local script updates back to Google Apps Script.
-
-## 🚧 Transition Note
-
-This system **formerly used [api-football.com](https://www.api-football.com/)** (via their AFL endpoints) for stat ingestion, but is now being **fully migrated to a custom AFL data scraper** tailored for BBBFFL needs.
-
-Once migration is complete, all `api-football` dependencies will be removed entirely.
-
-## 📦 Requirements
-
-- Node.js + `clasp` installed
-- Google Apps Script linked projects (see `.clasp.json` in each subfolder)
-- Git for version control
-
----
-
-## 📝 Future Goals
-
-- Migrate all stat endpoints to internal scraper API
-- Enhance player matching and error handling
-- Integrate live stats viewer and weekly fixture preview
+The legacy `clasp` pull/push helpers moved with the GAS projects to
+`legacy/gas/`. They are intentionally retired from the normal repository
+workflow and are preserved only for maintainers who explicitly need to
+inspect or recover the historical Apps Script projects. See
+[`legacy/gas/README.md`](legacy/gas/README.md) before using them.

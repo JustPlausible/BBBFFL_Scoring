@@ -7,10 +7,10 @@ A small FastAPI service implementing the narrow vertical slice from
 > -> canonical BBBFFL scoring -> individual player/running team scores ->
 > scorer-controlled interchange/DNP handling -> final scorer sign-off.
 
-This is a new, self-contained application area. It does not touch, reuse,
-or reorganise the legacy Google Apps Script projects elsewhere in this
-repository (`AFL_Stats/`, `BBBFFL_Results/`, `BBBFFL_Weekly_Teams/`), which
-remain historical/reference implementations.
+This is the active, core application source and the primary implementation
+target for the 2027 rebuild. The archived Google Apps Script projects in
+`legacy/gas/` remain historical, migration, and 2026 replay references; they
+are not an alternative target for new features.
 
 ## What this is not
 
@@ -75,8 +75,8 @@ coach selection + AFL facts + scorer decisions -> official BBBFFL score
 ## Scoring rules
 
 Recovered from the legacy Google Apps Script implementation
-(`BBBFFL_Results/fetchBBBFFLResults.js` and
-`BBBFFL_Results/generateLiveBBBFFLMatches.js` on the
+(`legacy/gas/BBBFFL_Results/fetchBBBFFLResults.js` and
+`legacy/gas/BBBFFL_Results/generateLiveBBBFFLMatches.js` on the
 `audit/google-apps-script-2026` branch, cross-checked against
 `docs/reviews/2025-system-forensic-review.md` section 8, where both
 independent legacy implementations agreed):

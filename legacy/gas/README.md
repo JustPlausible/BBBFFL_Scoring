@@ -26,9 +26,11 @@ migration should be explicit, evidence-driven work with its own scope.
 
 ## Retired `clasp` workflow
 
-`pull-all.sh` and `push-all.sh` are archived operational helpers. Their project
-paths remain valid when the scripts are run from this directory, but they are
-**intentionally retired from normal development and CI**. They require:
+`pull-all.sh` and `push-all.sh` are archived operational helpers. They resolve
+their project paths relative to their own location, so invoking them from the
+repository root or another working directory does not redirect `clasp` to an
+unrelated directory. They are **intentionally retired from normal development
+and CI**. They require:
 
 1. Node.js and `clasp`;
 2. maintainer access to the historical Google Apps Script projects; and
@@ -37,12 +39,12 @@ paths remain valid when the scripts are run from this directory, but they are
 The `.clasp.json` files contain deployment-specific project identifiers and are
 ignored by Git, so they may only exist in an authorised maintainer's local
 checkout. The committed `appsscript.json` manifests remain archived with each
-project. The helpers must be invoked deliberately from this directory:
+project. The helpers must be invoked deliberately, for example from the
+repository root:
 
 ```bash
-cd legacy/gas
-./pull-all.sh  # fetch historical remote GAS source
-./push-all.sh  # update historical remote GAS source; use only with approval
+./legacy/gas/pull-all.sh  # fetch historical remote GAS source
+./legacy/gas/push-all.sh  # update historical remote GAS source; use only with approval
 ```
 
 Neither helper is called by GitHub Actions. Moving them into this archive

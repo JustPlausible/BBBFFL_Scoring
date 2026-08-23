@@ -1,133 +1,222 @@
-# BBBFFL 2026 Grand Final — coach discussion for 2027
+# BBBFFL 2026 Grand Final — coach discussion outcomes for 2027
 
 ## Purpose
 
-Short discussion guide for the 2026 Grand Final gathering. Most BBBFFL behaviour is already well understood; the items below are the decisions or confirmations that are most useful before the 2027 rebuild proceeds.
+This document records the outcomes of the 2026 Grand Final-day coach discussion for the planned 2027 BBBFFL rebuild.
 
-This is not intended to turn BBBFFL into a formal rules-heavy competition. The aim is to remove the few ambiguities that software cannot safely guess.
+The discussion was intentionally practical rather than constitutional. The goal was to confirm the few league behaviours that software cannot safely guess and to test whether coaches supported moving from the legacy spreadsheet/WhatsApp workflow toward a full-season BBBFFL website.
 
-The 2026 scorer workbook has now also been audited, with a light consistency check against the 2021–2025 workbooks. Workbook-derived findings are tracked separately in `2026-workbook-findings.md`; only questions that genuinely need human confirmation are repeated here.
+The 2026 scorer workbook has also been audited, with a light consistency check against the 2021–2025 workbooks. Workbook-derived evidence is tracked separately in `2026-workbook-findings.md`.
 
-## Must decide or confirm today
+## Overall product decision
 
-### 1. 2027 rule changes
+The coaches were strongly supportive of moving forward with a full-season BBBFFL website.
 
-Confirm whether the existing scoring remains unchanged for 2027:
+The likely direction is now **web-first**, rather than extending the previous Google Sheets/Google Forms model. Legacy spreadsheet/GAS approaches remain useful historical and migration evidence, but they should move down the development priority list rather than defining the 2027 product architecture.
 
-- Forward: goal = 6, behind = 1.
+The coach-facing implementation can be refined later through prototypes and replay testing, but the core expectation is now:
+
+- each coach has a simple authenticated account;
+- team selection is performed directly on a mobile-friendly BBBFFL web page;
+- live scores/results are followed through the website;
+- the scorer retains a powerful administration/review interface;
+- WhatsApp becomes primarily a notification/social channel rather than the authoritative team-submission mechanism;
+- email remains useful for direct coach communication and result/league notices;
+- historical and spectator competition data can largely be public, while personal contact details and write/admin functions remain authenticated.
+
+## Confirmed decisions
+
+### 1. 2027 scoring rules — unchanged
+
+No rule changes were agreed for 2027.
+
+Unless the league explicitly revisits this before the 2027 draft, scoring remains:
+
+- Forward: goal = 6 points, behind = 1 point.
 - Midfielder: 1 point per disposal.
 - Tackler: 6 points per tackle.
 - Ruck: hit-outs + marks.
-- No bonuses, fractions or positional eligibility restrictions.
+- Interchange: uses the scoring formula of the position it ultimately fills.
+- No bonuses, fractional scores or AFL-position eligibility restrictions.
 
-Record any other rule changes agreed for 2027.
+Annual rules should still be versioned so any later change does not rewrite historical seasons.
 
-### 2. Interchange loophole priority
+### 2. Interchange loophole priority — highest score wins
 
-Confirm the edge case:
+The edge case discussed was:
 
-- A coach intentionally leaves a position available for an early-game Interchange player.
-- Later in the round, a genuinely selected player is ruled DNP in another position.
-- The Interchange would score more in the later DNP position.
+- a coach intentionally leaves a position available for an early-game Interchange player;
+- later in the round another selected player is ruled DNP;
+- the Interchange would score more in the later DNP position.
 
-Does the Interchange remain committed to the intentional loophole position, or move to the highest-scoring available DNP position?
+The confirmed rule is that the **highest-scoring available replacement position takes priority**, regardless of whether an earlier vacancy was intentionally created as a loophole.
 
-### 3. Ordinary AFL byes
+The system should calculate the potential scores for all eligible replacement positions and recommend the highest-scoring outcome. The scorer still confirms the final Interchange assignment and retains normal exceptional-ruling authority.
 
-The scorer workbooks explicitly annotate AFL bye rounds and historical record entries include `* denotes bye round`, so BBBFFL clearly continues to play during ordinary AFL bye periods.
+An intentional loophole therefore creates an opportunity for the Interchange to score; it does not permanently reserve that position if a better legitimate replacement opportunity later arises.
 
-Confirm the intended rule wording:
+### 3. Ordinary AFL byes — unavailable, not DNP
 
-- a player whose AFL club has a scheduled bye is simply unavailable for that BBBFFL round;
-- an AFL bye is **not** a DNP and therefore does not activate the Interchange;
-- coaches are expected to select around byes using the players available from their squad;
-- there are no other ordinary-bye exceptions beyond any separately agreed Opening Round/deferred-stat rules.
+A player whose AFL club has a scheduled bye is simply unavailable for that BBBFFL round.
 
-This is important to make explicit before software starts interpreting AFL availability states.
+- An AFL bye is **not** a DNP.
+- A bye therefore does **not** activate the Interchange.
+- Coaches are expected to select around known AFL byes using their available squad.
+- The future team-selection page should clearly warn/show that a player is on a bye, but the current preference is **not** to prevent the coach selecting that player.
+- If a coach deliberately or accidentally selects a player on a bye, the consequences remain the coach's responsibility rather than the system silently repairing the lineup.
+- Notifications/warnings before lockout may be useful.
 
-### 4. What counts toward all-time records?
+Any special Opening Round/deferred-stat rules remain separate from the ordinary AFL-bye rule.
 
-The workbook maintains all-time BBBFFL records such as highest team score, positional records, largest winning margin, lowest winning score and highest losing score.
+### 4. All-time record scope
 
-Confirm the scope for the future automatic record book:
+Confirmed record rules:
 
-- Do normal premiership finals scores count in the same all-time BBBFFL records as home-and-away rounds?
-- Do SuperScore performances count toward those same all-time team/positional records, or should SuperScore records be separate?
-- Should ordinary bye-affected rounds remain eligible for records, with a note/annotation if useful, as the legacy workbook currently suggests?
+- Normal home-and-away scores count toward BBBFFL all-time records.
+- Premiership-finals scores also count toward the same normal BBBFFL all-time records.
+- SuperScore performances **do not** count toward the normal BBBFFL record book.
+- SuperScore should be capable of maintaining its **own separate records/history**.
+- Ordinary bye-affected BBBFFL rounds remain eligible for all-time records.
+- Bye-affected record entries should be capable of carrying an annotation/marker, consistent with the legacy workbook's historical asterisk convention.
 
-### 5. Team submission visibility
+This distinction is important for automated record calculation: normal competition/finals and SuperScore must retain enough competition-context metadata to derive the correct record sets.
 
-Today, WhatsApp means a team becomes visible to everyone as soon as the coach posts it.
+### 5. Team drafts versus submitted teams
 
-Confirm whether the new system should preserve that behaviour:
+The future coach team-naming page should distinguish **Save Draft** from **Submit**.
 
-- selections being edited remain private;
-- once the coach presses Submit, the submitted team becomes visible to the league immediately;
-- it does not wait for lockout.
+- A coach may build and save a private working lineup during the week.
+- Saved drafts are not visible to other coaches.
+- A coach may return to and edit a saved draft while relevant positions remain unlocked.
+- Once the coach selects **Submit**, the submitted lineup becomes visible to the league immediately, matching the existing WhatsApp convention.
+- The team does not remain hidden until lockout.
+- A submitted lineup can still be edited/resubmitted by the coach while the relevant players/positions remain unlocked.
 
-### 6. Coach submission method
+A remaining implementation edge case is what to do when a coach has a saved draft but never presses Submit by main lockout; see **Open edge cases** below.
 
-Ask whether coaches would use a simple BBBFFL mobile/web team-selection page if it provided:
+### 6. Coach submission method — website becomes primary
 
-- their owned squad;
-- AFL match/start time;
-- AFL team-list/selection status where available;
-- injury information where available;
-- season and recent-form statistics;
-- calculated Forward/Midfield/Tackle/Ruck potential scores;
-- simple nine-player submission.
+All coaches were supportive of moving toward direct web-based team submission.
 
-WhatsApp can remain supported during transition, with the scorer able to enter a WhatsApp submission into BBBFFL.
+The preferred direction is therefore:
 
-### 7. Notifications
+- authenticated coach login;
+- mobile-friendly weekly team-selection page;
+- coach's owned squad shown automatically;
+- useful AFL fixture/team-selection/injury/form information shown where practical;
+- direct nine-position submission through BBBFFL;
+- no requirement to retain Google Forms/Google Sheets as the primary coach workflow.
 
-Gauge support for BBBFFL sending useful messages to the existing WhatsApp group and/or email, such as:
+WhatsApp team posting does not need to remain the normal submission mechanism.
 
-- lockout approaching and coaches still missing;
+However, the scorer must retain the ability to enter or modify a lineup on behalf of a coach when a coach cannot use the site and supplies the team through WhatsApp, phone, another coach, email or another accepted channel. Such administrative entry should retain an audit trail.
+
+### 7. Notifications — WhatsApp and email remain useful
+
+Coaches were supportive of automated league notifications.
+
+WhatsApp is a strong candidate for the shared/social notification channel rather than the authoritative database. Email should also be retained in coach profiles for direct or grouped communication.
+
+Useful events include:
+
+- lockout approaching;
+- coaches still missing a submission;
 - team submitted;
-- selected player late withdrawal;
-- round ready/results published;
-- updated ladder;
-- mid-season draft reminders;
-- finals/SuperScore results.
+- selected player late withdrawal/availability warning;
+- suspected DNP or Interchange action requiring scorer attention;
+- round ready for scorer review;
+- results and updated ladder published;
+- mid-season delisting/draft events;
+- finals/SuperScore results and progression.
 
-Development/replay notifications should go to a separate test WhatsApp group rather than the real league chat.
+Replay/development notifications must use test destinations rather than the production league chat/email list.
 
-## Useful discussion if time permits
+### 8. Coach identity and team identity are separate
 
-### Partial submission then no final team
+The future model must store persistent **coach/user identity** separately from season-specific **team name**.
 
-If a coach correctly names one or more early-game players but then completely fails to submit the remainder before main lockout, what exactly carries forward from the previous round into the still-empty positions?
+This supports:
 
-This is a genuine software edge case worth agreeing explicitly.
+- coaches changing team names between seasons;
+- coaches entering/leaving the competition;
+- historical coach records independent of team-name changes;
+- authenticated account/contact details remaining attached to the person rather than the display team name.
 
-### Replacement coach and pre-drawn draft order
+Coach email/contact information is private. Public views may identify teams primarily by team name.
 
-If next year's draft order has already been drawn and a coach later withdraws, should the replacement normally inherit that draft position, or should the league redraw?
+### 9. Replacement coach after draft-order draw — league discretion
 
-This can remain scorer/league discretion if coaches do not want a hard rule.
+No hard rule is required.
 
-### Draft-pick trading
+If a coach withdraws after the next season's draft order has already been drawn, the league/scorer may decide whether a replacement inherits that position or whether another arrangement/redraw is appropriate.
 
-Mid-season draft picks can be traded. Preseason draft-order trading has occurred. Ask whether coaches want to explicitly allow individual live preseason draft picks to be traded, or simply leave this as an exceptional agreement if it ever occurs.
+The system should support an authorised administrative adjustment and audit it, rather than imposing a fixed automatic rule.
 
-### Public spectator pages
+### 10. Draft-pick trading — explicitly supported
 
-Current proposal:
+Individual draft selections can be traded in both preseason and mid-season drafting contexts if coaches agree.
 
-- public team names;
+This should be treated as a commissioner/scorer-approved transaction:
+
+- two or more coaches agree the trade socially;
+- the transaction is communicated to the league/scorer;
+- an authorised scorer/admin records/approves it;
+- ownership/order of the relevant draft selection changes before it is exercised;
+- the transaction remains auditable.
+
+The live draft interface must therefore not assume each original draft-order owner permanently owns every pick generated from that position.
+
+### 11. Public spectator scope — broad competition visibility is acceptable
+
+Coaches were comfortable with most competition information being publicly viewable.
+
+Public pages can reasonably include:
+
+- team names;
 - live Round Centre and detailed matchups;
 - current ladder;
-- finals/SuperScore views;
-- no email/contact details;
-- coach names not required publicly;
-- deeper history can remain logged-in or be decided later.
+- finals bracket;
+- SuperScore views;
+- historical results/records/draft history where eventually implemented.
 
-### Team identity
+Private/authenticated information includes:
 
-No decision is required for 2027, but ask whether coaches would enjoy choosing team colours/logos for the future Round Centre.
+- email/contact details;
+- saved draft lineups before submission;
+- administrative controls;
+- scorer notes/rulings/audit detail where not appropriate for spectators;
+- any capability to modify league data.
 
-## Already understood — no need to re-litigate unless coaches disagree
+### 12. Team colours/logos/branding — deferred
+
+No team-identity visual scheme was chosen.
+
+Coaches may be interested in future team colours/logos/branding, but this should be explored through later UI drafts and is not a requirement for the first full-season model.
+
+## Open edge cases
+
+### Partial early submission followed by no final submission
+
+This remains the main unresolved weekly-selection edge case.
+
+Likely intended behaviour is:
+
+- any properly submitted early-game selections remain locked and valid;
+- for still-empty positions at main lockout, the previous round's corresponding selections may be carried forward where possible;
+- normal player-lock/duplicate/availability rules must still be respected;
+- the scorer confirms the resulting fallback lineup.
+
+This was not sufficiently explicit to treat as a hard rule yet. It should be tested in the 2026 replay and, if needed, confirmed with coaches before the 2027 live season.
+
+### Saved draft but never submitted
+
+The new web workflow introduces a related question that did not exist cleanly in WhatsApp:
+
+- if a coach has saved a complete or partial private draft but never presses **Submit**, does that draft count for fallback purposes, or is the coach considered to have failed to submit and therefore receives the normal previous-lineup carry-forward?
+
+Current safe interpretation is that **Save Draft is not Submit**, so the normal failure-to-submit rule should apply unless the league later agrees otherwise. This should be made explicit during replay/usability testing before implementation is locked.
+
+## Already confirmed league fundamentals
 
 - 10 coaches/teams.
 - Complete redraft every season; no keepers.
@@ -138,11 +227,11 @@ No decision is required for 2027, but ask whether coaches would enjoy choosing t
 - Unselected squad players are simply not selected; they are not a bench.
 - Any owned player can be used in any fantasy position.
 - Early-game players must be named before their AFL match starts and then remain locked in that position.
-- Main lockout freezes the remaining lineup.
+- Main lockout freezes the remaining lineup for coaches.
 - Failure to submit defaults to the previous relevant lineup, with Round 1/SS1 exceptions handled through scorer-confirmed fallback rules.
 - DNP is confirmed by the scorer and is not inferred merely from zero statistics.
 - Interchange uses the scoring formula of the position it fills.
-- With multiple genuine DNP positions, Interchange normally goes to the highest-scoring available position, subject to scorer confirmation.
+- With multiple eligible DNP/vacant positions, Interchange goes to the highest-scoring available position, subject to scorer confirmation.
 - Five regular-season head-to-head matches per round.
 - Win 4, draw 2, loss 0; ladder ordering uses premiership points, percentage, then Points For.
 - Tied finals are won for progression purposes by the team that finished higher on the home-and-away ladder, subject to scorer confirmation.
@@ -151,20 +240,23 @@ No decision is required for 2027, but ask whether coaches would enjoy choosing t
 - Mid-season draft uses reverse post-Round-9 ladder order and does not snake.
 - No normal player movement outside preseason and mid-season windows.
 - Scorer remains the final fantasy authority; software should recommend rather than overrule.
-- The 2026 workbook confirms the exact legacy nine-round fixture-number rotation; this does not need to be debated unless coaches want to change the draw system.
+- The 2026 workbook confirms the exact legacy nine-round fixture-number rotation.
 
-## Product idea to show interested coaches
+## Product direction after the discussion
 
-The intended full-season BBBFFL experience is broader than today's spreadsheet:
+The intended full-season BBBFFL experience is now reasonably well endorsed by the coaches:
 
-1. Coach logs in with a simple account/magic link.
-2. Home screen shows opponent, ladder context, lockouts and submission status.
-3. Coach selects nine players from their owned squad with useful AFL statistics alongside them.
-4. Submitted teams become visible to the league.
-5. Everyone follows all five fantasy matches live through a Round Centre.
-6. Scorer receives DNP/Interchange recommendations and reviews exceptions.
-7. Scorer publishes the official round, updating results and ladder.
-8. Finals and SuperScore use the same scoring engine.
-9. Historical draft/results/record information can grow around the system over time.
+1. Coach signs in using a simple authenticated account.
+2. Dashboard shows opponent, ladder context, AFL/BBBFFL lockouts and submission status.
+3. Coach can privately save a draft lineup during the week.
+4. Coach selects nine players from their owned squad with useful AFL information alongside them.
+5. Pressing **Submit** publishes the team to the league.
+6. Everyone follows all five fantasy matches live through a Round Centre.
+7. Scorer receives DNP/Interchange/fallback recommendations and reviews exceptions.
+8. Scorer publishes the official round, updating results, ladder and applicable records.
+9. Finals and SuperScore use the same core scoring/ruling engine but retain their separate competition contexts.
+10. Historical draft/results/record information can progressively migrate from the legacy workbooks.
 
-Before the 2027 season, the plan is to replay the real 2026 season through the rebuilt application using the real draft squads, weekly submissions and historical AFL data. This will exercise the full season from draft through Grand Final before the system is trusted live.
+The current Grand Final/SuperScore trial interface is considered a successful starting point, not a locked final design.
+
+Before the 2027 season, the plan remains to replay the real 2026 season through the rebuilt application using the real draft squads, weekly submissions and historical AFL data. That replay should be used both as an acceptance test and as the main mechanism for resolving the remaining edge cases before live operation.

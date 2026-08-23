@@ -159,7 +159,7 @@ Normally after Round 9:
 
 1. The official post-round ladder is established.
 2. Mid-season draft priority is frozen in reverse ladder order: 10th to 1st.
-3. Normal percentage tiebreaks determine ladder order where premiership points are equal.
+3. Normal ladder ordering rules determine draft priority where premiership points are equal.
 4. Coaches publicly delist any number of players before the scorer closes the delisting window.
 5. Coaches may trade players and/or mid-season draft selections during the permitted window.
 6. The draft occurs asynchronously, normally through WhatsApp/email rather than a live meeting.
@@ -257,11 +257,15 @@ Authorised scorer/admin intervention remains possible after lockout and is treat
 
 ## Failure to submit
 
-If a coach fails to submit a team by the deadline, the default rule is to carry forward **the same team selection from the previous BBBFFL round**.
+If a coach fails to submit a team by the deadline, the default rule is to carry forward **the same team selection from the previous relevant BBBFFL selection stream**.
 
-The system should not optimise or repair that team for current availability. Players who are injured, omitted or otherwise unavailable remain selected and normal DNP/Interchange rules apply.
+For the normal home-and-away competition and continuing finals participation, this normally means the coach's previous premiership/home-and-away lineup. The system should not optimise or repair that team for current availability. Players who are injured, omitted or otherwise unavailable remain selected and normal DNP/Interchange rules apply.
 
-The scorer should be able to confirm the carry-forward, and the lineup should retain a visible/auditable source such as `carried forward from Round N` rather than pretending the coach submitted it.
+If there is no previous lineup to carry forward — most importantly, a coach who fails to name a team for Round 1 — the system cannot invent a lineup. A scorer must enter/confirm the opening team using a scorer override, with the action retained in the audit history.
+
+SuperScore is an independent selection stream, but SS1 still needs a practical fallback because no previous SuperScore lineup exists. If a coach fails to submit SS1, the lineup may be derived from that coach's most recently named ordinary BBBFFL team (for example, the Round 20 lineup in the 2026 structure), subject to scorer confirmation. From SS2 onward, the previous SuperScore lineup is the relevant carry-forward source.
+
+The scorer should be able to confirm every carry-forward, and the lineup should retain a visible/auditable source such as `carried forward from Round N`, `derived from Round 20 for SS1`, or `scorer override` rather than pretending the coach submitted it.
 
 The precise handling of a partially submitted early-lockout team followed by failure to complete the main submission should be retained as an edge case for explicit testing/ruling.
 
@@ -330,7 +334,13 @@ The ladder retains:
 - percentage = `(Points For / Points Against) * 100`;
 - points-per-game average for informational/fun presentation.
 
-When premiership points are equal, percentage determines ladder order.
+Ladder ordering is:
+
+1. premiership points;
+2. percentage;
+3. Points For (equivalent in ordering terms to points-per-game average where every club has played the same number of matches).
+
+This ordering is also used when freezing reverse-ladder mid-season draft priority, top-five qualification and finals seeding. If clubs remain exactly tied across all three values, the system must surface the unresolved equality for an explicit scorer ruling rather than silently inventing a random or undocumented fourth tiebreak. Any future league-agreed fourth criterion should be added here and versioned as a season rule.
 
 ## Finals
 
@@ -359,7 +369,11 @@ The top five teams qualify. With a 24-round AFL season, BBBFFL finals occupy AFL
 
 - Grand Final: Second Semi-Final winner vs Preliminary Final winner.
 
-The system should automatically derive bracket progression from confirmed results while preserving scorer authority to correct results.
+### Tied finals
+
+If any BBBFFL finals match is tied on score, the team that finished **higher on the final home-and-away ladder** wins the tie for progression purposes. In the Grand Final, the same rule determines the premier. The system should recommend this outcome automatically from the locked finals seeding, but the scorer must still confirm the finals result and retains override authority for an exceptional league ruling.
+
+The system should automatically derive bracket progression from scorer-confirmed results while preserving scorer authority to correct results.
 
 ## SuperScore
 
@@ -452,11 +466,21 @@ The normal regular-season view should show all five head-to-head matchups and li
 
 Finals should provide the corresponding bracket/match presentation, while SuperScore should continue to provide an all-team ranked view.
 
+### Exploratory 2027 UI concept
+
+The following mock-up was produced from the successful 2026 Grand Final and SuperScore trial interfaces to help coaches visualise what a fuller system might eventually contain:
+
+![Exploratory BBBFFL 2027 UI concept](../images/2027-ui-concept.png)
+
+This image is **concept only and is not an approved 2027 design or implementation specification**. It illustrates possible relationships between a Round Centre/home dashboard, team-selection screen, live matchup view, ladder and SuperScore overview. Individual layout, navigation, labels, projections, team branding and displayed data remain subject to testing and future coach feedback. Implementation tools should derive required behaviour from this season model, not treat pixels or incidental example data in the mock-up as requirements.
+
 ## Potential/best possible score
 
 A useful analytical feature is a coach's retrospective **best possible team score** from their complete owned squad for a round.
 
-The calculation should optimise the normal nine positions using each player at most once and the normal scoring formulas. This is an analytical/coaching metric, not the official result and should remain distinct from submitted score.
+For this retrospective metric, optimise only the **eight scoring positions**: three Forwards, three Midfielders, one Tackler and one Ruck. Each squad player may be used at most once and normal positional scoring formulas apply. The Interchange position is ignored because it contributes no additional score of its own; DNP/loophole replacement mechanics are part of the actual submitted-team result, not this coaching-selection optimisation.
+
+This is an analytical/coaching metric, not the official result and should remain distinct from submitted score.
 
 ## Scorer round-review workflow
 
@@ -572,6 +596,8 @@ The replay should deliberately exercise edge cases where possible, including:
 - pre-lockout edit/resubmission;
 - rejected coach edit after lockout;
 - failure to submit and previous-team carry-forward;
+- Round 1 missing submission requiring scorer-created opening lineup;
+- SS1 fallback derived from the coach's most recent ordinary BBBFFL lineup;
 - genuine DNP;
 - intentional Interchange loophole;
 - multiple DNP positions;
@@ -581,6 +607,7 @@ The replay should deliberately exercise edge cases where possible, including:
 - traded mid-season pick;
 - provisional AFL player reconciliation;
 - drawn BBBFFL match;
+- tied finals match resolved from home-and-away ladder seeding and confirmed by scorer;
 - tied SuperScore;
 - finals progression;
 - Grand Final and season closure.
@@ -635,6 +662,7 @@ AI coding tools should follow these principles:
 12. Prefer one shared rules engine for live and replay modes.
 13. Avoid hard-coding the current AFL fixture structure where BBBFFL has historically needed exceptions.
 14. Preserve historical identity using canonical `afl-api` player IDs, with provisional reconciliation where necessary.
+15. Treat UI concept images as exploratory communication aids, not as domain requirements.
 
 ## Known decisions still requiring confirmation
 
@@ -646,10 +674,11 @@ The following should not be silently invented by implementation tools:
 4. **Replacement coach after draft-order draw:** normally likely to inherit the departed coach's position, but league may choose to redraw; scorer/league discretion remains.
 5. **Preseason live draft-pick trading:** uncommon and not presently a fully specified rule.
 6. **Partial early submission followed by failure to complete main submission:** clarify whether previous-round selections fill remaining positions or another ruling applies.
-7. **Opening Round:** retain historical support but determine 2027 behaviour only once the AFL fixture format is known.
-8. **Team visibility:** current intent is immediate league visibility once submitted; confirm coaches are happy to preserve this when direct web submission replaces WhatsApp.
-9. **Public spectator scope:** current intent is team names, live results/matchups and current ladder; historical/public expansion can be decided later.
-10. **WhatsApp automation:** desired, but feasibility and permitted API workflow require technical investigation.
+7. **Exact ladder equality after Points For:** if two clubs remain identical on premiership points, percentage and Points For, an explicit scorer ruling is currently required; a formal fourth tiebreak may be agreed later.
+8. **Opening Round:** retain historical support but determine 2027 behaviour only once the AFL fixture format is known.
+9. **Team visibility:** current intent is immediate league visibility once submitted; confirm coaches are happy to preserve this when direct web submission replaces WhatsApp.
+10. **Public spectator scope:** current intent is team names, live results/matchups and current ladder; historical/public expansion can be decided later.
+11. **WhatsApp automation:** desired, but feasibility and permitted API workflow require technical investigation.
 
 ## Status
 

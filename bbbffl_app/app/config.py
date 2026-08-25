@@ -25,6 +25,7 @@ class Settings:
     afl_api_key: str | None
     afl_api_timeout_seconds: float
     database_path: str
+    database_url: str
     teams_config_path: str
     admin_token: str | None
     poll_interval_seconds: int
@@ -37,11 +38,13 @@ class Settings:
 
 
 def get_settings() -> Settings:
+    database_path = os.getenv("BBBFFL_DB_PATH", str(BASE_DIR / "data" / "scorer_decisions.db"))
     return Settings(
         afl_api_base_url=os.getenv("AFL_API_BASE_URL", "http://localhost:8000").rstrip("/"),
         afl_api_key=os.getenv("AFL_API_KEY") or None,
         afl_api_timeout_seconds=float(os.getenv("AFL_API_TIMEOUT_SECONDS", "10")),
-        database_path=os.getenv("BBBFFL_DB_PATH", str(BASE_DIR / "data" / "scorer_decisions.db")),
+        database_path=database_path,
+        database_url=os.getenv("BBBFFL_DATABASE_URL", f"sqlite:///{database_path}"),
         teams_config_path=os.getenv(
             "BBBFFL_TEAMS_CONFIG_PATH", str(BASE_DIR / "data" / "grand_final_teams.json")
         ),

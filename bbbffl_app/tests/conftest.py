@@ -1,9 +1,10 @@
-import sqlite3
 
 import pytest
 
+from tests.db_helpers import migrated_connection
+
 from app.afl_client import Match, Player, PlayerStatLine, Team
-from app.db import DecisionsRepository, init_db
+from app.db import DecisionsRepository
 from app.teams import TeamConfig
 
 CATS = Team(team_id=1001, name="Cats")
@@ -59,9 +60,7 @@ class FakeAflClient:
 
 @pytest.fixture
 def decisions():
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    init_db(conn)
+    conn = migrated_connection()
     return DecisionsRepository(conn)
 
 

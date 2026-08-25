@@ -1,4 +1,4 @@
-"""SQLite storage for scorer decisions.
+"""Relational storage for scorer decisions.
 
 Scorer decisions (DNP, interchange assignment, direct score overrides, and
 matchup finalisation) are kept entirely separate from the coach-declared
@@ -21,201 +21,111 @@ table is required.
 """
 
 import json
-import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 GRAND_FINAL_COMPETITION_KEY = "grand_final"
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS slot_dnp (
-    competition_key TEXT NOT NULL DEFAULT 'grand_final',
-    team_key TEXT NOT NULL,
-    slot TEXT NOT NULL,
-    dnp INTEGER NOT NULL DEFAULT 0,
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (competition_key, team_key, slot)
-);
-
-CREATE TABLE IF NOT EXISTS interchange_assignment (
-    competition_key TEXT NOT NULL DEFAULT 'grand_final',
-    team_key TEXT NOT NULL,
-    target_position TEXT,
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (competition_key, team_key)
-);
-
-CREATE TABLE IF NOT EXISTS score_override (
-    competition_key TEXT NOT NULL DEFAULT 'grand_final',
-    team_key TEXT NOT NULL,
-    position TEXT NOT NULL,
-    override_score REAL,
-    reason TEXT,
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (competition_key, team_key, position)
-);
-
-CREATE TABLE IF NOT EXISTS matchup_state (
-    competition_key TEXT PRIMARY KEY,
-    finalized INTEGER NOT NULL DEFAULT 0,
-    finalized_at TEXT,
-    finalized_note TEXT,
-    finalized_snapshot TEXT
-);
-"""
-
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def connect(database_path: str) -> sqlite3.Connection:
-    # check_same_thread=False: FastAPI dispatches sync route handlers onto a
-    # threadpool, so requests may not share the thread this connection was
-    # opened on. SQLite still serialises access internally, which is
-    # sufficient for this prototype's single-scorer write volume.
-    conn = sqlite3.connect(database_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+def _translate(statement, parameters):
+    """Rewrite '?' positional placeholders (this module's DB-API-ish
+    convention) into the named parameters SQLAlchemy's text() expects."""
+    if isinstance(parameters, tuple):
+        values = {}
+        pieces = statement.split("?")
+        rebuilt = pieces[0]
+        for index, piece in enumerate(pieces[1:]):
+            name = f"p{index}"
+            rebuilt += f":{name}" + piece
+            values[name] = parameters[index]
+        statement, parameters = rebuilt, values
+    return statement, parameters
 
 
-def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
-    ).fetchone()
-    return row is not None
+class _Result:
+    """A result whose rows are materialized immediately, so callers can read
+    them after the connection that produced them has already been released
+    back to the pool."""
+    def __init__(self, sa_result):
+        self._rows = sa_result.mappings().all() if sa_result.returns_rows else []
+    def fetchall(self):
+        return self._rows
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
 
 
-def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+class _TransactionConnection:
+    """Bound to one connection for the lifetime of a single transaction()
+    block; not retained by callers past that block."""
+    def __init__(self, connection):
+        self._connection = connection
+    def execute(self, statement, parameters=()):
+        from sqlalchemy import text
+        statement, parameters = _translate(statement, parameters)
+        return _Result(self._connection.execute(text(statement), parameters))
 
 
-def _migrate_legacy_schema(conn: sqlite3.Connection) -> None:
-    """Upgrades a database created before competition_key existed, so a
-    scorer decision recorded before this change is preserved under the
-    Grand Final's competition_key rather than lost or (worse) mixed up with
-    a later SuperScore round that happens to reuse a team_key.
+class DatabaseConnection:
+    """Small DB-API-shaped facade over a SQLAlchemy Engine/pool.
 
-    Each legacy per-team-key table is rebuilt with competition_key folded
-    into its primary key; matchup_state's old `id = 1` singleton row becomes
-    the "grand_final" row of a table keyed by competition_key instead.
+    Deliberately holds no long-lived Connection: a synchronous FastAPI
+    handler can run concurrently with others in Starlette's thread pool, and
+    a SQLAlchemy Connection is not a thread-safe request boundary. Every
+    operation instead acquires a pooled connection for just its own duration
+    and releases it immediately afterwards, so requests never share
+    transaction state (see PR #23 review).
     """
-    if _table_exists(conn, "slot_dnp") and "competition_key" not in _table_columns(conn, "slot_dnp"):
-        conn.executescript(
-            """
-            ALTER TABLE slot_dnp RENAME TO slot_dnp_legacy;
-            CREATE TABLE slot_dnp (
-                competition_key TEXT NOT NULL DEFAULT 'grand_final',
-                team_key TEXT NOT NULL,
-                slot TEXT NOT NULL,
-                dnp INTEGER NOT NULL DEFAULT 0,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (competition_key, team_key, slot)
-            );
-            INSERT INTO slot_dnp (competition_key, team_key, slot, dnp, updated_at)
-                SELECT 'grand_final', team_key, slot, dnp, updated_at FROM slot_dnp_legacy;
-            DROP TABLE slot_dnp_legacy;
-            """
-        )
+    def __init__(self, engine):
+        self.engine = engine
 
-    if _table_exists(conn, "interchange_assignment") and "competition_key" not in _table_columns(
-        conn, "interchange_assignment"
-    ):
-        conn.executescript(
-            """
-            ALTER TABLE interchange_assignment RENAME TO interchange_assignment_legacy;
-            CREATE TABLE interchange_assignment (
-                competition_key TEXT NOT NULL DEFAULT 'grand_final',
-                team_key TEXT NOT NULL,
-                target_position TEXT,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (competition_key, team_key)
-            );
-            INSERT INTO interchange_assignment (competition_key, team_key, target_position, updated_at)
-                SELECT 'grand_final', team_key, target_position, updated_at
-                FROM interchange_assignment_legacy;
-            DROP TABLE interchange_assignment_legacy;
-            """
-        )
+    def execute(self, statement, parameters=()):
+        """Run one statement on a short-lived pooled connection.
 
-    if _table_exists(conn, "score_override") and "competition_key" not in _table_columns(
-        conn, "score_override"
-    ):
-        conn.executescript(
-            """
-            ALTER TABLE score_override RENAME TO score_override_legacy;
-            CREATE TABLE score_override (
-                competition_key TEXT NOT NULL DEFAULT 'grand_final',
-                team_key TEXT NOT NULL,
-                position TEXT NOT NULL,
-                override_score REAL,
-                reason TEXT,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (competition_key, team_key, position)
-            );
-            INSERT INTO score_override
-                (competition_key, team_key, position, override_score, reason, updated_at)
-                SELECT 'grand_final', team_key, position, override_score, reason, updated_at
-                FROM score_override_legacy;
-            DROP TABLE score_override_legacy;
-            """
-        )
+        Used for reads (no explicit transaction needed) and is also what
+        `init_db`'s legacy-detection probe relies on.
+        """
+        from sqlalchemy import text
+        statement, parameters = _translate(statement, parameters)
+        with self.engine.connect() as connection:
+            return _Result(connection.execute(text(statement), parameters))
 
-    if _table_exists(conn, "matchup_state") and "competition_key" not in _table_columns(
-        conn, "matchup_state"
-    ):
-        # A pre-finalized_snapshot database (older than that column) would
-        # otherwise make the SELECT below fail with "no such column:
-        # finalized_snapshot" -- add it to the *old* table first, while it's
-        # still named matchup_state, so the copy always has something to
-        # select regardless of which legacy schema generation this is.
-        if "finalized_snapshot" not in _table_columns(conn, "matchup_state"):
-            conn.execute("ALTER TABLE matchup_state ADD COLUMN finalized_snapshot TEXT")
-        conn.executescript(
-            """
-            ALTER TABLE matchup_state RENAME TO matchup_state_legacy;
-            CREATE TABLE matchup_state (
-                competition_key TEXT PRIMARY KEY,
-                finalized INTEGER NOT NULL DEFAULT 0,
-                finalized_at TEXT,
-                finalized_note TEXT,
-                finalized_snapshot TEXT
-            );
-            INSERT INTO matchup_state
-                (competition_key, finalized, finalized_at, finalized_note, finalized_snapshot)
-                SELECT 'grand_final', finalized, finalized_at, finalized_note, finalized_snapshot
-                FROM matchup_state_legacy WHERE id = 1;
-            DROP TABLE matchup_state_legacy;
-            """
-        )
+    def close(self):
+        self.engine.dispose()
 
 
-def init_db(conn: sqlite3.Connection) -> None:
-    _migrate_legacy_schema(conn)
-    conn.executescript(SCHEMA)
-    # CREATE TABLE IF NOT EXISTS won't add columns to a table that already
-    # existed before finalized_snapshot was introduced -- add it if missing
-    # so an in-place upgrade doesn't lose the ability to store a snapshot.
-    existing_columns = _table_columns(conn, "matchup_state")
-    if "finalized_snapshot" not in existing_columns:
-        conn.execute("ALTER TABLE matchup_state ADD COLUMN finalized_snapshot TEXT")
-    conn.execute(
-        "INSERT OR IGNORE INTO matchup_state (competition_key, finalized) VALUES (?, 0)",
-        (GRAND_FINAL_COMPETITION_KEY,),
-    )
-    conn.commit()
+def connect(database_url: str) -> DatabaseConnection:
+    from sqlalchemy import create_engine
+    if "://" not in database_url:
+        database_url = f"sqlite:///{database_url}"
+    return DatabaseConnection(create_engine(database_url, connect_args={"check_same_thread": False} if database_url.startswith("sqlite") else {}))
+
+
+def init_db(conn) -> None:
+    """Deprecated compatibility shim for callers already on a migrated DB.
+
+    Schema creation belongs exclusively to Alembic. Tests and deployments must
+    call app.migrations.migrate before opening the repository connection.
+    """
+    try:
+        conn.execute("SELECT version_num FROM alembic_version").fetchone()
+    except Exception as exc:
+        raise RuntimeError("database is not migration-managed; run `alembic upgrade head`") from exc
 
 
 @contextmanager
-def transaction(conn: sqlite3.Connection):
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
+def transaction(database: DatabaseConnection):
+    """Run one write operation in its own pooled connection and transaction,
+    committing on success and rolling back on error -- never reusing a
+    connection across calls, so one request can never observe or disturb
+    another's in-flight transaction."""
+    with database.engine.connect() as connection:
+        with connection.begin():
+            yield _TransactionConnection(connection)
 
 
 @dataclass(frozen=True)
@@ -243,11 +153,11 @@ class MatchupState:
 class DecisionsRepository:
     """CRUD for scorer decisions, scoped to a single competition instance.
 
-    Not thread-safe across processes beyond what sqlite itself guarantees --
-    adequate for a single-worker prototype.
+    Transactions are provided by SQLAlchemy while persistence semantics remain
+    explicit SQL and are shared by SQLite and PostgreSQL.
     """
 
-    def __init__(self, conn: sqlite3.Connection, competition_key: str = GRAND_FINAL_COMPETITION_KEY):
+    def __init__(self, conn, competition_key: str = GRAND_FINAL_COMPETITION_KEY):
         self.conn = conn
         self.competition_key = competition_key
 

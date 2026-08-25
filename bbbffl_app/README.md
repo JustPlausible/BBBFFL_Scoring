@@ -289,7 +289,3 @@ policy, and CI expectations.
 Set `BBBFFL_DATABASE_URL` to a SQLAlchemy PostgreSQL URL in production, for
 example `postgresql+psycopg://user:password@database/bbbffl`. SQLite remains
 the local/test default. See [`docs/database-migrations.md`](docs/database-migrations.md).
-
-## Database configuration and migrations
-
-Set `BBBFFL_DATABASE_URL` to a PostgreSQL URL in production (for example, `postgresql+psycopg://user:password@database/bbbffl`). SQLite remains the local/test default. Migration commands, legacy upgrade detection, and rollback policy are documented in [`../docs/database-migrations.md`](../docs/database-migrations.md).

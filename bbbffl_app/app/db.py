@@ -32,36 +32,69 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _translate(statement, parameters):
+    """Rewrite '?' positional placeholders (this module's DB-API-ish
+    convention) into the named parameters SQLAlchemy's text() expects."""
+    if isinstance(parameters, tuple):
+        values = {}
+        pieces = statement.split("?")
+        rebuilt = pieces[0]
+        for index, piece in enumerate(pieces[1:]):
+            name = f"p{index}"
+            rebuilt += f":{name}" + piece
+            values[name] = parameters[index]
+        statement, parameters = rebuilt, values
+    return statement, parameters
+
+
 class _Result:
-    def __init__(self, result):
-        self.result = result
+    """A result whose rows are materialized immediately, so callers can read
+    them after the connection that produced them has already been released
+    back to the pool."""
+    def __init__(self, sa_result):
+        self._rows = sa_result.mappings().all() if sa_result.returns_rows else []
     def fetchall(self):
-        return self.result.mappings().all()
+        return self._rows
     def fetchone(self):
-        return self.result.mappings().first()
+        return self._rows[0] if self._rows else None
+
+
+class _TransactionConnection:
+    """Bound to one connection for the lifetime of a single transaction()
+    block; not retained by callers past that block."""
+    def __init__(self, connection):
+        self._connection = connection
+    def execute(self, statement, parameters=()):
+        from sqlalchemy import text
+        statement, parameters = _translate(statement, parameters)
+        return _Result(self._connection.execute(text(statement), parameters))
 
 
 class DatabaseConnection:
-    """Small DB-API-shaped facade over SQLAlchemy Core connections."""
+    """Small DB-API-shaped facade over a SQLAlchemy Engine/pool.
+
+    Deliberately holds no long-lived Connection: a synchronous FastAPI
+    handler can run concurrently with others in Starlette's thread pool, and
+    a SQLAlchemy Connection is not a thread-safe request boundary. Every
+    operation instead acquires a pooled connection for just its own duration
+    and releases it immediately afterwards, so requests never share
+    transaction state (see PR #23 review).
+    """
     def __init__(self, engine):
         self.engine = engine
-        self.connection = engine.connect()
+
     def execute(self, statement, parameters=()):
+        """Run one statement on a short-lived pooled connection.
+
+        Used for reads (no explicit transaction needed) and is also what
+        `init_db`'s legacy-detection probe relies on.
+        """
         from sqlalchemy import text
-        if isinstance(parameters, tuple):
-            values = {}
-            pieces = statement.split("?")
-            rebuilt = pieces[0]
-            for index, piece in enumerate(pieces[1:]):
-                name = f"p{index}"
-                rebuilt += f":{name}" + piece
-                values[name] = parameters[index]
-            statement, parameters = rebuilt, values
-        return _Result(self.connection.execute(text(statement), parameters))
-    def commit(self): self.connection.commit()
-    def rollback(self): self.connection.rollback()
+        statement, parameters = _translate(statement, parameters)
+        with self.engine.connect() as connection:
+            return _Result(connection.execute(text(statement), parameters))
+
     def close(self):
-        self.connection.close()
         self.engine.dispose()
 
 
@@ -85,13 +118,14 @@ def init_db(conn) -> None:
 
 
 @contextmanager
-def transaction(conn):
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
+def transaction(database: DatabaseConnection):
+    """Run one write operation in its own pooled connection and transaction,
+    committing on success and rolling back on error -- never reusing a
+    connection across calls, so one request can never observe or disturb
+    another's in-flight transaction."""
+    with database.engine.connect() as connection:
+        with connection.begin():
+            yield _TransactionConnection(connection)
 
 
 @dataclass(frozen=True)

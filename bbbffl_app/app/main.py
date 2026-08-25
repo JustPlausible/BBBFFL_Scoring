@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI):
     # deployment convenience and is idempotent; production may run the same
     # command as a separate release step before starting the application.
     migrate(settings.database_url)
-    conn = connect(settings.database_url)
+    database = connect(settings.database_url)
 
     afl_client = AflApiClient(
         base_url=settings.afl_api_base_url,
@@ -43,8 +43,8 @@ async def lifespan(app: FastAPI):
     teams = get_teams(settings.teams_config_path)
 
     app.state.settings = settings
-    app.state.db_conn = conn
-    app.state.decisions = DecisionsRepository(conn)
+    app.state.database = database
+    app.state.decisions = DecisionsRepository(database)
     app.state.afl_client = afl_client
     app.state.identity_cache = PlayerIdentityCache(afl_client)
     app.state.teams = teams
@@ -64,7 +64,7 @@ async def lifespan(app: FastAPI):
             superscore_config = get_superscore_config(settings.superscore_config_path)
             app.state.superscore_config = superscore_config
             app.state.superscore_decisions = DecisionsRepository(
-                conn, superscore_competition_key(superscore_config.season, superscore_config.afl_round)
+                database, superscore_competition_key(superscore_config.season, superscore_config.afl_round)
             )
             logger.info(
                 "SuperScore enabled (season=%s, round=%s, entries=%s)",
@@ -88,7 +88,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         afl_client.close()
-        conn.close()
+        database.close()
 
 
 app = FastAPI(title="BBBFFL Grand Final Live Scoring", lifespan=lifespan)

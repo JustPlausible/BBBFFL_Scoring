@@ -13,7 +13,12 @@ COPY data ./data
 # Scorer decisions must survive container restarts -- mount a volume here.
 VOLUME ["/app/data"]
 
-ENV BBBFFL_DATABASE_URL=sqlite:////app/data/scorer_decisions.db \
+# BBBFFL_DB_PATH (not BBBFFL_DATABASE_URL) is the image default so that a
+# deployment upgrading from the legacy prototype which sets only
+# BBBFFL_DB_PATH keeps pointing at its existing data. An explicit
+# BBBFFL_DATABASE_URL (e.g. for PostgreSQL) still overrides it -- see
+# app/config.py's precedence and docs/database-migrations.md.
+ENV BBBFFL_DB_PATH=/app/data/scorer_decisions.db \
     BBBFFL_TEAMS_CONFIG_PATH=/app/data/grand_final_teams.json
 
 EXPOSE 8000

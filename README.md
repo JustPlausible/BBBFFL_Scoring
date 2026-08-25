@@ -30,3 +30,9 @@ The legacy `clasp` pull/push helpers moved with the GAS projects to
 workflow and are preserved only for maintainers who explicitly need to
 inspect or recover the historical Apps Script projects. See
 [`legacy/gas/README.md`](legacy/gas/README.md) before using them.
+
+## Database migrations
+
+PostgreSQL is the supported production database; SQLite is supported for local
+development, tests, replay, and existing prototype upgrades. Alembic owns
+schema evolution. See [`docs/database-migrations.md`](docs/database-migrations.md).

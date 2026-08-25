@@ -6,7 +6,8 @@ from fastapi.responses import JSONResponse
 
 from app.afl_client import AflApiClient, AflApiError
 from app.config import get_settings
-from app.db import DecisionsRepository, connect, init_db
+from app.db import DecisionsRepository, connect
+from app.migrations import migrate
 from app.routes import admin, health, public, superscore as superscore_routes
 from app.service import PlayerIdentityCache
 from app.superscore import competition_key as superscore_competition_key
@@ -28,8 +29,11 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_logging(settings.log_level)
 
-    conn = connect(settings.database_path)
-    init_db(conn)
+    # Migrations are the sole schema authority. Running them at startup is a
+    # deployment convenience and is idempotent; production may run the same
+    # command as a separate release step before starting the application.
+    migrate(settings.database_url)
+    conn = connect(settings.database_url)
 
     afl_client = AflApiClient(
         base_url=settings.afl_api_base_url,

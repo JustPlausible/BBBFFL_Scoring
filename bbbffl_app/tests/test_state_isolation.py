@@ -6,24 +6,21 @@ both happen to use the identical team_key -- because every row in
 app/db.py is scoped by competition_key.
 """
 
-import sqlite3
 
-from app.db import GRAND_FINAL_COMPETITION_KEY, DecisionsRepository, init_db
+from tests.db_helpers import migrated_connection
+
+from app.db import GRAND_FINAL_COMPETITION_KEY, DecisionsRepository
 
 
 def _repos():
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    init_db(conn)
+    conn = migrated_connection()
     grand_final = DecisionsRepository(conn, GRAND_FINAL_COMPETITION_KEY)
     superscore = DecisionsRepository(conn, competition_key="superscore:2026:20")
     return grand_final, superscore
 
 
 def test_default_grand_final_repository_uses_the_grand_final_key():
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    init_db(conn)
+    conn = migrated_connection()
     repo = DecisionsRepository(conn)
     assert repo.competition_key == GRAND_FINAL_COMPETITION_KEY
 
@@ -93,9 +90,7 @@ def test_two_superscore_rounds_are_independently_addressable():
     (keyed by season+round in superscore.py) keeps each round's SuperScore
     decisions/result distinct -- the basis for retaining SuperScore history
     across the season's four rounds without a separate results table."""
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    init_db(conn)
+    conn = migrated_connection()
     round_20 = DecisionsRepository(conn, competition_key="superscore:2026:20")
     round_21 = DecisionsRepository(conn, competition_key="superscore:2026:21")
 

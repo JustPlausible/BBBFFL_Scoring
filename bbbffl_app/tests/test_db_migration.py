@@ -1,159 +1,114 @@
-"""Proves an existing (pre-competition_key) scorer_decisions.db -- as
-already deployed for the live Grand Final trial -- upgrades in place without
-losing any recorded decision, and continues to be reachable under the
-Grand Final's fixed competition_key afterwards.
-"""
-
+"""Regression coverage for the real Alembic history and legacy bootstrap."""
+import json
 import sqlite3
 
-from app.db import DecisionsRepository, init_db
+import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
+from sqlalchemy import create_engine, inspect, text
+
+from app.db import DecisionsRepository, connect
+from app.migrations import HEAD, downgrade, migrate
 
 LEGACY_SCHEMA = """
-CREATE TABLE slot_dnp (
-    team_key TEXT NOT NULL,
-    slot TEXT NOT NULL,
-    dnp INTEGER NOT NULL DEFAULT 0,
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (team_key, slot)
-);
-
-CREATE TABLE interchange_assignment (
-    team_key TEXT PRIMARY KEY,
-    target_position TEXT,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE score_override (
-    team_key TEXT NOT NULL,
-    position TEXT NOT NULL,
-    override_score REAL,
-    reason TEXT,
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (team_key, position)
-);
-
-CREATE TABLE matchup_state (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    finalized INTEGER NOT NULL DEFAULT 0,
-    finalized_at TEXT,
-    finalized_note TEXT,
-    finalized_snapshot TEXT
-);
+CREATE TABLE slot_dnp (team_key TEXT NOT NULL, slot TEXT NOT NULL, dnp INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, PRIMARY KEY (team_key, slot));
+CREATE TABLE interchange_assignment (team_key TEXT PRIMARY KEY, target_position TEXT, updated_at TEXT NOT NULL);
+CREATE TABLE score_override (team_key TEXT NOT NULL, position TEXT NOT NULL, override_score REAL, reason TEXT, updated_at TEXT NOT NULL, PRIMARY KEY (team_key, position));
+CREATE TABLE matchup_state (id INTEGER PRIMARY KEY CHECK (id = 1), finalized INTEGER NOT NULL DEFAULT 0, finalized_at TEXT, finalized_note TEXT, finalized_snapshot TEXT);
 """
+EXPECTED_TABLES = {"alembic_version", "slot_dnp", "interchange_assignment", "score_override", "matchup_state"}
 
 
-def _legacy_conn():
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
+def _url(path):
+    return f"sqlite:///{path}"
+
+
+def _legacy_database(path):
+    conn = sqlite3.connect(path)
     conn.executescript(LEGACY_SCHEMA)
-    conn.execute(
-        "INSERT INTO slot_dnp (team_key, slot, dnp, updated_at) VALUES ('team_a', 'Forward1', 1, 't')"
-    )
-    conn.execute(
-        "INSERT INTO interchange_assignment (team_key, target_position, updated_at) "
-        "VALUES ('team_a', 'Ruck', 't')"
-    )
-    conn.execute(
-        "INSERT INTO score_override (team_key, position, override_score, reason, updated_at) "
-        "VALUES ('team_a', 'Ruck', 42.0, 'legacy correction', 't')"
-    )
-    conn.execute(
-        "INSERT INTO matchup_state (id, finalized, finalized_at, finalized_note) "
-        "VALUES (1, 1, '2026-01-01T00:00:00+00:00', 'legacy signoff')"
-    )
+    conn.execute("INSERT INTO slot_dnp VALUES ('team_a', 'Forward1', 1, 't')")
+    conn.execute("INSERT INTO interchange_assignment VALUES ('team_a', 'Ruck', 't')")
+    conn.execute("INSERT INTO score_override VALUES ('team_a', 'Ruck', 42.0, 'legacy correction', 't')")
+    snapshot = json.dumps({"status": "FINAL", "teams": [{"team_key": "team_a", "total_score": 99}]})
+    conn.execute("INSERT INTO matchup_state VALUES (1, 1, '2026-01-01T00:00:00+00:00', 'legacy signoff', ?)", (snapshot,))
     conn.commit()
-    return conn
+    # Prove this fixture is genuinely unversioned and meaningful before migration.
+    assert conn.execute("SELECT dnp FROM slot_dnp").fetchone()[0] == 1
+    assert "alembic_version" not in {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    conn.close()
 
 
-def test_legacy_dnp_survives_migration_under_the_grand_final_key():
-    conn = _legacy_conn()
-    init_db(conn)
-    repo = DecisionsRepository(conn)  # defaults to grand_final
-    assert repo.get_dnp_map()[("team_a", "Forward1")] is True
+def test_empty_database_migrates_to_head_and_repository_works(tmp_path):
+    url = _url(tmp_path / "fresh.db")
+    migrate(url)
+    engine = create_engine(url)
+    assert set(inspect(engine).get_table_names()) == EXPECTED_TABLES
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == HEAD
+        # Composite primary keys create backing indexes on SQLite.
+        assert inspect(conn).get_pk_constraint("slot_dnp")["constrained_columns"] == ["competition_key", "team_key", "slot"]
+    repo_conn = connect(url)
+    repo = DecisionsRepository(repo_conn)
+    repo.set_dnp("team_a", "Forward1", True)
+    assert repo.get_dnp_map() == {("team_a", "Forward1"): True}
+    repo_conn.close()
 
 
-def test_legacy_interchange_assignment_survives_migration():
-    conn = _legacy_conn()
-    init_db(conn)
-    repo = DecisionsRepository(conn)
+def test_realistic_legacy_state_survives_losslessly(tmp_path):
+    path = tmp_path / "legacy.db"
+    _legacy_database(path)
+    url = _url(path)
+    migrate(url)
+    repo = DecisionsRepository(connect(url))
+    assert repo.get_dnp_map() == {("team_a", "Forward1"): True}
     assert repo.get_interchange_assignments()["team_a"].target_position == "Ruck"
-
-
-def test_legacy_override_survives_migration():
-    conn = _legacy_conn()
-    init_db(conn)
-    repo = DecisionsRepository(conn)
-    override = repo.get_overrides()[("team_a", "Ruck")]
-    assert override.override_score == 42.0
-    assert override.reason == "legacy correction"
-
-
-def test_legacy_finalized_matchup_state_survives_migration():
-    conn = _legacy_conn()
-    init_db(conn)
-    repo = DecisionsRepository(conn)
+    assert repo.get_overrides()[("team_a", "Ruck")].override_score == 42.0
     state = repo.get_matchup_state()
-    assert state.finalized is True
-    assert state.finalized_note == "legacy signoff"
+    assert state.finalized and state.finalized_note == "legacy signoff"
+    assert state.snapshot["teams"][0]["total_score"] == 99
 
 
-def test_migration_is_idempotent_across_repeated_init_db_calls():
-    conn = _legacy_conn()
-    init_db(conn)
-    init_db(conn)  # simulates a second app startup against the same file
-    repo = DecisionsRepository(conn)
-    assert repo.get_dnp_map()[("team_a", "Forward1")] is True
-    assert repo.get_matchup_state().finalized is True
+def test_migration_is_idempotent(tmp_path):
+    path = tmp_path / "legacy.db"
+    _legacy_database(path)
+    url = _url(path)
+    migrate(url)
+    migrate(url)
+    assert DecisionsRepository(connect(url)).get_dnp_map() == {("team_a", "Forward1"): True}
 
 
-def test_a_new_competition_key_on_the_migrated_db_starts_clean():
-    conn = _legacy_conn()
-    init_db(conn)
-    superscore = DecisionsRepository(conn, competition_key="superscore:2026:20")
-    assert superscore.get_dnp_map() == {}
-    assert superscore.get_matchup_state().finalized is False
+def test_unrecognized_unversioned_schema_is_refused(tmp_path):
+    path = tmp_path / "unknown.db"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE slot_dnp (surprise TEXT)")
+    conn.close()
+    with pytest.raises(RuntimeError, match="Unrecognized BBBFFL schema"):
+        migrate(_url(path))
 
 
-def test_pre_snapshot_legacy_db_migrates_without_losing_the_finalized_row():
-    """A database created before finalized_snapshot existed at all (an even
-    older legacy generation than _legacy_conn's) must still migrate
-    cleanly: _migrate_legacy_schema() runs before init_db()'s own
-    finalized_snapshot compatibility ALTER TABLE, so the migration's copy
-    step needs the column to already exist on the old table it's reading
-    from, not just the new one it's writing to."""
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    conn.executescript(
-        """
-        CREATE TABLE slot_dnp (
-            team_key TEXT NOT NULL, slot TEXT NOT NULL, dnp INTEGER NOT NULL DEFAULT 0,
-            updated_at TEXT NOT NULL, PRIMARY KEY (team_key, slot)
-        );
-        CREATE TABLE interchange_assignment (
-            team_key TEXT PRIMARY KEY, target_position TEXT, updated_at TEXT NOT NULL
-        );
-        CREATE TABLE score_override (
-            team_key TEXT NOT NULL, position TEXT NOT NULL, override_score REAL, reason TEXT,
-            updated_at TEXT NOT NULL, PRIMARY KEY (team_key, position)
-        );
-        CREATE TABLE matchup_state (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            finalized INTEGER NOT NULL DEFAULT 0,
-            finalized_at TEXT,
-            finalized_note TEXT
-        );
-        """
-    )
-    conn.execute(
-        "INSERT INTO matchup_state (id, finalized, finalized_at, finalized_note) "
-        "VALUES (1, 1, '2026-01-01T00:00:00+00:00', 'pre-snapshot signoff')"
-    )
-    conn.commit()
+def test_reversible_downgrade_preserves_representable_grand_final_data(tmp_path):
+    url = _url(tmp_path / "down.db")
+    migrate(url)
+    repo = DecisionsRepository(connect(url))
+    repo.set_dnp("team_a", "Forward1", True)
+    repo.conn.close()
+    downgrade(url, "0001_prototype")
+    engine = create_engine(url)
+    with engine.connect() as conn:
+        assert {c["name"] for c in inspect(conn).get_columns("slot_dnp")} == {"team_key", "slot", "dnp", "updated_at"}
+        assert conn.execute(text("SELECT dnp FROM slot_dnp WHERE team_key='team_a'")).scalar_one() == 1
 
-    init_db(conn)  # must not raise OperationalError: no such column: finalized_snapshot
 
-    repo = DecisionsRepository(conn)
-    state = repo.get_matchup_state()
-    assert state.finalized is True
-    assert state.finalized_note == "pre-snapshot signoff"
-    assert state.snapshot is None
+def test_downgrade_refuses_loss_of_other_competitions(tmp_path):
+    url = _url(tmp_path / "irreversible.db")
+    migrate(url)
+    repo = DecisionsRepository(connect(url), "superscore:2026:20")
+    repo.set_dnp("team_a", "Forward1", True)
+    repo.conn.close()
+    with pytest.raises(RuntimeError, match="cannot be represented"):
+        downgrade(url, "0001_prototype")
+
+
+def test_revision_chain_has_single_head():
+    cfg = Config("alembic.ini")
+    assert ScriptDirectory.from_config(cfg).get_heads() == [HEAD]

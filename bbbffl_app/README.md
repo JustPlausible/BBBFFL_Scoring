@@ -40,7 +40,7 @@ bbbffl_app/
     superscore.py     # loads the coach-declared SuperScore entries JSON
                        # (read-only); reuses teams.TeamConfig/parse_roster --
                        # there is no separate SuperScore lineup schema
-    db.py            # SQLite store for scorer decisions (DNP, interchange,
+    db.py            # PostgreSQL/SQLite store for scorer decisions (DNP, interchange,
                       # overrides, finalisation), scoped per competition
                       # instance via competition_key -- separate from
                       # teams.py/superscore.py
@@ -231,8 +231,8 @@ docker run -d \
   bbbffl-grand-final
 ```
 
-The `data/` volume is what makes scorer decisions and the finalised result
-survive a container restart. Put this alongside the existing `afl-api`
+When using the default local SQLite URL, the `data/` volume makes scorer decisions and the finalised result
+survive a container restart. Production uses `BBBFFL_DATABASE_URL` with PostgreSQL. Schema upgrades are described in [`docs/database-migrations.md`](docs/database-migrations.md). Put this alongside the existing `afl-api`
 container and expose it later through your reverse proxy of choice; no
 changes to `afl-api` are required.
 
@@ -274,3 +274,22 @@ adjust if a field ever drifts.
    header, not per-user auth -- adequate for one trusted scorer on a
    private home-server network for one weekend, not a general access
    control model.
+
+## Database migrations
+
+PostgreSQL is the supported production database; SQLite is supported for local
+development, tests, replay, and upgrades of existing prototype database files.
+Schema evolution is owned by Alembic rather than application startup DDL. See
+[`docs/database-migrations.md`](docs/database-migrations.md) for configuration,
+validated legacy bootstrap behaviour, operator/developer commands, rollback
+policy, and CI expectations.
+
+### Database configuration
+
+Set `BBBFFL_DATABASE_URL` to a SQLAlchemy PostgreSQL URL in production, for
+example `postgresql+psycopg://user:password@database/bbbffl`. SQLite remains
+the local/test default. See [`docs/database-migrations.md`](docs/database-migrations.md).
+
+## Database configuration and migrations
+
+Set `BBBFFL_DATABASE_URL` to a PostgreSQL URL in production (for example, `postgresql+psycopg://user:password@database/bbbffl`). SQLite remains the local/test default. Migration commands, legacy upgrade detection, and rollback policy are documented in [`../docs/database-migrations.md`](../docs/database-migrations.md).

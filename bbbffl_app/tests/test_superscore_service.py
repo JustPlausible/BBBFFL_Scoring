@@ -1,9 +1,10 @@
-import sqlite3
 
 import pytest
 
+from tests.db_helpers import migrated_connection
+
 from app.afl_client import Match, Player, PlayerStatLine, Team
-from app.db import DecisionsRepository, init_db
+from app.db import DecisionsRepository
 from app.scoring import ROSTER_SLOTS
 from app.service import build_superscore_state, get_superscore_view
 from app.teams import TeamConfig
@@ -30,9 +31,7 @@ def ten_entries():
 
 @pytest.fixture
 def superscore_decisions():
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    init_db(conn)
+    conn = migrated_connection()
     return DecisionsRepository(conn, competition_key="superscore:2026:20")
 
 

@@ -95,10 +95,15 @@ def test_upgrade_from_previous_head_preserves_scorer_state(tmp_path):
     repo = DecisionsRepository(connect(url))
     repo.set_dnp("team_a", "Forward1", True)
     repo.finalize("signed", {"status": "FINAL"})
+    before_migration = repo.get_matchup_state()
     migrate(url)
     restored = DecisionsRepository(connect(url))
+    after_migration = restored.get_matchup_state()
     assert restored.get_dnp_map() == {("team_a", "Forward1"): True}
-    assert restored.get_matchup_state().snapshot == {"status": "FINAL"}
+    assert after_migration.snapshot == before_migration.snapshot
+    assert after_migration.snapshot["status"] == "FINAL"
+    assert after_migration.snapshot["finalized_note"] == "signed"
+    assert after_migration.snapshot["finalized_at"]
 
 
 def test_unrecognized_unversioned_schema_is_refused(tmp_path):

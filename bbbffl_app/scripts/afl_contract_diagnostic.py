@@ -14,7 +14,11 @@ Usage
     export AFL_API_KEY=...                                 # a real consumer key
     python -m scripts.afl_contract_diagnostic
 
-Exit code is 0 only if every REQUIRED check passes. INFORMATIONAL checks
+Exit code is 0 only if every REQUIRED check PASSes -- a required check that
+can only SKIP (e.g. no historical season available to probe, or no match
+with player rows was found) counts as not validated and also produces a
+non-zero exit, since exit 0 is meant to certify the contract was actually
+confirmed, not merely that nothing failed outright. INFORMATIONAL checks
 (committed future dependencies BBBFFL does not consume yet, and the optional
 OpenAPI cross-check) are always reported but never affect the exit code.
 
@@ -52,6 +56,7 @@ class DiagnosticContext:
     results: list[CheckResult] = field(default_factory=list)
     # Discovered state threaded between checks.
     season_id: int | None = None
+    current_round_number: int | None = None
     round_id: int | None = None
     match_id: int | None = None
     canonical_player_id: int | None = None
@@ -108,6 +113,7 @@ def check_seasons(ctx: DiagnosticContext) -> None:
     )
     if current:
         ctx.season_id = current[0]["season_id"]
+        ctx.current_round_number = current[0].get("current_round_number")
         ctx.record(
             "seasons: current_round_number present or explicitly null",
             "current_round_number" in current[0],
@@ -135,10 +141,17 @@ def check_rounds(ctx: DiagnosticContext) -> None:
         all(r.get("byes") is None or isinstance(r.get("byes"), list) for r in rounds),
         required=False,
     )
-    # Prefer the round the season itself reports as current.
-    preferred = next(
-        (r for r in rounds if r.get("round_number") is not None), rounds[0]
-    )
+    # Prefer the round matching the season's own reported current_round_number
+    # (set by check_seasons) -- falling back to the first round with a known
+    # round_number only when that lookup fails (e.g. current_round_number is
+    # null, or no round in the list actually carries that number).
+    preferred = None
+    if ctx.current_round_number is not None:
+        preferred = next(
+            (r for r in rounds if r.get("round_number") == ctx.current_round_number), None
+        )
+    if preferred is None:
+        preferred = next((r for r in rounds if r.get("round_number") is not None), rounds[0])
     ctx.round_id = preferred["round_id"]
 
 
@@ -217,12 +230,19 @@ def check_player_stats(ctx: DiagnosticContext) -> None:
     )
     players = body.get("players", [])
     if players:
-        row = players[0]
-        stats_keys = set(row.get("stats", {}).keys())
+        # Checked across every row, not just the first -- a later row is
+        # just as capable of omitting a scored field, and AflApiClient
+        # currently coerces a missing/null field to 0 rather than raising,
+        # so an incomplete row would otherwise pass unnoticed.
+        missing_by_row = [
+            (i, sorted(REQUIRED_STAT_FIELDS - set(row.get("stats", {}).keys())))
+            for i, row in enumerate(players)
+        ]
+        missing_by_row = [(i, fields) for i, fields in missing_by_row if fields]
         ctx.record(
             "player-stats: rows expose all BBBFFL-scored stat fields",
-            REQUIRED_STAT_FIELDS <= stats_keys,
-            f"present={sorted(stats_keys)}",
+            not missing_by_row,
+            "all rows complete" if not missing_by_row else f"missing (row_index, fields)={missing_by_row[:5]}",
         )
         resolved = [p for p in players if p.get("canonical_player_id") is not None]
         if resolved:
@@ -408,6 +428,14 @@ def run(
                 check(ctx)
             except _NetworkFailure as exc:
                 ctx.record(f"{check.__name__} (network)", False, exc.detail)
+            except Exception as exc:  # noqa: BLE001
+                # A malformed/incompatible 200 response (e.g. a required
+                # field missing or wrongly typed) must be reported as a
+                # failed check, never crash the whole diagnostic and hide
+                # every check after it -- this is exactly the "materially
+                # incompatible deployment" case the diagnostic exists to
+                # detect. See docs/afl-api-v1-contract.md.
+                ctx.record(f"{check.__name__} (malformed response)", False, f"{type(exc).__name__}: {exc}")
     finally:
         client.close()
     ctx.results.extend(check_auth_failures(base_url, transport=transport))
@@ -421,7 +449,11 @@ def _print_report(results: list[CheckResult]) -> bool:
     for r in results:
         tag = "   " if r.required else "opt"
         print(f"[{r.status:4}][{tag}] {r.name.ljust(width)}  {r.detail}")
-        if r.required and r.status == "FAIL":
+        if r.required and r.status in ("FAIL", "SKIP"):
+            # A required check that could only SKIP (e.g. no historical
+            # season, or no match with player rows was found to probe)
+            # means that piece of the contract was never actually
+            # confirmed -- exit 0 must not claim it was validated.
             all_required_passed = False
     passed = sum(1 for r in results if r.status == "PASS")
     failed = sum(1 for r in results if r.status == "FAIL")

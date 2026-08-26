@@ -23,6 +23,11 @@ EXPECTED_TABLES = {
     "score_override",
     "matchup_state",
     "audit_event",
+    "bbbffl_season",
+    "season_rules_version",
+    "competition_stream",
+    "bbbffl_round",
+    "bbbffl_round_afl_reference",
 }
 
 
@@ -82,6 +87,18 @@ def test_migration_is_idempotent(tmp_path):
     migrate(url)
     migrate(url)
     assert DecisionsRepository(connect(url)).get_dnp_map() == {("team_a", "Forward1"): True}
+
+
+def test_upgrade_from_previous_head_preserves_scorer_state(tmp_path):
+    url = _url(tmp_path / "previous-head.db")
+    migrate(url, "0003_audit")
+    repo = DecisionsRepository(connect(url))
+    repo.set_dnp("team_a", "Forward1", True)
+    repo.finalize("signed", {"status": "FINAL"})
+    migrate(url)
+    restored = DecisionsRepository(connect(url))
+    assert restored.get_dnp_map() == {("team_a", "Forward1"): True}
+    assert restored.get_matchup_state().snapshot == {"status": "FINAL"}
 
 
 def test_unrecognized_unversioned_schema_is_refused(tmp_path):

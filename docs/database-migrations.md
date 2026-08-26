@@ -49,6 +49,10 @@ Upgrades retain timestamps, DNP flags, Interchange targets, override values and
 reasons, finalisation note/time, frozen JSON snapshots, and all competition
 keys unchanged.
 
+Revision `0004_season` adds the season-aware parent identity tables without
+backfilling ambiguous prototype `competition_key` values. See
+[`season-competition-schema.md`](season-competition-schema.md).
+
 ## Audit events (revision `0003_audit`)
 
 `0003_audit` adds one domain-neutral `audit_event` table -- the append-only

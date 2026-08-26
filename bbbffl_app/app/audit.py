@@ -313,12 +313,19 @@ class AuditEventRepository:
         if correlation_id is not None:
             clauses.append("correlation_id = ?")
             params.append(correlation_id)
-        query = "SELECT * FROM audit_event"
+        base_query = "SELECT * FROM audit_event"
         if clauses:
-            query += " WHERE " + " AND ".join(clauses)
-        query += " ORDER BY sequence ASC"
+            base_query += " WHERE " + " AND ".join(clauses)
         if limit is not None:
-            query += f" LIMIT {int(limit)}"
+            # A limited read should return the most *recent* matching
+            # events, not get permanently stuck on the oldest `limit` rows
+            # once more than `limit` events exist. Select the newest
+            # `limit` rows first, then re-sort that page back into the
+            # deterministic ascending order every caller of this method
+            # relies on.
+            query = f"SELECT * FROM ({base_query} ORDER BY sequence DESC LIMIT {int(limit)}) AS recent ORDER BY sequence ASC"
+        else:
+            query = base_query + " ORDER BY sequence ASC"
         rows = self.conn.execute(query, tuple(params)).fetchall()
         return [_row_to_event(row) for row in rows]
 

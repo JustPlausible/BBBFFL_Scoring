@@ -25,6 +25,18 @@ first so the event's before/after state is accurate. `slot_dnp` /
 `interchange_assignment` / `score_override` / `matchup_state` remain the
 source of truth for current state; `audit_event` explains how that state was
 reached and is never read back to compute it.
+
+That "read prior value, then write" pattern is only race-free if the read is
+taken under a row lock -- otherwise two concurrent writers to the same row
+(e.g. two overlapping requests toggling the same DNP slot) could both read
+the same stale "before" value and each append an audit event whose
+before/after no longer chains correctly. `_for_update_suffix` appends
+`FOR UPDATE` to those reads on PostgreSQL -- the supported production
+database (see docs/database-migrations.md) -- so the second writer blocks
+until the first commits and then reads its real prior state. SQLite has no
+row-level locking syntax to hold the same guarantee; it remains exposed to
+this race in theory, which is an accepted tradeoff given SQLite's role here
+is local development, hermetic tests and replay, not production.
 """
 
 import json
@@ -50,6 +62,12 @@ GRAND_FINAL_COMPETITION_KEY = "grand_final"
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _for_update_suffix(database) -> str:
+    """`" FOR UPDATE"` on PostgreSQL, `""` on SQLite (which doesn't support
+    the clause at all). See the module docstring for why this matters."""
+    return " FOR UPDATE" if database.engine.dialect.name == "postgresql" else ""
 
 
 def _translate(statement, parameters):
@@ -194,7 +212,8 @@ class DecisionsRepository:
     ) -> None:
         with transaction(self.conn) as conn:
             existing = conn.execute(
-                "SELECT dnp FROM slot_dnp WHERE competition_key = ? AND team_key = ? AND slot = ?",
+                "SELECT dnp FROM slot_dnp WHERE competition_key = ? AND team_key = ? AND slot = ?"
+                + _for_update_suffix(self.conn),
                 (self.competition_key, team_key, slot),
             ).fetchone()
             before_state = {"dnp": bool(existing["dnp"])} if existing is not None else {"dnp": None}
@@ -240,7 +259,7 @@ class DecisionsRepository:
         with transaction(self.conn) as conn:
             existing = conn.execute(
                 "SELECT target_position FROM interchange_assignment "
-                "WHERE competition_key = ? AND team_key = ?",
+                "WHERE competition_key = ? AND team_key = ?" + _for_update_suffix(self.conn),
                 (self.competition_key, team_key),
             ).fetchone()
             before_state = {
@@ -295,7 +314,7 @@ class DecisionsRepository:
         with transaction(self.conn) as conn:
             existing = conn.execute(
                 "SELECT override_score, reason FROM score_override "
-                "WHERE competition_key = ? AND team_key = ? AND position = ?",
+                "WHERE competition_key = ? AND team_key = ? AND position = ?" + _for_update_suffix(self.conn),
                 (self.competition_key, team_key, position),
             ).fetchone()
             before_state = (
@@ -321,6 +340,17 @@ class DecisionsRepository:
                     """,
                     (self.competition_key, team_key, position, override_score, reason, _now()),
                 )
+            # A cleared override (override_score=None) deletes the row, so
+            # get_overrides() will report nothing for it afterwards --
+            # after_state must say the same (None/None), even though the
+            # caller may still have supplied `reason` as an operator note
+            # explaining *why* it was cleared. That note is recorded as the
+            # event's own `reason` below regardless of which branch ran.
+            after_state = (
+                {"override_score": None, "reason": None}
+                if override_score is None
+                else {"override_score": override_score, "reason": reason}
+            )
             append_event(
                 conn,
                 actor=actor,
@@ -330,7 +360,7 @@ class DecisionsRepository:
                 correlation_id=correlation_id,
                 reason=reason,
                 before_state=before_state,
-                after_state={"override_score": override_score, "reason": reason},
+                after_state=after_state,
                 payload={"competition_key": self.competition_key, "team_key": team_key, "position": position},
             )
 
@@ -396,7 +426,7 @@ class DecisionsRepository:
         with transaction(self.conn) as conn:
             existing = conn.execute(
                 "SELECT finalized, finalized_at, finalized_note FROM matchup_state "
-                "WHERE competition_key = ?",
+                "WHERE competition_key = ?" + _for_update_suffix(self.conn),
                 (self.competition_key,),
             ).fetchone()
             before_state = (

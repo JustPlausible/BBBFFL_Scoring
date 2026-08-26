@@ -96,6 +96,25 @@ def test_repeated_override_changes_append_rather_than_update(decisions, audit_ev
     assert events[2].before_state == {"override_score": 55.0, "reason": "revised correction"}
 
 
+def test_clearing_an_override_records_a_null_after_state_even_with_an_explanatory_reason(
+    decisions, audit_events
+):
+    """override_score=None deletes the score_override row -- get_overrides()
+    reports nothing for it afterwards -- so after_state must say the same
+    (None/None), never a residual reason string that would disagree with
+    the actual domain state. The caller's explanatory text is still kept,
+    but as the event's own `reason` (why it was cleared), not as part of
+    after_state."""
+    decisions.set_override("team_a", "Ruck", 42.0, "first correction")
+    decisions.set_override("team_a", "Ruck", None, "clearing because it was a mistake")
+
+    events = audit_events.list_events(entity_type="scoring.override", entity_id="grand_final:team_a:Ruck")
+    clear_event = events[-1]
+    assert clear_event.after_state == {"override_score": None, "reason": None}
+    assert clear_event.reason == "clearing because it was a mistake"
+    assert decisions.get_overrides() == {}
+
+
 # -- Deterministic ordering ---------------------------------------------------
 
 
@@ -109,6 +128,20 @@ def test_events_are_returned_in_deterministic_historical_order(decisions, audit_
     sequences = [e.sequence for e in events]
     assert sequences == sorted(sequences)
     assert len(sequences) == len(set(sequences))
+
+
+def test_limit_keeps_the_most_recent_events_not_the_oldest(decisions, audit_events):
+    """A limited read of a diagnostic surface should stay useful once more
+    events exist than the limit -- it must not get permanently stuck
+    showing only the oldest `limit` rows forever."""
+    for i in range(5):
+        decisions.set_dnp("team_a", "Forward1", i % 2 == 0)
+
+    limited = audit_events.list_events(limit=2)
+    all_events = audit_events.list_events()
+    assert [e.event_id for e in limited] == [e.event_id for e in all_events[-2:]]
+    # Still chronologically ascending within the returned page.
+    assert [e.sequence for e in limited] == sorted(e.sequence for e in limited)
 
 
 # -- Actor/context -------------------------------------------------------------

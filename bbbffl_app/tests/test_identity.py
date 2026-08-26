@@ -3,6 +3,7 @@
 from dataclasses import asdict
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.exc import IntegrityError
 
 from app.audit import ActorContext, AuditEventRepository
@@ -86,3 +87,78 @@ def test_rename_and_creation_events_do_not_audit_private_contact_data(repos):
     events = AuditEventRepository(identities.database).list_events(entity_type="season_entry", entity_id=entry.season_entry_id)
     assert [event.action for event in events] == ["identity.season_entry.created", "identity.team_name.changed"]
     assert "never-in-event@example.test" not in repr(events)
+
+
+@pytest.mark.parametrize(
+    ("operation", "history_table"),
+    [
+        ("rename", "season_entry_team_name_history"),
+        ("transfer", "season_entry_coach_history"),
+    ],
+)
+def test_history_rotation_locks_stable_entry_before_reading_current_history(
+    repos, operation, history_table
+):
+    identities, seasons = repos
+    original = identities.create_coach("Original")
+    replacement = identities.create_coach("Replacement")
+    season = seasons.create_season(2027, "2027")
+    entry = identities.create_entry(
+        season.season_id, "licence", original.coach_id, "First"
+    )
+    statements = []
+
+    def record_statement(_conn, _cursor, statement, _parameters, _context, _many):
+        statements.append(" ".join(statement.lower().split()))
+
+    event.listen(identities.database.engine, "before_cursor_execute", record_statement)
+    try:
+        if operation == "rename":
+            identities.rename_team(entry.season_entry_id, "Second")
+        else:
+            identities.transfer_entry(entry.season_entry_id, replacement.coach_id)
+    finally:
+        event.remove(
+            identities.database.engine, "before_cursor_execute", record_statement
+        )
+
+    entry_lock = next(
+        index
+        for index, statement in enumerate(statements)
+        if statement.startswith("select season_entry_id from season_entry ")
+    )
+    history_read = next(
+        index
+        for index, statement in enumerate(statements)
+        if statement.startswith(f"select * from {history_table} ")
+    )
+    assert entry_lock < history_read
+
+
+def test_serialized_history_rotations_keep_a_current_row(repos):
+    """SQLite cannot reproduce PostgreSQL row locks; sequential operations
+    exercise the state seen by a waiter after the stable entry lock is released.
+    """
+    identities, seasons = repos
+    first = identities.create_coach("First")
+    second = identities.create_coach("Second")
+    third = identities.create_coach("Third")
+    season = seasons.create_season(2027, "2027")
+    entry = identities.create_entry(
+        season.season_id, "licence", first.coach_id, "One", effective_at="1"
+    )
+
+    identities.rename_team(entry.season_entry_id, "Two", effective_at="2")
+    identities.rename_team(entry.season_entry_id, "Three", effective_at="3")
+    identities.transfer_entry(entry.season_entry_id, second.coach_id, effective_at="2")
+    identities.transfer_entry(entry.season_entry_id, third.coach_id, effective_at="3")
+
+    assert [name.team_name for name in identities.list_team_names(entry.season_entry_id)] == [
+        "One",
+        "Two",
+        "Three",
+    ]
+    assert [
+        assignment.coach_id
+        for assignment in identities.list_assignments(entry.season_entry_id)
+    ] == [first.coach_id, second.coach_id, third.coach_id]

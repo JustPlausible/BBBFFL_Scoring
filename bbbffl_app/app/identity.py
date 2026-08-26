@@ -89,7 +89,18 @@ class IdentityRepository:
     def rename_team(self, entry_id, team_name, *, actor=ActorContext.anonymous_operator("admin"), reason=None, effective_at=None):
         at = effective_at or _now()
         with transaction(self.database) as conn:
-            old = conn.execute("SELECT * FROM season_entry_team_name_history WHERE season_entry_id=? AND ended_at IS NULL" + _for_update_suffix(self.database), (entry_id,)).fetchone()
+            entry = conn.execute(
+                "SELECT season_entry_id FROM season_entry WHERE season_entry_id=?"
+                + _for_update_suffix(self.database),
+                (entry_id,),
+            ).fetchone()
+            if not entry:
+                raise KeyError(entry_id)
+            old = conn.execute(
+                "SELECT * FROM season_entry_team_name_history "
+                "WHERE season_entry_id=? AND ended_at IS NULL",
+                (entry_id,),
+            ).fetchone()
             if not old:
                 raise KeyError(entry_id)
             conn.execute("UPDATE season_entry_team_name_history SET ended_at=? WHERE team_name_id=?", (at, old["team_name_id"]))
@@ -101,7 +112,18 @@ class IdentityRepository:
     def transfer_entry(self, entry_id, coach_id, *, actor=ActorContext.anonymous_operator("admin"), reason=None, effective_at=None):
         at = effective_at or _now()
         with transaction(self.database) as conn:
-            old = conn.execute("SELECT * FROM season_entry_coach_history WHERE season_entry_id=? AND ended_at IS NULL" + _for_update_suffix(self.database), (entry_id,)).fetchone()
+            entry = conn.execute(
+                "SELECT season_entry_id FROM season_entry WHERE season_entry_id=?"
+                + _for_update_suffix(self.database),
+                (entry_id,),
+            ).fetchone()
+            if not entry:
+                raise KeyError(entry_id)
+            old = conn.execute(
+                "SELECT * FROM season_entry_coach_history "
+                "WHERE season_entry_id=? AND ended_at IS NULL",
+                (entry_id,),
+            ).fetchone()
             if not old:
                 raise KeyError(entry_id)
             conn.execute("UPDATE season_entry_coach_history SET ended_at=? WHERE assignment_id=?", (at, old["assignment_id"]))

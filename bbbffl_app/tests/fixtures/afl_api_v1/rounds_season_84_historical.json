@@ -1,0 +1,14 @@
+{
+  "rounds": [
+    {
+      "round_id": 1300,
+      "season_id": 84,
+      "round_number": 1,
+      "name": "Round 1",
+      "abbreviation": "R1",
+      "start_time": "2025-03-06T08:00:00Z",
+      "end_time": "2025-03-09T12:00:00Z",
+      "byes": []
+    }
+  ]
+}

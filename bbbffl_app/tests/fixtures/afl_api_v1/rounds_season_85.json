@@ -1,0 +1,36 @@
+{
+  "rounds": [
+    {
+      "round_id": 1400,
+      "season_id": 85,
+      "round_number": 0,
+      "name": "Opening Round",
+      "abbreviation": "OR",
+      "start_time": "2026-03-05T08:00:00Z",
+      "end_time": "2026-03-08T12:00:00Z",
+      "byes": []
+    },
+    {
+      "round_id": 1401,
+      "season_id": 85,
+      "round_number": 1,
+      "name": "Round 1",
+      "abbreviation": "R1",
+      "start_time": "2026-03-12T08:00:00Z",
+      "end_time": "2026-03-15T12:00:00Z",
+      "byes": null
+    },
+    {
+      "round_id": 1412,
+      "season_id": 85,
+      "round_number": 12,
+      "name": "Round 12",
+      "abbreviation": "R12",
+      "start_time": "2026-06-04T08:00:00Z",
+      "end_time": "2026-06-07T12:00:00Z",
+      "byes": [
+        {"team_id": 2, "name": "Western Bulldogs", "abbreviation": "WB"}
+      ]
+    }
+  ]
+}

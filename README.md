@@ -36,3 +36,13 @@ inspect or recover the historical Apps Script projects. See
 PostgreSQL is the supported production database; SQLite is supported for local
 development, tests, replay, and existing prototype upgrades. Alembic owns
 schema evolution. See [`docs/database-migrations.md`](docs/database-migrations.md).
+
+## afl-api `/api/v1` contract
+
+BBBFFL consumes only the public, versioned `afl-api` `/api/v1` contract, never
+its internal database, CFS/Champion Data directly, or the deployment
+hostname/credentials as a compatibility identifier. The endpoint/field
+inventory, semantic contract (identifiers, match lifecycle, stat finality,
+timing, player membership), known upstream gaps, and compatibility/pinning
+policy are documented in
+[`docs/afl-api-v1-contract.md`](docs/afl-api-v1-contract.md).

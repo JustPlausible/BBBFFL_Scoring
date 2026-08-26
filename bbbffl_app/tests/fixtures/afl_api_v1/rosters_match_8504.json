@@ -1,0 +1,57 @@
+{
+  "match": {
+    "match_id": 8504,
+    "match_provider_id": "CD_M20260613001",
+    "round_id": 1412,
+    "season_id": 85,
+    "status": "CONCLUDED"
+  },
+  "metadata": {
+    "match_status_at_observation": "CONFIRMED",
+    "source_updated_at": "2026-06-06T02:30:00Z"
+  },
+  "home_team": {
+    "team": {"team_id": 3, "name": "Collingwood"},
+    "champion_data_team_id": "CD_T3",
+    "team_status": "CONFIRMED",
+    "selections": [
+      {
+        "player": {
+          "champion_data_player_id": "CD_I1023261",
+          "canonical_player_id": 584,
+          "display_name": "Nick Daicos"
+        },
+        "position": "MIDFIELD",
+        "jumper_number": 35,
+        "captain": true
+      },
+      {
+        "player": {
+          "champion_data_player_id": "CD_I1099999",
+          "canonical_player_id": null,
+          "display_name": null
+        },
+        "position": "INTERCHANGE",
+        "jumper_number": 41,
+        "captain": null
+      }
+    ],
+    "context": {
+      "ins": [],
+      "outs": [
+        {
+          "player": {
+            "champion_data_player_id": "CD_I1088123",
+            "canonical_player_id": 6612,
+            "display_name": "Late Withdrawal Example"
+          },
+          "reason": "Omitted"
+        }
+      ],
+      "late_changes": [],
+      "club_debuts": [],
+      "milestones": []
+    }
+  },
+  "away_team": null
+}

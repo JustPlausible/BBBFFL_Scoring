@@ -1,0 +1,11 @@
+{
+  "match_id": 8504,
+  "round_id": 1412,
+  "season_id": 85,
+  "status": "CONCLUDED",
+  "start_time_utc": "2026-06-06T03:10:00Z",
+  "home_team": {"team_id": 3, "name": "Collingwood"},
+  "away_team": {"team_id": 11, "name": "St Kilda"},
+  "score_home": 101,
+  "score_away": 64
+}

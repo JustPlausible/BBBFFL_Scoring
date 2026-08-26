@@ -1,0 +1,48 @@
+{
+  "matches": [
+    {
+      "match_id": 8501,
+      "round_id": 1412,
+      "season_id": 85,
+      "status": "UPCOMING",
+      "start_time_utc": "2026-06-04T08:40:00Z",
+      "home_team": {"team_id": 3, "name": "Collingwood"},
+      "away_team": {"team_id": 15, "name": "Richmond"},
+      "score_home": null,
+      "score_away": null
+    },
+    {
+      "match_id": 8502,
+      "round_id": 1412,
+      "season_id": 85,
+      "status": "LIVE",
+      "start_time_utc": "2026-06-05T08:40:00Z",
+      "home_team": {"team_id": 11, "name": "St Kilda"},
+      "away_team": {"team_id": 4, "name": "Gold Coast SUNS"},
+      "score_home": 12,
+      "score_away": 6
+    },
+    {
+      "match_id": 8503,
+      "round_id": 1412,
+      "season_id": 85,
+      "status": "POSTGAME",
+      "start_time_utc": "2026-06-06T05:20:00Z",
+      "home_team": {"team_id": 1, "name": "Adelaide"},
+      "away_team": {"team_id": 9, "name": "Melbourne"},
+      "score_home": 88,
+      "score_away": 72
+    },
+    {
+      "match_id": 8504,
+      "round_id": 1412,
+      "season_id": 85,
+      "status": "CONCLUDED",
+      "start_time_utc": "2026-06-06T03:10:00Z",
+      "home_team": {"team_id": 3, "name": "Collingwood"},
+      "away_team": {"team_id": 11, "name": "St Kilda"},
+      "score_home": 101,
+      "score_away": 64
+    }
+  ]
+}

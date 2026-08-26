@@ -1,0 +1,8 @@
+{
+  "canonical_player_id": 584,
+  "seasons": [
+    {"season_id": 86, "year": 2027, "name": "2027", "team": {"team_id": 11, "name": "Essendon"}},
+    {"season_id": 85, "year": 2026, "name": "2026", "team": {"team_id": 3, "name": "Collingwood"}},
+    {"season_id": 84, "year": 2025, "name": "2025", "team": {"team_id": 3, "name": "Collingwood"}}
+  ]
+}

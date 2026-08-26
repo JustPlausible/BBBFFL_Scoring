@@ -1,0 +1,24 @@
+{
+  "injuries": [
+    {
+      "canonical_player_id": 7734,
+      "player": {"display_name": "R. Ruckman"},
+      "team": {"team_id": 11, "name": "St Kilda"},
+      "injury": "Hamstring",
+      "estimated_return": "Round 14",
+      "source_updated": "Updated: Tue 2 Jun",
+      "observed_at": "2026-06-02T04:00:00Z",
+      "current": true
+    },
+    {
+      "canonical_player_id": 9021,
+      "player": {"display_name": null},
+      "team": null,
+      "injury": "Ankle",
+      "estimated_return": "Test",
+      "source_updated": null,
+      "observed_at": "2026-06-02T04:00:00Z",
+      "current": true
+    }
+  ]
+}

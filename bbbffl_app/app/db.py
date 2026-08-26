@@ -40,9 +40,13 @@ is local development, hermetic tests and replay, not production.
 """
 
 import json
+import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
 
 from app.audit import (
     DNP_CHANGED,
@@ -58,6 +62,21 @@ from app.audit import (
 )
 
 GRAND_FINAL_COMPETITION_KEY = "grand_final"
+
+
+@event.listens_for(Engine, "connect")
+def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
+    """Enable SQLite's opt-in referential-integrity enforcement centrally.
+
+    The listener is registered on SQLAlchemy's Engine class, so it covers
+    application/replay connections, Alembic's engine, and hermetic test engines
+    rather than relying on each repository to remember a PRAGMA.
+    PostgreSQL connections are deliberately untouched.
+    """
+    if isinstance(dbapi_connection, sqlite3.Connection):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys = ON")
+        cursor.close()
 
 
 def _now() -> str:

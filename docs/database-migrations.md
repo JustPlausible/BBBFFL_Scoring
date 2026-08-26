@@ -18,6 +18,10 @@ explicit-SQL repository is deliberately not converted to an ORM: it remains
 the narrow boundary for DNP, Interchange, overrides, finalisation, frozen
 snapshots, and competition isolation. `migrations/versions` is the sole schema
 authority. Startup invokes the same migrator as a convenience but owns no DDL.
+The shared SQLAlchemy engine boundary enables `PRAGMA foreign_keys = ON` on
+every SQLite DB-API connection (including Alembic, replay and test engines);
+PostgreSQL connections are unaffected. Repositories therefore complement,
+rather than replace, database-enforced referential integrity.
 
 ## Operator commands
 

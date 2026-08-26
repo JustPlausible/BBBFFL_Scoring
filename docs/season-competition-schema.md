@@ -7,12 +7,25 @@ and optimistic version. Lifecycle only moves `setup -> active -> completed`;
 completion is frozen and has no reopening shortcut. Transitions are privileged
 writes appended through the shared audit-event boundary.
 
-`season_rules_version` is append-only at the repository boundary. Its stable
-UUID, season-scoped logical key and positive version number allow a later result
-to retain its exact interpretation. A changed rule is a new row, never an edit.
-Creating one is audited. `competition_stream` selects an explicit rules version
-and has a stream key unique only within its season. Its type identifies ordinary,
-finals, SuperScore, replay or test context without implementing their mechanics.
+`season_rules_version` is append-only at the repository boundary and is owned by
+one season. It represents that season's authoritative rules and configuration
+context, not a globally reusable scoring-formula identity: annual squad size,
+fees, lockouts, finals/SuperScore configuration, mappings, prizes and notes may
+all differ even when scoring formulas do not. Therefore unchanged formulas in
+2026 and 2027 still receive distinct persisted rules identities, and historical
+references stay attached to the immutable season-owned version that governed
+them. Later scoring package 26 will consume this context rather than interpreting
+its IDs as global formula IDs. Its stable UUID, season-scoped logical key and
+positive version number allow a later result to retain its exact interpretation.
+A changed rule is a new row, never an edit, and creating one is audited.
+
+`competition_stream` selects an explicit same-season rules version and has a
+stream key unique only within its season. Its constrained type identifies only
+sporting contexts: ordinary competition, finals, or SuperScore. Replay/test are
+execution or data provenance concerns, not sporting stream types. Thus a
+reconstructed season contains ordinary and SuperScore streams just as the
+season being reconstructed did; isolation comes from its distinct `season_id`,
+not by misclassifying those streams as `replay`.
 
 `bbbffl_round` belongs to a competition stream and has a stable UUID plus a
 stream-scoped key, label and sequence. `bbbffl_round_afl_reference` maps it to

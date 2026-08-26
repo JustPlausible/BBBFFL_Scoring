@@ -7,6 +7,10 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect
 
+# Importing the database boundary registers SQLite's per-connection foreign-key
+# enforcement before Alembic or legacy-schema inspection opens an engine.
+from app import db as _database_boundary  # noqa: F401
+
 HEAD = "0004_season"
 TABLES = {"slot_dnp", "interchange_assignment", "score_override", "matchup_state"}
 LEGACY_COLUMNS = {

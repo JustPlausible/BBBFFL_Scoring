@@ -28,6 +28,10 @@ EXPECTED_TABLES = {
     "competition_stream",
     "bbbffl_round",
     "bbbffl_round_afl_reference",
+    "coach",
+    "season_entry",
+    "season_entry_coach_history",
+    "season_entry_team_name_history",
 }
 
 
@@ -104,6 +108,16 @@ def test_upgrade_from_previous_head_preserves_scorer_state(tmp_path):
     assert after_migration.snapshot["status"] == "FINAL"
     assert after_migration.snapshot["finalized_note"] == "signed"
     assert after_migration.snapshot["finalized_at"]
+
+
+def test_upgrade_from_season_head_and_empty_identity_downgrade(tmp_path):
+    url = _url(tmp_path / "identity-upgrade.db")
+    migrate(url, "0004_season")
+    migrate(url)
+    engine = create_engine(url)
+    assert "season_entry" in set(inspect(engine).get_table_names())
+    downgrade(url, "0004_season")
+    assert "season_entry" not in set(inspect(create_engine(url)).get_table_names())
 
 
 def test_unrecognized_unversioned_schema_is_refused(tmp_path):

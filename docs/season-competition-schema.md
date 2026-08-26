@@ -51,3 +51,25 @@ slice; until then this conspicuous boundary avoids silently rewriting history.
 Fixtures, entries/ownership, detailed exceptional mapping rules, results,
 ladders/finals, SuperScore selection history and scoring-rule payloads remain
 deferred to their roadmap packages.
+
+## Coach and season-entry identity
+
+Private human identity is stored in `coach`. Its UUID is stable when names or
+contact details change and is deliberately unrelated to AFL/provider identity.
+Contact/profile columns never appear in the public entry projection.
+
+`season_entry` is a UUID-backed competition licence in exactly one
+`bbbffl_season`. The human occupying it is recorded in temporal
+`season_entry_coach_history`; a replacement closes the current interval and
+adds another rather than changing an old row. Likewise,
+`season_entry_team_name_history` retains every public rename interval. Partial
+unique indexes permit only one open coach assignment and one open public name
+per entry. `(season_id, licence_key)` is unique, while licence keys may be
+reused in another season, so replay and live data cannot collide.
+
+Later squad, draft, fixture, lineup, result, ladder, finals and SuperScore
+tables should ordinarily foreign-key `season_entry.season_entry_id`. They must
+not key records by `coach`, email, display name, team name, AFL player identity,
+or a provider identifier. Scorer-approved entry transfers and renames append
+events through the existing audit boundary with actor, reason, and before/after
+attribution; no authentication capability is implied by the coach table.

@@ -132,6 +132,26 @@ def test_full_scorer_workflow(client):
     )
     assert r.status_code == 423
 
+    r = client.get("/api/admin/audit-events", headers=ADMIN_HEADERS)
+    assert r.status_code == 200
+    actions = [event["action"] for event in r.json()]
+    # DNP, interchange, override and finalize each recorded their own event
+    # through the real API surface -- the rejected finalize (409) and the
+    # rejected post-finalize DNP (423) recorded nothing, since neither
+    # mutation was ever attempted.
+    assert actions == [
+        "scoring.dnp.changed",
+        "scoring.interchange.changed",
+        "scoring.override.changed",
+        "scoring.result.finalized",
+    ]
+    assert all(event["actor_type"] == "anonymous_operator" for event in r.json())
+
+
+def test_audit_events_endpoint_requires_admin_token(client):
+    assert client.get("/api/admin/audit-events").status_code == 401
+    assert client.get("/api/admin/audit-events", headers=ADMIN_HEADERS).status_code == 200
+
 
 def test_public_state_exposes_starting_player_identity_for_a_dnp_position(client):
     """The public page must keep showing the coach's original selection for

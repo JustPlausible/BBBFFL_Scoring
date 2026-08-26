@@ -5,6 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.afl_client import AflApiClient, AflApiError
+from app.audit import AuditEventRepository
 from app.config import get_settings
 from app.db import DecisionsRepository, connect
 from app.migrations import migrate
@@ -45,6 +46,7 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.database = database
     app.state.decisions = DecisionsRepository(database)
+    app.state.audit_events = AuditEventRepository(database)
     app.state.afl_client = afl_client
     app.state.identity_cache = PlayerIdentityCache(afl_client)
     app.state.teams = teams

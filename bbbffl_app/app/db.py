@@ -18,6 +18,25 @@ uses a key derived from season/round (see superscore.py), which also means
 each SuperScore round's decisions and result remain distinct and retained
 independently for future historical reporting -- no separate SuperScore
 table is required.
+
+Every mutation below also appends an immutable audit event (see app/audit.py)
+inside the same transaction as its domain write, reading the prior value
+first so the event's before/after state is accurate. `slot_dnp` /
+`interchange_assignment` / `score_override` / `matchup_state` remain the
+source of truth for current state; `audit_event` explains how that state was
+reached and is never read back to compute it.
+
+That "read prior value, then write" pattern is only race-free if the read is
+taken under a row lock -- otherwise two concurrent writers to the same row
+(e.g. two overlapping requests toggling the same DNP slot) could both read
+the same stale "before" value and each append an audit event whose
+before/after no longer chains correctly. `_for_update_suffix` appends
+`FOR UPDATE` to those reads on PostgreSQL -- the supported production
+database (see docs/database-migrations.md) -- so the second writer blocks
+until the first commits and then reads its real prior state. SQLite has no
+row-level locking syntax to hold the same guarantee; it remains exposed to
+this race in theory, which is an accepted tradeoff given SQLite's role here
+is local development, hermetic tests and replay, not production.
 """
 
 import json
@@ -25,11 +44,30 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from app.audit import (
+    DNP_CHANGED,
+    ENTITY_TYPE_INTERCHANGE,
+    ENTITY_TYPE_MATCHUP,
+    ENTITY_TYPE_OVERRIDE,
+    ENTITY_TYPE_SLOT,
+    INTERCHANGE_CHANGED,
+    OVERRIDE_CHANGED,
+    RESULT_FINALIZED,
+    ActorContext,
+    append_event,
+)
+
 GRAND_FINAL_COMPETITION_KEY = "grand_final"
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _for_update_suffix(database) -> str:
+    """`" FOR UPDATE"` on PostgreSQL, `""` on SQLite (which doesn't support
+    the clause at all). See the module docstring for why this matters."""
+    return " FOR UPDATE" if database.engine.dialect.name == "postgresql" else ""
 
 
 def _translate(statement, parameters):
@@ -162,8 +200,23 @@ class DecisionsRepository:
         self.competition_key = competition_key
 
     # -- DNP -----------------------------------------------------------
-    def set_dnp(self, team_key: str, slot: str, dnp: bool) -> None:
+    def set_dnp(
+        self,
+        team_key: str,
+        slot: str,
+        dnp: bool,
+        *,
+        actor: ActorContext = ActorContext.anonymous_operator(),
+        reason: str | None = None,
+        correlation_id: str | None = None,
+    ) -> None:
         with transaction(self.conn) as conn:
+            existing = conn.execute(
+                "SELECT dnp FROM slot_dnp WHERE competition_key = ? AND team_key = ? AND slot = ?"
+                + _for_update_suffix(self.conn),
+                (self.competition_key, team_key, slot),
+            ).fetchone()
+            before_state = {"dnp": bool(existing["dnp"])} if existing is not None else {"dnp": None}
             conn.execute(
                 """
                 INSERT INTO slot_dnp (competition_key, team_key, slot, dnp, updated_at)
@@ -172,6 +225,18 @@ class DecisionsRepository:
                     updated_at = excluded.updated_at
                 """,
                 (self.competition_key, team_key, slot, int(dnp), _now()),
+            )
+            append_event(
+                conn,
+                actor=actor,
+                action=DNP_CHANGED,
+                entity_type=ENTITY_TYPE_SLOT,
+                entity_id=f"{self.competition_key}:{team_key}:{slot}",
+                correlation_id=correlation_id,
+                reason=reason,
+                before_state=before_state,
+                after_state={"dnp": dnp},
+                payload={"competition_key": self.competition_key, "team_key": team_key, "slot": slot},
             )
 
     def get_dnp_map(self) -> dict[tuple[str, str], bool]:
@@ -182,8 +247,24 @@ class DecisionsRepository:
         return {(row["team_key"], row["slot"]): bool(row["dnp"]) for row in rows}
 
     # -- Interchange -----------------------------------------------------
-    def set_interchange_assignment(self, team_key: str, target_position: str | None) -> None:
+    def set_interchange_assignment(
+        self,
+        team_key: str,
+        target_position: str | None,
+        *,
+        actor: ActorContext = ActorContext.anonymous_operator(),
+        reason: str | None = None,
+        correlation_id: str | None = None,
+    ) -> None:
         with transaction(self.conn) as conn:
+            existing = conn.execute(
+                "SELECT target_position FROM interchange_assignment "
+                "WHERE competition_key = ? AND team_key = ?" + _for_update_suffix(self.conn),
+                (self.competition_key, team_key),
+            ).fetchone()
+            before_state = {
+                "target_position": existing["target_position"] if existing is not None else None
+            }
             conn.execute(
                 """
                 INSERT INTO interchange_assignment (competition_key, team_key, target_position, updated_at)
@@ -193,6 +274,18 @@ class DecisionsRepository:
                     updated_at = excluded.updated_at
                 """,
                 (self.competition_key, team_key, target_position, _now()),
+            )
+            append_event(
+                conn,
+                actor=actor,
+                action=INTERCHANGE_CHANGED,
+                entity_type=ENTITY_TYPE_INTERCHANGE,
+                entity_id=f"{self.competition_key}:{team_key}",
+                correlation_id=correlation_id,
+                reason=reason,
+                before_state=before_state,
+                after_state={"target_position": target_position},
+                payload={"competition_key": self.competition_key, "team_key": team_key},
             )
 
     def get_interchange_assignments(self) -> dict[str, InterchangeAssignment]:
@@ -209,9 +302,26 @@ class DecisionsRepository:
 
     # -- Overrides -------------------------------------------------------
     def set_override(
-        self, team_key: str, position: str, override_score: float | None, reason: str | None
+        self,
+        team_key: str,
+        position: str,
+        override_score: float | None,
+        reason: str | None,
+        *,
+        actor: ActorContext = ActorContext.anonymous_operator(),
+        correlation_id: str | None = None,
     ) -> None:
         with transaction(self.conn) as conn:
+            existing = conn.execute(
+                "SELECT override_score, reason FROM score_override "
+                "WHERE competition_key = ? AND team_key = ? AND position = ?" + _for_update_suffix(self.conn),
+                (self.competition_key, team_key, position),
+            ).fetchone()
+            before_state = (
+                {"override_score": existing["override_score"], "reason": existing["reason"]}
+                if existing is not None
+                else {"override_score": None, "reason": None}
+            )
             if override_score is None:
                 conn.execute(
                     "DELETE FROM score_override WHERE competition_key = ? AND team_key = ? AND position = ?",
@@ -230,6 +340,29 @@ class DecisionsRepository:
                     """,
                     (self.competition_key, team_key, position, override_score, reason, _now()),
                 )
+            # A cleared override (override_score=None) deletes the row, so
+            # get_overrides() will report nothing for it afterwards --
+            # after_state must say the same (None/None), even though the
+            # caller may still have supplied `reason` as an operator note
+            # explaining *why* it was cleared. That note is recorded as the
+            # event's own `reason` below regardless of which branch ran.
+            after_state = (
+                {"override_score": None, "reason": None}
+                if override_score is None
+                else {"override_score": override_score, "reason": reason}
+            )
+            append_event(
+                conn,
+                actor=actor,
+                action=OVERRIDE_CHANGED,
+                entity_type=ENTITY_TYPE_OVERRIDE,
+                entity_id=f"{self.competition_key}:{team_key}:{position}",
+                correlation_id=correlation_id,
+                reason=reason,
+                before_state=before_state,
+                after_state=after_state,
+                payload={"competition_key": self.competition_key, "team_key": team_key, "position": position},
+            )
 
     def get_overrides(self) -> dict[tuple[str, str], ScoreOverride]:
         rows = self.conn.execute(
@@ -266,7 +399,14 @@ class DecisionsRepository:
             snapshot=snapshot,
         )
 
-    def finalize(self, note: str | None, snapshot: dict | None = None) -> None:
+    def finalize(
+        self,
+        note: str | None,
+        snapshot: dict | None = None,
+        *,
+        actor: ActorContext = ActorContext.anonymous_operator(),
+        correlation_id: str | None = None,
+    ) -> None:
         """Lock this competition instance and, when a snapshot is supplied,
         freeze the official result as it stood at sign-off time. Once
         finalized with a snapshot, later reads are served from this frozen
@@ -284,6 +424,20 @@ class DecisionsRepository:
             snapshot["finalized_note"] = note
             stored_snapshot = json.dumps(snapshot)
         with transaction(self.conn) as conn:
+            existing = conn.execute(
+                "SELECT finalized, finalized_at, finalized_note FROM matchup_state "
+                "WHERE competition_key = ?" + _for_update_suffix(self.conn),
+                (self.competition_key,),
+            ).fetchone()
+            before_state = (
+                {
+                    "finalized": bool(existing["finalized"]),
+                    "finalized_at": existing["finalized_at"],
+                    "finalized_note": existing["finalized_note"],
+                }
+                if existing is not None
+                else {"finalized": False, "finalized_at": None, "finalized_note": None}
+            )
             conn.execute(
                 """
                 INSERT INTO matchup_state
@@ -296,4 +450,25 @@ class DecisionsRepository:
                     finalized_snapshot = excluded.finalized_snapshot
                 """,
                 (self.competition_key, now, note, stored_snapshot),
+            )
+            # A compact summary, not the full snapshot -- the frozen snapshot
+            # itself already lives in matchup_state.finalized_snapshot;
+            # entity_version points to it rather than duplicating it here.
+            team_scores = (
+                {team["team_key"]: team["total_score"] for team in snapshot.get("teams", [])}
+                if snapshot is not None
+                else None
+            )
+            append_event(
+                conn,
+                actor=actor,
+                action=RESULT_FINALIZED,
+                entity_type=ENTITY_TYPE_MATCHUP,
+                entity_id=self.competition_key,
+                correlation_id=correlation_id,
+                reason=note,
+                before_state=before_state,
+                after_state={"finalized": True, "finalized_at": now, "finalized_note": note, "team_scores": team_scores},
+                entity_version=now,
+                payload={"competition_key": self.competition_key, "has_snapshot": snapshot is not None},
             )

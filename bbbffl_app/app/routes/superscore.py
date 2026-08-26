@@ -20,7 +20,15 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from app.config import BASE_DIR
-from app.routes.admin import DnpRequest, FinalizeRequest, InterchangeRequest, OverrideRequest, require_admin
+from app.routes.admin import (
+    ADMIN_ACTOR,
+    SCORER_ACTOR,
+    DnpRequest,
+    FinalizeRequest,
+    InterchangeRequest,
+    OverrideRequest,
+    require_admin,
+)
 from app.scoring import ROSTER_SLOTS, SCORABLE_POSITIONS
 from app.service import build_superscore_state, get_superscore_view
 from app.superscore import superscore_round_label
@@ -153,7 +161,9 @@ def set_superscore_dnp(payload: DnpRequest, request: Request):
     _ensure_valid_team(request, payload.team_key)
     if payload.slot not in ROSTER_SLOTS:
         raise HTTPException(status_code=400, detail=f"Unknown slot: {payload.slot}")
-    request.app.state.superscore_decisions.set_dnp(payload.team_key, payload.slot, payload.dnp)
+    request.app.state.superscore_decisions.set_dnp(
+        payload.team_key, payload.slot, payload.dnp, actor=SCORER_ACTOR
+    )
     return _current_state(request)
 
 
@@ -169,7 +179,7 @@ def set_superscore_interchange(payload: InterchangeRequest, request: Request):
             status_code=400, detail=f"Invalid target_position: {payload.target_position}"
         )
     request.app.state.superscore_decisions.set_interchange_assignment(
-        payload.team_key, payload.target_position
+        payload.team_key, payload.target_position, actor=SCORER_ACTOR
     )
     return _current_state(request)
 
@@ -183,7 +193,7 @@ def set_superscore_override(payload: OverrideRequest, request: Request):
     if payload.position not in SCORABLE_POSITIONS:
         raise HTTPException(status_code=400, detail=f"Invalid position: {payload.position}")
     request.app.state.superscore_decisions.set_override(
-        payload.team_key, payload.position, payload.override_score, payload.reason
+        payload.team_key, payload.position, payload.override_score, payload.reason, actor=SCORER_ACTOR
     )
     return _current_state(request)
 
@@ -211,7 +221,7 @@ def finalize_superscore(payload: FinalizeRequest, request: Request):
             ),
         )
     snapshot = dataclasses.asdict(result)
-    state.superscore_decisions.finalize(payload.note, snapshot)
+    state.superscore_decisions.finalize(payload.note, snapshot, actor=ADMIN_ACTOR)
     return _current_state(request)
 
 

@@ -7,7 +7,7 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect
 
-HEAD = "0002_competition"
+HEAD = "0003_audit"
 TABLES = {"slot_dnp", "interchange_assignment", "score_override", "matchup_state"}
 LEGACY_COLUMNS = {
     "slot_dnp": {"team_key", "slot", "dnp", "updated_at"},
@@ -61,7 +61,11 @@ def _validate_legacy(inspector) -> str | None:
             and primary_keys == LEGACY_PRIMARY_KEYS):
         return "0001_prototype"
     if shapes == CURRENT_COLUMNS and primary_keys == CURRENT_PRIMARY_KEYS:
-        return HEAD
+        # This is the 0002 shape specifically (four decision tables, no
+        # audit_event yet) -- stamp at that revision, not the dynamic HEAD,
+        # so the upgrade below still runs any newer revisions (e.g. 0003) on
+        # top of it instead of skipping them.
+        return "0002_competition"
     details = ", ".join(
         f"{table} columns={sorted(columns)} pk={primary_keys[table]}"
         for table, columns in sorted(shapes.items())

@@ -71,16 +71,30 @@ jobs:
           cache: pip
           cache-dependency-path: bbbffl_app/requirements.txt
       - run: pip install -r requirements.txt
-      - name: Upgrade twice and exercise scorer persistence
+      - name: Upgrade twice and exercise scorer persistence and audit boundary
         run: |
           python -m app.migrations upgrade
           python -m app.migrations upgrade
           python - <<'PY'
           import os
           from app.db import DecisionsRepository, connect
+          from app.audit import ActorContext, AuditEventRepository
+          from sqlalchemy.exc import IntegrityError
+
           connection = connect(os.environ["BBBFFL_DATABASE_URL"])
           repository = DecisionsRepository(connection)
-          repository.set_dnp("ci-team", "Forward1", True)
+          repository.set_dnp("ci-team", "Forward1", True, actor=ActorContext.anonymous_operator(role="scorer"))
           assert repository.get_dnp_map() == {("ci-team", "Forward1"): True}
+
+          events = AuditEventRepository(connection).list_events(entity_type="scoring.slot")
+          assert len(events) == 1 and events[0].after_state == {"dnp": True}
+
+          try:
+              connection.execute(
+                  "UPDATE audit_event SET reason = 'tampered' WHERE event_id = ?", (events[0].event_id,)
+              )
+              raise SystemExit("audit_event accepted an UPDATE on PostgreSQL -- append-only trigger regressed")
+          except IntegrityError:
+              pass
           connection.close()
           PY

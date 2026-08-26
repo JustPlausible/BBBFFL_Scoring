@@ -260,6 +260,19 @@ nested `home_team`/`away_team`/`current_team` team objects (matched on
 parses these exact shapes. `afl_client.py` remains the single file to
 adjust if a field ever drifts.
 
+The full inventory of every `/api/v1` endpoint/field BBBFFL currently
+depends on or is committed to depend on for the 2027 roadmap, the identifier/
+lifecycle/finality/timing/membership semantics BBBFFL relies on, known
+upstream gaps, and the compatibility/pinning policy are documented in
+[`../docs/afl-api-v1-contract.md`](../docs/afl-api-v1-contract.md)
+(issue #18 / roadmap package 04). Deterministic contract fixtures live in
+`tests/fixtures/afl_api_v1/` (see that directory's `PROVENANCE.md`) and are
+proven by `tests/test_afl_contract_v1.py`, run hermetically with every
+`pytest` invocation. An opt-in, network-using, credential-free-output
+diagnostic that validates a real deployment is in
+`scripts/afl_contract_diagnostic.py` — see the contract report for how to
+run it; it is never part of CI or plain `pytest`.
+
 ## Remaining known assumptions / blockers
 
 1. `data/grand_final_teams.json` currently contains **placeholder**
@@ -267,13 +280,20 @@ adjust if a field ever drifts.
    coach-declared selection (and real team names) before Grand Final
    weekend. Same for `data/superscore_teams.example.json` if/when
    SuperScore is enabled for a round.
-2. No authentication scheme for afl-api was confirmed beyond an optional
-   `x-api-key`-style header (`AFL_API_KEY`); adjust `afl_client.py` if the
-   real deployment uses something else (e.g. bearer token).
+2. ~~No authentication scheme for afl-api was confirmed beyond an optional
+   `x-api-key`-style header~~ — **confirmed** against afl-api's own
+   `auth.py`/`docs/api_v1_*.md`: the `x-api-key` header (`AFL_API_KEY`) is
+   correct and is the only supported scheme in v1. See
+   [`../docs/afl-api-v1-contract.md`](../docs/afl-api-v1-contract.md) §1.7.
 3. The admin interface is gated by a single shared `BBBFFL_ADMIN_TOKEN`
    header, not per-user auth -- adequate for one trusted scorer on a
    private home-server network for one weekend, not a general access
    control model.
+4. Live validation of `docs/afl-api-v1-contract.md`'s fixtures/diagnostic
+   against the actual deployed dev instance is outstanding (blocked by this
+   development environment's network egress policy when issue #18 was
+   done, not a design gap) — see that report's "Live validation status"
+   section for the required follow-up before roadmap packages 08/32.
 
 ## Database migrations
 

@@ -1,0 +1,49 @@
+{
+  "match": {
+    "match_id": 8504,
+    "match_provider_id": "CD_M20260613001",
+    "round_id": 1412,
+    "season_id": 85,
+    "status": "CONCLUDED"
+  },
+  "lifecycle": {"finality": "final"},
+  "metadata": {"source_updated_at": "2026-06-06T05:10:00Z"},
+  "players": [
+    {
+      "champion_data_player_id": "CD_I1023261",
+      "canonical_player_id": 584,
+      "afl_player_id": 5501,
+      "display_name": "Nick Daicos",
+      "side": "home",
+      "team_id": 3,
+      "stats": {
+        "goals": 3, "behinds": 1, "kicks": 21, "handballs": 12,
+        "disposals": 33, "marks": 9, "tackles": 4, "hitouts": 0
+      }
+    },
+    {
+      "champion_data_player_id": "CD_I1004321",
+      "canonical_player_id": 4821,
+      "afl_player_id": 12345,
+      "display_name": "J. Smith",
+      "side": "away",
+      "team_id": 11,
+      "stats": {
+        "goals": 0, "behinds": 0, "kicks": 8, "handballs": 6,
+        "disposals": 14, "marks": 3, "tackles": 6, "hitouts": 0
+      }
+    },
+    {
+      "champion_data_player_id": "CD_I1077412",
+      "canonical_player_id": 7734,
+      "afl_player_id": 20981,
+      "display_name": "R. Ruckman",
+      "side": "away",
+      "team_id": 11,
+      "stats": {
+        "goals": 0, "behinds": 0, "kicks": 5, "handballs": 2,
+        "disposals": 7, "marks": 4, "tackles": 1, "hitouts": 31
+      }
+    }
+  ]
+}

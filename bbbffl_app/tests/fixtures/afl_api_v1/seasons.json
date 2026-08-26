@@ -1,0 +1,18 @@
+{
+  "seasons": [
+    {
+      "season_id": 85,
+      "year": 2026,
+      "name": "2026 Toyota AFL Premiership",
+      "is_current": true,
+      "current_round_number": 12
+    },
+    {
+      "season_id": 84,
+      "year": 2025,
+      "name": "2025 Toyota AFL Premiership",
+      "is_current": false,
+      "current_round_number": null
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "player": {
+    "canonical_player_id": 396,
+    "display_name": "Josh Daicos",
+    "current_team": {"team_id": 3, "name": "Collingwood"},
+    "identifiers": {"afl_player_id": 1321, "champion_data_player_id": "CD_I1005054"}
+  }
+}

@@ -9,6 +9,11 @@ inspection.
 If BBBFFL_ADMIN_TOKEN is set, every endpoint here requires a matching
 `X-Admin-Token` header. This is a lightweight gate suitable for a single
 trusted scorer on a home-server prototype, not general-purpose auth.
+
+Every mutation below also records an immutable audit event in the same
+transaction as its domain write (see app/audit.py and
+docs/audit-events.md). GET /audit-events is a tiny read-only diagnostic
+surface over that trail -- not an audit UI.
 """
 
 import dataclasses
@@ -18,10 +23,20 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
+from app.audit import ActorContext
 from app.config import BASE_DIR
 from app.scoring import ROSTER_SLOTS, SCORABLE_POSITIONS
 from app.service import build_matchup_state, get_matchup_view
 from app.superscore import superscore_round_label
+
+# The admin surface today is one shared token, not a per-person login (see
+# require_admin below and roadmap package 19/20). Every mutation is
+# attributed to this well-defined, non-impersonating actor -- see
+# app/audit.py's module docstring for why "anonymous_operator" rather than
+# inventing a fake authenticated identity. actor_role still distinguishes
+# ordinary scorer duties from the privileged finalisation action.
+SCORER_ACTOR = ActorContext.anonymous_operator(role="scorer")
+ADMIN_ACTOR = ActorContext.anonymous_operator(role="admin")
 
 router = APIRouter(prefix="/api/admin")
 page_router = APIRouter()
@@ -88,7 +103,7 @@ def set_dnp(payload: DnpRequest, request: Request):
     _ensure_valid_team(request, payload.team_key)
     if payload.slot not in ROSTER_SLOTS:
         raise HTTPException(status_code=400, detail=f"Unknown slot: {payload.slot}")
-    request.app.state.decisions.set_dnp(payload.team_key, payload.slot, payload.dnp)
+    request.app.state.decisions.set_dnp(payload.team_key, payload.slot, payload.dnp, actor=SCORER_ACTOR)
     return _current_state(request)
 
 
@@ -100,7 +115,9 @@ def set_interchange(payload: InterchangeRequest, request: Request):
         raise HTTPException(
             status_code=400, detail=f"Invalid target_position: {payload.target_position}"
         )
-    request.app.state.decisions.set_interchange_assignment(payload.team_key, payload.target_position)
+    request.app.state.decisions.set_interchange_assignment(
+        payload.team_key, payload.target_position, actor=SCORER_ACTOR
+    )
     return _current_state(request)
 
 
@@ -111,7 +128,7 @@ def set_override(payload: OverrideRequest, request: Request):
     if payload.position not in SCORABLE_POSITIONS:
         raise HTTPException(status_code=400, detail=f"Invalid position: {payload.position}")
     request.app.state.decisions.set_override(
-        payload.team_key, payload.position, payload.override_score, payload.reason
+        payload.team_key, payload.position, payload.override_score, payload.reason, actor=SCORER_ACTOR
     )
     return _current_state(request)
 
@@ -134,8 +151,30 @@ def finalize(payload: FinalizeRequest, request: Request):
             ),
         )
     snapshot = dataclasses.asdict(result)
-    state.decisions.finalize(payload.note, snapshot)
+    state.decisions.finalize(payload.note, snapshot, actor=ADMIN_ACTOR)
     return _current_state(request)
+
+
+@router.get("/audit-events", dependencies=[Depends(require_admin)])
+def list_audit_events(
+    request: Request,
+    entity_type: str | None = None,
+    entity_id: str | None = None,
+    action: str | None = None,
+    correlation_id: str | None = None,
+    limit: int = 200,
+):
+    """Tiny read-only diagnostic surface over the audit trail -- proves the
+    append-only boundary end-to-end, not an admin audit UI. Deterministic
+    chronological order (see AuditEventRepository.list_events)."""
+    events = request.app.state.audit_events.list_events(
+        entity_type=entity_type,
+        entity_id=entity_id,
+        action=action,
+        correlation_id=correlation_id,
+        limit=limit,
+    )
+    return [dataclasses.asdict(event) for event in events]
 
 
 @page_router.get("/admin", response_class=HTMLResponse)

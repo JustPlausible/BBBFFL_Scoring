@@ -49,6 +49,25 @@ Upgrades retain timestamps, DNP flags, Interchange targets, override values and
 reasons, finalisation note/time, frozen JSON snapshots, and all competition
 keys unchanged.
 
+## Audit events (revision `0003_audit`)
+
+`0003_audit` adds one domain-neutral `audit_event` table -- the append-only
+history of every DNP, Interchange, override and finalisation change (and the
+boundary future privileged workflows should reuse). See
+[`audit-events.md`](audit-events.md) for the full design; `app/audit.py` is
+the implementation.
+
+`slot_dnp` / `interchange_assignment` / `score_override` / `matchup_state`
+remain the sole source of truth for current state, exactly as before --
+`audit_event` only explains how that state was reached and is never read
+back to compute it.
+
+Downgrading below `0003_audit` drops `audit_event` entirely, which is lossy,
+so it is refused (matching the `0002_competition` precedent above) once any
+row exists there. Downgrade only succeeds while `audit_event` is empty --
+i.e. before the first DNP/Interchange/override/finalize mutation on that
+database.
+
 ## Migration authoring and rollback
 
 Every relational change must be a new ordered revision. Do not add startup DDL

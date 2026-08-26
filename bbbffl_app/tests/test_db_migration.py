@@ -16,7 +16,14 @@ CREATE TABLE interchange_assignment (team_key TEXT PRIMARY KEY, target_position 
 CREATE TABLE score_override (team_key TEXT NOT NULL, position TEXT NOT NULL, override_score REAL, reason TEXT, updated_at TEXT NOT NULL, PRIMARY KEY (team_key, position));
 CREATE TABLE matchup_state (id INTEGER PRIMARY KEY CHECK (id = 1), finalized INTEGER NOT NULL DEFAULT 0, finalized_at TEXT, finalized_note TEXT, finalized_snapshot TEXT);
 """
-EXPECTED_TABLES = {"alembic_version", "slot_dnp", "interchange_assignment", "score_override", "matchup_state"}
+EXPECTED_TABLES = {
+    "alembic_version",
+    "slot_dnp",
+    "interchange_assignment",
+    "score_override",
+    "matchup_state",
+    "audit_event",
+}
 
 
 def _url(path):
@@ -87,11 +94,21 @@ def test_unrecognized_unversioned_schema_is_refused(tmp_path):
 
 
 def test_reversible_downgrade_preserves_representable_grand_final_data(tmp_path):
+    # Uses raw SQL rather than DecisionsRepository: the repository always
+    # appends an audit event (see app/audit.py), and 0003's downgrade
+    # refuses once audit_event holds history -- that refusal is exercised
+    # separately below. This test isolates the pre-existing 0002->0001
+    # column-shape preservation the downgrade chain must still honour.
     url = _url(tmp_path / "down.db")
     migrate(url)
-    repo = DecisionsRepository(connect(url))
-    repo.set_dnp("team_a", "Forward1", True)
-    repo.conn.close()
+    engine = create_engine(url)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO slot_dnp (competition_key, team_key, slot, dnp, updated_at) "
+                "VALUES ('grand_final', 'team_a', 'Forward1', 1, '2026-01-01T00:00:00+00:00')"
+            )
+        )
     downgrade(url, "0001_prototype")
     engine = create_engine(url)
     with engine.connect() as conn:
@@ -102,11 +119,34 @@ def test_reversible_downgrade_preserves_representable_grand_final_data(tmp_path)
 def test_downgrade_refuses_loss_of_other_competitions(tmp_path):
     url = _url(tmp_path / "irreversible.db")
     migrate(url)
-    repo = DecisionsRepository(connect(url), "superscore:2026:20")
-    repo.set_dnp("team_a", "Forward1", True)
-    repo.conn.close()
+    engine = create_engine(url)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO slot_dnp (competition_key, team_key, slot, dnp, updated_at) "
+                "VALUES ('superscore:2026:20', 'team_a', 'Forward1', 1, '2026-01-01T00:00:00+00:00')"
+            )
+        )
     with pytest.raises(RuntimeError, match="cannot be represented"):
         downgrade(url, "0001_prototype")
+
+
+def test_downgrade_refuses_loss_of_audit_history(tmp_path):
+    url = _url(tmp_path / "audit-irreversible.db")
+    migrate(url)
+    repo = DecisionsRepository(connect(url))
+    repo.set_dnp("team_a", "Forward1", True)
+    repo.conn.close()
+    with pytest.raises(RuntimeError, match="audit_event holds history"):
+        downgrade(url, "0002_competition")
+
+
+def test_downgrade_to_0002_succeeds_when_audit_event_is_empty(tmp_path):
+    url = _url(tmp_path / "audit-empty.db")
+    migrate(url)
+    downgrade(url, "0002_competition")
+    engine = create_engine(url)
+    assert "audit_event" not in set(inspect(engine).get_table_names())
 
 
 def test_revision_chain_has_single_head():

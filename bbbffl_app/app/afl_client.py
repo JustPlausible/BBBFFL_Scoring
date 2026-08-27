@@ -244,6 +244,7 @@ class AflApiClient:
         timeout: float = 10.0,
         connect_timeout: float | None = None,
         read_timeout: float | None = None,
+        contract_version: str = "v1",
     ):
         headers = {"x-api-key": api_key} if api_key else {}
         request_timeout = httpx.Timeout(
@@ -253,6 +254,12 @@ class AflApiClient:
             pool=timeout,
         )
         self._client = httpx.Client(base_url=base_url, headers=headers, timeout=request_timeout)
+        # See app/config.py's AFL_API_CONTRACT_VERSION / SUPPORTED_AFL_API_CONTRACT_VERSIONS
+        # and docs/afl-api-v1-contract.md -- every request path below is
+        # built from this rather than a hard-coded "/api/v1" literal, so an
+        # explicitly configured, unsupported contract version fails at
+        # settings validation time, never as a silent wrong-path request.
+        self._contract_version = contract_version
 
     def close(self) -> None:
         self._client.close()
@@ -279,7 +286,7 @@ class AflApiClient:
         return response.json()
 
     def get_current_season(self) -> Season:
-        payload = self._get("/api/v1/seasons")
+        payload = self._get(f"/api/{self._contract_version}/seasons")
         for entry in _unwrap(payload, "seasons"):
             if entry.get("is_current"):
                 return Season(
@@ -300,14 +307,14 @@ class AflApiClient:
 
     def get_rounds(self, season_id: int) -> list[Round]:
         """Return stable identities from the public versioned rounds endpoint."""
-        payload = self._get(f"/api/v1/seasons/{season_id}/rounds")
+        payload = self._get(f"/api/{self._contract_version}/seasons/{season_id}/rounds")
         return [
             Round(round_id=entry["round_id"], round_number=entry["round_number"])
             for entry in _unwrap(payload, "rounds")
         ]
 
     def get_matches(self, round_id: int) -> list[Match]:
-        payload = self._get(f"/api/v1/rounds/{round_id}/matches")
+        payload = self._get(f"/api/{self._contract_version}/rounds/{round_id}/matches")
         return [
             Match(
                 match_id=entry["match_id"],
@@ -320,7 +327,7 @@ class AflApiClient:
         ]
 
     def get_player(self, canonical_player_id: int) -> Player:
-        payload = self._get(f"/api/v1/players/{canonical_player_id}")
+        payload = self._get(f"/api/{self._contract_version}/players/{canonical_player_id}")
         entry = payload["player"] if isinstance(payload, dict) and "player" in payload else payload
         return Player(
             canonical_player_id=entry["canonical_player_id"],
@@ -329,7 +336,7 @@ class AflApiClient:
         )
 
     def get_match_player_stats(self, match_id: int) -> dict[int, PlayerStatLine]:
-        payload = self._get(f"/api/v1/matches/{match_id}/player-stats")
+        payload = self._get(f"/api/{self._contract_version}/matches/{match_id}/player-stats")
         stats: dict[int, PlayerStatLine] = {}
         for row in _unwrap(payload, "players"):
             player_id = row.get("canonical_player_id")

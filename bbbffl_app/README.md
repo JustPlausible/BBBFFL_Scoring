@@ -213,6 +213,19 @@ enforced exactly-10-entries count, prize-money split, and a polished
 historical results view across rounds -- the `competition_key` scoping
 above is what keeps that last one cheap to add later.
 
+## Application settings
+
+`app/config.py`'s `get_settings()` is the single validated settings
+boundary for critical runtime configuration -- database URL, admin token,
+public base URL, afl-api base URL/contract version, and AFL access mode
+(`live` vs. `replay`). It fails closed early at startup (before migrations
+run or the app accepts a request) when `BBBFFL_ENVIRONMENT=production` is
+missing a required secret or holds an invalid critical URL, without ever
+logging a secret's value. Development/test keep today's permissive
+defaults unchanged. See [`../docs/settings.md`](../docs/settings.md)
+(roadmap package 06, issue #38) for the full production requirements and
+[`.env.example`](.env.example) for every variable.
+
 ## Running locally
 
 ```bash
@@ -316,7 +329,9 @@ and stale-data rules are documented in
 3. The admin interface is gated by a single shared `BBBFFL_ADMIN_TOKEN`
    header, not per-user auth -- adequate for one trusted scorer on a
    private home-server network for one weekend, not a general access
-   control model.
+   control model. `BBBFFL_ENVIRONMENT=production` refuses to start without
+   this token set (issue #38 / [`../docs/settings.md`](../docs/settings.md));
+   development/test remain permissive and may leave it unset.
 4. Live validation of `docs/afl-api-v1-contract.md`'s fixtures/diagnostic
    against the actual deployed dev instance is outstanding (blocked by this
    development environment's network egress policy when issue #18 was
@@ -336,4 +351,7 @@ policy, and CI expectations.
 
 Set `BBBFFL_DATABASE_URL` to a SQLAlchemy PostgreSQL URL in production, for
 example `postgresql+psycopg://user:password@database/bbbffl`. SQLite remains
-the local/test default. See [`docs/database-migrations.md`](docs/database-migrations.md).
+the local/test default. `BBBFFL_ENVIRONMENT=production` enforces both --
+required, and must be PostgreSQL, not SQLite -- via the validated settings
+boundary (see [`../docs/settings.md`](../docs/settings.md)). See
+[`docs/database-migrations.md`](docs/database-migrations.md).

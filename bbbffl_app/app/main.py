@@ -27,6 +27,18 @@ from app.teams import TeamConfigError, get_teams
 logger = logging.getLogger("bbbffl.startup")
 
 
+class ReplayModeNotWiredError(RuntimeError):
+    """Raised at startup when `BBBFFL_AFL_MODE=replay` is declared but this
+    build has no replay-backed `AflDataSource` to satisfy it yet (roadmap
+    package 32 -- see `app/config.py`'s "AFL access mode" docs). Refusing
+    to start here, before migrations run or `AflApiClient` is constructed
+    below, is what keeps a declared replay/deterministic run from ever
+    silently falling back to live afl-api access -- issue #38's explicit
+    requirement. Settings validation alone (`get_settings()`) accepts a
+    well-formed `replay` declaration; it is this application build, not
+    the configuration, that cannot yet fulfill it."""
+
+
 def configure_logging(level: str) -> None:
     logging.basicConfig(
         level=level,
@@ -38,6 +50,14 @@ def configure_logging(level: str) -> None:
 async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_logging(settings.log_level)
+
+    if settings.afl_mode == "replay":
+        raise ReplayModeNotWiredError(
+            "BBBFFL_AFL_MODE=replay is declared but not yet implemented: this build has no "
+            "replay-backed AFL data source (roadmap package 32). Refusing to start rather than "
+            "silently falling back to live afl-api access. Set BBBFFL_AFL_MODE=live (or leave "
+            "it unset) until the replay harness lands."
+        )
 
     # Migrations are the sole schema authority. Running them at startup is a
     # deployment convenience and is idempotent; production may run the same
@@ -51,6 +71,7 @@ async def lifespan(app: FastAPI):
         timeout=settings.afl_api_timeout_seconds,
         connect_timeout=settings.afl_api_connect_timeout_seconds,
         read_timeout=settings.afl_api_read_timeout_seconds,
+        contract_version=settings.afl_api_contract_version,
     )
     # ResilientAflClient is a drop-in AflDataSource: it adds bounded
     # transient retry/backoff, per-endpoint stale-cache fallback, and
@@ -106,9 +127,13 @@ async def lifespan(app: FastAPI):
             )
 
     logger.info(
-        "BBBFFL Grand Final prototype starting up (teams=%s, afl_api=%s)",
-        [t.team_key for t in teams],
+        "BBBFFL Grand Final prototype starting up (environment=%s, afl_mode=%s, "
+        "afl_api=%s, afl_api_contract_version=%s, teams=%s)",
+        settings.environment,
+        settings.afl_mode,
         settings.afl_api_base_url,
+        settings.afl_api_contract_version,
+        [t.team_key for t in teams],
     )
     try:
         yield

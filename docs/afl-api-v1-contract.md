@@ -255,10 +255,17 @@ only** and never a fallback from older data — confirmed by
   exactly-named settings in `app/config.py` (`Settings.afl_api_base_url`,
   `.afl_api_key`), sourced from environment variables, with no hard-coded
   hostname, `/docs` path, or credential anywhere in the repository. The
-  base URL is the **service root**; `AflApiClient` composes `/api/v1/...`
-  itself (`app/afl_client.py`'s `_get`), matching the issue's requirement.
-  No changes to configuration naming were needed — this issue confirms the
-  existing convention already satisfies the requirement.
+  base URL is the **service root**; `AflApiClient` composes
+  `/api/{contract_version}/...` itself (`app/afl_client.py`'s `_get`),
+  matching the issue's requirement. No changes to configuration naming
+  were needed — this issue confirms the existing convention already
+  satisfies the requirement.
+  **Update (issue #38 / roadmap package 06):** `AFL_API_CONTRACT_VERSION`
+  (default `v1`, validated against `SUPPORTED_AFL_API_CONTRACT_VERSIONS` in
+  `app/config.py`) now makes the expected contract version this pinning
+  policy documents an explicit, validated setting rather than an implicit
+  literal, and is what `AflApiClient` actually builds every request path
+  from. See [`settings.md`](settings.md).
 
 ## 2. BBBFFL assumptions now protected by tests
 

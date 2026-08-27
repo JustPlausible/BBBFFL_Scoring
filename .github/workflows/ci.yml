@@ -129,7 +129,10 @@ jobs:
           fixture_repository = FixtureRepository(connection)
           draws = []
           entries_by_season = []
-          for year in (2026, 2027):
+          # Keep this independent from the 2026 season seeded above for the
+          # legacy-mapping upgrade regression. Season years are intentionally
+          # unique domain identities, so this fixture uses its own test years.
+          for year in (2027, 2028):
               season = seasons.create_season(year, str(year))
               entries = []
               for number in range(1, 11):

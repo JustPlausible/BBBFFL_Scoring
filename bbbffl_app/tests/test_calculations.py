@@ -1,5 +1,7 @@
 """Five-matchup acceptance coverage for persisted season scoring."""
 
+from sqlalchemy import text
+
 from app.afl_client import Match, PlayerStatLine, Team
 from app.calculations import MatchupCalculationService
 from app.db import transaction
@@ -31,18 +33,83 @@ def setup_round(db=None, *, year=2027):
     with db.engine.begin() as conn:
         for index, entry in enumerate(entries):
             lineup_id = f"lineup-{year}-{index}"
-            conn.exec_driver_sql("INSERT INTO weekly_lineup VALUES (?,?,?,?,?,?,1,?,?)", (lineup_id, scope["season_id"], scope["competition_id"], round_.bbbffl_round_id, entry.season_entry_id, 1, now, now))
-            conn.exec_driver_sql("INSERT INTO weekly_lineup_submission VALUES (?,1,1,?,'coach',NULL,'coach','coach',NULL,NULL)", (lineup_id, now))
+            conn.execute(
+                text(
+                    "INSERT INTO weekly_lineup "
+                    "(lineup_id, season_id, competition_id, bbbffl_round_id, "
+                    "season_entry_id, draft_revision, effective_submission_version, "
+                    "created_at, updated_at) "
+                    "VALUES (:lineup_id, :season_id, :competition_id, :round_id, "
+                    ":entry_id, 1, 1, :now, :now)"
+                ),
+                {
+                    "lineup_id": lineup_id,
+                    "season_id": scope["season_id"],
+                    "competition_id": scope["competition_id"],
+                    "round_id": round_.bbbffl_round_id,
+                    "entry_id": entry.season_entry_id,
+                    "now": now,
+                },
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO weekly_lineup_submission "
+                    "(lineup_id, version, based_on_draft_revision, submitted_at, "
+                    "actor_type, actor_id, actor_role, source_type, source_detail, reason) "
+                    "VALUES (:lineup_id, 1, 1, :now, 'coach', NULL, 'coach', "
+                    "'coach', NULL, NULL)"
+                ),
+                {"lineup_id": lineup_id, "now": now},
+            )
             for position in POSITIONS:
                 player = None
                 if position in ("F1", "Interchange"):
                     canonical = 1000 + index * 2 + (position == "Interchange")
                     player = f"player-{year}-{canonical}"
-                    conn.exec_driver_sql("INSERT INTO season_player_pool VALUES (?,?,?,?,?,NULL,1,'afl-api',?,NULL,?,?)", (player, scope["season_id"], canonical, f"P{canonical}", 1, now, now, now))
+                    conn.execute(
+                        text(
+                            "INSERT INTO season_player_pool "
+                            "(season_player_id, season_id, canonical_player_id, "
+                            "display_name, afl_team_id, afl_team_name, eligible, "
+                            "source_provider, source_fetched_at, source_updated_at, "
+                            "created_at, updated_at) "
+                            "VALUES (:player_id, :season_id, :canonical_id, :name, "
+                            "1, NULL, TRUE, 'afl-api', :now, NULL, :now, :now)"
+                        ),
+                        {
+                            "player_id": player,
+                            "season_id": scope["season_id"],
+                            "canonical_id": canonical,
+                            "name": f"P{canonical}",
+                            "now": now,
+                        },
+                    )
                     if index != 0 or position != "F1":
                         stats[canonical] = PlayerStatLine(canonical, goals=index + 1)
-                conn.exec_driver_sql("INSERT INTO weekly_lineup_draft_slot VALUES (?,?,?)", (lineup_id, position, player))
-                conn.exec_driver_sql("INSERT INTO weekly_lineup_submission_slot VALUES (?,1,?,?)", (lineup_id, position, player))
+                conn.execute(
+                    text(
+                        "INSERT INTO weekly_lineup_draft_slot "
+                        "(lineup_id, position, season_player_id) "
+                        "VALUES (:lineup_id, :position, :player_id)"
+                    ),
+                    {
+                        "lineup_id": lineup_id,
+                        "position": position,
+                        "player_id": player,
+                    },
+                )
+                conn.execute(
+                    text(
+                        "INSERT INTO weekly_lineup_submission_slot "
+                        "(lineup_id, version, position, season_player_id) "
+                        "VALUES (:lineup_id, 1, :position, :player_id)"
+                    ),
+                    {
+                        "lineup_id": lineup_id,
+                        "position": position,
+                        "player_id": player,
+                    },
+                )
     return db, lifecycle, round_, stats
 
 

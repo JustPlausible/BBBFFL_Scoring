@@ -62,6 +62,7 @@ def upgrade():
             op.execute(f"""
             CREATE TRIGGER {table}_frozen_update BEFORE UPDATE ON {table}
             WHEN (SELECT state FROM season_fixture_draw WHERE fixture_draw_id=OLD.fixture_draw_id)='frozen'
+              OR (SELECT state FROM season_fixture_draw WHERE fixture_draw_id=NEW.fixture_draw_id)='frozen'
             BEGIN SELECT RAISE(ABORT, 'frozen fixture draw is immutable'); END
             """)
             op.execute(f"""
@@ -82,14 +83,18 @@ def upgrade():
     elif bind.dialect.name == "postgresql":
         op.execute("""
         CREATE FUNCTION enforce_fixture_draw_mutability() RETURNS trigger AS $$
-        DECLARE draw_state text;
+        DECLARE old_draw_state text;
+        DECLARE new_draw_state text;
         BEGIN
-          IF TG_OP = 'DELETE' THEN
-            SELECT state INTO draw_state FROM season_fixture_draw WHERE fixture_draw_id=OLD.fixture_draw_id FOR UPDATE;
-          ELSE
-            SELECT state INTO draw_state FROM season_fixture_draw WHERE fixture_draw_id=NEW.fixture_draw_id FOR UPDATE;
+          IF TG_OP IN ('UPDATE', 'DELETE') THEN
+            SELECT state INTO old_draw_state FROM season_fixture_draw WHERE fixture_draw_id=OLD.fixture_draw_id FOR UPDATE;
           END IF;
-          IF draw_state='frozen' THEN RAISE EXCEPTION 'frozen fixture draw is immutable'; END IF;
+          IF TG_OP IN ('INSERT', 'UPDATE') THEN
+            SELECT state INTO new_draw_state FROM season_fixture_draw WHERE fixture_draw_id=NEW.fixture_draw_id FOR UPDATE;
+          END IF;
+          IF old_draw_state='frozen' OR new_draw_state='frozen' THEN
+            RAISE EXCEPTION 'frozen fixture draw is immutable';
+          END IF;
           IF TG_OP = 'DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;
         END; $$ LANGUAGE plpgsql
         """)

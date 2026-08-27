@@ -114,3 +114,105 @@ def test_draw_requires_all_ten_entries_of_its_season(fixture_tree):
     invalid = [e.season_entry_id for e in entries[:-1]] + [other_entries[0].season_entry_id]
     with pytest.raises(ValueError, match="exactly one season"):
         repository.save_draft(season.season_id, invalid)
+
+
+@pytest.mark.parametrize("table", ["season_fixture_number", "season_fixture_matchup"])
+def test_child_update_cannot_move_out_of_or_into_frozen_draw(table):
+    database = migrated_connection()
+    frozen_season, frozen_entries = _season_with_entries(database, 2026)
+    draft_season, draft_entries = _season_with_entries(database, 2027)
+    repository = FixtureRepository(database)
+    frozen = repository.save_draft(
+        frozen_season.season_id, [entry.season_entry_id for entry in frozen_entries]
+    )
+    draft = repository.save_draft(
+        draft_season.season_id, [entry.season_entry_id for entry in draft_entries]
+    )
+    repository.freeze(frozen_season.season_id)
+
+    if table == "season_fixture_number":
+        where = "fixture_draw_id=? AND fixture_number=1"
+        move_to_draft = (
+            "UPDATE season_fixture_number SET fixture_draw_id=?, season_id=?, "
+            "season_entry_id=? WHERE " + where,
+            (
+                draft.fixture_draw_id,
+                draft_season.season_id,
+                draft_entries[0].season_entry_id,
+                frozen.fixture_draw_id,
+            ),
+        )
+        move_to_frozen = (
+            "UPDATE season_fixture_number SET fixture_draw_id=?, season_id=?, "
+            "season_entry_id=? WHERE " + where,
+            (
+                frozen.fixture_draw_id,
+                frozen_season.season_id,
+                frozen_entries[0].season_entry_id,
+                draft.fixture_draw_id,
+            ),
+        )
+        same_frozen = (
+            "UPDATE season_fixture_number SET fixture_number=fixture_number WHERE "
+            + where,
+            (frozen.fixture_draw_id,),
+        )
+    else:
+        where = "fixture_draw_id=? AND bbbffl_round_number=1 AND matchup_order=1"
+        move_to_draft = (
+            "UPDATE season_fixture_matchup SET fixture_draw_id=?, season_id=?, "
+            "home_season_entry_id=?, away_season_entry_id=? WHERE " + where,
+            (
+                draft.fixture_draw_id,
+                draft_season.season_id,
+                draft_entries[0].season_entry_id,
+                draft_entries[1].season_entry_id,
+                frozen.fixture_draw_id,
+            ),
+        )
+        move_to_frozen = (
+            "UPDATE season_fixture_matchup SET fixture_draw_id=?, season_id=?, "
+            "home_season_entry_id=?, away_season_entry_id=? WHERE " + where,
+            (
+                frozen.fixture_draw_id,
+                frozen_season.season_id,
+                frozen_entries[0].season_entry_id,
+                frozen_entries[1].season_entry_id,
+                draft.fixture_draw_id,
+            ),
+        )
+        same_frozen = (
+            "UPDATE season_fixture_matchup SET matchup_order=matchup_order WHERE "
+            + where,
+            (frozen.fixture_draw_id,),
+        )
+
+    # Vacate the destination in the mutable draw so frozen -> draft would
+    # succeed in the absence of the OLD-draw trigger check.
+    with transaction(database) as conn:
+        conn.execute("DELETE FROM " + table + " WHERE " + where, (draft.fixture_draw_id,))
+    with pytest.raises(IntegrityError, match="frozen fixture draw is immutable"):
+        with transaction(database) as conn:
+            conn.execute(*move_to_draft)
+
+    # Restore the draft so the inverse and in-place cases both target real
+    # rows. Their trigger message proves immutability runs before uniqueness.
+    repository.save_draft(
+        draft_season.season_id, [entry.season_entry_id for entry in draft_entries]
+    )
+    for statement, parameters in (move_to_frozen, same_frozen):
+        with pytest.raises(IntegrityError, match="frozen fixture draw is immutable"):
+            with transaction(database) as conn:
+                conn.execute(statement, parameters)
+    with pytest.raises(IntegrityError, match="frozen fixture draw is immutable"):
+        with transaction(database) as conn:
+            conn.execute(
+                "DELETE FROM " + table + " WHERE " + where,
+                (frozen.fixture_draw_id,),
+            )
+    with pytest.raises(IntegrityError, match="frozen fixture draw is immutable"):
+        with transaction(database) as conn:
+            conn.execute(
+                "INSERT INTO " + table + " SELECT * FROM " + table + " WHERE " + where,
+                (frozen.fixture_draw_id,),
+            )

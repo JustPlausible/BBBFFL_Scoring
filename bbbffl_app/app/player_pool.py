@@ -179,11 +179,33 @@ class OwnershipRepository:
         if squad_limit <= 0:
             raise ValueError("squad limit must be positive")
         with transaction(self.database) as conn:
+            # Serialize configuration changes with acquisitions, which lock a
+            # season entry before checking capacity. SQLite's no-op write takes
+            # its writer lock before any validation snapshot.
+            if self.database.engine.dialect.name == "sqlite":
+                conn.execute(
+                    "UPDATE bbbffl_season SET updated_at=updated_at WHERE season_id=?",
+                    (season_id,),
+                )
             existing = conn.execute(
                 "SELECT squad_limit FROM season_squad_configuration WHERE season_id=?"
                 + _for_update_suffix(self.database),
                 (season_id,),
             ).fetchone()
+            entries = conn.execute(
+                "SELECT season_entry_id FROM season_entry WHERE season_id=?"
+                + _for_update_suffix(self.database),
+                (season_id,),
+            ).fetchall()
+            for entry in entries:
+                maximum = self._maximum_squad_size(
+                    entry["season_entry_id"], connection=conn
+                )
+                if maximum > squad_limit:
+                    raise SquadCapacityError(
+                        f"squad limit of {squad_limit} is below persisted squad "
+                        f"size {maximum} for entry {entry['season_entry_id']}"
+                    )
             conn.execute(
                 "INSERT INTO season_squad_configuration VALUES (?, ?, ?) ON CONFLICT(season_id) DO UPDATE SET squad_limit=excluded.squad_limit, updated_at=excluded.updated_at",
                 (season_id, squad_limit, _now()),
@@ -201,6 +223,42 @@ class OwnershipRepository:
                 after_state={"squad_limit": squad_limit},
             )
 
+    def _maximum_squad_size(
+        self, season_entry_id, *, from_at=None, additional=0, connection=None
+    ):
+        """Maximum effective squad size at all acquisition boundaries.
+
+        Counts use half-open ownership periods. When ``additional`` is set,
+        it represents a proposed open-ended period beginning at ``from_at``.
+        Checking every later acquisition boundary is sufficient because squad
+        size can only increase at those boundaries (releases only decrease it).
+        """
+        conn = connection or self.database
+        boundaries = [from_at] if from_at is not None else []
+        if from_at is None:
+            rows = conn.execute(
+                "SELECT DISTINCT acquired_at FROM player_ownership_period "
+                "WHERE season_entry_id=? ORDER BY acquired_at",
+                (season_entry_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT DISTINCT acquired_at FROM player_ownership_period "
+                "WHERE season_entry_id=? AND acquired_at>=? ORDER BY acquired_at",
+                (season_entry_id, from_at),
+            ).fetchall()
+        boundaries.extend(row["acquired_at"] for row in rows)
+        maximum = 0
+        for boundary in dict.fromkeys(boundaries):
+            count = conn.execute(
+                "SELECT COUNT(*) AS n FROM player_ownership_period "
+                "WHERE season_entry_id=? AND acquired_at<=? "
+                "AND (released_at IS NULL OR released_at>?)",
+                (season_entry_id, boundary, boundary),
+            ).fetchone()["n"]
+            maximum = max(maximum, count + additional)
+        return maximum
+
     def validate_squad_capacity(
         self, season_entry_id, *, effective_at, additional=1, connection=None
     ):
@@ -217,15 +275,17 @@ class OwnershipRepository:
         ).fetchone()
         if not config:
             raise ValueError("season squad limit is not configured")
-        count = conn.execute(
-            "SELECT COUNT(*) AS n FROM player_ownership_period WHERE season_entry_id=? AND acquired_at<=? AND (released_at IS NULL OR released_at>?)",
-            (season_entry_id, effective_at, effective_at),
-        ).fetchone()["n"]
-        if count + additional > config["squad_limit"]:
+        maximum = self._maximum_squad_size(
+            season_entry_id,
+            from_at=effective_at,
+            additional=additional,
+            connection=conn,
+        )
+        if maximum > config["squad_limit"]:
             raise SquadCapacityError(
                 f"squad limit of {config['squad_limit']} would be exceeded"
             )
-        return config["squad_limit"] - count
+        return config["squad_limit"] - maximum
 
     def acquire(
         self,

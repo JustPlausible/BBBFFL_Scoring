@@ -111,6 +111,79 @@ def test_squad_capacity_rejects_excess_player():
         )
 
 
+def test_backdated_acquisition_cannot_overfill_squad_at_future_boundary():
+    _db, season, entries, pool, ownership = setup_domain(limit=1)
+    february = pool.refresh_player(season.season_id, 396, "February player")
+    january = pool.refresh_player(season.season_id, 584, "January player")
+    ownership.acquire(
+        february.season_player_id,
+        entries[0].season_entry_id,
+        effective_at="2027-02-01",
+    )
+
+    with pytest.raises(SquadCapacityError):
+        ownership.acquire(
+            january.season_player_id,
+            entries[0].season_entry_id,
+            effective_at="2027-01-01",
+        )
+    assert ownership.squad_at(entries[0].season_entry_id, "2027-02-01") == [
+        ownership.history(february.season_player_id)[0]
+    ]
+
+
+def test_backdated_transfer_cannot_overfill_destination_at_future_boundary():
+    _db, season, entries, pool, ownership = setup_domain(limit=1)
+    future = pool.refresh_player(season.season_id, 396, "Future player")
+    transferred = pool.refresh_player(season.season_id, 584, "Transferred player")
+    ownership.acquire(
+        future.season_player_id,
+        entries[1].season_entry_id,
+        effective_at="2027-02-01",
+    )
+    ownership.acquire(
+        transferred.season_player_id,
+        entries[0].season_entry_id,
+        effective_at="2026-12-01",
+    )
+
+    with pytest.raises(SquadCapacityError):
+        ownership.transfer(
+            transferred.season_player_id,
+            entries[1].season_entry_id,
+            effective_at="2027-01-01",
+        )
+    assert (
+        ownership.owner_at(transferred.season_player_id, "2027-03-01").season_entry_id
+        == entries[0].season_entry_id
+    )
+
+
+def test_squad_limit_reduction_rejects_persisted_oversize_squad():
+    db, season, entries, pool, ownership = setup_domain(limit=2)
+    players = [
+        pool.refresh_player(season.season_id, player_id, name)
+        for player_id, name in ((396, "First"), (584, "Second"))
+    ]
+    for player in players:
+        ownership.acquire(
+            player.season_player_id,
+            entries[0].season_entry_id,
+            effective_at="2027-01-01",
+        )
+    # Even after one player is released, the season-wide configuration must
+    # not retroactively make the persisted January squad invalid.
+    ownership.release(players[1].season_player_id, effective_at="2027-02-01")
+
+    with pytest.raises(SquadCapacityError):
+        ownership.configure_squad_limit(season.season_id, 1)
+    configured = db.execute(
+        "SELECT squad_limit FROM season_squad_configuration WHERE season_id=?",
+        (season.season_id,),
+    ).fetchone()
+    assert configured["squad_limit"] == 2
+
+
 def test_afl_club_refresh_does_not_change_ownership_or_audit_history():
     db, season, entries, pool, ownership = setup_domain()
     player = pool.refresh_player(

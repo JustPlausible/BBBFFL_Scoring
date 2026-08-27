@@ -1,7 +1,7 @@
 """Persist ordinary-round, matchup and versioned official-result lifecycle."""
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "0010_lifecycle"
 down_revision = "0009_season_length"
@@ -55,9 +55,7 @@ def upgrade():
             ],
             ondelete="RESTRICT",
         ),
-        sa.UniqueConstraint(
-            "bbbffl_round_id", "competition_id", name="uq_lifecycle_round_competition"
-        ),
+        sa.UniqueConstraint("bbbffl_round_id", "competition_id", name="uq_lifecycle_round_competition"),
         sa.CheckConstraint(
             "state IN ('upcoming','open','live','review','final')",
             name="ck_round_lifecycle_state",
@@ -70,32 +68,22 @@ def upgrade():
         sa.Column(
             "bbbffl_round_id",
             sa.Text(),
-            sa.ForeignKey(
-                "bbbffl_round_lifecycle.bbbffl_round_id", ondelete="RESTRICT"
-            ),
+            sa.ForeignKey("bbbffl_round_lifecycle.bbbffl_round_id", ondelete="RESTRICT"),
             nullable=False,
         ),
         sa.Column(
             "fixture_matchup_id",
             sa.Text(),
-            sa.ForeignKey(
-                "season_fixture_matchup.fixture_matchup_id", ondelete="RESTRICT"
-            ),
+            sa.ForeignKey("season_fixture_matchup.fixture_matchup_id", ondelete="RESTRICT"),
             nullable=False,
         ),
         sa.Column("matchup_order", sa.Integer(), nullable=False),
         sa.Column("home_season_entry_id", sa.Text(), nullable=False),
         sa.Column("away_season_entry_id", sa.Text(), nullable=False),
         sa.Column("effective_official_version", sa.Integer()),
-        sa.UniqueConstraint(
-            "bbbffl_round_id", "fixture_matchup_id", name="uq_round_fixture_matchup"
-        ),
-        sa.UniqueConstraint(
-            "bbbffl_round_id", "matchup_order", name="uq_round_matchup_order"
-        ),
-        sa.CheckConstraint(
-            "matchup_order BETWEEN 1 AND 5", name="ck_lifecycle_matchup_order"
-        ),
+        sa.UniqueConstraint("bbbffl_round_id", "fixture_matchup_id", name="uq_round_fixture_matchup"),
+        sa.UniqueConstraint("bbbffl_round_id", "matchup_order", name="uq_round_matchup_order"),
+        sa.CheckConstraint("matchup_order BETWEEN 1 AND 5", name="ck_lifecycle_matchup_order"),
         sa.CheckConstraint(
             "home_season_entry_id <> away_season_entry_id",
             name="ck_lifecycle_distinct_entries",
@@ -137,9 +125,7 @@ def upgrade():
         sa.Column(
             "bbbffl_round_id",
             sa.Text(),
-            sa.ForeignKey(
-                "bbbffl_round_lifecycle.bbbffl_round_id", ondelete="RESTRICT"
-            ),
+            sa.ForeignKey("bbbffl_round_lifecycle.bbbffl_round_id", ondelete="RESTRICT"),
             nullable=False,
         ),
         sa.Column("provider_status", sa.Text(), nullable=False),
@@ -165,14 +151,8 @@ def upgrade():
 
 
 def downgrade():
-    if (
-        op.get_bind()
-        .execute(sa.text("SELECT COUNT(*) FROM bbbffl_round_lifecycle"))
-        .scalar_one()
-    ):
-        raise RuntimeError(
-            "0010 downgrade refused: competition lifecycle history would be lost"
-        )
+    if op.get_bind().execute(sa.text("SELECT COUNT(*) FROM bbbffl_round_lifecycle")).scalar_one():
+        raise RuntimeError("0010 downgrade refused: competition lifecycle history would be lost")
     if op.get_bind().dialect.name == "postgresql":
         op.execute("DROP FUNCTION reject_official_result_mutation() CASCADE")
     for table in (

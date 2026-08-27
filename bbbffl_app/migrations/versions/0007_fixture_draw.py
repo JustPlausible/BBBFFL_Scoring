@@ -1,7 +1,7 @@
 """Season fixture-number draw and persisted historical BBBFFL rotation."""
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "0007_fixture"
 down_revision = "0006_players"
@@ -13,7 +13,9 @@ def upgrade():
     op.create_table(
         "season_fixture_draw",
         sa.Column("fixture_draw_id", sa.Text(), primary_key=True),
-        sa.Column("season_id", sa.Text(), sa.ForeignKey("bbbffl_season.season_id", ondelete="RESTRICT"), nullable=False),
+        sa.Column(
+            "season_id", sa.Text(), sa.ForeignKey("bbbffl_season.season_id", ondelete="RESTRICT"), nullable=False
+        ),
         sa.Column("rotation_version", sa.Text(), nullable=False),
         sa.Column("state", sa.Text(), nullable=False),
         sa.Column("version", sa.Integer(), nullable=False),
@@ -24,7 +26,10 @@ def upgrade():
         sa.UniqueConstraint("fixture_draw_id", "season_id", name="uq_fixture_draw_id_season"),
         sa.CheckConstraint("state IN ('draft', 'frozen')", name="ck_fixture_draw_state"),
         sa.CheckConstraint("version >= 1", name="ck_fixture_draw_version"),
-        sa.CheckConstraint("(state = 'draft' AND frozen_at IS NULL) OR (state = 'frozen' AND frozen_at IS NOT NULL)", name="ck_fixture_draw_frozen_at"),
+        sa.CheckConstraint(
+            "(state = 'draft' AND frozen_at IS NULL) OR (state = 'frozen' AND frozen_at IS NOT NULL)",
+            name="ck_fixture_draw_frozen_at",
+        ),
     )
     op.create_table(
         "season_fixture_number",
@@ -32,8 +37,16 @@ def upgrade():
         sa.Column("season_id", sa.Text(), nullable=False),
         sa.Column("fixture_number", sa.Integer(), nullable=False),
         sa.Column("season_entry_id", sa.Text(), nullable=False),
-        sa.ForeignKeyConstraint(["fixture_draw_id", "season_id"], ["season_fixture_draw.fixture_draw_id", "season_fixture_draw.season_id"], ondelete="RESTRICT"),
-        sa.ForeignKeyConstraint(["season_entry_id", "season_id"], ["season_entry.season_entry_id", "season_entry.season_id"], ondelete="RESTRICT"),
+        sa.ForeignKeyConstraint(
+            ["fixture_draw_id", "season_id"],
+            ["season_fixture_draw.fixture_draw_id", "season_fixture_draw.season_id"],
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["season_entry_id", "season_id"],
+            ["season_entry.season_entry_id", "season_entry.season_id"],
+            ondelete="RESTRICT",
+        ),
         sa.PrimaryKeyConstraint("fixture_draw_id", "fixture_number"),
         sa.UniqueConstraint("fixture_draw_id", "season_entry_id", name="uq_fixture_draw_entry"),
         sa.CheckConstraint("fixture_number BETWEEN 1 AND 10", name="ck_fixture_number_range"),
@@ -47,9 +60,21 @@ def upgrade():
         sa.Column("matchup_order", sa.Integer(), nullable=False),
         sa.Column("home_season_entry_id", sa.Text(), nullable=False),
         sa.Column("away_season_entry_id", sa.Text(), nullable=False),
-        sa.ForeignKeyConstraint(["fixture_draw_id", "season_id"], ["season_fixture_draw.fixture_draw_id", "season_fixture_draw.season_id"], ondelete="RESTRICT"),
-        sa.ForeignKeyConstraint(["home_season_entry_id", "season_id"], ["season_entry.season_entry_id", "season_entry.season_id"], ondelete="RESTRICT"),
-        sa.ForeignKeyConstraint(["away_season_entry_id", "season_id"], ["season_entry.season_entry_id", "season_entry.season_id"], ondelete="RESTRICT"),
+        sa.ForeignKeyConstraint(
+            ["fixture_draw_id", "season_id"],
+            ["season_fixture_draw.fixture_draw_id", "season_fixture_draw.season_id"],
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["home_season_entry_id", "season_id"],
+            ["season_entry.season_entry_id", "season_entry.season_id"],
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["away_season_entry_id", "season_id"],
+            ["season_entry.season_entry_id", "season_entry.season_id"],
+            ondelete="RESTRICT",
+        ),
         sa.UniqueConstraint("fixture_draw_id", "bbbffl_round_number", "matchup_order", name="uq_fixture_matchup_slot"),
         sa.CheckConstraint("bbbffl_round_number BETWEEN 1 AND 20", name="ck_fixture_round_range"),
         sa.CheckConstraint("matchup_order BETWEEN 1 AND 5", name="ck_fixture_matchup_order"),
@@ -99,7 +124,9 @@ def upgrade():
         END; $$ LANGUAGE plpgsql
         """)
         for table in ("season_fixture_number", "season_fixture_matchup"):
-            op.execute(f"CREATE TRIGGER {table}_mutable BEFORE INSERT OR UPDATE OR DELETE ON {table} FOR EACH ROW EXECUTE FUNCTION enforce_fixture_draw_mutability()")
+            op.execute(
+                f"CREATE TRIGGER {table}_mutable BEFORE INSERT OR UPDATE OR DELETE ON {table} FOR EACH ROW EXECUTE FUNCTION enforce_fixture_draw_mutability()"
+            )
         op.execute("""
         CREATE FUNCTION enforce_fixture_draw_state() RETURNS trigger AS $$
         BEGIN
@@ -107,7 +134,9 @@ def upgrade():
           RETURN NEW;
         END; $$ LANGUAGE plpgsql
         """)
-        op.execute("CREATE TRIGGER fixture_draw_no_unfreeze BEFORE UPDATE ON season_fixture_draw FOR EACH ROW EXECUTE FUNCTION enforce_fixture_draw_state()")
+        op.execute(
+            "CREATE TRIGGER fixture_draw_no_unfreeze BEFORE UPDATE ON season_fixture_draw FOR EACH ROW EXECUTE FUNCTION enforce_fixture_draw_state()"
+        )
 
 
 def downgrade():

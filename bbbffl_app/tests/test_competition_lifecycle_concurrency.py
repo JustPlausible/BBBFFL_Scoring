@@ -8,13 +8,13 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 import app.round_mapping as round_mapping_module
+from app.afl_client import PlayerStatLine
+from app.calculations import MatchupCalculationService
 from app.db import connect
 from app.migrations import migrate
 from app.round_mapping import RoundMappingRepository
-from tests.test_competition_lifecycle import KnownRound, operational
 from tests.test_calculations import Facts, setup_round
-from app.calculations import MatchupCalculationService
-from app.afl_client import PlayerStatLine
+from tests.test_competition_lifecycle import KnownRound, operational
 
 
 @pytest.fixture(scope="module")
@@ -133,9 +133,7 @@ def _concurrent_service_calculations(database, matchup_id, stat_sets, observed_a
 
     def calculate(stats):
         ready.wait(timeout=5)
-        return MatchupCalculationService(database, Facts(stats)).calculate_matchup(
-            matchup_id, observed_at=observed_at
-        )
+        return MatchupCalculationService(database, Facts(stats)).calculate_matchup(matchup_id, observed_at=observed_at)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         return list(executor.map(calculate, stat_sets))
@@ -178,9 +176,7 @@ def test_concurrent_identical_existing_service_calculations_remain_idempotent(
     service = MatchupCalculationService(database, Facts(stats))
     assert service.calculate_matchup(matchup_id).revision == 1
 
-    results = _concurrent_service_calculations(
-        database, matchup_id, (dict(stats), dict(stats)), "2106-01-01T00:00:00Z"
-    )
+    results = _concurrent_service_calculations(database, matchup_id, (dict(stats), dict(stats)), "2106-01-01T00:00:00Z")
     assert [result.revision for result in results] == [1, 1]
     assert len({result.input_fingerprint for result in results}) == 1
 
@@ -190,9 +186,7 @@ def test_concurrent_different_existing_service_calculations_advance_atomically(
 ):
     database, lifecycle, round_, stats = setup_round(postgres_database, year=2107)
     matchup_id = lifecycle.list_matchups(round_.bbbffl_round_id)[0].matchup_id
-    assert MatchupCalculationService(database, Facts(stats)).calculate_matchup(
-        matchup_id
-    ).revision == 1
+    assert MatchupCalculationService(database, Facts(stats)).calculate_matchup(matchup_id).revision == 1
 
     results = _concurrent_service_calculations(
         database,

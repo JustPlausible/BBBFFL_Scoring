@@ -1,11 +1,9 @@
-
 import pytest
-
-from tests.db_helpers import migrated_connection
 
 from app.afl_client import Match, Player, PlayerStatLine, Team
 from app.db import DecisionsRepository
 from app.teams import TeamConfig
+from tests.db_helpers import migrated_connection
 
 CATS = Team(team_id=1001, name="Cats")
 PIES = Team(team_id=1002, name="Pies")
@@ -28,9 +26,7 @@ class FakeRound:
 class FakeAflClient:
     """A duck-typed stand-in for AflApiClient -- no network involved."""
 
-    def __init__(
-        self, matches, players, stats_by_match=None, season_id=1, current_round_number=1, year=2026
-    ):
+    def __init__(self, matches, players, stats_by_match=None, season_id=1, current_round_number=1, year=2026):
         self.matches = matches
         self.players = players
         self.stats_by_match = stats_by_match or {}

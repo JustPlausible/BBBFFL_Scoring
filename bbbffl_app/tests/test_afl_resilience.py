@@ -13,7 +13,6 @@ from app.afl_client import (
     AflApiHttpStatusError,
     AflApiTimeoutError,
 )
-from app.afl_diagnostics import EvidenceStatus
 from app.afl_resilience import (
     AflEvidenceUnavailableError,
     EndpointCachePolicy,
@@ -408,9 +407,7 @@ def test_evidence_batch_catches_a_stale_call_masked_by_a_later_fresh_one():
     though part of the result is stale. evidence_batch() must still catch
     it because it tracks every call made during the batch, not just the
     latest one per label."""
-    transport = ScriptedTransport(
-        [["match-1-stats"], AflApiConnectionError("/x"), ["match-2-stats"]]
-    )
+    transport = ScriptedTransport([["match-1-stats"], AflApiConnectionError("/x"), ["match-2-stats"]])
     clock = FakeClock()
     client = ResilientAflClient(
         transport,

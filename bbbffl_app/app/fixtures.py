@@ -2,10 +2,11 @@
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 from uuid import UUID, uuid4, uuid5
 
-from app.audit import ActorContext, append_event
-from app.db import _for_update_suffix, transaction
+from app.audit import ActorContext, ConnectionLike, append_event
+from app.db import DatabaseConnection, _for_update_suffix, transaction
 
 ROTATION_VERSION = "bbbffl-workbook-2026-v1"
 BASE_ROTATION = (
@@ -21,7 +22,7 @@ BASE_ROTATION = (
 )
 
 
-def fixture_number_rotation(round_count=20):
+def fixture_number_rotation(round_count: int = 20) -> tuple[tuple[tuple[int, int], ...], ...]:
     """Continue the historical rotation for a configured season length."""
     if round_count < 1:
         raise ValueError("regular season round count must be positive")
@@ -54,29 +55,36 @@ class FixtureMatchup:
     away_season_entry_id: str
 
 
-def _now():
+def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 class FixtureRepository:
-    def __init__(self, database):
+    def __init__(self, database: DatabaseConnection):
         self.database = database
 
-    def save_draft(self, season_id, entries_by_fixture_number, *, actor=ActorContext.anonymous_operator("admin"), reason=None):
+    def save_draft(
+        self,
+        season_id: str,
+        entries_by_fixture_number: list[str],
+        *,
+        actor: ActorContext = ActorContext.anonymous_operator("admin"),
+        reason: str | None = None,
+    ) -> FixtureDraw | None:
         entries = list(entries_by_fixture_number)
         if len(entries) != 10 or len(set(entries)) != 10:
             raise ValueError("fixture draw requires ten distinct season entries")
         with transaction(self.database) as conn:
-            season = conn.execute(
-                "SELECT * FROM bbbffl_season WHERE season_id=?", (season_id,)
-            ).fetchone()
+            season = conn.execute("SELECT * FROM bbbffl_season WHERE season_id=?", (season_id,)).fetchone()
             if not season:
                 raise KeyError(season_id)
             rows = conn.execute("SELECT season_entry_id FROM season_entry WHERE season_id=?", (season_id,)).fetchall()
             season_entries = {row["season_entry_id"] for row in rows}
             if len(season_entries) != 10 or set(entries) != season_entries:
                 raise ValueError("fixture draw must assign all ten entries from exactly one season")
-            existing = conn.execute("SELECT * FROM season_fixture_draw WHERE season_id=?" + _for_update_suffix(self.database), (season_id,)).fetchone()
+            existing = conn.execute(
+                "SELECT * FROM season_fixture_draw WHERE season_id=?" + _for_update_suffix(self.database), (season_id,)
+            ).fetchone()
             if existing and existing["state"] == "frozen":
                 raise ValueError("frozen fixture draw is immutable")
             now = _now()
@@ -86,37 +94,66 @@ class FixtureRepository:
                 version = existing["version"] + 1
                 conn.execute("DELETE FROM season_fixture_matchup WHERE fixture_draw_id=?", (draw_id,))
                 conn.execute("DELETE FROM season_fixture_number WHERE fixture_draw_id=?", (draw_id,))
-                conn.execute("UPDATE season_fixture_draw SET version=?, updated_at=? WHERE fixture_draw_id=?", (version, now, draw_id))
+                conn.execute(
+                    "UPDATE season_fixture_draw SET version=?, updated_at=? WHERE fixture_draw_id=?",
+                    (version, now, draw_id),
+                )
                 action = "fixture.draw.corrected"
             else:
                 draw_id = str(uuid4())
                 before = None
                 version = 1
-                conn.execute("INSERT INTO season_fixture_draw VALUES (?, ?, ?, 'draft', ?, ?, ?, NULL)", (draw_id, season_id, ROTATION_VERSION, version, now, now))
+                conn.execute(
+                    "INSERT INTO season_fixture_draw VALUES (?, ?, ?, 'draft', ?, ?, ?, NULL)",
+                    (draw_id, season_id, ROTATION_VERSION, version, now, now),
+                )
                 action = "fixture.draw.created"
             for number, entry_id in enumerate(entries, 1):
-                conn.execute("INSERT INTO season_fixture_number VALUES (?, ?, ?, ?)", (draw_id, season_id, number, entry_id))
-            round_count = (
-                season["regular_season_round_count"]
-                if "regular_season_round_count" in season.keys()
-                else 20
-            )
+                conn.execute(
+                    "INSERT INTO season_fixture_number VALUES (?, ?, ?, ?)", (draw_id, season_id, number, entry_id)
+                )
+            round_count = season["regular_season_round_count"] if "regular_season_round_count" in season.keys() else 20
             for round_number, pairings in enumerate(fixture_number_rotation(round_count), 1):
                 for order, (home, away) in enumerate(pairings, 1):
                     matchup_id = str(uuid5(UUID(draw_id), f"round:{round_number}:match:{order}"))
-                    conn.execute("INSERT INTO season_fixture_matchup VALUES (?, ?, ?, ?, ?, ?, ?)", (matchup_id, draw_id, season_id, round_number, order, entries[home - 1], entries[away - 1]))
+                    conn.execute(
+                        "INSERT INTO season_fixture_matchup VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (matchup_id, draw_id, season_id, round_number, order, entries[home - 1], entries[away - 1]),
+                    )
             after = {str(i): entry for i, entry in enumerate(entries, 1)}
-            append_event(conn, actor=actor, action=action, entity_type="fixture_draw", entity_id=draw_id, entity_version=str(version), reason=reason, before_state=before, after_state=after, payload={"rotation_version": ROTATION_VERSION})
+            append_event(
+                conn,
+                actor=actor,
+                action=action,
+                entity_type="fixture_draw",
+                entity_id=draw_id,
+                entity_version=str(version),
+                reason=reason,
+                before_state=before,
+                after_state=after,
+                payload={"rotation_version": ROTATION_VERSION},
+            )
         return self.get_draw(season_id)
 
     @staticmethod
-    def _number_map(conn, draw_id):
-        rows = conn.execute("SELECT fixture_number, season_entry_id FROM season_fixture_number WHERE fixture_draw_id=? ORDER BY fixture_number", (draw_id,)).fetchall()
+    def _number_map(conn: ConnectionLike, draw_id: str) -> dict[str, str]:
+        rows = conn.execute(
+            "SELECT fixture_number, season_entry_id FROM season_fixture_number WHERE fixture_draw_id=? ORDER BY fixture_number",
+            (draw_id,),
+        ).fetchall()
         return {str(row["fixture_number"]): row["season_entry_id"] for row in rows}
 
-    def freeze(self, season_id, *, actor=ActorContext.anonymous_operator("admin"), reason=None):
+    def freeze(
+        self,
+        season_id: str,
+        *,
+        actor: ActorContext = ActorContext.anonymous_operator("admin"),
+        reason: str | None = None,
+    ) -> FixtureDraw | None:
         with transaction(self.database) as conn:
-            row = conn.execute("SELECT * FROM season_fixture_draw WHERE season_id=?" + _for_update_suffix(self.database), (season_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM season_fixture_draw WHERE season_id=?" + _for_update_suffix(self.database), (season_id,)
+            ).fetchone()
             if not row:
                 raise KeyError(season_id)
             if row["state"] == "frozen":
@@ -131,14 +168,8 @@ class FixtureRepository:
                 "GROUP BY bbbffl_round_number ORDER BY bbbffl_round_number",
                 (row["fixture_draw_id"],),
             ).fetchall()
-            season = conn.execute(
-                "SELECT * FROM bbbffl_season WHERE season_id=?", (season_id,)
-            ).fetchone()
-            round_count = (
-                season["regular_season_round_count"]
-                if "regular_season_round_count" in season.keys()
-                else 20
-            )
+            season = conn.execute("SELECT * FROM bbbffl_season WHERE season_id=?", (season_id,)).fetchone()
+            round_count = season["regular_season_round_count"] if "regular_season_round_count" in season.keys() else 20
             expected_rounds = list(range(1, round_count + 1))
             if (
                 assignments != 10
@@ -147,21 +178,34 @@ class FixtureRepository:
             ):
                 raise ValueError("fixture draw is incomplete")
             now, version = _now(), row["version"] + 1
-            conn.execute("UPDATE season_fixture_draw SET state='frozen', version=?, updated_at=?, frozen_at=? WHERE fixture_draw_id=?", (version, now, now, row["fixture_draw_id"]))
-            append_event(conn, actor=actor, action="fixture.draw.frozen", entity_type="fixture_draw", entity_id=row["fixture_draw_id"], entity_version=str(version), reason=reason, before_state={"state": "draft"}, after_state={"state": "frozen"})
+            conn.execute(
+                "UPDATE season_fixture_draw SET state='frozen', version=?, updated_at=?, frozen_at=? WHERE fixture_draw_id=?",
+                (version, now, now, row["fixture_draw_id"]),
+            )
+            append_event(
+                conn,
+                actor=actor,
+                action="fixture.draw.frozen",
+                entity_type="fixture_draw",
+                entity_id=row["fixture_draw_id"],
+                entity_version=str(version),
+                reason=reason,
+                before_state={"state": "draft"},
+                after_state={"state": "frozen"},
+            )
         return self.get_draw(season_id)
 
-    def get_draw(self, season_id):
+    def get_draw(self, season_id: str) -> FixtureDraw | None:
         row = self.database.execute("SELECT * FROM season_fixture_draw WHERE season_id=?", (season_id,)).fetchone()
         return FixtureDraw(**dict(row)) if row else None
 
-    def fixture_numbers(self, season_id):
+    def fixture_numbers(self, season_id: str) -> dict[str, str]:
         row = self.get_draw(season_id)
         return self._number_map(self.database, row.fixture_draw_id) if row else {}
 
-    def list_matchups(self, season_id, round_number=None):
+    def list_matchups(self, season_id: str, round_number: int | None = None) -> list[FixtureMatchup]:
         sql = "SELECT m.* FROM season_fixture_matchup m JOIN season_fixture_draw d ON d.fixture_draw_id=m.fixture_draw_id WHERE d.season_id=?"
-        params = [season_id]
+        params: list[Any] = [season_id]
         if round_number is not None:
             sql += " AND m.bbbffl_round_number=?"
             params.append(round_number)

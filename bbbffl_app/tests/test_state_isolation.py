@@ -6,10 +6,8 @@ both happen to use the identical team_key -- because every row in
 app/db.py is scoped by competition_key.
 """
 
-
-from tests.db_helpers import migrated_connection
-
 from app.db import GRAND_FINAL_COMPETITION_KEY, DecisionsRepository
+from tests.db_helpers import migrated_connection
 
 
 def _repos():

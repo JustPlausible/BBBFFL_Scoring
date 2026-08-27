@@ -38,9 +38,7 @@ def client(tmp_path, monkeypatch):
         # The sample team config uses different (100xxx) player IDs; register those too.
         for team in app.state.teams:
             for pid in team.roster.values():
-                players.setdefault(
-                    pid, Player(canonical_player_id=pid, name=f"Player {pid}", current_team=CATS)
-                )
+                players.setdefault(pid, Player(canonical_player_id=pid, name=f"Player {pid}", current_team=CATS))
 
         match = Match(match_id=100, home_team=CATS, away_team=PIES, status="LIVE")
         fake = FakeAflClient([match], players, {100: {}})
@@ -341,9 +339,7 @@ def test_postgame_afl_match_renders_rostered_players_as_postgame_not_final(clien
     should be prompted to sign off yet."""
     from app.main import app as fastapi_app
 
-    fastapi_app.state.fake_afl_client.matches = [
-        Match(match_id=100, home_team=CATS, away_team=PIES, status="POSTGAME")
-    ]
+    fastapi_app.state.fake_afl_client.matches = [Match(match_id=100, home_team=CATS, away_team=PIES, status="POSTGAME")]
 
     r = client.get("/api/public/state")
     assert r.status_code == 200

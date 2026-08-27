@@ -140,11 +140,7 @@ def classify_failure(exc: BaseException) -> FailureClass:
     if isinstance(exc, AflApiConnectionError):
         return FailureClass.CONNECTION_ERROR
     if isinstance(exc, AflApiHttpStatusError):
-        return (
-            FailureClass.TRANSIENT_HTTP
-            if exc.status_code in _TRANSIENT_HTTP_STATUSES
-            else FailureClass.CLIENT_HTTP
-        )
+        return FailureClass.TRANSIENT_HTTP if exc.status_code in _TRANSIENT_HTTP_STATUSES else FailureClass.CLIENT_HTTP
     if isinstance(exc, (KeyError, TypeError, ValueError)):
         return FailureClass.CONTRACT_ERROR
     if isinstance(exc, AflApiError):
@@ -344,14 +340,10 @@ class ResilientAflClient:
         return self._call("matches", round_id, lambda: self._transport.get_matches(round_id))
 
     def get_player(self, canonical_player_id: int):
-        return self._call(
-            "player", canonical_player_id, lambda: self._transport.get_player(canonical_player_id)
-        )
+        return self._call("player", canonical_player_id, lambda: self._transport.get_player(canonical_player_id))
 
     def get_match_player_stats(self, match_id: int):
-        return self._call(
-            "player_stats", match_id, lambda: self._transport.get_match_player_stats(match_id)
-        )
+        return self._call("player_stats", match_id, lambda: self._transport.get_match_player_stats(match_id))
 
     # -- Evidence/diagnostics surface --------------------------------------
 
@@ -408,17 +400,30 @@ class ResilientAflClient:
             if failure_class in RETRYABLE_FAILURE_CLASSES:
                 entry = self._cache.get((endpoint, cache_key))
                 if entry is not None and (now - entry.fetched_at) <= policy.stale_ttl_seconds:
-                    self._record(endpoint, EvidenceStatus.STALE, correlation_id, failure_class=failure_class,
-                                 cache_age_seconds=now - entry.fetched_at, detail=_safe_detail(exc))
+                    self._record(
+                        endpoint,
+                        EvidenceStatus.STALE,
+                        correlation_id,
+                        failure_class=failure_class,
+                        cache_age_seconds=now - entry.fetched_at,
+                        detail=_safe_detail(exc),
+                    )
                     return entry.value
-                self._record(endpoint, EvidenceStatus.UNAVAILABLE, correlation_id, failure_class=failure_class,
-                             detail=_safe_detail(exc))
+                self._record(
+                    endpoint,
+                    EvidenceStatus.UNAVAILABLE,
+                    correlation_id,
+                    failure_class=failure_class,
+                    detail=_safe_detail(exc),
+                )
                 raise AflEvidenceUnavailableError(endpoint, cause=exc) from exc
             # Non-retryable: a contract/schema incompatibility or a genuine
             # client-side error. Never consult the cache here -- an
             # incompatible upstream response must stay visible, not be
             # hidden behind stale-but-structurally-valid cached data.
-            status = EvidenceStatus.INVALID if failure_class == FailureClass.CONTRACT_ERROR else EvidenceStatus.UNAVAILABLE
+            status = (
+                EvidenceStatus.INVALID if failure_class == FailureClass.CONTRACT_ERROR else EvidenceStatus.UNAVAILABLE
+            )
             self._record(endpoint, status, correlation_id, failure_class=failure_class, detail=_safe_detail(exc))
             raise
         else:

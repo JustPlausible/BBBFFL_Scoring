@@ -1,14 +1,16 @@
 """Repositories for explicit, season-scoped BBBFFL parent identities."""
 
-from dataclasses import dataclass
 import json
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import inspect
 
 from app.audit import ActorContext, append_event
-from app.db import _for_update_suffix, transaction
+from app.db import DatabaseConnection, _for_update_suffix, transaction
 
 SEASON_LIFECYCLE_CHANGED = "season.lifecycle.changed"
 RULES_VERSION_CREATED = "season.rules_version.created"
@@ -74,7 +76,7 @@ class BBBFFLRound:
 
 
 class SeasonRepository:
-    def __init__(self, database):
+    def __init__(self, database: DatabaseConnection):
         self.database = database
 
     def _has_round_count(self) -> bool:
@@ -83,7 +85,7 @@ class SeasonRepository:
         }
 
     @staticmethod
-    def _season_from_row(row) -> Season:
+    def _season_from_row(row: Mapping[str, Any]) -> Season:
         values = dict(row)
         values.setdefault("regular_season_round_count", 20)
         return Season(**values)
@@ -127,15 +129,11 @@ class SeasonRepository:
         return item
 
     def get_season(self, season_id: str) -> Season | None:
-        row = self.database.execute(
-            "SELECT * FROM bbbffl_season WHERE season_id = ?", (season_id,)
-        ).fetchone()
+        row = self.database.execute("SELECT * FROM bbbffl_season WHERE season_id = ?", (season_id,)).fetchone()
         return self._season_from_row(row) if row else None
 
     def get_season_by_year(self, year: int) -> Season | None:
-        row = self.database.execute(
-            "SELECT * FROM bbbffl_season WHERE year = ?", (year,)
-        ).fetchone()
+        row = self.database.execute("SELECT * FROM bbbffl_season WHERE year = ?", (year,)).fetchone()
         return self._season_from_row(row) if row else None
 
     def transition_lifecycle(
@@ -148,8 +146,7 @@ class SeasonRepository:
     ) -> Season:
         with transaction(self.database) as connection:
             row = connection.execute(
-                "SELECT * FROM bbbffl_season WHERE season_id = ?"
-                + _for_update_suffix(self.database),
+                "SELECT * FROM bbbffl_season WHERE season_id = ?" + _for_update_suffix(self.database),
                 (season_id,),
             ).fetchone()
             if not row:
@@ -157,15 +154,12 @@ class SeasonRepository:
 
             old_state = row["lifecycle_state"]
             if target not in LEGAL_TRANSITIONS[old_state]:
-                raise ValueError(
-                    f"illegal lifecycle transition: {old_state} -> {target}"
-                )
+                raise ValueError(f"illegal lifecycle transition: {old_state} -> {target}")
 
             updated_at = _now()
             version = row["version"] + 1
             connection.execute(
-                "UPDATE bbbffl_season "
-                "SET lifecycle_state=?, updated_at=?, version=? WHERE season_id=?",
+                "UPDATE bbbffl_season SET lifecycle_state=?, updated_at=?, version=? WHERE season_id=?",
                 (target, updated_at, version, season_id),
             )
             append_event(
@@ -192,9 +186,7 @@ class SeasonRepository:
                 updated_at=updated_at,
                 version=version,
                 regular_season_round_count=(
-                    row["regular_season_round_count"]
-                    if "regular_season_round_count" in row.keys()
-                    else 20
+                    row["regular_season_round_count"] if "regular_season_round_count" in row.keys() else 20
                 ),
             )
         return result
@@ -226,10 +218,16 @@ class SeasonRepository:
             if "scoring_rules" in columns:
                 connection.execute(
                     "INSERT INTO season_rules_version (rules_version_id, season_id, rules_key, version_number, name, notes, created_at, created_by, scoring_rules) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (*tuple(item.__dict__.values())[:-1], json.dumps(scoring_rules, sort_keys=True) if scoring_rules is not None else None),
+                    (
+                        *tuple(item.__dict__.values())[:-1],
+                        json.dumps(scoring_rules, sort_keys=True) if scoring_rules is not None else None,
+                    ),
                 )
             else:
-                connection.execute("INSERT INTO season_rules_version VALUES (?, ?, ?, ?, ?, ?, ?, ?)", tuple(item.__dict__.values())[:-1])
+                connection.execute(
+                    "INSERT INTO season_rules_version VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    tuple(item.__dict__.values())[:-1],
+                )
             append_event(
                 connection,
                 actor=actor,
@@ -247,8 +245,7 @@ class SeasonRepository:
 
     def list_rules_versions(self, season_id: str) -> list[RulesVersion]:
         rows = self.database.execute(
-            "SELECT * FROM season_rules_version "
-            "WHERE season_id=? ORDER BY rules_key, version_number",
+            "SELECT * FROM season_rules_version WHERE season_id=? ORDER BY rules_key, version_number",
             (season_id,),
         ).fetchall()
         result = []
@@ -273,9 +270,7 @@ class SeasonRepository:
         if not rules or rules["season_id"] != season_id:
             raise ValueError("rules version must belong to competition season")
 
-        item = CompetitionStream(
-            _id(), season_id, rules_version_id, stream_key, label, stream_type, _now()
-        )
+        item = CompetitionStream(_id(), season_id, rules_version_id, stream_key, label, stream_type, _now())
         with transaction(self.database) as connection:
             connection.execute(
                 "INSERT INTO competition_stream VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -285,14 +280,12 @@ class SeasonRepository:
 
     def list_competitions(self, season_id: str) -> list[CompetitionStream]:
         rows = self.database.execute(
-            "SELECT * FROM competition_stream " "WHERE season_id=? ORDER BY stream_key",
+            "SELECT * FROM competition_stream WHERE season_id=? ORDER BY stream_key",
             (season_id,),
         ).fetchall()
         return [CompetitionStream(**dict(row)) for row in rows]
 
-    def create_round(
-        self, competition_id: str, round_key: str, label: str, sequence: int
-    ) -> BBBFFLRound:
+    def create_round(self, competition_id: str, round_key: str, label: str, sequence: int) -> BBBFFLRound:
         item = BBBFFLRound(_id(), competition_id, round_key, label, sequence, _now())
         with transaction(self.database) as connection:
             connection.execute(
@@ -303,7 +296,7 @@ class SeasonRepository:
 
     def list_rounds(self, competition_id: str) -> list[BBBFFLRound]:
         rows = self.database.execute(
-            "SELECT * FROM bbbffl_round " "WHERE competition_id=? ORDER BY sequence",
+            "SELECT * FROM bbbffl_round WHERE competition_id=? ORDER BY sequence",
             (competition_id,),
         ).fetchall()
         return [BBBFFLRound(**dict(row)) for row in rows]

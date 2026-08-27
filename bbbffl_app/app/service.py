@@ -16,7 +16,7 @@ from typing import Literal, Protocol
 from app.afl_client import Match, MatchState, Player, PlayerStatLine, Team
 from app.db import DecisionsRepository
 from app.presentation import Number, football_score_for_position, format_football_line
-from app.scoring import FORWARD_POSITIONS, ROSTER_SLOTS, SCORABLE_POSITIONS, PlayerStats, score_position
+from app.scoring import FORWARD_POSITIONS, SCORABLE_POSITIONS, PlayerStats, score_position
 from app.teams import TeamConfig
 
 logger = logging.getLogger("bbbffl.service")
@@ -380,11 +380,7 @@ def build_matchup_state(
                     else:
                         match = _match_for_player(team_by_player, matches_by_team_id, interchange_id)
                         match_state = match.state if match else "yet_to_play"
-                        stat_line = (
-                            stats_by_match.get(match.match_id, {}).get(interchange_id)
-                            if match
-                            else None
-                        )
+                        stat_line = stats_by_match.get(match.match_id, {}).get(interchange_id) if match else None
                         calculated_score = score_position(position, _stats_to_player_stats(stat_line))
                 recommended = False
             elif starting_player_id is None:
@@ -415,9 +411,7 @@ def build_matchup_state(
                 recommended = False
 
             effective_score = (
-                override.override_score
-                if override and override.override_score is not None
-                else calculated_score
+                override.override_score if override and override.override_score is not None else calculated_score
             )
             if effective_score is not None:
                 total_score += effective_score
@@ -454,9 +448,7 @@ def build_matchup_state(
                     recommended_interchange=recommended,
                     starting_dnp=starting_dnp,
                     starting_player_id=starting_player_id,
-                    starting_player_name=(
-                        name_by_player.get(starting_player_id) if starting_player_id else None
-                    ),
+                    starting_player_name=(name_by_player.get(starting_player_id) if starting_player_id else None),
                     display_goals=football.goals,
                     display_behinds=football.behinds,
                     display_is_actual_afl=football.is_actual_afl,
@@ -467,9 +459,7 @@ def build_matchup_state(
 
         interchange_info = InterchangeInfo(
             canonical_player_id=interchange_id,
-            player_name=(
-                name_by_player.get(interchange_id, "") if interchange_id is not None else "Unnamed"
-            ),
+            player_name=(name_by_player.get(interchange_id, "") if interchange_id is not None else "Unnamed"),
             afl_club=_team_name(team_by_player, interchange_id) or "",
             match_state=interchange_match_state,
             dnp=interchange_dnp,
@@ -581,9 +571,7 @@ def _rank_standings(teams: list[TeamResult]) -> list[StandingEntry]:
         if team.total_score != previous_score:
             rank = index
             previous_score = team.total_score
-        standings.append(
-            StandingEntry(rank=rank, team_key=team.team_key, name=team.name, total_score=team.total_score)
-        )
+        standings.append(StandingEntry(rank=rank, team_key=team.team_key, name=team.name, total_score=team.total_score))
     return standings
 
 
@@ -722,9 +710,7 @@ def get_superscore_view(
     served from the stored snapshot and afl-api is never queried again."""
     matchup_state = decisions.get_matchup_state()
     if matchup_state.finalized and matchup_state.snapshot is not None:
-        return _backfill_counts(
-            _backfill_starting_player_identity(_backfill_football_display(matchup_state.snapshot))
-        )
+        return _backfill_counts(_backfill_starting_player_identity(_backfill_football_display(matchup_state.snapshot)))
     result = build_superscore_state(afl_client, entries, decisions, season, afl_round, identity_cache)
     return dataclasses.asdict(result)
 
@@ -746,8 +732,6 @@ def get_matchup_view(
     """
     matchup_state = decisions.get_matchup_state()
     if matchup_state.finalized and matchup_state.snapshot is not None:
-        return _backfill_counts(
-            _backfill_starting_player_identity(_backfill_football_display(matchup_state.snapshot))
-        )
+        return _backfill_counts(_backfill_starting_player_identity(_backfill_football_display(matchup_state.snapshot)))
     result = build_matchup_state(afl_client, teams, decisions, identity_cache)
     return dataclasses.asdict(result)

@@ -193,14 +193,11 @@ class OwnershipRepository:
                 (season_id,),
             ).fetchone()
             entries = conn.execute(
-                "SELECT season_entry_id FROM season_entry WHERE season_id=?"
-                + _for_update_suffix(self.database),
+                "SELECT season_entry_id FROM season_entry WHERE season_id=?" + _for_update_suffix(self.database),
                 (season_id,),
             ).fetchall()
             for entry in entries:
-                maximum = self._maximum_squad_size(
-                    entry["season_entry_id"], connection=conn
-                )
+                maximum = self._maximum_squad_size(entry["season_entry_id"], connection=conn)
                 if maximum > squad_limit:
                     raise SquadCapacityError(
                         f"squad limit of {squad_limit} is below persisted squad "
@@ -217,15 +214,11 @@ class OwnershipRepository:
                 entity_type="season.squad_configuration",
                 entity_id=season_id,
                 reason=reason,
-                before_state={"squad_limit": existing["squad_limit"]}
-                if existing
-                else None,
+                before_state={"squad_limit": existing["squad_limit"]} if existing else None,
                 after_state={"squad_limit": squad_limit},
             )
 
-    def _maximum_squad_size(
-        self, season_entry_id, *, from_at=None, additional=0, connection=None
-    ):
+    def _maximum_squad_size(self, season_entry_id, *, from_at=None, additional=0, connection=None):
         """Maximum effective squad size at all acquisition boundaries.
 
         Counts use half-open ownership periods. When ``additional`` is set,
@@ -237,8 +230,7 @@ class OwnershipRepository:
         boundaries = [from_at] if from_at is not None else []
         if from_at is None:
             rows = conn.execute(
-                "SELECT DISTINCT acquired_at FROM player_ownership_period "
-                "WHERE season_entry_id=? ORDER BY acquired_at",
+                "SELECT DISTINCT acquired_at FROM player_ownership_period WHERE season_entry_id=? ORDER BY acquired_at",
                 (season_entry_id,),
             ).fetchall()
         else:
@@ -259,9 +251,7 @@ class OwnershipRepository:
             maximum = max(maximum, count + additional)
         return maximum
 
-    def validate_squad_capacity(
-        self, season_entry_id, *, effective_at, additional=1, connection=None
-    ):
+    def validate_squad_capacity(self, season_entry_id, *, effective_at, additional=1, connection=None):
         conn = connection or self.database
         entry = conn.execute(
             "SELECT season_id FROM season_entry WHERE season_entry_id=?",
@@ -282,9 +272,7 @@ class OwnershipRepository:
             connection=conn,
         )
         if maximum > config["squad_limit"]:
-            raise SquadCapacityError(
-                f"squad limit of {config['squad_limit']} would be exceeded"
-            )
+            raise SquadCapacityError(f"squad limit of {config['squad_limit']} would be exceeded")
         return config["squad_limit"] - maximum
 
     def acquire(
@@ -319,8 +307,7 @@ class OwnershipRepository:
             if not player:
                 raise KeyError(season_player_id)
             entry = conn.execute(
-                "SELECT season_id FROM season_entry WHERE season_entry_id=?"
-                + _for_update_suffix(self.database),
+                "SELECT season_id FROM season_entry WHERE season_entry_id=?" + _for_update_suffix(self.database),
                 (season_entry_id,),
             ).fetchone()
             if not entry:
@@ -334,12 +321,8 @@ class OwnershipRepository:
                 (season_player_id, at, at),
             ).fetchone()
             if overlap:
-                raise PlayerUnavailableError(
-                    "player is already owned at the effective time"
-                )
-            self.validate_squad_capacity(
-                season_entry_id, effective_at=at, connection=conn
-            )
+                raise PlayerUnavailableError("player is already owned at the effective time")
+            self.validate_squad_capacity(season_entry_id, effective_at=at, connection=conn)
             item = OwnershipPeriod(
                 _id(),
                 season_player_id,
@@ -456,14 +439,11 @@ class OwnershipRepository:
                 (season_player_id,),
             ).fetchone()
             entry = conn.execute(
-                "SELECT season_id FROM season_entry WHERE season_entry_id=?"
-                + _for_update_suffix(self.database),
+                "SELECT season_id FROM season_entry WHERE season_entry_id=?" + _for_update_suffix(self.database),
                 (to_entry_id,),
             ).fetchone()
             if not player or not current or not entry:
-                raise PlayerUnavailableError(
-                    "player, current owner, or destination is unavailable"
-                )
+                raise PlayerUnavailableError("player, current owner, or destination is unavailable")
             if entry["season_id"] != player["season_id"]:
                 raise ValueError("player and entry must belong to the same season")
             if not player["eligible"]:

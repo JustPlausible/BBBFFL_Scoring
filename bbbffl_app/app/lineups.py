@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from sqlalchemy.exc import IntegrityError
 
-from app.audit import ActorContext, ENTITY_TYPE_LINEUP, LINEUP_SUBMITTED, append_event
+from app.audit import ENTITY_TYPE_LINEUP, LINEUP_SUBMITTED, ActorContext, append_event
 from app.db import _for_update_suffix, transaction
 from app.season import _now
 
@@ -77,7 +77,8 @@ class WeeklyLineupRepository:
                 self._validate_scope(conn, season_id, competition_id, round_id, entry_id)
                 self._validate_players(conn, season_id, selected)
                 row = conn.execute(
-                    "SELECT * FROM weekly_lineup WHERE season_id=? AND competition_id=? AND bbbffl_round_id=? AND season_entry_id=?" + _for_update_suffix(self.database),
+                    "SELECT * FROM weekly_lineup WHERE season_id=? AND competition_id=? AND bbbffl_round_id=? AND season_entry_id=?"
+                    + _for_update_suffix(self.database),
                     (season_id, competition_id, round_id, entry_id),
                 ).fetchone()
                 if row is None:
@@ -102,7 +103,10 @@ class WeeklyLineupRepository:
                         raise LineupConflictError("stale draft revision")
                     conn.execute("DELETE FROM weekly_lineup_draft_slot WHERE lineup_id=?", (lineup_id,))
                 for position in POSITIONS:
-                    conn.execute("INSERT INTO weekly_lineup_draft_slot VALUES (?, ?, ?)", (lineup_id, position, selected[position]))
+                    conn.execute(
+                        "INSERT INTO weekly_lineup_draft_slot VALUES (?, ?, ?)",
+                        (lineup_id, position, selected[position]),
+                    )
         except IntegrityError as exc:
             raise LineupConflictError("concurrent draft creation or edit") from exc
         return LineupDraft(lineup_id, season_id, competition_id, round_id, entry_id, revision, selected, created, now)
@@ -140,7 +144,18 @@ class WeeklyLineupRepository:
             row["updated_at"],
         )
 
-    def submit(self, lineup_id, *, expected_draft_revision, expected_submission_version, actor=ActorContext.anonymous_operator("coach"), source_type="coach", source_detail=None, reason=None, lock_guard=None):
+    def submit(
+        self,
+        lineup_id,
+        *,
+        expected_draft_revision,
+        expected_submission_version,
+        actor=ActorContext.anonymous_operator("coach"),
+        source_type="coach",
+        source_detail=None,
+        reason=None,
+        lock_guard=None,
+    ):
         if source_type not in SUBMISSION_SOURCES:
             raise LineupIntegrityError("unknown submission source")
         if lock_guard is not None and hasattr(lock_guard, "materialize"):
@@ -154,7 +169,9 @@ class WeeklyLineupRepository:
             # takes row locks below. Both then perform a compare-and-swap.
             if self.database.engine.dialect.name == "sqlite":
                 conn.execute("UPDATE weekly_lineup SET updated_at=updated_at WHERE lineup_id=?", (lineup_id,))
-            lineup = conn.execute("SELECT * FROM weekly_lineup WHERE lineup_id=?" + _for_update_suffix(self.database), (lineup_id,)).fetchone()
+            lineup = conn.execute(
+                "SELECT * FROM weekly_lineup WHERE lineup_id=?" + _for_update_suffix(self.database), (lineup_id,)
+            ).fetchone()
             if not lineup:
                 raise KeyError(lineup_id)
             if lineup["draft_revision"] != expected_draft_revision:
@@ -162,10 +179,15 @@ class WeeklyLineupRepository:
             current = lineup["effective_submission_version"] or 0
             if current != expected_submission_version:
                 raise LineupConflictError("stale submission version")
-            lifecycle = conn.execute("SELECT state FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?" + _for_update_suffix(self.database), (lineup["bbbffl_round_id"],)).fetchone()
+            lifecycle = conn.execute(
+                "SELECT state FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?" + _for_update_suffix(self.database),
+                (lineup["bbbffl_round_id"],),
+            ).fetchone()
             if not lifecycle or lifecycle["state"] != "open":
                 raise LineupIntegrityError("BBBFFL round does not currently permit submission")
-            slots = conn.execute("SELECT position, season_player_id FROM weekly_lineup_draft_slot WHERE lineup_id=?", (lineup_id,)).fetchall()
+            slots = conn.execute(
+                "SELECT position, season_player_id FROM weekly_lineup_draft_slot WHERE lineup_id=?", (lineup_id,)
+            ).fetchall()
             positions = {row["position"]: row["season_player_id"] for row in slots}
             positions = self._normalise(positions)
             self._validate_players(conn, lineup["season_id"], positions, lock=True)
@@ -188,10 +210,24 @@ class WeeklyLineupRepository:
             version, now = current + 1, _now()
             conn.execute(
                 "INSERT INTO weekly_lineup_submission VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (lineup_id, version, expected_draft_revision, now, actor.actor_type, actor.actor_id, actor.actor_role, source_type, json.dumps(source_detail, sort_keys=True) if source_detail is not None else None, reason),
+                (
+                    lineup_id,
+                    version,
+                    expected_draft_revision,
+                    now,
+                    actor.actor_type,
+                    actor.actor_id,
+                    actor.actor_role,
+                    source_type,
+                    json.dumps(source_detail, sort_keys=True) if source_detail is not None else None,
+                    reason,
+                ),
             )
             for position in POSITIONS:
-                conn.execute("INSERT INTO weekly_lineup_submission_slot VALUES (?, ?, ?, ?)", (lineup_id, version, position, positions[position]))
+                conn.execute(
+                    "INSERT INTO weekly_lineup_submission_slot VALUES (?, ?, ?, ?)",
+                    (lineup_id, version, position, positions[position]),
+                )
             result = conn.execute(
                 "UPDATE weekly_lineup SET effective_submission_version=?, updated_at=? WHERE lineup_id=? AND "
                 "((effective_submission_version IS NULL AND ?=0) OR effective_submission_version=?)",
@@ -199,21 +235,50 @@ class WeeklyLineupRepository:
             )
             if not result.rowcount:
                 raise LineupConflictError("concurrent submission")
-            append_event(conn, actor=actor, action=LINEUP_SUBMITTED, entity_type=ENTITY_TYPE_LINEUP, entity_id=lineup_id, entity_version=str(version), reason=reason, after_state={"effective_submission_version": version}, payload={"source_type": source_type, "based_on_draft_revision": expected_draft_revision})
+            append_event(
+                conn,
+                actor=actor,
+                action=LINEUP_SUBMITTED,
+                entity_type=ENTITY_TYPE_LINEUP,
+                entity_id=lineup_id,
+                entity_version=str(version),
+                reason=reason,
+                after_state={"effective_submission_version": version},
+                payload={"source_type": source_type, "based_on_draft_revision": expected_draft_revision},
+            )
         return self.get_submission(lineup_id, version)
 
     def get_effective_submission(self, lineup_id):
-        row = self.database.execute("SELECT effective_submission_version FROM weekly_lineup WHERE lineup_id=?", (lineup_id,)).fetchone()
+        row = self.database.execute(
+            "SELECT effective_submission_version FROM weekly_lineup WHERE lineup_id=?", (lineup_id,)
+        ).fetchone()
         if not row or row["effective_submission_version"] is None:
             return None
         return self.get_submission(lineup_id, row["effective_submission_version"])
 
     def get_submission(self, lineup_id, version):
-        row = self.database.execute("SELECT * FROM weekly_lineup_submission WHERE lineup_id=? AND version=?", (lineup_id, version)).fetchone()
+        row = self.database.execute(
+            "SELECT * FROM weekly_lineup_submission WHERE lineup_id=? AND version=?", (lineup_id, version)
+        ).fetchone()
         if not row:
             return None
-        slots = self.database.execute("SELECT position, season_player_id FROM weekly_lineup_submission_slot WHERE lineup_id=? AND version=?", (lineup_id, version)).fetchall()
-        return SubmittedLineup(row["lineup_id"], row["version"], row["based_on_draft_revision"], {s["position"]: s["season_player_id"] for s in slots}, row["submitted_at"], row["actor_type"], row["actor_id"], row["actor_role"], row["source_type"], json.loads(row["source_detail"]) if row["source_detail"] else None, row["reason"])
+        slots = self.database.execute(
+            "SELECT position, season_player_id FROM weekly_lineup_submission_slot WHERE lineup_id=? AND version=?",
+            (lineup_id, version),
+        ).fetchall()
+        return SubmittedLineup(
+            row["lineup_id"],
+            row["version"],
+            row["based_on_draft_revision"],
+            {s["position"]: s["season_player_id"] for s in slots},
+            row["submitted_at"],
+            row["actor_type"],
+            row["actor_id"],
+            row["actor_role"],
+            row["source_type"],
+            json.loads(row["source_detail"]) if row["source_detail"] else None,
+            row["reason"],
+        )
 
     @staticmethod
     def _normalise(positions):
@@ -227,7 +292,10 @@ class WeeklyLineupRepository:
         return result
 
     def _validate_scope(self, conn, season_id, competition_id, round_id, entry_id):
-        row = conn.execute("SELECT c.season_id AS competition_season, r.competition_id, e.season_id AS entry_season FROM competition_stream c JOIN bbbffl_round r ON r.competition_id=c.competition_id JOIN season_entry e ON e.season_entry_id=? WHERE c.competition_id=? AND r.bbbffl_round_id=?", (entry_id, competition_id, round_id)).fetchone()
+        row = conn.execute(
+            "SELECT c.season_id AS competition_season, r.competition_id, e.season_id AS entry_season FROM competition_stream c JOIN bbbffl_round r ON r.competition_id=c.competition_id JOIN season_entry e ON e.season_entry_id=? WHERE c.competition_id=? AND r.bbbffl_round_id=?",
+            (entry_id, competition_id, round_id),
+        ).fetchone()
         if not row:
             raise LineupIntegrityError("unknown lineup season/competition/round/entry scope")
         if row["competition_season"] != season_id or row["entry_season"] != season_id:
@@ -236,13 +304,20 @@ class WeeklyLineupRepository:
     def _validate_players(self, conn, season_id, positions, lock=False):
         players = sorted({p for p in positions.values() if p is not None})
         for player_id in players:
-            row = conn.execute("SELECT season_id FROM season_player_pool WHERE season_player_id=?" + (_for_update_suffix(self.database) if lock else ""), (player_id,)).fetchone()
+            row = conn.execute(
+                "SELECT season_id FROM season_player_pool WHERE season_player_id=?"
+                + (_for_update_suffix(self.database) if lock else ""),
+                (player_id,),
+            ).fetchone()
             if not row or row["season_id"] != season_id:
                 raise LineupIntegrityError("selection must reference a season-player in the lineup season")
 
     @staticmethod
     def _validate_ownership(conn, entry_id, positions):
         for player_id in {p for p in positions.values() if p is not None}:
-            owner = conn.execute("SELECT season_entry_id FROM player_ownership_period WHERE season_player_id=? AND released_at IS NULL", (player_id,)).fetchone()
+            owner = conn.execute(
+                "SELECT season_entry_id FROM player_ownership_period WHERE season_player_id=? AND released_at IS NULL",
+                (player_id,),
+            ).fetchone()
             if not owner or owner["season_entry_id"] != entry_id:
                 raise LineupIntegrityError("selected player is not currently owned by the submitting entry")

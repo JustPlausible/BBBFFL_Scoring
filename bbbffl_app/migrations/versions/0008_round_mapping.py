@@ -1,7 +1,7 @@
 """Versioned, fail-closed BBBFFL round to AFL context mappings."""
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "0008_round_map"
 down_revision = "0007_fixture"
@@ -12,10 +12,7 @@ depends_on = None
 def upgrade():
     bind = op.get_bind()
     duplicates = bind.execute(
-        sa.text(
-            "SELECT bbbffl_round_id FROM bbbffl_round_afl_reference "
-            "GROUP BY bbbffl_round_id HAVING COUNT(*) > 1"
-        )
+        sa.text("SELECT bbbffl_round_id FROM bbbffl_round_afl_reference GROUP BY bbbffl_round_id HAVING COUNT(*) > 1")
     ).fetchall()
     if duplicates:
         raise RuntimeError(
@@ -25,7 +22,12 @@ def upgrade():
     op.create_table(
         "round_afl_mapping",
         sa.Column("mapping_id", sa.Text(), primary_key=True),
-        sa.Column("bbbffl_round_id", sa.Text(), sa.ForeignKey("bbbffl_round.bbbffl_round_id", ondelete="RESTRICT"), nullable=False),
+        sa.Column(
+            "bbbffl_round_id",
+            sa.Text(),
+            sa.ForeignKey("bbbffl_round.bbbffl_round_id", ondelete="RESTRICT"),
+            nullable=False,
+        ),
         sa.Column("current_revision", sa.Integer(), nullable=False),
         sa.Column("created_at", sa.Text(), nullable=False),
         sa.UniqueConstraint("bbbffl_round_id", name="uq_round_afl_mapping_round"),
@@ -33,7 +35,9 @@ def upgrade():
     )
     op.create_table(
         "round_afl_mapping_revision",
-        sa.Column("mapping_id", sa.Text(), sa.ForeignKey("round_afl_mapping.mapping_id", ondelete="RESTRICT"), nullable=False),
+        sa.Column(
+            "mapping_id", sa.Text(), sa.ForeignKey("round_afl_mapping.mapping_id", ondelete="RESTRICT"), nullable=False
+        ),
         sa.Column("revision", sa.Integer(), nullable=False),
         sa.Column("state", sa.Text(), nullable=False),
         sa.Column("provider", sa.Text(), nullable=False, server_default="afl-api-v1"),
@@ -45,9 +49,14 @@ def upgrade():
         sa.PrimaryKeyConstraint("mapping_id", "revision"),
         sa.CheckConstraint("state IN ('unresolved', 'ambiguous', 'accepted')", name="ck_mapping_revision_state"),
         sa.CheckConstraint("revision >= 1", name="ck_mapping_history_revision_positive"),
-        sa.CheckConstraint("(state = 'accepted' AND afl_season_id IS NOT NULL AND afl_round_id IS NOT NULL) OR state <> 'accepted'", name="ck_accepted_mapping_has_context"),
+        sa.CheckConstraint(
+            "(state = 'accepted' AND afl_season_id IS NOT NULL AND afl_round_id IS NOT NULL) OR state <> 'accepted'",
+            name="ck_accepted_mapping_has_context",
+        ),
     )
-    op.create_index("ix_mapping_afl_context", "round_afl_mapping_revision", ["provider", "afl_season_id", "afl_round_id"])
+    op.create_index(
+        "ix_mapping_afl_context", "round_afl_mapping_revision", ["provider", "afl_season_id", "afl_round_id"]
+    )
 
     # A legacy row already represented an operational reference. Preserve its
     # stable ID, provider identity and original timestamp as accepted revision
@@ -85,11 +94,18 @@ def downgrade():
     op.create_table(
         "bbbffl_round_afl_reference",
         sa.Column("mapping_id", sa.Text(), primary_key=True),
-        sa.Column("bbbffl_round_id", sa.Text(), sa.ForeignKey("bbbffl_round.bbbffl_round_id", ondelete="RESTRICT"), nullable=False),
+        sa.Column(
+            "bbbffl_round_id",
+            sa.Text(),
+            sa.ForeignKey("bbbffl_round.bbbffl_round_id", ondelete="RESTRICT"),
+            nullable=False,
+        ),
         sa.Column("provider", sa.Text(), nullable=False, server_default="afl-api-v1"),
         sa.Column("afl_season_id", sa.Integer(), nullable=False),
         sa.Column("afl_round_id", sa.Integer(), nullable=False),
         sa.Column("created_at", sa.Text(), nullable=False),
-        sa.UniqueConstraint("bbbffl_round_id", "provider", "afl_season_id", "afl_round_id", name="uq_round_afl_reference"),
+        sa.UniqueConstraint(
+            "bbbffl_round_id", "provider", "afl_season_id", "afl_round_id", name="uq_round_afl_reference"
+        ),
     )
     op.create_index("ix_round_afl_lookup", "bbbffl_round_afl_reference", ["provider", "afl_season_id", "afl_round_id"])

@@ -59,8 +59,13 @@ def test_unresolved_and_ambiguous_mappings_fail_closed(domain):
     unresolved = make(2026, round_key="opening-round-unresolved")
     ambiguous = make(2026, round_key="opening-round-ambiguous", sequence=2)
     mappings.propose(unresolved.bbbffl_round_id)
-    mappings.propose(ambiguous.bbbffl_round_id, state="ambiguous", afl_season_id=84, afl_round_id=1390,
-                     reason="Opening Round/deferred-bye treatment is not fully evidenced")
+    mappings.propose(
+        ambiguous.bbbffl_round_id,
+        state="ambiguous",
+        afl_season_id=84,
+        afl_round_id=1390,
+        reason="Opening Round/deferred-bye treatment is not fully evidenced",
+    )
     assert mappings.resolve(unresolved.bbbffl_round_id) is None
     assert mappings.resolve(ambiguous.bbbffl_round_id) is None
 
@@ -76,9 +81,7 @@ def test_revised_proposal_audit_preserves_before_and_after(domain):
         afl_round_id=1390,
         reason="Two historical interpretations remain",
     )
-    events = AuditEventRepository(database).list_events(
-        entity_type="round.afl_mapping", entity_id=first.mapping_id
-    )
+    events = AuditEventRepository(database).list_events(entity_type="round.afl_mapping", entity_id=first.mapping_id)
     assert events[-1].before_state == {
         "state": "unresolved",
         "afl_season_id": None,
@@ -99,7 +102,10 @@ def test_ordinary_and_superscore_independently_share_afl_context(domain):
     first = mappings.accept(ordinary.bbbffl_round_id, 85, 1412, known)
     second = mappings.accept(superscore.bbbffl_round_id, 85, 1412, known)
     assert first.mapping_id != second.mapping_id
-    assert mappings.resolve(ordinary.bbbffl_round_id).afl_round_id == mappings.resolve(superscore.bbbffl_round_id).afl_round_id
+    assert (
+        mappings.resolve(ordinary.bbbffl_round_id).afl_round_id
+        == mappings.resolve(superscore.bbbffl_round_id).afl_round_id
+    )
 
 
 def test_replay_and_live_seasons_do_not_leak(domain):
@@ -126,7 +132,9 @@ def test_authorised_correction_preserves_history_and_audit(domain):
     round_ = make(2026)
     known = KnownRounds((84, 1300), (84, 1301))
     original = mappings.accept(round_.bbbffl_round_id, 84, 1300, known)
-    corrected = mappings.correct(round_.bbbffl_round_id, 84, 1301, known, reason="Official AFL round identity corrected")
+    corrected = mappings.correct(
+        round_.bbbffl_round_id, 84, 1301, known, reason="Official AFL round identity corrected"
+    )
     assert [item.afl_round_id for item in mappings.history(round_.bbbffl_round_id)] == [1300, 1301]
     assert corrected.revision == original.revision + 1
     events = AuditEventRepository(database).list_events(entity_type="round.afl_mapping", entity_id=original.mapping_id)

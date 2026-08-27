@@ -1,7 +1,8 @@
 """Versioned schema migration entry points and validated legacy bootstrap."""
-from pathlib import Path
+
 import argparse
 import os
+from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
@@ -53,16 +54,17 @@ def _validate_legacy(inspector) -> str | None:
     if not user_tables:
         return None
     if user_tables != TABLES:
-        raise RuntimeError(f"Unrecognized BBBFFL schema: expected exactly {sorted(TABLES)}, found {sorted(user_tables)}")
+        raise RuntimeError(
+            f"Unrecognized BBBFFL schema: expected exactly {sorted(TABLES)}, found {sorted(user_tables)}"
+        )
     shapes = {table: _shape(inspector, table) for table in TABLES}
-    primary_keys = {
-        table: inspector.get_pk_constraint(table).get("constrained_columns") or []
-        for table in TABLES
-    }
+    primary_keys = {table: inspector.get_pk_constraint(table).get("constrained_columns") or [] for table in TABLES}
     legacy_matchup = {"id", "finalized", "finalized_at", "finalized_note"}
-    if (all(shapes[t] == LEGACY_COLUMNS[t] for t in LEGACY_COLUMNS)
-            and shapes["matchup_state"] in (legacy_matchup, legacy_matchup | {"finalized_snapshot"})
-            and primary_keys == LEGACY_PRIMARY_KEYS):
+    if (
+        all(shapes[t] == LEGACY_COLUMNS[t] for t in LEGACY_COLUMNS)
+        and shapes["matchup_state"] in (legacy_matchup, legacy_matchup | {"finalized_snapshot"})
+        and primary_keys == LEGACY_PRIMARY_KEYS
+    ):
         return "0001_prototype"
     if shapes == CURRENT_COLUMNS and primary_keys == CURRENT_PRIMARY_KEYS:
         # This is the 0002 shape specifically (four decision tables, no
@@ -71,8 +73,7 @@ def _validate_legacy(inspector) -> str | None:
         # top of it instead of skipping them.
         return "0002_competition"
     details = ", ".join(
-        f"{table} columns={sorted(columns)} pk={primary_keys[table]}"
-        for table, columns in sorted(shapes.items())
+        f"{table} columns={sorted(columns)} pk={primary_keys[table]}" for table, columns in sorted(shapes.items())
     )
     raise RuntimeError(f"Unrecognized BBBFFL schema columns; refusing to stamp or mutate: {details}")
 

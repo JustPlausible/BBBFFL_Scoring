@@ -27,11 +27,11 @@ from app.routes.admin import (
     OverrideRequest,
     require_admin,
 )
-from app.scoring import SCORABLE_POSITIONS
 from app.scorer_decisions import finalize as finalize_result
 from app.scorer_decisions import set_dnp as apply_dnp_decision
 from app.scorer_decisions import set_interchange as apply_interchange_decision
 from app.scorer_decisions import set_override as apply_override_decision
+from app.scoring import SCORABLE_POSITIONS
 from app.service import build_superscore_state, get_superscore_view
 from app.superscore import superscore_round_label
 
@@ -53,7 +53,11 @@ def _current_state(request: Request) -> dict:
     state = request.app.state
     config = state.superscore_config
     return get_superscore_view(
-        state.afl_client, config.entries, state.superscore_decisions, config.season, config.afl_round,
+        state.afl_client,
+        config.entries,
+        state.superscore_decisions,
+        config.season,
+        config.afl_round,
         state.identity_cache,
     )
 
@@ -136,16 +140,12 @@ def public_superscore_state(request: Request):
 # -- Admin ------------------------------------------------------------------
 
 
-@router.get(
-    "/admin/superscore/state", dependencies=[Depends(_require_superscore), Depends(require_admin)]
-)
+@router.get("/admin/superscore/state", dependencies=[Depends(_require_superscore), Depends(require_admin)])
 def admin_superscore_state(request: Request):
     return _current_state(request)
 
 
-@router.post(
-    "/admin/superscore/dnp", dependencies=[Depends(_require_superscore), Depends(require_admin)]
-)
+@router.post("/admin/superscore/dnp", dependencies=[Depends(_require_superscore), Depends(require_admin)])
 def set_superscore_dnp(payload: DnpRequest, request: Request):
     apply_dnp_decision(
         request.app.state.superscore_decisions, _team_keys(request), payload.team_key, payload.slot, payload.dnp
@@ -164,9 +164,7 @@ def set_superscore_interchange(payload: InterchangeRequest, request: Request):
     return _current_state(request)
 
 
-@router.post(
-    "/admin/superscore/override", dependencies=[Depends(_require_superscore), Depends(require_admin)]
-)
+@router.post("/admin/superscore/override", dependencies=[Depends(_require_superscore), Depends(require_admin)])
 def set_superscore_override(payload: OverrideRequest, request: Request):
     apply_override_decision(
         request.app.state.superscore_decisions,
@@ -179,9 +177,7 @@ def set_superscore_override(payload: OverrideRequest, request: Request):
     return _current_state(request)
 
 
-@router.post(
-    "/admin/superscore/finalize", dependencies=[Depends(_require_superscore), Depends(require_admin)]
-)
+@router.post("/admin/superscore/finalize", dependencies=[Depends(_require_superscore), Depends(require_admin)])
 def finalize_superscore(payload: FinalizeRequest, request: Request):
     state = request.app.state
     config = state.superscore_config
@@ -197,16 +193,18 @@ def finalize_superscore(payload: FinalizeRequest, request: Request):
         # a second afl-api round trip after the write commits would be
         # unsafe.
         result = build_superscore_state(
-            afl_client, config.entries, state.superscore_decisions, config.season, config.afl_round,
+            afl_client,
+            config.entries,
+            state.superscore_decisions,
+            config.season,
+            config.afl_round,
             state.identity_cache,
         )
         finalize_result(result, state.superscore_decisions, payload.note, afl_client=evidence)
     return _current_state(request)
 
 
-@page_router.get(
-    "/admin/superscore", response_class=HTMLResponse, dependencies=[Depends(_require_superscore)]
-)
+@page_router.get("/admin/superscore", response_class=HTMLResponse, dependencies=[Depends(_require_superscore)])
 def admin_superscore_page(request: Request):
     config = request.app.state.superscore_config
     return templates.TemplateResponse(

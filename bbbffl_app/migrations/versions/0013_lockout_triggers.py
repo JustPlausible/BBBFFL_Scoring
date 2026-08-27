@@ -8,8 +8,8 @@ round-scoped, immutable record of when each configured trigger actually
 activated.
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "0013_lockout_triggers"
 down_revision = "0012_lockouts"
@@ -21,7 +21,12 @@ def upgrade():
     op.create_table(
         "bbbffl_round_lockout_trigger",
         sa.Column("trigger_id", sa.Text(), primary_key=True),
-        sa.Column("bbbffl_round_id", sa.Text(), sa.ForeignKey("bbbffl_round.bbbffl_round_id", ondelete="RESTRICT"), nullable=False),
+        sa.Column(
+            "bbbffl_round_id",
+            sa.Text(),
+            sa.ForeignKey("bbbffl_round.bbbffl_round_id", ondelete="RESTRICT"),
+            nullable=False,
+        ),
         sa.Column("trigger_key", sa.Text(), nullable=False),
         sa.Column("current_revision", sa.Integer(), nullable=False),
         sa.Column("created_at", sa.Text(), nullable=False),
@@ -30,7 +35,12 @@ def upgrade():
     )
     op.create_table(
         "bbbffl_round_lockout_trigger_revision",
-        sa.Column("trigger_id", sa.Text(), sa.ForeignKey("bbbffl_round_lockout_trigger.trigger_id", ondelete="RESTRICT"), nullable=False),
+        sa.Column(
+            "trigger_id",
+            sa.Text(),
+            sa.ForeignKey("bbbffl_round_lockout_trigger.trigger_id", ondelete="RESTRICT"),
+            nullable=False,
+        ),
         sa.Column("revision", sa.Integer(), nullable=False),
         sa.Column("trigger_type", sa.Text(), nullable=False),
         sa.Column("sequence", sa.Integer(), nullable=False),
@@ -55,7 +65,12 @@ def upgrade():
     )
     op.create_table(
         "bbbffl_round_lockout_trigger_activation",
-        sa.Column("trigger_id", sa.Text(), sa.ForeignKey("bbbffl_round_lockout_trigger.trigger_id", ondelete="RESTRICT"), primary_key=True),
+        sa.Column(
+            "trigger_id",
+            sa.Text(),
+            sa.ForeignKey("bbbffl_round_lockout_trigger.trigger_id", ondelete="RESTRICT"),
+            primary_key=True,
+        ),
         sa.Column("revision", sa.Integer(), nullable=False),
         sa.Column("afl_match_id", sa.Integer(), nullable=False),
         sa.Column("observed_status", sa.Text(), nullable=False),
@@ -71,11 +86,19 @@ def upgrade():
     # never be silently rewritten by a later upstream correction.
     bind = op.get_bind()
     if bind.dialect.name == "sqlite":
-        op.execute("CREATE TRIGGER lockout_trigger_activation_no_update BEFORE UPDATE ON bbbffl_round_lockout_trigger_activation BEGIN SELECT RAISE(ABORT, 'trigger activation evidence is immutable'); END")
-        op.execute("CREATE TRIGGER lockout_trigger_activation_no_delete BEFORE DELETE ON bbbffl_round_lockout_trigger_activation BEGIN SELECT RAISE(ABORT, 'trigger activation evidence is immutable'); END")
+        op.execute(
+            "CREATE TRIGGER lockout_trigger_activation_no_update BEFORE UPDATE ON bbbffl_round_lockout_trigger_activation BEGIN SELECT RAISE(ABORT, 'trigger activation evidence is immutable'); END"
+        )
+        op.execute(
+            "CREATE TRIGGER lockout_trigger_activation_no_delete BEFORE DELETE ON bbbffl_round_lockout_trigger_activation BEGIN SELECT RAISE(ABORT, 'trigger activation evidence is immutable'); END"
+        )
     elif bind.dialect.name == "postgresql":
-        op.execute("CREATE FUNCTION reject_lockout_trigger_activation_mutation() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'trigger activation evidence is immutable'; END; $$ LANGUAGE plpgsql")
-        op.execute("CREATE TRIGGER lockout_trigger_activation_immutable BEFORE UPDATE OR DELETE ON bbbffl_round_lockout_trigger_activation FOR EACH ROW EXECUTE FUNCTION reject_lockout_trigger_activation_mutation()")
+        op.execute(
+            "CREATE FUNCTION reject_lockout_trigger_activation_mutation() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'trigger activation evidence is immutable'; END; $$ LANGUAGE plpgsql"
+        )
+        op.execute(
+            "CREATE TRIGGER lockout_trigger_activation_immutable BEFORE UPDATE OR DELETE ON bbbffl_round_lockout_trigger_activation FOR EACH ROW EXECUTE FUNCTION reject_lockout_trigger_activation_mutation()"
+        )
 
 
 def downgrade():

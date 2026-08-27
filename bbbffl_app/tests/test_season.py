@@ -5,8 +5,8 @@ from sqlalchemy.exc import IntegrityError
 
 from app.audit import AuditEventRepository
 from app.db import transaction
-from app.season import SeasonRepository
 from app.round_mapping import RoundMappingRepository
+from app.season import SeasonRepository
 from tests.db_helpers import migrated_connection
 
 
@@ -16,15 +16,9 @@ def repository():
 
 
 def _season_tree(repo, year):
-    season = repo.create_season(
-        year, f"{year} {'Replay' if year == 2026 else 'Season'}"
-    )
-    rules = repo.create_rules_version(
-        season.season_id, "canonical", 1, "Canonical scoring"
-    )
-    ordinary = repo.create_competition(
-        season.season_id, rules.rules_version_id, "ordinary", "BBBFFL", "ordinary"
-    )
+    season = repo.create_season(year, f"{year} {'Replay' if year == 2026 else 'Season'}")
+    rules = repo.create_rules_version(season.season_id, "canonical", 1, "Canonical scoring")
+    ordinary = repo.create_competition(season.season_id, rules.rules_version_id, "ordinary", "BBBFFL", "ordinary")
     superscore = repo.create_competition(
         season.season_id,
         rules.rules_version_id,
@@ -42,16 +36,9 @@ def test_2026_replay_and_2027_operational_seasons_are_isolated(repository):
     operational = _season_tree(repository, 2027)
     repository.transition_lifecycle(operational[0].season_id, "active")
     assert replay[0].season_id != operational[0].season_id
-    assert {
-        c.stream_key for c in repository.list_competitions(replay[0].season_id)
-    } == {"ordinary", "superscore"}
-    assert {
-        c.competition_id for c in repository.list_competitions(replay[0].season_id)
-    }.isdisjoint(
-        {
-            c.competition_id
-            for c in repository.list_competitions(operational[0].season_id)
-        }
+    assert {c.stream_key for c in repository.list_competitions(replay[0].season_id)} == {"ordinary", "superscore"}
+    assert {c.competition_id for c in repository.list_competitions(replay[0].season_id)}.isdisjoint(
+        {c.competition_id for c in repository.list_competitions(operational[0].season_id)}
     )
     assert repository.list_rounds(replay[2].competition_id) == [replay[4]]
     assert repository.list_rounds(operational[2].competition_id) == [operational[4]]
@@ -63,9 +50,7 @@ def test_lifecycle_is_forward_only_and_audited(repository):
     assert repository.transition_lifecycle(season.season_id, "completed").version == 3
     with pytest.raises(ValueError, match="completed -> active"):
         repository.transition_lifecycle(season.season_id, "active")
-    events = AuditEventRepository(repository.database).list_events(
-        entity_type="season", entity_id=season.season_id
-    )
+    events = AuditEventRepository(repository.database).list_events(entity_type="season", entity_id=season.season_id)
     assert [e.action for e in events] == [
         "season.lifecycle.changed",
         "season.lifecycle.changed",
@@ -73,9 +58,7 @@ def test_lifecycle_is_forward_only_and_audited(repository):
     assert events[-1].after_state == {"lifecycle_state": "completed"}
 
 
-def test_lifecycle_returns_exact_values_written_without_post_commit_read(
-    repository, monkeypatch
-):
+def test_lifecycle_returns_exact_values_written_without_post_commit_read(repository, monkeypatch):
     season = repository.create_season(2027, "2027")
     written_at = "2027-03-01T02:03:04+00:00"
     monkeypatch.setattr("app.season._now", lambda: written_at)
@@ -93,33 +76,20 @@ def test_lifecycle_returns_exact_values_written_without_post_commit_read(
 
 def test_rules_are_immutable_versions_with_stable_references(repository):
     season = repository.create_season(2027, "2027")
-    v1 = repository.create_rules_version(
-        season.season_id, "canonical", 1, "2027 launch"
-    )
-    repository.create_competition(
-        season.season_id, v1.rules_version_id, "ordinary", "BBBFFL", "ordinary"
-    )
-    v2 = repository.create_rules_version(
-        season.season_id, "canonical", 2, "Clarified rules"
-    )
+    v1 = repository.create_rules_version(season.season_id, "canonical", 1, "2027 launch")
+    repository.create_competition(season.season_id, v1.rules_version_id, "ordinary", "BBBFFL", "ordinary")
+    v2 = repository.create_rules_version(season.season_id, "canonical", 2, "Clarified rules")
     assert v1.rules_version_id != v2.rules_version_id
-    assert (
-        repository.list_competitions(season.season_id)[0].rules_version_id
-        == v1.rules_version_id
-    )
+    assert repository.list_competitions(season.season_id)[0].rules_version_id == v1.rules_version_id
     assert not hasattr(repository, "update_rules_version")
-    assert [
-        r.version_number for r in repository.list_rules_versions(season.season_id)
-    ] == [1, 2]
+    assert [r.version_number for r in repository.list_rules_versions(season.season_id)] == [1, 2]
     other = repository.create_season(2026, "2026 Replay")
     other_rules = repository.create_rules_version(
         other.season_id, "canonical", 1, "Same logical formula, explicit record"
     )
     assert other_rules.rules_version_id != v1.rules_version_id
     with pytest.raises(ValueError, match="belong"):
-        repository.create_competition(
-            other.season_id, v1.rules_version_id, "ordinary", "BBBFFL", "ordinary"
-        )
+        repository.create_competition(other.season_id, v1.rules_version_id, "ordinary", "BBBFFL", "ordinary")
 
 
 def test_scoped_uniqueness_rejects_collisions_only_inside_parent(repository):
@@ -138,16 +108,10 @@ def test_scoped_uniqueness_rejects_collisions_only_inside_parent(repository):
 
 def test_stream_type_is_sporting_context_not_execution_context(repository):
     season = repository.create_season(2026, "2026 Replay")
-    rules = repository.create_rules_version(
-        season.season_id, "canonical", 1, "2026 rules"
-    )
-    repository.create_competition(
-        season.season_id, rules.rules_version_id, "ordinary", "BBBFFL", "ordinary"
-    )
+    rules = repository.create_rules_version(season.season_id, "canonical", 1, "2026 rules")
+    repository.create_competition(season.season_id, rules.rules_version_id, "ordinary", "BBBFFL", "ordinary")
     with pytest.raises(IntegrityError):
-        repository.create_competition(
-            season.season_id, rules.rules_version_id, "replay", "Replay", "replay"
-        )
+        repository.create_competition(season.season_id, rules.rules_version_id, "replay", "Replay", "replay")
 
 
 @pytest.mark.parametrize(
@@ -175,9 +139,7 @@ def test_sqlite_restricts_deleting_historical_parents(repository):
     season, *_ = _season_tree(repository, 2027)
     with pytest.raises(IntegrityError):
         with transaction(repository.database) as connection:
-            connection.execute(
-                "DELETE FROM bbbffl_season WHERE season_id=?", (season.season_id,)
-            )
+            connection.execute("DELETE FROM bbbffl_season WHERE season_id=?", (season.season_id,))
 
 
 def test_database_rejects_competition_rules_from_another_season(repository):
@@ -202,13 +164,12 @@ def test_database_rejects_competition_rules_from_another_season(repository):
 def test_sqlite_restricts_deleting_round_with_afl_reference(repository):
     tree = _season_tree(repository, 2027)
     bbbffl_round = tree[4]
+
     class Existing:
         def round_exists(self, season_id, round_id):
             return (season_id, round_id) == (85, 1412)
 
-    RoundMappingRepository(repository.database).accept(
-        bbbffl_round.bbbffl_round_id, 85, 1412, Existing()
-    )
+    RoundMappingRepository(repository.database).accept(bbbffl_round.bbbffl_round_id, 85, 1412, Existing())
     with pytest.raises(IntegrityError):
         with transaction(repository.database) as connection:
             connection.execute(

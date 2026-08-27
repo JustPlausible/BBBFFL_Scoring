@@ -177,7 +177,7 @@ from typing import Protocol
 from sqlalchemy.exc import IntegrityError
 
 from app.afl_client import Match, is_recognized_match_status, normalize_match_status
-from app.audit import ActorContext, ENTITY_TYPE_LOCKOUT_TRIGGER, LOCKOUT_TRIGGER_CONFIGURED, append_event
+from app.audit import ENTITY_TYPE_LOCKOUT_TRIGGER, LOCKOUT_TRIGGER_CONFIGURED, ActorContext, append_event
 from app.db import _for_update_suffix, transaction
 from app.lineups import POSITIONS
 from app.season import _id, _now
@@ -283,9 +283,7 @@ class RoundMatchFactsProvider:
     def matches_for(self, bbbffl_round_id: str) -> list[Match]:
         mapping = self._round_mappings.resolve(bbbffl_round_id)
         if mapping is None:
-            raise MatchResolutionError(
-                f"BBBFFL round {bbbffl_round_id} has no accepted AFL round mapping"
-            )
+            raise MatchResolutionError(f"BBBFFL round {bbbffl_round_id} has no accepted AFL round mapping")
         return self._afl_client.get_matches(mapping.afl_round_id)
 
 
@@ -317,18 +315,12 @@ def resolve_match(afl_team_id: int | None, matches: list[Match]) -> Match:
     match. Never a name-based join; fails explicitly (never guesses) if the
     match cannot be reliably resolved."""
     if afl_team_id is None:
-        raise MatchResolutionError(
-            "selected player has no known AFL club; cannot resolve an AFL match"
-        )
+        raise MatchResolutionError("selected player has no known AFL club; cannot resolve an AFL match")
     found = [match for match in matches if match.involves_team(afl_team_id)]
     if not found:
-        raise MatchResolutionError(
-            f"no AFL match found for team {afl_team_id} in the mapped round"
-        )
+        raise MatchResolutionError(f"no AFL match found for team {afl_team_id} in the mapped round")
     if len(found) > 1:
-        raise MatchResolutionError(
-            f"ambiguous AFL match resolution for team {afl_team_id}: {len(found)} matches found"
-        )
+        raise MatchResolutionError(f"ambiguous AFL match resolution for team {afl_team_id}: {len(found)} matches found")
     return found[0]
 
 
@@ -427,7 +419,9 @@ class LockoutTriggerRepository:
                 "UPDATE bbbffl_round_lockout_trigger SET current_revision=? WHERE trigger_id=?",
                 (revision, head["trigger_id"]),
             )
-            self._insert_revision(conn, head["trigger_id"], revision, trigger_type, sequence, match_ids, actor, reason, now)
+            self._insert_revision(
+                conn, head["trigger_id"], revision, trigger_type, sequence, match_ids, actor, reason, now
+            )
             append_event(
                 conn,
                 actor=actor,
@@ -471,8 +465,16 @@ class LockoutTriggerRepository:
             ).fetchall()
         )
         return LockoutTrigger(
-            row["trigger_id"], row["bbbffl_round_id"], row["trigger_key"], row["revision"],
-            row["trigger_type"], row["sequence"], match_ids, row["created_at"], row["created_by"], row["reason"],
+            row["trigger_id"],
+            row["bbbffl_round_id"],
+            row["trigger_key"],
+            row["revision"],
+            row["trigger_type"],
+            row["sequence"],
+            match_ids,
+            row["created_at"],
+            row["created_by"],
+            row["reason"],
         )
 
     def _reject_duplicate_main(self, conn, bbbffl_round_id, *, exclude_trigger_key):
@@ -530,7 +532,9 @@ class LockGuard:
       Accepts or rejects the proposed change; never writes anything itself.
     """
 
-    def __init__(self, repository: "LockoutRepository", match_facts: MatchFactsProvider, evaluation_at: datetime | None):
+    def __init__(
+        self, repository: "LockoutRepository", match_facts: MatchFactsProvider, evaluation_at: datetime | None
+    ):
         self._repository = repository
         self._match_facts = match_facts
         self._evaluation_at = evaluation_at
@@ -546,8 +550,13 @@ class LockGuard:
         matches = self._match_facts.matches_for(lineup_row["bbbffl_round_id"])
         coverage = self._repository._trigger_coverage(conn, lineup_row["bbbffl_round_id"])
         self._repository.guard_transition(
-            conn, lineup_row["lineup_id"], previous_positions, proposed_positions,
-            evaluation_at=at, matches=matches, coverage=coverage,
+            conn,
+            lineup_row["lineup_id"],
+            previous_positions,
+            proposed_positions,
+            evaluation_at=at,
+            matches=matches,
+            coverage=coverage,
         )
 
 
@@ -639,7 +648,15 @@ class LockoutRepository:
         for position, previous_player in previous_positions.items():
             proposed_player = proposed_positions.get(position)
             evaluated = self._evaluate_position(
-                conn, existing, lineup_id, position, previous_player, evaluation_at, matches, coverage, materializable=False
+                conn,
+                existing,
+                lineup_id,
+                position,
+                previous_player,
+                evaluation_at,
+                matches,
+                coverage,
+                materializable=False,
             )
             if evaluated.state in (LockState.LOCKED, LockState.INDETERMINATE) and proposed_player != previous_player:
                 raise LockedSelectionError(
@@ -649,7 +666,15 @@ class LockoutRepository:
             if proposed_player is None or proposed_player == previous_positions.get(position):
                 continue
             evaluated = self._evaluate_position(
-                conn, existing, lineup_id, position, proposed_player, evaluation_at, matches, coverage, materializable=False
+                conn,
+                existing,
+                lineup_id,
+                position,
+                proposed_player,
+                evaluation_at,
+                matches,
+                coverage,
+                materializable=False,
             )
             if evaluated.state != LockState.EDITABLE:
                 raise LockedSelectionError(
@@ -667,10 +692,14 @@ class LockoutRepository:
             "SELECT bbbffl_round_id FROM weekly_lineup WHERE lineup_id=?", (lineup_id,)
         ).fetchone()
         if row is not None:
-            self._materialize_round_triggers(row["bbbffl_round_id"], match_facts=match_facts, evaluation_at=evaluation_at)
+            self._materialize_round_triggers(
+                row["bbbffl_round_id"], match_facts=match_facts, evaluation_at=evaluation_at
+            )
         self._materialize_lineup(lineup_id, match_facts=match_facts, evaluation_at=evaluation_at)
 
-    def _materialize_round_triggers(self, bbbffl_round_id: str, *, match_facts: MatchFactsProvider, evaluation_at: datetime) -> None:
+    def _materialize_round_triggers(
+        self, bbbffl_round_id: str, *, match_facts: MatchFactsProvider, evaluation_at: datetime
+    ) -> None:
         """Durably record activation for every configured trigger in this
         round whose associated matches have reached lock boundary, in a
         standalone transaction. Idempotent (`ON CONFLICT DO NOTHING` via
@@ -750,7 +779,15 @@ class LockoutRepository:
             existing = self._existing_locks(conn, lineup_id)
             for position, season_player_id in effective.items():
                 self._evaluate_position(
-                    conn, existing, lineup_id, position, season_player_id, evaluation_at, matches, coverage, materializable=True
+                    conn,
+                    existing,
+                    lineup_id,
+                    position,
+                    season_player_id,
+                    evaluation_at,
+                    matches,
+                    coverage,
+                    materializable=True,
                 )
 
     # -- Internals: evaluation -----------------------------------------------
@@ -774,8 +811,17 @@ class LockoutRepository:
         return TriggerCoverage(configured=True, locked_match_ids=locked_match_ids, main_activated=main_activated)
 
     def _evaluate_position(
-        self, conn, existing: dict, lineup_id: str, position: str, season_player_id, evaluation_at, matches,
-        coverage: TriggerCoverage, *, materializable: bool,
+        self,
+        conn,
+        existing: dict,
+        lineup_id: str,
+        position: str,
+        season_player_id,
+        evaluation_at,
+        matches,
+        coverage: TriggerCoverage,
+        *,
+        materializable: bool,
     ) -> PositionLockState:
         if season_player_id is None:
             return PositionLockState(position, None, LockState.EDITABLE, "empty", None, None, None, False)
@@ -784,15 +830,23 @@ class LockoutRepository:
             # Durable, irreversible: never recomputed against (possibly
             # since-corrected) live match/trigger facts.
             return PositionLockState(
-                position, season_player_id, LockState.LOCKED,
-                row["lock_reason"], row["afl_match_id"], row["effective_lock_at"], row["observed_status"], True,
+                position,
+                season_player_id,
+                LockState.LOCKED,
+                row["lock_reason"],
+                row["afl_match_id"],
+                row["effective_lock_at"],
+                row["observed_status"],
+                True,
             )
         season_player = self._season_player(conn, season_player_id)
         afl_team_id = season_player["afl_team_id"] if season_player else None
         try:
             match = resolve_match(afl_team_id, matches)
         except MatchResolutionError as exc:
-            return PositionLockState(position, season_player_id, LockState.INDETERMINATE, str(exc), None, None, None, False)
+            return PositionLockState(
+                position, season_player_id, LockState.INDETERMINATE, str(exc), None, None, None, False
+            )
         if not coverage.configured:
             state, reason = LockState.INDETERMINATE, "lockout_plan_not_configured"
         elif match.match_id in coverage.locked_match_ids:
@@ -804,7 +858,13 @@ class LockoutRepository:
         if state == LockState.LOCKED and materializable:
             self._insert_lock(conn, lineup_id, position, season_player_id, match, reason, evaluation_at)
         return PositionLockState(
-            position, season_player_id, state, reason, match.match_id, match.start_time_utc, match.status,
+            position,
+            season_player_id,
+            state,
+            reason,
+            match.match_id,
+            match.start_time_utc,
+            match.status,
             state == LockState.LOCKED and materializable,
         )
 
@@ -829,8 +889,15 @@ class LockoutRepository:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (lineup_id, position) DO NOTHING",
             (
-                lineup_id, position, season_player_id, match.match_id, match.status, match.start_time_utc,
-                reason, evaluation_at.isoformat(), _now(),
+                lineup_id,
+                position,
+                season_player_id,
+                match.match_id,
+                match.status,
+                match.start_time_utc,
+                reason,
+                evaluation_at.isoformat(),
+                _now(),
             ),
         )
 
@@ -841,7 +908,13 @@ class LockoutRepository:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (trigger_id) DO NOTHING",
             (
-                trigger_id, revision, match.match_id, match.status, match.start_time_utc,
-                reason, evaluation_at.isoformat(), _now(),
+                trigger_id,
+                revision,
+                match.match_id,
+                match.status,
+                match.start_time_utc,
+                reason,
+                evaluation_at.isoformat(),
+                _now(),
             ),
         )

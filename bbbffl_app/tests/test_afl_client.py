@@ -178,7 +178,9 @@ def test_get_matches_tolerates_missing_start_time_utc(client):
     finally:
         api.close()
     assert matches == [
-        Match(match_id=9001, home_team=Team(1, "Home"), away_team=Team(2, "Away"), status="UPCOMING", start_time_utc=None)
+        Match(
+            match_id=9001, home_team=Team(1, "Home"), away_team=Team(2, "Away"), status="UPCOMING", start_time_utc=None
+        )
     ]
 
 
@@ -247,9 +249,7 @@ def test_is_recognized_match_status_distinguishes_known_from_unusual(raw_status,
 
 
 def test_match_state_property_delegates_to_normalize_match_status():
-    concluded = Match(
-        match_id=1, home_team=Team(1, "Cats"), away_team=Team(2, "Pies"), status="CONCLUDED"
-    )
+    concluded = Match(match_id=1, home_team=Team(1, "Cats"), away_team=Team(2, "Pies"), status="CONCLUDED")
     assert concluded.state == "completed"
 
 
@@ -258,9 +258,7 @@ def test_postgame_is_distinct_from_live_and_completed():
     collapsed into either neighbouring state -- it is its own fourth normal
     game state, not an alias for "live" (still playing) or "completed"
     (stats final)."""
-    postgame = Match(
-        match_id=1, home_team=Team(1, "Cats"), away_team=Team(2, "Pies"), status="POSTGAME"
-    )
+    postgame = Match(match_id=1, home_team=Team(1, "Cats"), away_team=Team(2, "Pies"), status="POSTGAME")
     assert postgame.state == "postgame"
     assert postgame.state != "live"
     assert postgame.state != "completed"
@@ -279,9 +277,7 @@ def test_client_applies_explicit_connect_and_read_timeout_budgets():
     finally:
         default_client.close()
 
-    split_client = AflApiClient(
-        base_url="http://afl-api.test", timeout=7.0, connect_timeout=2.0, read_timeout=15.0
-    )
+    split_client = AflApiClient(base_url="http://afl-api.test", timeout=7.0, connect_timeout=2.0, read_timeout=15.0)
     try:
         timeout = split_client._client.timeout
         assert timeout.connect == 2.0

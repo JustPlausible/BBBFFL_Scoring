@@ -18,9 +18,7 @@ from app.scoring import ROSTER_SLOTS
 from app.service import PlayerIdentityCache
 from tests.conftest import CATS, PIES, TEAM_A_ROSTER, TEAM_B_ROSTER, FakeAflClient
 
-GRAND_FINAL_CONFIG_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "data", "grand_final_teams.json"
-)
+GRAND_FINAL_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "grand_final_teams.json")
 
 
 def _superscore_lineup(base: int) -> dict:
@@ -106,10 +104,7 @@ ADMIN_HEADERS = {"X-Admin-Token": "secret123"}
 def test_superscore_routes_404_when_not_configured(client_no_superscore):
     assert client_no_superscore.get("/superscore").status_code == 404
     assert client_no_superscore.get("/api/public/superscore/state").status_code == 404
-    assert (
-        client_no_superscore.get("/api/admin/superscore/state", headers=ADMIN_HEADERS).status_code
-        == 404
-    )
+    assert client_no_superscore.get("/api/admin/superscore/state", headers=ADMIN_HEADERS).status_code == 404
 
 
 def test_grand_final_behaves_unchanged_when_superscore_is_disabled(client_no_superscore):
@@ -176,9 +171,7 @@ def test_postgame_afl_match_renders_superscore_players_as_postgame_not_final(
     both "live" and "completed", exactly as on the Grand Final screen."""
     from app.main import app as fastapi_app
 
-    fastapi_app.state.fake_afl_client.matches = [
-        Match(match_id=100, home_team=CATS, away_team=PIES, status="POSTGAME")
-    ]
+    fastapi_app.state.fake_afl_client.matches = [Match(match_id=100, home_team=CATS, away_team=PIES, status="POSTGAME")]
 
     r = client_with_superscore.get("/api/public/superscore/state")
     assert r.status_code == 200
@@ -199,10 +192,7 @@ def test_superscore_page_and_admin_page_render(client_with_superscore):
 
 def test_superscore_admin_requires_token(client_with_superscore):
     assert client_with_superscore.get("/api/admin/superscore/state").status_code == 401
-    assert (
-        client_with_superscore.get("/api/admin/superscore/state", headers=ADMIN_HEADERS).status_code
-        == 200
-    )
+    assert client_with_superscore.get("/api/admin/superscore/state", headers=ADMIN_HEADERS).status_code == 200
 
 
 def test_superscore_admin_rejects_unknown_team_key(client_with_superscore):
@@ -225,9 +215,7 @@ def test_full_superscore_scorer_workflow(client_with_superscore):
     fwd1 = next(p for p in team_1["positions"] if p["position"] == "Forward1")
     assert fwd1["slot_source"] == "vacant"
 
-    r = client_with_superscore.post(
-        "/api/admin/superscore/finalize", json={"note": "too early"}, headers=ADMIN_HEADERS
-    )
+    r = client_with_superscore.post("/api/admin/superscore/finalize", json={"note": "too early"}, headers=ADMIN_HEADERS)
     assert r.status_code == 409
 
     from app.main import app as fastapi_app
@@ -350,18 +338,9 @@ def test_admin_navigation_does_not_weaken_admin_protection(client_with_superscor
     already-protected pages -- the underlying APIs must still require the
     admin token in both directions."""
     assert client_with_superscore.get("/api/admin/state").status_code == 401
-    assert (
-        client_with_superscore.get("/api/admin/superscore/state").status_code == 401
-    )
-    assert (
-        client_with_superscore.get("/api/admin/state", headers=ADMIN_HEADERS).status_code == 200
-    )
-    assert (
-        client_with_superscore.get(
-            "/api/admin/superscore/state", headers=ADMIN_HEADERS
-        ).status_code
-        == 200
-    )
+    assert client_with_superscore.get("/api/admin/superscore/state").status_code == 401
+    assert client_with_superscore.get("/api/admin/state", headers=ADMIN_HEADERS).status_code == 200
+    assert client_with_superscore.get("/api/admin/superscore/state", headers=ADMIN_HEADERS).status_code == 200
 
 
 def test_finalizing_superscore_does_not_finalize_grand_final(client_with_superscore):
@@ -371,9 +350,7 @@ def test_finalizing_superscore_does_not_finalize_grand_final(client_with_supersc
         Match(match_id=100, home_team=CATS, away_team=PIES, status="CONCLUDED")
     ]
 
-    r = client_with_superscore.post(
-        "/api/admin/superscore/finalize", json={"note": "confirmed"}, headers=ADMIN_HEADERS
-    )
+    r = client_with_superscore.post("/api/admin/superscore/finalize", json={"note": "confirmed"}, headers=ADMIN_HEADERS)
     assert r.status_code == 200
     assert r.json()["status"] == "FINAL"
 

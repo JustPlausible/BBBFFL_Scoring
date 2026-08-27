@@ -1,7 +1,7 @@
 """Persist irreversible player-level AFL-match lockout evidence."""
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "0012_lockouts"
 down_revision = "0011_lineups"
@@ -14,9 +14,16 @@ POSITIONS = "'F1','F2','F3','M1','M2','M3','Ruck','Tackler','Interchange'"
 def upgrade():
     op.create_table(
         "weekly_lineup_lock",
-        sa.Column("lineup_id", sa.Text(), sa.ForeignKey("weekly_lineup.lineup_id", ondelete="RESTRICT"), nullable=False),
+        sa.Column(
+            "lineup_id", sa.Text(), sa.ForeignKey("weekly_lineup.lineup_id", ondelete="RESTRICT"), nullable=False
+        ),
         sa.Column("position", sa.Text(), nullable=False),
-        sa.Column("season_player_id", sa.Text(), sa.ForeignKey("season_player_pool.season_player_id", ondelete="RESTRICT"), nullable=False),
+        sa.Column(
+            "season_player_id",
+            sa.Text(),
+            sa.ForeignKey("season_player_pool.season_player_id", ondelete="RESTRICT"),
+            nullable=False,
+        ),
         sa.Column("afl_match_id", sa.Integer(), nullable=False),
         sa.Column("observed_status", sa.Text(), nullable=False),
         sa.Column("effective_lock_at", sa.Text()),
@@ -32,11 +39,19 @@ def upgrade():
     # docstring). Mirrors 0011's weekly_lineup_submission immutability.
     bind = op.get_bind()
     if bind.dialect.name == "sqlite":
-        op.execute("CREATE TRIGGER weekly_lineup_lock_no_update BEFORE UPDATE ON weekly_lineup_lock BEGIN SELECT RAISE(ABORT, 'lock evidence is immutable'); END")
-        op.execute("CREATE TRIGGER weekly_lineup_lock_no_delete BEFORE DELETE ON weekly_lineup_lock BEGIN SELECT RAISE(ABORT, 'lock evidence is immutable'); END")
+        op.execute(
+            "CREATE TRIGGER weekly_lineup_lock_no_update BEFORE UPDATE ON weekly_lineup_lock BEGIN SELECT RAISE(ABORT, 'lock evidence is immutable'); END"
+        )
+        op.execute(
+            "CREATE TRIGGER weekly_lineup_lock_no_delete BEFORE DELETE ON weekly_lineup_lock BEGIN SELECT RAISE(ABORT, 'lock evidence is immutable'); END"
+        )
     elif bind.dialect.name == "postgresql":
-        op.execute("CREATE FUNCTION reject_lineup_lock_mutation() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'lock evidence is immutable'; END; $$ LANGUAGE plpgsql")
-        op.execute("CREATE TRIGGER weekly_lineup_lock_immutable BEFORE UPDATE OR DELETE ON weekly_lineup_lock FOR EACH ROW EXECUTE FUNCTION reject_lineup_lock_mutation()")
+        op.execute(
+            "CREATE FUNCTION reject_lineup_lock_mutation() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'lock evidence is immutable'; END; $$ LANGUAGE plpgsql"
+        )
+        op.execute(
+            "CREATE TRIGGER weekly_lineup_lock_immutable BEFORE UPDATE OR DELETE ON weekly_lineup_lock FOR EACH ROW EXECUTE FUNCTION reject_lineup_lock_mutation()"
+        )
 
 
 def downgrade():

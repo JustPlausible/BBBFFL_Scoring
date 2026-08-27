@@ -1,14 +1,12 @@
-
 import pytest
 
-from tests.db_helpers import migrated_connection
-
-from app.afl_client import Match, Player, PlayerStatLine, Team
+from app.afl_client import Match, Player, Team
 from app.db import DecisionsRepository
 from app.scoring import ROSTER_SLOTS
 from app.service import build_superscore_state, get_superscore_view
 from app.teams import TeamConfig
 from tests.conftest import FakeAflClient, stat_line
+from tests.db_helpers import migrated_connection
 
 CATS = Team(team_id=2001, name="Cats")
 PIES = Team(team_id=2002, name="Pies")
@@ -59,9 +57,7 @@ def _disposals_stats(entries, disposals_by_team_key):
     return stats
 
 
-def test_ten_entries_are_scored_using_the_existing_bbbffl_rules(
-    ten_entries, superscore_decisions, match
-):
+def test_ten_entries_are_scored_using_the_existing_bbbffl_rules(ten_entries, superscore_decisions, match):
     """SuperScore must reuse score_position() via build_matchup_state, not a
     separate scoring implementation -- this checks the standard Forward
     formula (6*goals + behinds) applies exactly as it does for Grand Final."""
@@ -138,9 +134,7 @@ def test_tied_scores_remain_tied_with_no_tiebreaker(ten_entries, superscore_deci
     assert third.rank == 3
 
 
-def test_superscore_scorer_decisions_are_independent_between_entries(
-    ten_entries, superscore_decisions, match
-):
+def test_superscore_scorer_decisions_are_independent_between_entries(ten_entries, superscore_decisions, match):
     players = _players_for(ten_entries)
     client = FakeAflClient([match], players, {500: {}})
 
@@ -160,9 +154,7 @@ def test_superscore_scorer_decisions_are_independent_between_entries(
     assert next(p for p in team_3.positions if p.position == "Ruck").effective_score == 0
 
 
-def test_superscore_reaches_awaiting_signoff_once_matches_complete(
-    ten_entries, superscore_decisions
-):
+def test_superscore_reaches_awaiting_signoff_once_matches_complete(ten_entries, superscore_decisions):
     final_match = Match(match_id=500, home_team=CATS, away_team=PIES, status="CONCLUDED")
     players = _players_for(ten_entries)
     client = FakeAflClient([final_match], players, {500: {}})
@@ -198,9 +190,7 @@ def test_superscore_stays_live_while_a_match_is_in_progress(ten_entries, supersc
     assert result.status == "LIVE"
 
 
-def test_superscore_postgame_match_interprets_the_same_as_grand_final(
-    ten_entries, superscore_decisions
-):
+def test_superscore_postgame_match_interprets_the_same_as_grand_final(ten_entries, superscore_decisions):
     """SuperScore reuses build_matchup_state via build_superscore_state, so
     a POSTGAME match must be interpreted identically to the Grand Final:
     its own distinct "postgame" state, counted separately, and not treated
@@ -218,9 +208,7 @@ def test_superscore_postgame_match_interprets_the_same_as_grand_final(
     assert next(p for p in team_1.positions if p.position == "Forward1").match_state == "postgame"
 
 
-def test_superscore_requests_the_configured_round_not_afl_apis_current_round(
-    ten_entries, superscore_decisions, match
-):
+def test_superscore_requests_the_configured_round_not_afl_apis_current_round(ten_entries, superscore_decisions, match):
     """Regression: afl-api's 'current round' can move on (round rollover) or
     lag a freshly deployed config. SuperScore must always score the round
     declared in its own config (AFL_ROUND=20 here), never whatever afl-api

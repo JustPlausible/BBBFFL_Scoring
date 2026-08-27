@@ -147,9 +147,7 @@ def check_rounds(ctx: DiagnosticContext) -> None:
     # null, or no round in the list actually carries that number).
     preferred = None
     if ctx.current_round_number is not None:
-        preferred = next(
-            (r for r in rounds if r.get("round_number") == ctx.current_round_number), None
-        )
+        preferred = next((r for r in rounds if r.get("round_number") == ctx.current_round_number), None)
     if preferred is None:
         preferred = next((r for r in rounds if r.get("round_number") is not None), rounds[0])
     ctx.round_id = preferred["round_id"]
@@ -235,8 +233,7 @@ def check_player_stats(ctx: DiagnosticContext) -> None:
         # currently coerces a missing/null field to 0 rather than raising,
         # so an incomplete row would otherwise pass unnoticed.
         missing_by_row = [
-            (i, sorted(REQUIRED_STAT_FIELDS - set(row.get("stats", {}).keys())))
-            for i, row in enumerate(players)
+            (i, sorted(REQUIRED_STAT_FIELDS - set(row.get("stats", {}).keys()))) for i, row in enumerate(players)
         ]
         missing_by_row = [(i, fields) for i, fields in missing_by_row if fields]
         ctx.record(
@@ -350,7 +347,9 @@ def check_auth_failures(base_url: str, transport: httpx.BaseTransport | None = N
             resp = no_key_client.get("/api/v1/seasons")
             ok = resp.status_code == 401 and "detail" in resp.json()
             results.append(
-                CheckResult("GET /api/v1/seasons (no key) -> 401", "PASS" if ok else "FAIL", f"status={resp.status_code}")
+                CheckResult(
+                    "GET /api/v1/seasons (no key) -> 401", "PASS" if ok else "FAIL", f"status={resp.status_code}"
+                )
             )
         with httpx.Client(
             base_url=base_url, headers={"x-api-key": "not-a-real-key"}, timeout=20.0, transport=transport

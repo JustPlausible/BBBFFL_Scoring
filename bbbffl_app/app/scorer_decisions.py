@@ -86,9 +86,7 @@ def _ensure_known_team(team_keys, team_key: str) -> None:
 
 def _ensure_editable(decisions) -> None:
     if decisions.get_matchup_state().finalized:
-        raise CompetitionFinalizedError(
-            "competition instance already finalised; decisions are locked"
-        )
+        raise CompetitionFinalizedError("competition instance already finalised; decisions are locked")
 
 
 def set_dnp(decisions, team_keys, team_key: str, slot: str, dnp: bool, *, actor: ActorContext = SCORER_ACTOR) -> None:
@@ -163,8 +161,7 @@ def finalize(
     """
     if result.status != "AWAITING_SCORER_SIGNOFF":
         raise ResultNotReadyError(
-            "Cannot finalise until all relevant AFL matches are complete "
-            "(status must be AWAITING_SCORER_SIGNOFF)."
+            "Cannot finalise until all relevant AFL matches are complete (status must be AWAITING_SCORER_SIGNOFF)."
         )
     is_evidence_fresh = getattr(afl_client, "is_evidence_fresh", None)
     if callable(is_evidence_fresh) and not is_evidence_fresh():

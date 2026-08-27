@@ -4,8 +4,8 @@ Legacy scorer tables deliberately remain keyed by ``competition_key``.  They
 are a compatibility boundary, not an implicit backfill into these identities.
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "0004_season"
 down_revision = "0003_audit"
@@ -69,9 +69,7 @@ def upgrade():
         sa.Column("label", sa.Text(), nullable=False),
         sa.Column("stream_type", sa.Text(), nullable=False),
         sa.Column("created_at", sa.Text(), nullable=False),
-        sa.UniqueConstraint(
-            "season_id", "stream_key", name="uq_competition_stream_season_key"
-        ),
+        sa.UniqueConstraint("season_id", "stream_key", name="uq_competition_stream_season_key"),
         sa.ForeignKeyConstraint(
             ["rules_version_id", "season_id"],
             ["season_rules_version.rules_version_id", "season_rules_version.season_id"],
@@ -97,12 +95,8 @@ def upgrade():
         sa.Column("label", sa.Text(), nullable=False),
         sa.Column("sequence", sa.Integer(), nullable=False),
         sa.Column("created_at", sa.Text(), nullable=False),
-        sa.UniqueConstraint(
-            "competition_id", "round_key", name="uq_bbbffl_round_competition_key"
-        ),
-        sa.UniqueConstraint(
-            "competition_id", "sequence", name="uq_bbbffl_round_competition_sequence"
-        ),
+        sa.UniqueConstraint("competition_id", "round_key", name="uq_bbbffl_round_competition_key"),
+        sa.UniqueConstraint("competition_id", "sequence", name="uq_bbbffl_round_competition_sequence"),
         sa.CheckConstraint("sequence >= 1", name="ck_bbbffl_round_sequence"),
     )
     op.create_index("ix_bbbffl_round_competition", "bbbffl_round", ["competition_id"])
@@ -135,14 +129,8 @@ def upgrade():
 
 
 def downgrade():
-    if (
-        op.get_bind()
-        .execute(sa.text("SELECT COUNT(*) FROM bbbffl_season"))
-        .scalar_one()
-    ):
-        raise RuntimeError(
-            "0004 downgrade refused: season domain data cannot be represented by the prior schema"
-        )
+    if op.get_bind().execute(sa.text("SELECT COUNT(*) FROM bbbffl_season")).scalar_one():
+        raise RuntimeError("0004 downgrade refused: season domain data cannot be represented by the prior schema")
     for table in (
         "bbbffl_round_afl_reference",
         "bbbffl_round",

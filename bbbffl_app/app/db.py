@@ -108,11 +108,14 @@ class _Result:
     """A result whose rows are materialized immediately, so callers can read
     them after the connection that produced them has already been released
     back to the pool."""
+
     def __init__(self, sa_result):
         self.rowcount = sa_result.rowcount
         self._rows = sa_result.mappings().all() if sa_result.returns_rows else []
+
     def fetchall(self):
         return self._rows
+
     def fetchone(self):
         return self._rows[0] if self._rows else None
 
@@ -120,10 +123,13 @@ class _Result:
 class _TransactionConnection:
     """Bound to one connection for the lifetime of a single transaction()
     block; not retained by callers past that block."""
+
     def __init__(self, connection):
         self._connection = connection
+
     def execute(self, statement, parameters=()):
         from sqlalchemy import text
+
         statement, parameters = _translate(statement, parameters)
         return _Result(self._connection.execute(text(statement), parameters))
 
@@ -138,6 +144,7 @@ class DatabaseConnection:
     and releases it immediately afterwards, so requests never share
     transaction state (see PR #23 review).
     """
+
     def __init__(self, engine):
         self.engine = engine
 
@@ -148,6 +155,7 @@ class DatabaseConnection:
         `init_db`'s legacy-detection probe relies on.
         """
         from sqlalchemy import text
+
         statement, parameters = _translate(statement, parameters)
         with self.engine.connect() as connection:
             return _Result(connection.execute(text(statement), parameters))
@@ -158,9 +166,14 @@ class DatabaseConnection:
 
 def connect(database_url: str) -> DatabaseConnection:
     from sqlalchemy import create_engine
+
     if "://" not in database_url:
         database_url = f"sqlite:///{database_url}"
-    return DatabaseConnection(create_engine(database_url, connect_args={"check_same_thread": False} if database_url.startswith("sqlite") else {}))
+    return DatabaseConnection(
+        create_engine(
+            database_url, connect_args={"check_same_thread": False} if database_url.startswith("sqlite") else {}
+        )
+    )
 
 
 def init_db(conn) -> None:
@@ -282,9 +295,7 @@ class DecisionsRepository:
                 "WHERE competition_key = ? AND team_key = ?" + _for_update_suffix(self.conn),
                 (self.competition_key, team_key),
             ).fetchone()
-            before_state = {
-                "target_position": existing["target_position"] if existing is not None else None
-            }
+            before_state = {"target_position": existing["target_position"] if existing is not None else None}
             conn.execute(
                 """
                 INSERT INTO interchange_assignment (competition_key, team_key, target_position, updated_at)
@@ -314,9 +325,7 @@ class DecisionsRepository:
             (self.competition_key,),
         ).fetchall()
         return {
-            row["team_key"]: InterchangeAssignment(
-                team_key=row["team_key"], target_position=row["target_position"]
-            )
+            row["team_key"]: InterchangeAssignment(team_key=row["team_key"], target_position=row["target_position"])
             for row in rows
         }
 
@@ -488,7 +497,12 @@ class DecisionsRepository:
                 correlation_id=correlation_id,
                 reason=note,
                 before_state=before_state,
-                after_state={"finalized": True, "finalized_at": now, "finalized_note": note, "team_scores": team_scores},
+                after_state={
+                    "finalized": True,
+                    "finalized_at": now,
+                    "finalized_note": note,
+                    "team_scores": team_scores,
+                },
                 entity_version=now,
                 payload={"competition_key": self.competition_key, "has_snapshot": snapshot is not None},
             )

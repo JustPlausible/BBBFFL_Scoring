@@ -301,9 +301,7 @@ class AflApiClient:
         for item in self.get_rounds(season_id):
             if item.round_number == round_number:
                 return item
-        raise AflApiError(
-            f"afl-api returned no round {round_number} for season {season_id}"
-        )
+        raise AflApiError(f"afl-api returned no round {round_number} for season {season_id}")
 
     def get_rounds(self, season_id: int) -> list[Round]:
         """Return stable identities from the public versioned rounds endpoint."""

@@ -27,13 +27,11 @@ def upgrade():
         ("engine_version", sa.Text()),
     ):
         op.add_column("bbbffl_matchup_calculation", sa.Column(name, type_, nullable=True))
-    op.create_index("uq_calculation_matchup_fingerprint", "bbbffl_matchup_calculation", ["matchup_id", "input_fingerprint"], unique=True)
 
 
 def downgrade():
     if op.get_bind().execute(sa.text("SELECT COUNT(*) FROM bbbffl_matchup_calculation")).scalar_one():
         raise RuntimeError("0014 downgrade refused: scoring calculation provenance would be lost")
-    op.drop_index("uq_calculation_matchup_fingerprint", table_name="bbbffl_matchup_calculation")
     for name in ("engine_version", "upstream_observed_at", "upstream_revision", "away_lineup_version", "away_lineup_id", "home_lineup_version", "home_lineup_id", "away_season_entry_id", "home_season_entry_id", "bbbffl_round_id", "rules_version_id", "season_id", "input_fingerprint"):
         op.drop_column("bbbffl_matchup_calculation", name)
     op.drop_column("season_rules_version", "scoring_rules")

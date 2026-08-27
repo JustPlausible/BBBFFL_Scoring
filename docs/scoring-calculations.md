@@ -18,6 +18,10 @@ changed AFL stat produces a new revision only for matchups containing that fact.
 The replaceable calculation row has no lifecycle pointer to, and cannot publish
 or overwrite, immutable `bbbffl_official_result` rows.
 
+`matchup_id` is the sole uniqueness boundary for current calculated state.
+`input_fingerprint` is ordinary provenance used by the atomic matchup upsert to
+compare inputs; it is not a second identity or a calculation-history key.
+
 Missing player-stat rows remain visible as selected DNP evidence. Upstream null
 stat fields remain null and make that slot's calculated score incomplete rather
 than being converted to zero. Interchange is retained as an unscored selection;

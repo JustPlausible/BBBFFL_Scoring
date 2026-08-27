@@ -14,6 +14,7 @@ from app.round_mapping import RoundMappingRepository
 from tests.test_competition_lifecycle import KnownRound, operational
 from tests.test_calculations import Facts, setup_round
 from app.calculations import MatchupCalculationService
+from app.afl_client import PlayerStatLine
 
 
 @pytest.fixture(scope="module")
@@ -125,3 +126,85 @@ def test_concurrent_identical_first_service_calculations_settle_at_revision_one(
     ).fetchone()
     assert persisted["revision"] == 1
     assert persisted["input_fingerprint"] == results[0].input_fingerprint
+
+
+def _concurrent_service_calculations(database, matchup_id, stat_sets, observed_at):
+    ready = threading.Barrier(2)
+
+    def calculate(stats):
+        ready.wait(timeout=5)
+        return MatchupCalculationService(database, Facts(stats)).calculate_matchup(
+            matchup_id, observed_at=observed_at
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        return list(executor.map(calculate, stat_sets))
+
+
+def _changed_stats(stats, goals):
+    changed = dict(stats)
+    player_id = next(iter(changed))
+    changed[player_id] = PlayerStatLine(player_id, goals=goals)
+    return changed
+
+
+def test_concurrent_different_first_service_calculations_advance_atomically(
+    postgres_database,
+):
+    database, lifecycle, round_, stats = setup_round(postgres_database, year=2105)
+    matchup_id = lifecycle.list_matchups(round_.bbbffl_round_id)[0].matchup_id
+    results = _concurrent_service_calculations(
+        database,
+        matchup_id,
+        (_changed_stats(stats, 40), _changed_stats(stats, 50)),
+        "2105-01-01T00:00:00Z",
+    )
+
+    assert sorted(result.revision for result in results) == [1, 2]
+    last = next(result for result in results if result.revision == 2)
+    persisted = postgres_database.execute(
+        "SELECT revision, input_fingerprint FROM bbbffl_matchup_calculation WHERE matchup_id=?",
+        (matchup_id,),
+    ).fetchone()
+    assert persisted["revision"] == 2
+    assert persisted["input_fingerprint"] == last.input_fingerprint
+
+
+def test_concurrent_identical_existing_service_calculations_remain_idempotent(
+    postgres_database,
+):
+    database, lifecycle, round_, stats = setup_round(postgres_database, year=2106)
+    matchup_id = lifecycle.list_matchups(round_.bbbffl_round_id)[0].matchup_id
+    service = MatchupCalculationService(database, Facts(stats))
+    assert service.calculate_matchup(matchup_id).revision == 1
+
+    results = _concurrent_service_calculations(
+        database, matchup_id, (dict(stats), dict(stats)), "2106-01-01T00:00:00Z"
+    )
+    assert [result.revision for result in results] == [1, 1]
+    assert len({result.input_fingerprint for result in results}) == 1
+
+
+def test_concurrent_different_existing_service_calculations_advance_atomically(
+    postgres_database,
+):
+    database, lifecycle, round_, stats = setup_round(postgres_database, year=2107)
+    matchup_id = lifecycle.list_matchups(round_.bbbffl_round_id)[0].matchup_id
+    assert MatchupCalculationService(database, Facts(stats)).calculate_matchup(
+        matchup_id
+    ).revision == 1
+
+    results = _concurrent_service_calculations(
+        database,
+        matchup_id,
+        (_changed_stats(stats, 60), _changed_stats(stats, 70)),
+        "2107-01-01T00:00:00Z",
+    )
+    assert sorted(result.revision for result in results) == [2, 3]
+    last = next(result for result in results if result.revision == 3)
+    persisted = postgres_database.execute(
+        "SELECT revision, input_fingerprint FROM bbbffl_matchup_calculation WHERE matchup_id=?",
+        (matchup_id,),
+    ).fetchone()
+    assert persisted["revision"] == 3
+    assert persisted["input_fingerprint"] == last.input_fingerprint

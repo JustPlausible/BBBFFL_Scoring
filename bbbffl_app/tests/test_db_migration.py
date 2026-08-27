@@ -8,6 +8,8 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, text
 
 from app.db import DecisionsRepository, connect
+from app.fixtures import FixtureRepository
+from app.identity import IdentityRepository
 from app.migrations import HEAD, downgrade, migrate
 from app.round_mapping import RoundMappingRepository
 from app.season import SeasonRepository
@@ -181,6 +183,74 @@ def test_upgrade_from_0007_preserves_legacy_round_mapping(tmp_path):
     assert resolved.mapping_id == legacy_id
     assert (resolved.afl_season_id, resolved.afl_round_id) == (84, 1300)
     assert "bbbffl_round_afl_reference" not in set(inspect(upgraded.engine).get_table_names())
+
+
+def test_season_length_upgrade_defaults_without_rewriting_frozen_fixture(tmp_path):
+    url = _url(tmp_path / "season-length-upgrade.db")
+    migrate(url, "0008_round_map")
+    connection = connect(url)
+    seasons = SeasonRepository(connection)
+    season = seasons.create_season(2026, "2026 Replay")
+    identities = IdentityRepository(connection)
+    entries = []
+    for number in range(1, 11):
+        coach = identities.create_coach(f"Migration Coach {number}")
+        entries.append(
+            identities.create_entry(
+                season.season_id, f"migration-{number}", coach.coach_id, f"Team {number}"
+            )
+        )
+    fixtures = FixtureRepository(connection)
+    draw = fixtures.save_draft(
+        season.season_id, [entry.season_entry_id for entry in entries]
+    )
+    fixtures.freeze(season.season_id)
+    before = [tuple(matchup.__dict__.values()) for matchup in fixtures.list_matchups(season.season_id)]
+    connection.close()
+
+    migrate(url)
+    upgraded = connect(url)
+    assert SeasonRepository(upgraded).get_season(season.season_id).regular_season_round_count == 20
+    after = [
+        tuple(matchup.__dict__.values())
+        for matchup in FixtureRepository(upgraded).list_matchups(season.season_id)
+    ]
+    assert after == before
+    assert FixtureRepository(upgraded).get_draw(season.season_id).fixture_draw_id == draw.fixture_draw_id
+
+
+def test_season_length_downgrade_refuses_non_default_configuration(tmp_path):
+    url = _url(tmp_path / "season-length-downgrade.db")
+    migrate(url)
+    connection = connect(url)
+    SeasonRepository(connection).create_season(
+        2027, "2027", regular_season_round_count=23
+    )
+    connection.close()
+
+    # No fixture rows exist, so refusal must be based on season configuration
+    # itself. The same dialect-independent query protects PostgreSQL.
+    with pytest.raises(RuntimeError, match="non-default season length"):
+        downgrade(url, "0008_round_map")
+
+
+def test_season_length_downgrade_preserves_default_season(tmp_path):
+    url = _url(tmp_path / "default-season-length-downgrade.db")
+    migrate(url)
+    connection = connect(url)
+    season = SeasonRepository(connection).create_season(2026, "2026 Replay")
+    connection.close()
+
+    downgrade(url, "0008_round_map")
+    engine = create_engine(url)
+    assert "regular_season_round_count" not in {
+        column["name"] for column in inspect(engine).get_columns("bbbffl_season")
+    }
+    with engine.connect() as raw:
+        assert raw.execute(
+            text("SELECT label FROM bbbffl_season WHERE season_id=:season_id"),
+            {"season_id": season.season_id},
+        ).scalar_one() == "2026 Replay"
 
 
 def test_unrecognized_unversioned_schema_is_refused(tmp_path):

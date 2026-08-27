@@ -63,6 +63,15 @@ exclusive time-bounded ownership ledger. It refuses downgrade after player
 pool data exists because the previous schema cannot represent that state. See
 [`player-pool-ownership.md`](player-pool-ownership.md).
 
+Revision `0009_season_length` adds the season-scoped BBBFFL regular-season
+round count, backfilled and defaulted to 20. It does not regenerate persisted
+fixture draws. It also replaces the historical round-20 matchup constraint
+with a positive-round constraint so independently configured longer seasons
+can persist the established rotation. A database trigger prevents changing
+the configured length after its fixture draw is frozen. Downgrade refuses on
+both supported databases if any season has a non-default length or any fixture
+contains a round beyond 20, rather than silently discarding configuration.
+
 ## Audit events (revision `0003_audit`)
 
 `0003_audit` adds one domain-neutral `audit_event` table -- the append-only

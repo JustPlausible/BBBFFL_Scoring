@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from sqlalchemy import inspect
+
 from app.audit import ActorContext, append_event
 from app.db import _for_update_suffix, transaction
 
@@ -33,6 +35,7 @@ class Season:
     created_at: str
     updated_at: str
     version: int
+    regular_season_round_count: int
 
 
 @dataclass(frozen=True)
@@ -72,31 +75,66 @@ class SeasonRepository:
     def __init__(self, database):
         self.database = database
 
+    def _has_round_count(self) -> bool:
+        return "regular_season_round_count" in {
+            column["name"] for column in inspect(self.database.engine).get_columns("bbbffl_season")
+        }
+
+    @staticmethod
+    def _season_from_row(row) -> Season:
+        values = dict(row)
+        values.setdefault("regular_season_round_count", 20)
+        return Season(**values)
+
     def create_season(
-        self, year: int, label: str, *, lifecycle_state: str = "setup"
+        self,
+        year: int,
+        label: str,
+        *,
+        lifecycle_state: str = "setup",
+        regular_season_round_count: int = 20,
     ) -> Season:
         if lifecycle_state not in LEGAL_TRANSITIONS:
             raise ValueError("invalid season lifecycle state")
+        if regular_season_round_count < 1:
+            raise ValueError("regular season round count must be positive")
         now = _now()
-        item = Season(_id(), year, label, lifecycle_state, now, now, 1)
+        item = Season(
+            _id(),
+            year,
+            label,
+            lifecycle_state,
+            now,
+            now,
+            1,
+            regular_season_round_count,
+        )
         with transaction(self.database) as connection:
-            connection.execute(
-                "INSERT INTO bbbffl_season VALUES (?, ?, ?, ?, ?, ?, ?)",
-                tuple(item.__dict__.values()),
-            )
+            if self._has_round_count():
+                connection.execute(
+                    "INSERT INTO bbbffl_season VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    tuple(item.__dict__.values()),
+                )
+            else:
+                # Migration/CI compatibility while deliberately exercising a
+                # pre-0009 schema; its implicit historical value is 20.
+                connection.execute(
+                    "INSERT INTO bbbffl_season VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    tuple(item.__dict__.values())[:-1],
+                )
         return item
 
     def get_season(self, season_id: str) -> Season | None:
         row = self.database.execute(
             "SELECT * FROM bbbffl_season WHERE season_id = ?", (season_id,)
         ).fetchone()
-        return Season(**dict(row)) if row else None
+        return self._season_from_row(row) if row else None
 
     def get_season_by_year(self, year: int) -> Season | None:
         row = self.database.execute(
             "SELECT * FROM bbbffl_season WHERE year = ?", (year,)
         ).fetchone()
-        return Season(**dict(row)) if row else None
+        return self._season_from_row(row) if row else None
 
     def transition_lifecycle(
         self,
@@ -151,6 +189,11 @@ class SeasonRepository:
                 created_at=row["created_at"],
                 updated_at=updated_at,
                 version=version,
+                regular_season_round_count=(
+                    row["regular_season_round_count"]
+                    if "regular_season_round_count" in row.keys()
+                    else 20
+                ),
             )
         return result
 

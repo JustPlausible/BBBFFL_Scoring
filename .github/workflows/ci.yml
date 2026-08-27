@@ -141,6 +141,30 @@ jobs:
               entries_by_season.append(entries)
               draws.append(fixture_repository.save_draft(season.season_id, [entry.season_entry_id for entry in entries]))
           fixture_repository.freeze(draws[0].season_id)
+          try:
+              connection.execute(
+                  "UPDATE bbbffl_season SET regular_season_round_count=23 WHERE season_id=?",
+                  (draws[0].season_id,),
+              )
+              raise SystemExit("frozen fixture accepted a season-length change")
+          except DBAPIError as error:
+              assert "frozen fixture draw fixes season length" in str(error)
+
+          # A non-default configured length is itself non-representable by
+          # 0008, even before that season has any matchup rows.
+          configured = seasons.create_season(
+              2029, "PostgreSQL downgrade guard", regular_season_round_count=23
+          )
+          from app.migrations import downgrade
+          try:
+              downgrade(os.environ["BBBFFL_DATABASE_URL"], "0008_round_map")
+              raise SystemExit("downgrade discarded a non-default season length")
+          except RuntimeError as error:
+              assert "non-default season length" in str(error)
+          connection.execute(
+              "UPDATE bbbffl_season SET regular_season_round_count=20 WHERE season_id=?",
+              (configured.season_id,),
+          )
           rejected_tables = []
           for table, key, participant_update, participants in (
               (

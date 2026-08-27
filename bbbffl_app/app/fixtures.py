@@ -21,11 +21,14 @@ BASE_ROTATION = (
 )
 
 
-def fixture_number_rotation():
-    """Return the exact persisted 20-round workbook pattern."""
+def fixture_number_rotation(round_count=20):
+    """Continue the historical rotation for a configured season length."""
+    if round_count < 1:
+        raise ValueError("regular season round count must be positive")
     first = BASE_ROTATION
     reversed_half = tuple(tuple((away, home) for home, away in rnd) for rnd in first)
-    return first + reversed_half + first[:2]
+    cycle = first + reversed_half
+    return tuple(cycle[index % len(cycle)] for index in range(round_count))
 
 
 @dataclass(frozen=True)
@@ -64,6 +67,11 @@ class FixtureRepository:
         if len(entries) != 10 or len(set(entries)) != 10:
             raise ValueError("fixture draw requires ten distinct season entries")
         with transaction(self.database) as conn:
+            season = conn.execute(
+                "SELECT * FROM bbbffl_season WHERE season_id=?", (season_id,)
+            ).fetchone()
+            if not season:
+                raise KeyError(season_id)
             rows = conn.execute("SELECT season_entry_id FROM season_entry WHERE season_id=?", (season_id,)).fetchall()
             season_entries = {row["season_entry_id"] for row in rows}
             if len(season_entries) != 10 or set(entries) != season_entries:
@@ -88,7 +96,12 @@ class FixtureRepository:
                 action = "fixture.draw.created"
             for number, entry_id in enumerate(entries, 1):
                 conn.execute("INSERT INTO season_fixture_number VALUES (?, ?, ?, ?)", (draw_id, season_id, number, entry_id))
-            for round_number, pairings in enumerate(fixture_number_rotation(), 1):
+            round_count = (
+                season["regular_season_round_count"]
+                if "regular_season_round_count" in season.keys()
+                else 20
+            )
+            for round_number, pairings in enumerate(fixture_number_rotation(round_count), 1):
                 for order, (home, away) in enumerate(pairings, 1):
                     matchup_id = str(uuid5(UUID(draw_id), f"round:{round_number}:match:{order}"))
                     conn.execute("INSERT INTO season_fixture_matchup VALUES (?, ?, ?, ?, ?, ?, ?)", (matchup_id, draw_id, season_id, round_number, order, entries[home - 1], entries[away - 1]))
@@ -108,8 +121,30 @@ class FixtureRepository:
                 raise KeyError(season_id)
             if row["state"] == "frozen":
                 raise ValueError("fixture draw is already frozen")
-            counts = conn.execute("SELECT (SELECT COUNT(*) FROM season_fixture_number WHERE fixture_draw_id=?) assignments, (SELECT COUNT(*) FROM season_fixture_matchup WHERE fixture_draw_id=?) matchups", (row["fixture_draw_id"], row["fixture_draw_id"])).fetchone()
-            if counts["assignments"] != 10 or counts["matchups"] != 100:
+            assignments = conn.execute(
+                "SELECT COUNT(*) assignments FROM season_fixture_number WHERE fixture_draw_id=?",
+                (row["fixture_draw_id"],),
+            ).fetchone()["assignments"]
+            rounds = conn.execute(
+                "SELECT bbbffl_round_number, COUNT(*) matchups "
+                "FROM season_fixture_matchup WHERE fixture_draw_id=? "
+                "GROUP BY bbbffl_round_number ORDER BY bbbffl_round_number",
+                (row["fixture_draw_id"],),
+            ).fetchall()
+            season = conn.execute(
+                "SELECT * FROM bbbffl_season WHERE season_id=?", (season_id,)
+            ).fetchone()
+            round_count = (
+                season["regular_season_round_count"]
+                if "regular_season_round_count" in season.keys()
+                else 20
+            )
+            expected_rounds = list(range(1, round_count + 1))
+            if (
+                assignments != 10
+                or [item["bbbffl_round_number"] for item in rounds] != expected_rounds
+                or any(item["matchups"] != 5 for item in rounds)
+            ):
                 raise ValueError("fixture draw is incomplete")
             now, version = _now(), row["version"] + 1
             conn.execute("UPDATE season_fixture_draw SET state='frozen', version=?, updated_at=?, frozen_at=? WHERE fixture_draw_id=?", (version, now, now, row["fixture_draw_id"]))

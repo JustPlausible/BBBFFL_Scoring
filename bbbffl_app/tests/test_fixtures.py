@@ -21,6 +21,25 @@ def _season_with_entries(database, year, prefix="Team"):
     return season, entries
 
 
+def _configured_season_with_entries(database, year, round_count):
+    season = SeasonRepository(database).create_season(
+        year, str(year), regular_season_round_count=round_count
+    )
+    identities = IdentityRepository(database)
+    entries = []
+    for number in range(1, 11):
+        coach = identities.create_coach(f"Coach {year}-{number}")
+        entries.append(
+            identities.create_entry(
+                season.season_id,
+                f"licence-{number}",
+                coach.coach_id,
+                f"Team {number}",
+            )
+        )
+    return season, entries
+
+
 @pytest.fixture
 def fixture_tree():
     database = migrated_connection()
@@ -51,6 +70,78 @@ def test_documented_2026_fixture_number_golden_and_invariants():
     }
     assert rotation[9:18] == tuple(tuple((away, home) for home, away in round_) for round_ in expected)
     assert rotation[18:] == expected[:2]
+
+
+def test_rotation_continues_beyond_twenty_and_can_end_mid_cycle():
+    rotation_23 = fixture_number_rotation(23)
+    assert rotation_23[:9] == BASE_ROTATION
+    assert rotation_23[9:18] == tuple(
+        tuple((away, home) for home, away in round_) for round_ in BASE_ROTATION
+    )
+    assert rotation_23[18:] == BASE_ROTATION[:5]
+    assert fixture_number_rotation(14) == rotation_23[:14]
+    for round_ in rotation_23:
+        assert len(round_) == 5
+        assert sorted(entry for matchup in round_ for entry in matchup) == list(range(1, 11))
+
+
+def test_season_lengths_are_independent_and_drive_persisted_draws():
+    database = migrated_connection()
+    short, short_entries = _configured_season_with_entries(database, 2027, 14)
+    long, long_entries = _configured_season_with_entries(database, 2028, 23)
+    repository = FixtureRepository(database)
+    repository.save_draft(short.season_id, [entry.season_entry_id for entry in short_entries])
+    repository.save_draft(long.season_id, [entry.season_entry_id for entry in long_entries])
+
+    assert len(repository.list_matchups(short.season_id)) == 14 * 5
+    assert len(repository.list_matchups(long.season_id)) == 23 * 5
+    long_round_23 = repository.list_matchups(long.season_id, 23)
+    expected = BASE_ROTATION[4]
+    number_by_entry = {
+        entry.season_entry_id: number for number, entry in enumerate(long_entries, 1)
+    }
+    assert [
+        (number_by_entry[m.home_season_entry_id], number_by_entry[m.away_season_entry_id])
+        for m in long_round_23
+    ] == list(expected)
+
+
+def test_configuration_change_cannot_regenerate_a_frozen_fixture():
+    database = migrated_connection()
+    season, entries = _configured_season_with_entries(database, 2026, 20)
+    repository = FixtureRepository(database)
+    repository.save_draft(season.season_id, [entry.season_entry_id for entry in entries])
+    repository.freeze(season.season_id)
+    before = repository.list_matchups(season.season_id)
+
+    with pytest.raises(IntegrityError, match="frozen fixture draw fixes season length"):
+        with transaction(database) as conn:
+            conn.execute(
+                "UPDATE bbbffl_season SET regular_season_round_count=23 WHERE season_id=?",
+                (season.season_id,),
+            )
+    with pytest.raises(ValueError, match="immutable"):
+        repository.save_draft(season.season_id, [entry.season_entry_id for entry in entries])
+    assert repository.list_matchups(season.season_id) == before
+
+
+def test_freeze_requires_each_configured_round_exactly_once(fixture_tree):
+    database, season, entries, repository = fixture_tree
+    draw = repository.save_draft(
+        season.season_id, [entry.season_entry_id for entry in entries]
+    )
+    # Preserve the total of 100 rows while replacing configured round 20 with
+    # an out-of-range round. A total-count-only validation would accept this.
+    with transaction(database) as conn:
+        conn.execute(
+            "UPDATE season_fixture_matchup SET bbbffl_round_number=21 "
+            "WHERE fixture_draw_id=? AND bbbffl_round_number=20",
+            (draw.fixture_draw_id,),
+        )
+
+    with pytest.raises(ValueError, match="incomplete"):
+        repository.freeze(season.season_id)
+    assert repository.get_draw(season.season_id).state == "draft"
 
 
 def test_persists_stable_entry_pairings_not_mutable_names(fixture_tree):

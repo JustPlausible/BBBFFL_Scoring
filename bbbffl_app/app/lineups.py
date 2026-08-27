@@ -93,13 +93,37 @@ class WeeklyLineupRepository:
         return LineupDraft(lineup_id, season_id, competition_id, round_id, entry_id, revision, selected, created, now)
 
     def get_draft(self, season_id, competition_id, round_id, entry_id):
-        row = self.database.execute(
-            "SELECT * FROM weekly_lineup WHERE season_id=? AND competition_id=? AND bbbffl_round_id=? AND season_entry_id=?",
+        # Materialise the header and slots in one database statement. Under
+        # PostgreSQL READ COMMITTED, merely placing two SELECTs in the same
+        # transaction would not provide a single snapshot: a draft save could
+        # commit between them. The join makes it impossible to pair revision N
+        # metadata with revision N+1 slots.
+        rows = self.database.execute(
+            "SELECT w.*, s.position, s.season_player_id "
+            "FROM weekly_lineup w "
+            "LEFT JOIN weekly_lineup_draft_slot s ON s.lineup_id=w.lineup_id "
+            "WHERE w.season_id=? AND w.competition_id=? "
+            "AND w.bbbffl_round_id=? AND w.season_entry_id=? "
+            "ORDER BY s.position",
             (season_id, competition_id, round_id, entry_id),
-        ).fetchone()
-        if not row:
+        ).fetchall()
+        if not rows:
             return None
-        return self._draft(row)
+        row = rows[0]
+        positions = {slot["position"]: slot["season_player_id"] for slot in rows}
+        if set(positions) != set(POSITIONS):
+            raise LineupIntegrityError("persisted draft does not contain all scoring positions")
+        return LineupDraft(
+            row["lineup_id"],
+            row["season_id"],
+            row["competition_id"],
+            row["bbbffl_round_id"],
+            row["season_entry_id"],
+            row["draft_revision"],
+            positions,
+            row["created_at"],
+            row["updated_at"],
+        )
 
     def submit(self, lineup_id, *, expected_draft_revision, expected_submission_version, actor=ActorContext.anonymous_operator("coach"), source_type="coach", source_detail=None, reason=None):
         if source_type not in SUBMISSION_SOURCES:
@@ -154,10 +178,6 @@ class WeeklyLineupRepository:
             return None
         slots = self.database.execute("SELECT position, season_player_id FROM weekly_lineup_submission_slot WHERE lineup_id=? AND version=?", (lineup_id, version)).fetchall()
         return SubmittedLineup(row["lineup_id"], row["version"], row["based_on_draft_revision"], {s["position"]: s["season_player_id"] for s in slots}, row["submitted_at"], row["actor_type"], row["actor_id"], row["actor_role"], row["source_type"], json.loads(row["source_detail"]) if row["source_detail"] else None, row["reason"])
-
-    def _draft(self, row):
-        slots = self.database.execute("SELECT position, season_player_id FROM weekly_lineup_draft_slot WHERE lineup_id=?", (row["lineup_id"],)).fetchall()
-        return LineupDraft(row["lineup_id"], row["season_id"], row["competition_id"], row["bbbffl_round_id"], row["season_entry_id"], row["draft_revision"], {s["position"]: s["season_player_id"] for s in slots}, row["created_at"], row["updated_at"])
 
     @staticmethod
     def _normalise(positions):

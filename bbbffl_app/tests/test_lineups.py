@@ -43,6 +43,48 @@ def test_draft_repeated_edits_conflict_and_survive_new_repository():
         save(repo, round_, entries, scope, {}, edited.revision)
 
 
+def test_draft_read_cannot_mix_header_revision_with_newer_slots(monkeypatch):
+    db, _, round_, entries, scope, players, _ = context()
+    repo = WeeklyLineupRepository(db)
+    first = save(repo, round_, entries, scope, {"F1": players[0].season_player_id})
+    real_execute = db.execute
+    save_after_snapshot = False
+
+    def execute_then_commit_new_revision(statement, parameters=()):
+        nonlocal save_after_snapshot
+        result = real_execute(statement, parameters)
+        if not save_after_snapshot and "FROM weekly_lineup w" in statement:
+            save_after_snapshot = True
+            save(
+                repo,
+                round_,
+                entries,
+                scope,
+                {"F1": players[1].season_player_id},
+                first.revision,
+            )
+        return result
+
+    monkeypatch.setattr(db, "execute", execute_then_commit_new_revision)
+    observed = repo.get_draft(
+        scope["season_id"],
+        scope["competition_id"],
+        round_.bbbffl_round_id,
+        entries[0].season_entry_id,
+    )
+
+    # The concurrent save commits after the joined result was materialised.
+    # The read must return the complete old snapshot, never an old revision
+    # header paired with the new player selection.
+    assert observed.revision == 1
+    assert observed.positions["F1"] == players[0].season_player_id
+    current = real_execute(
+        "SELECT draft_revision FROM weekly_lineup WHERE lineup_id=?",
+        (first.lineup_id,),
+    ).fetchone()
+    assert current["draft_revision"] == 2
+
+
 def test_submission_is_immutable_resubmission_history_and_ownership_history_survives():
     db, _, round_, entries, scope, players, _ = context()
     repo = WeeklyLineupRepository(db)

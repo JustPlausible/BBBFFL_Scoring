@@ -48,6 +48,10 @@ EXPECTED_TABLES = {
     "bbbffl_matchup_calculation",
     "bbbffl_official_result",
     "bbbffl_round_upstream_fact",
+    "weekly_lineup",
+    "weekly_lineup_draft_slot",
+    "weekly_lineup_submission",
+    "weekly_lineup_submission_slot",
 }
 
 

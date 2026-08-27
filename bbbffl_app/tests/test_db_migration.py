@@ -9,6 +9,8 @@ from sqlalchemy import create_engine, inspect, text
 
 from app.db import DecisionsRepository, connect
 from app.migrations import HEAD, downgrade, migrate
+from app.round_mapping import RoundMappingRepository
+from app.season import SeasonRepository
 
 LEGACY_SCHEMA = """
 CREATE TABLE slot_dnp (team_key TEXT NOT NULL, slot TEXT NOT NULL, dnp INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, PRIMARY KEY (team_key, slot));
@@ -27,7 +29,8 @@ EXPECTED_TABLES = {
     "season_rules_version",
     "competition_stream",
     "bbbffl_round",
-    "bbbffl_round_afl_reference",
+    "round_afl_mapping",
+    "round_afl_mapping_revision",
     "coach",
     "season_entry",
     "season_entry_coach_history",
@@ -139,6 +142,45 @@ def test_upgrade_from_player_head_adds_fixture_schema(tmp_path):
     migrate(url, "0006_players")
     migrate(url)
     assert {"season_fixture_draw", "season_fixture_number", "season_fixture_matchup"} <= set(inspect(create_engine(url)).get_table_names())
+
+
+def test_upgrade_from_0007_preserves_legacy_round_mapping(tmp_path):
+    url = _url(tmp_path / "round-mapping-upgrade.db")
+    migrate(url, "0007_fixture")
+    connection = connect(url)
+    seasons = SeasonRepository(connection)
+    season = seasons.create_season(2026, "2026 Replay")
+    rules = seasons.create_rules_version(season.season_id, "canonical", 1, "2026")
+    competition = seasons.create_competition(
+        season.season_id, rules.rules_version_id, "ordinary", "BBBFFL", "ordinary"
+    )
+    round_ = seasons.create_round(competition.competition_id, "r1", "Round 1", 1)
+    legacy_id = "legacy-mapping-id"
+    with connection.engine.begin() as raw:
+        raw.execute(
+            text(
+                "INSERT INTO bbbffl_round_afl_reference VALUES "
+                "(:mapping, :round, :provider, :season, :afl_round, :created)"
+            ),
+            {
+                "mapping": legacy_id,
+                "round": round_.bbbffl_round_id,
+                "provider": "afl-api-v1",
+                "season": 84,
+                "afl_round": 1300,
+                "created": "2026-03-01T00:00:00+00:00",
+            },
+        )
+    connection.close()
+
+    migrate(url)
+    migrate(url)  # repeated upgrades remain harmless
+    upgraded = connect(url)
+    resolved = RoundMappingRepository(upgraded).resolve(round_.bbbffl_round_id)
+    assert resolved is not None
+    assert resolved.mapping_id == legacy_id
+    assert (resolved.afl_season_id, resolved.afl_round_id) == (84, 1300)
+    assert "bbbffl_round_afl_reference" not in set(inspect(upgraded.engine).get_table_names())
 
 
 def test_unrecognized_unversioned_schema_is_refused(tmp_path):

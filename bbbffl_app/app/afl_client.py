@@ -192,13 +192,20 @@ class AflApiClient:
         raise AflApiError("afl-api /api/v1/seasons returned no season with is_current=true")
 
     def get_round(self, season_id: int, round_number: int) -> Round:
-        payload = self._get(f"/api/v1/seasons/{season_id}/rounds")
-        for entry in _unwrap(payload, "rounds"):
-            if entry.get("round_number") == round_number:
-                return Round(round_id=entry["round_id"], round_number=round_number)
+        for item in self.get_rounds(season_id):
+            if item.round_number == round_number:
+                return item
         raise AflApiError(
             f"afl-api returned no round {round_number} for season {season_id}"
         )
+
+    def get_rounds(self, season_id: int) -> list[Round]:
+        """Return stable identities from the public versioned rounds endpoint."""
+        payload = self._get(f"/api/v1/seasons/{season_id}/rounds")
+        return [
+            Round(round_id=entry["round_id"], round_number=entry["round_number"])
+            for entry in _unwrap(payload, "rounds")
+        ]
 
     def get_matches(self, round_id: int) -> list[Match]:
         payload = self._get(f"/api/v1/rounds/{round_id}/matches")

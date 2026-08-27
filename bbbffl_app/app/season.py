@@ -92,6 +92,12 @@ class SeasonRepository:
         ).fetchone()
         return Season(**dict(row)) if row else None
 
+    def get_season_by_year(self, year: int) -> Season | None:
+        row = self.database.execute(
+            "SELECT * FROM bbbffl_season WHERE year = ?", (year,)
+        ).fetchone()
+        return Season(**dict(row)) if row else None
+
     def transition_lifecycle(
         self,
         season_id: str,
@@ -243,45 +249,5 @@ class SeasonRepository:
         rows = self.database.execute(
             "SELECT * FROM bbbffl_round " "WHERE competition_id=? ORDER BY sequence",
             (competition_id,),
-        ).fetchall()
-        return [BBBFFLRound(**dict(row)) for row in rows]
-
-    def map_afl_round(
-        self,
-        bbbffl_round_id: str,
-        afl_season_id: int,
-        afl_round_id: int,
-        *,
-        provider: str = "afl-api-v1",
-    ) -> str:
-        mapping_id = _id()
-        with transaction(self.database) as connection:
-            connection.execute(
-                "INSERT INTO bbbffl_round_afl_reference VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    mapping_id,
-                    bbbffl_round_id,
-                    provider,
-                    afl_season_id,
-                    afl_round_id,
-                    _now(),
-                ),
-            )
-        return mapping_id
-
-    def rounds_for_afl_reference(
-        self,
-        afl_season_id: int,
-        afl_round_id: int,
-        *,
-        provider: str = "afl-api-v1",
-    ) -> list[BBBFFLRound]:
-        rows = self.database.execute(
-            "SELECT r.* FROM bbbffl_round r "
-            "JOIN bbbffl_round_afl_reference m "
-            "ON m.bbbffl_round_id=r.bbbffl_round_id "
-            "WHERE m.provider=? AND m.afl_season_id=? AND m.afl_round_id=? "
-            "ORDER BY r.bbbffl_round_id",
-            (provider, afl_season_id, afl_round_id),
         ).fetchall()
         return [BBBFFLRound(**dict(row)) for row in rows]

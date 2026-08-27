@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from app.audit import AuditEventRepository
 from app.db import transaction
 from app.season import SeasonRepository
+from app.round_mapping import RoundMappingRepository
 from tests.db_helpers import migrated_connection
 
 
@@ -160,10 +161,6 @@ def test_stream_type_is_sporting_context_not_execution_context(repository):
             "INSERT INTO bbbffl_round VALUES (?, ?, ?, ?, ?, ?)",
             ("round", "missing-competition", "r1", "Round 1", 1, "t"),
         ),
-        (
-            "INSERT INTO bbbffl_round_afl_reference VALUES (?, ?, ?, ?, ?, ?)",
-            ("mapping", "missing-round", "afl-api-v1", 85, 1412, "t"),
-        ),
     ],
 )
 def test_sqlite_rejects_orphan_season_domain_rows(repository, statement, parameters):
@@ -205,7 +202,13 @@ def test_database_rejects_competition_rules_from_another_season(repository):
 def test_sqlite_restricts_deleting_round_with_afl_reference(repository):
     tree = _season_tree(repository, 2027)
     bbbffl_round = tree[4]
-    repository.map_afl_round(bbbffl_round.bbbffl_round_id, 85, 1412)
+    class Existing:
+        def round_exists(self, season_id, round_id):
+            return (season_id, round_id) == (85, 1412)
+
+    RoundMappingRepository(repository.database).accept(
+        bbbffl_round.bbbffl_round_id, 85, 1412, Existing()
+    )
     with pytest.raises(IntegrityError):
         with transaction(repository.database) as connection:
             connection.execute(
@@ -214,17 +217,6 @@ def test_sqlite_restricts_deleting_round_with_afl_reference(repository):
             )
 
 
-def test_bbbffl_rounds_are_independent_of_afl_numbering_and_many_contexts_can_map(
-    repository,
-):
-    tree = _season_tree(repository, 2027)
-    # BBBFFL Round 1 and SS1 intentionally map to AFL provider round id 1412;
-    # neither BBBFFL sequence/key is inferred from that provider identity.
-    repository.map_afl_round(tree[4].bbbffl_round_id, 85, 1412)
-    repository.map_afl_round(tree[5].bbbffl_round_id, 85, 1412)
-    mapped = repository.rounds_for_afl_reference(85, 1412)
-    assert {r.bbbffl_round_id for r in mapped} == {
-        tree[4].bbbffl_round_id,
-        tree[5].bbbffl_round_id,
-    }
-    assert {(r.round_key, r.sequence) for r in mapped} == {("r1", 1), ("ss1", 1)}
+def test_season_repository_has_no_independent_mapping_write_path(repository):
+    assert not hasattr(repository, "map_afl_round")
+    assert not hasattr(repository, "rounds_for_afl_reference")

@@ -57,6 +57,12 @@ Revision `0004_season` adds the season-aware parent identity tables without
 backfilling ambiguous prototype `competition_key` values. See
 [`season-competition-schema.md`](season-competition-schema.md).
 
+Revision `0005_identity` adds private coach and season-entry identity/history.
+Revision `0006_players` adds the season player cache, season squad limit and
+exclusive time-bounded ownership ledger. It refuses downgrade after player
+pool data exists because the previous schema cannot represent that state. See
+[`player-pool-ownership.md`](player-pool-ownership.md).
+
 ## Audit events (revision `0003_audit`)
 
 `0003_audit` adds one domain-neutral `audit_event` table -- the append-only

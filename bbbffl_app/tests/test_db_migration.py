@@ -32,6 +32,9 @@ EXPECTED_TABLES = {
     "season_entry",
     "season_entry_coach_history",
     "season_entry_team_name_history",
+    "season_player_pool",
+    "season_squad_configuration",
+    "player_ownership_period",
 }
 
 
@@ -118,6 +121,14 @@ def test_upgrade_from_season_head_and_empty_identity_downgrade(tmp_path):
     assert "season_entry" in set(inspect(engine).get_table_names())
     downgrade(url, "0004_season")
     assert "season_entry" not in set(inspect(create_engine(url)).get_table_names())
+
+
+def test_upgrade_from_identity_head_adds_player_ownership_schema(tmp_path):
+    url = _url(tmp_path / "player-upgrade.db")
+    migrate(url, "0005_identity")
+    migrate(url)
+    tables = set(inspect(create_engine(url)).get_table_names())
+    assert {"season_player_pool", "season_squad_configuration", "player_ownership_period"} <= tables
 
 
 def test_unrecognized_unversioned_schema_is_refused(tmp_path):

@@ -102,11 +102,14 @@ DNP_CHANGED = "scoring.dnp.changed"
 INTERCHANGE_CHANGED = "scoring.interchange.changed"
 OVERRIDE_CHANGED = "scoring.override.changed"
 RESULT_FINALIZED = "scoring.result.finalized"
+PLAYER_ACQUIRED = "ownership.player.acquired"
+PLAYER_RELEASED = "ownership.player.released"
 
 ENTITY_TYPE_SLOT = "scoring.slot"
 ENTITY_TYPE_INTERCHANGE = "scoring.interchange"
 ENTITY_TYPE_OVERRIDE = "scoring.override"
 ENTITY_TYPE_MATCHUP = "scoring.matchup"
+ENTITY_TYPE_OWNERSHIP_PERIOD = "ownership.period"
 
 
 def _now() -> str:

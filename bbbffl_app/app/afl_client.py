@@ -69,6 +69,7 @@ _COMPLETED_STATUSES = {"CONCLUDED", "FINAL", "FT", "FULL_TIME", "COMPLETE", "COM
 _POSTGAME_STATUSES = {"POSTGAME"}
 _LIVE_STATUSES = {"LIVE", "IN_PROGRESS", "IN PROGRESS"}
 _UPCOMING_STATUSES = {"UPCOMING", "SCHEDULED", "NOT_STARTED"}
+_KNOWN_MATCH_STATUSES = _COMPLETED_STATUSES | _POSTGAME_STATUSES | _LIVE_STATUSES | _UPCOMING_STATUSES
 
 
 def normalize_match_status(raw_status: str) -> MatchState:
@@ -82,6 +83,23 @@ def normalize_match_status(raw_status: str) -> MatchState:
     if normalized in _UPCOMING_STATUSES:
         return "yet_to_play"
     return "yet_to_play"
+
+
+def is_recognized_match_status(raw_status: str) -> bool:
+    """True when `raw_status` is one of the canonical afl-api v1 lifecycle
+    values or a tolerated legacy alias (see `normalize_match_status` above).
+
+    `normalize_match_status` always returns *some* normalized state,
+    defaulting anything unrecognised to "yet_to_play" -- a reasonable
+    default for presentation callers, but dangerous for a lockout decision
+    (app/lockouts.py): a genuinely unusual upstream status (e.g. a
+    postponed/abandoned match afl-api has not documented as canonical v1
+    vocabulary) must never be silently treated as an ordinary scheduled
+    match. This lets a lockout-sensitive caller detect "I don't recognise
+    this status" explicitly instead of guessing from the normalized value
+    alone.
+    """
+    return (raw_status or "").strip().upper() in _KNOWN_MATCH_STATUSES
 
 
 def _unwrap(payload: dict | list, key: str) -> list:
@@ -129,6 +147,11 @@ class Match:
     home_team: Team
     away_team: Team
     status: str
+    # Persisted UTC scheduled start, or None when afl-api has not yet
+    # supplied one. Not a rescheduling/live-update guarantee by itself --
+    # app/lockouts.py combines this with `status` rather than trusting
+    # wall-clock time alone (see docs/afl-api-v1-contract.md #1.5).
+    start_time_utc: str | None = None
 
     @property
     def state(self) -> MatchState:
@@ -215,6 +238,7 @@ class AflApiClient:
                 home_team=Team.from_json(entry["home_team"]),
                 away_team=Team.from_json(entry["away_team"]),
                 status=entry.get("status", ""),
+                start_time_utc=entry.get("start_time_utc"),
             )
             for entry in _unwrap(payload, "matches")
         ]

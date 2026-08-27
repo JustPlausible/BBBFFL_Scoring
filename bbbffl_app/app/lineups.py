@@ -1,4 +1,14 @@
-"""Durable boundary between private weekly drafts and official selections."""
+"""Durable boundary between private weekly drafts and official selections.
+
+`submit`'s optional `lock_guard` is the sole integration point with
+app/lockouts.py's player-level AFL-match lockout decision: when supplied, it
+is invoked inside this method's own transaction (after the previous
+effective submission is read, before the new version is written) and may
+raise to reject a submission that would mutate a locked/indeterminate
+position. This module has no other lockout awareness and does not import
+app/lockouts.py, keeping the two responsibilities -- immutable submission
+history here, lock evaluation/evidence there -- decoupled.
+"""
 
 import json
 from dataclasses import dataclass
@@ -125,7 +135,7 @@ class WeeklyLineupRepository:
             row["updated_at"],
         )
 
-    def submit(self, lineup_id, *, expected_draft_revision, expected_submission_version, actor=ActorContext.anonymous_operator("coach"), source_type="coach", source_detail=None, reason=None):
+    def submit(self, lineup_id, *, expected_draft_revision, expected_submission_version, actor=ActorContext.anonymous_operator("coach"), source_type="coach", source_detail=None, reason=None, lock_guard=None):
         if source_type not in SUBMISSION_SOURCES:
             raise LineupIntegrityError("unknown submission source")
         with transaction(self.database) as conn:
@@ -149,6 +159,21 @@ class WeeklyLineupRepository:
             positions = self._normalise(positions)
             self._validate_players(conn, lineup["season_id"], positions, lock=True)
             self._validate_ownership(conn, lineup["season_entry_id"], positions)
+            if lock_guard is not None:
+                # `guard_transition`'s caller-owned invariant: this must run
+                # under the `weekly_lineup` row lock already taken above, so
+                # two concurrent submissions for the same lineup serialize
+                # against each other and against the lock evidence each one
+                # observes/materializes (see app/lockouts.py).
+                if current:
+                    previous_rows = conn.execute(
+                        "SELECT position, season_player_id FROM weekly_lineup_submission_slot WHERE lineup_id=? AND version=?",
+                        (lineup_id, current),
+                    ).fetchall()
+                    previous_positions = {row["position"]: row["season_player_id"] for row in previous_rows}
+                else:
+                    previous_positions = {position: None for position in POSITIONS}
+                lock_guard(conn, lineup, previous_positions, positions)
             version, now = current + 1, _now()
             conn.execute(
                 "INSERT INTO weekly_lineup_submission VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",

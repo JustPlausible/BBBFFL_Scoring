@@ -362,20 +362,32 @@ class CompetitionLifecycleRepository:
         encoded = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
         with transaction(self.database) as conn:
             current = conn.execute(
-                "SELECT revision FROM bbbffl_matchup_calculation WHERE matchup_id=?",
+                "SELECT revision FROM bbbffl_matchup_calculation WHERE matchup_id=?"
+                + _for_update_suffix(self.database),
                 (matchup_id,),
             ).fetchone()
-            revision = current["revision"] + 1 if current else 1
             if current:
+                revision = current["revision"] + 1
                 conn.execute(
                     "UPDATE bbbffl_matchup_calculation SET revision=?, snapshot=?, updated_at=? WHERE matchup_id=?",
                     (revision, encoded, _now(), matchup_id),
                 )
             else:
-                conn.execute(
-                    "INSERT INTO bbbffl_matchup_calculation VALUES (?, ?, ?, ?)",
-                    (matchup_id, revision, encoded, _now()),
-                )
+                # Both supported databases make the conflict branch atomic.
+                # If two writers saw no row, one inserts revision 1 and the
+                # other waits for it, then increments that committed row to 2.
+                # This also avoids exposing an expected first-write race as a
+                # primary-key error to callers.
+                created = conn.execute(
+                    "INSERT INTO bbbffl_matchup_calculation "
+                    "(matchup_id, revision, snapshot, updated_at) VALUES (?, 1, ?, ?) "
+                    "ON CONFLICT (matchup_id) DO UPDATE SET "
+                    "revision=bbbffl_matchup_calculation.revision + 1, "
+                    "snapshot=excluded.snapshot, updated_at=excluded.updated_at "
+                    "RETURNING revision",
+                    (matchup_id, encoded, _now()),
+                ).fetchone()
+                revision = created["revision"]
         return revision
 
     def record_upstream_fact(self, round_id, provider_status, payload=None):
@@ -453,14 +465,14 @@ class CompetitionLifecycleRepository:
             if not isinstance(scores, (tuple, list)) or len(scores) != 2:
                 raise ValueError("each result requires home and away scores")
 
-    @staticmethod
-    def _validate_frozen_context(conn, row):
+    def _validate_frozen_context(self, conn, row):
         draw = conn.execute(
             "SELECT state, version FROM season_fixture_draw WHERE fixture_draw_id=?",
             (row["fixture_draw_id"],),
         ).fetchone()
         mapping = conn.execute(
-            "SELECT current_revision FROM round_afl_mapping WHERE mapping_id=?",
+            "SELECT current_revision FROM round_afl_mapping WHERE mapping_id=?"
+            + _for_update_suffix(self.database),
             (row["mapping_id"],),
         ).fetchone()
         if (

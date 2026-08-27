@@ -92,6 +92,12 @@ class SeasonRepository:
         ).fetchone()
         return Season(**dict(row)) if row else None
 
+    def get_season_by_year(self, year: int) -> Season | None:
+        row = self.database.execute(
+            "SELECT * FROM bbbffl_season WHERE year = ?", (year,)
+        ).fetchone()
+        return Season(**dict(row)) if row else None
+
     def transition_lifecycle(
         self,
         season_id: str,

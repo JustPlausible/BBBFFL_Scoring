@@ -34,20 +34,37 @@ class PlayerStats:
     tackles: int = 0
 
 
-def score_position(position: str, stats: PlayerStats) -> float:
+@dataclass(frozen=True)
+class ScoringRules:
+    """Version-resolved coefficients consumed by the one scoring core."""
+
+    forward_goal: int = 6
+    forward_behind: int = 1
+    midfield_disposal: int = 1
+    ruck_mark: int = 1
+    ruck_hitout: int = 1
+    tackler_tackle: int = 6
+
+    @classmethod
+    def from_dict(cls, value: dict | None) -> "ScoringRules":
+        return cls(**(value or {}))
+
+
+def score_position(position: str, stats: PlayerStats, rules: ScoringRules | None = None) -> float:
     """Compute the BBBFFL score for a starting position given a player's stats.
 
     `position` must be one of SCORABLE_POSITIONS. "Interchange" is deliberately
     not accepted here -- resolve it to the position it is replacing first.
     """
+    rules = rules or ScoringRules()
     if position in FORWARD_POSITIONS:
-        return 6 * stats.goals + stats.behinds
+        return rules.forward_goal * stats.goals + rules.forward_behind * stats.behinds
     if position in MIDFIELD_POSITIONS:
-        return stats.disposals
+        return rules.midfield_disposal * stats.disposals
     if position == "Ruck":
-        return stats.marks + stats.hitouts
+        return rules.ruck_mark * stats.marks + rules.ruck_hitout * stats.hitouts
     if position == "Tackler":
-        return 6 * stats.tackles
+        return rules.tackler_tackle * stats.tackles
     raise ValueError(
         f"'{position}' cannot be scored directly. Interchange must be scored "
         "as the starting position it replaces."

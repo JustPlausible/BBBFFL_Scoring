@@ -358,7 +358,7 @@ class CompetitionLifecycleRepository:
         return self.get_round(round_id)
 
     def save_calculation(self, matchup_id, snapshot):
-        """A deliberately opaque attachment point for a later scoring engine."""
+        """Legacy snapshot attachment; season scoring uses calculations service."""
         encoded = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
         with transaction(self.database) as conn:
             current = conn.execute(

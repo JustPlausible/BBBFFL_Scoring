@@ -26,8 +26,13 @@ effective official version; audit events explain both publication and pointer
 movement, but lifecycle/result tables remain the source of truth.
 
 Calculated snapshots live in `bbbffl_matchup_calculation`, separately from
-`bbbffl_official_result`. They are opaque storage for later scoring work, not a
-scoring engine. Calculation updates lock an existing row, while concurrent
+`bbbffl_official_result`. Package 26 binds each snapshot to its season, immutable
+rules version, round and matchup IDs, both entry and effective submitted-lineup
+versions, upstream AFL observation/revision, input fingerprint, and scoring-engine
+version. `MatchupCalculationService` calculates either one persisted matchup or
+the fixture's five persisted matchups through the shared positional core. A
+selected DNP and the single Interchange remain explicit slot evidence; neither is
+silently replaced or promoted to a scorer ruling. Calculation updates lock an existing row, while concurrent
 first writes use an atomic upsert, so every successful save receives a distinct
 monotonically increasing revision. Likewise `bbbffl_round_upstream_fact`
 retains provider status observations such as `LIVE`, `POSTGAME` and

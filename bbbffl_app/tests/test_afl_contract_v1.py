@@ -192,20 +192,18 @@ def test_get_match_player_stats_drops_rows_with_unresolved_canonical_identity(cl
 
 
 def test_get_match_player_stats_currently_coerces_null_stat_field_to_zero(client):
-    """KNOWN GAP (documented, not fixed by this issue): when a *resolved*
+    """When a *resolved*
     player's stat row has one individual field still null mid-collection
     (afl-api's real "unavailable" semantic -- see docs/api_v1_player_stats.md
     field notes), AflApiClient's `int(row_stats.get(field) or 0)` coercion
     currently collapses that null into a known zero, identically to an
     actually-recorded zero. Player 7734 in the partial-finality fixture has
     hitouts: null (still collecting) alongside populated goals/behinds/etc.
-    This test pins today's actual behaviour; resolving the gap (retaining
-    None instead of 0) is a package 05/27 concern (live-scoring resilience
-    and DNP/finality-aware recommendation), not this contract-validation
-    issue -- see docs/afl-api-v1-contract.md's "known upstream/consumer
-    gaps" section."""
+    Package 26 retains that distinction so incomplete facts cannot silently
+    produce a score -- see docs/afl-api-v1-contract.md's
+    "known upstream/consumer gaps" section."""
     stats = client.get_match_player_stats(8503)
-    assert stats[7734].hitouts == 0  # true unavailable-vs-zero would be None
+    assert stats[7734].hitouts is None
 
 
 def test_get_match_player_stats_final_lifecycle_has_fully_resolved_rows(client):

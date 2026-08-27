@@ -43,6 +43,11 @@ EXPECTED_TABLES = {
     "season_fixture_draw",
     "season_fixture_number",
     "season_fixture_matchup",
+    "bbbffl_round_lifecycle",
+    "bbbffl_matchup",
+    "bbbffl_matchup_calculation",
+    "bbbffl_official_result",
+    "bbbffl_round_upstream_fact",
 }
 
 
@@ -217,6 +222,20 @@ def test_season_length_upgrade_defaults_without_rewriting_frozen_fixture(tmp_pat
     ]
     assert after == before
     assert FixtureRepository(upgraded).get_draw(season.season_id).fixture_draw_id == draw.fixture_draw_id
+
+
+def test_upgrade_from_previous_head_adds_lifecycle_without_rewriting_foundations(tmp_path):
+    url = _url(tmp_path / "lifecycle-upgrade.db")
+    migrate(url, "0009_season_length")
+    connection = connect(url)
+    season = SeasonRepository(connection).create_season(2026, "2026 Replay")
+    connection.close()
+
+    migrate(url)
+    engine = create_engine(url)
+    tables = set(inspect(engine).get_table_names())
+    assert {"bbbffl_round_lifecycle", "bbbffl_matchup", "bbbffl_official_result"} <= tables
+    assert SeasonRepository(connect(url)).get_season(season.season_id).label == "2026 Replay"
 
 
 def test_season_length_downgrade_refuses_non_default_configuration(tmp_path):

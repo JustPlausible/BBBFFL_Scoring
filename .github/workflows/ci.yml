@@ -70,7 +70,7 @@ jobs:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: bbbffl_app/requirements.txt
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements-dev.txt
       - name: Upgrade twice and exercise scorer persistence and audit boundary
         run: |
           python -m app.migrations upgrade 0007_fixture
@@ -201,3 +201,5 @@ jobs:
           assert rejected_tables == ["season_fixture_number", "season_fixture_matchup"]
           connection.close()
           PY
+      - name: Exercise PostgreSQL lifecycle concurrency guarantees
+        run: pytest -q tests/test_competition_lifecycle_concurrency.py

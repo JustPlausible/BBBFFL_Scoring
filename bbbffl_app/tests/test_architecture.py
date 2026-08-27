@@ -95,12 +95,34 @@ def _resolve_app_import(module: str, name: str) -> str:
     return module
 
 
+def _resolve_relative_module(dotted: str, is_package: bool, node: ast.ImportFrom) -> str | None:
+    """Resolve `from .foo import bar` / `from . import bar` (node.level>=1)
+    against the importing module's own package, the same way Python's
+    import system does (see importlib._bootstrap._resolve_name). No module
+    under app/ uses a relative import today, but a future one must still be
+    classified rather than silently dropped from the graph -- an unresolved
+    relative import would otherwise let a route bypass the persistence-
+    boundary assertions, and a relative import participating in a cycle
+    would bypass cycle detection entirely."""
+    package_parts = list(dotted.split(".")) if is_package else list(dotted.split("."))[:-1]
+    if node.level > 1:
+        strip = node.level - 1
+        if strip > len(package_parts):
+            return None  # climbs above the package root; not a valid app.* edge
+        package_parts = package_parts[: len(package_parts) - strip]
+    base = ".".join(package_parts)
+    if not base:
+        return None
+    return f"{base}.{node.module}" if node.module else base
+
+
 def build_import_graph() -> dict[str, set[str]]:
     graph: dict[str, set[str]] = {}
     for path in sorted(APP_DIR.rglob("*.py")):
         dotted = _dotted_module_name(path)
         if not dotted or dotted == "app":
             continue
+        is_package = path.name == "__init__.py"
         tree = ast.parse(path.read_text(), filename=str(path))
         deps: set[str] = set()
         for node in ast.walk(tree):
@@ -109,12 +131,16 @@ def build_import_graph() -> dict[str, set[str]]:
                     if alias.name == "app" or alias.name.startswith("app."):
                         deps.add(alias.name)
             elif isinstance(node, ast.ImportFrom):
-                if node.level or node.module is None:
-                    continue  # relative import; none used under app/ today
-                if node.module != "app" and not node.module.startswith("app."):
+                if node.level:
+                    module = _resolve_relative_module(dotted, is_package, node)
+                else:
+                    module = node.module
+                if module is None:
+                    continue
+                if module != "app" and not module.startswith("app."):
                     continue
                 for alias in node.names:
-                    deps.add(_resolve_app_import(node.module, alias.name))
+                    deps.add(_resolve_app_import(module, alias.name))
         deps.discard(dotted)
         deps.discard("app")
         graph[dotted] = deps
@@ -124,6 +150,39 @@ def build_import_graph() -> dict[str, set[str]]:
 @pytest.fixture(scope="module")
 def graph() -> dict[str, set[str]]:
     return build_import_graph()
+
+
+def _parse_import_from(source: str) -> ast.ImportFrom:
+    (node,) = ast.parse(source).body
+    assert isinstance(node, ast.ImportFrom)
+    return node
+
+
+@pytest.mark.parametrize(
+    "dotted, is_package, source, expected",
+    [
+        # A plain module's relative import resolves against its parent
+        # package -- app.season's package is "app".
+        ("app.season", False, "from .db import transaction", "app.db"),
+        # Each extra leading dot climbs one more package level, exactly as
+        # importlib resolves it: app.routes.admin's package is "app.routes",
+        # so ".." climbs to "app".
+        ("app.routes.admin", False, "from ..db import transaction", "app.db"),
+        ("app.routes.admin", False, "from . import public", "app.routes"),
+        # A package's (__init__.py's) own relative import resolves within
+        # itself, not its parent.
+        ("app.routes", True, "from .admin import router", "app.routes.admin"),
+    ],
+)
+def test_resolve_relative_module_matches_python_import_semantics(dotted, is_package, source, expected):
+    """No module under app/ uses a relative import today (confirmed by
+    `test_every_app_module_is_classified` running clean against the real
+    tree), but `build_import_graph` must still resolve one correctly rather
+    than silently dropping the edge -- see `_resolve_relative_module`'s
+    docstring for why an unresolved relative import would defeat this
+    suite's whole purpose."""
+    node = _parse_import_from(source)
+    assert _resolve_relative_module(dotted, is_package, node) == expected
 
 
 def test_every_app_module_is_classified(graph):

@@ -11,7 +11,7 @@ from sqlalchemy import create_engine, inspect
 # enforcement before Alembic or legacy-schema inspection opens an engine.
 from app import db as _database_boundary  # noqa: F401
 
-HEAD = "0012_lockouts"
+HEAD = "0013_lockout_triggers"
 TABLES = {"slot_dnp", "interchange_assignment", "score_override", "matchup_state"}
 LEGACY_COLUMNS = {
     "slot_dnp": {"team_key", "slot", "dnp", "updated_at"},

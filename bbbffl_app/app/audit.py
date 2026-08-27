@@ -105,6 +105,7 @@ RESULT_FINALIZED = "scoring.result.finalized"
 PLAYER_ACQUIRED = "ownership.player.acquired"
 PLAYER_RELEASED = "ownership.player.released"
 LINEUP_SUBMITTED = "lineup.submission.created"
+LOCKOUT_TRIGGER_CONFIGURED = "lockout.trigger.configured"
 
 ENTITY_TYPE_SLOT = "scoring.slot"
 ENTITY_TYPE_INTERCHANGE = "scoring.interchange"
@@ -112,6 +113,7 @@ ENTITY_TYPE_OVERRIDE = "scoring.override"
 ENTITY_TYPE_MATCHUP = "scoring.matchup"
 ENTITY_TYPE_OWNERSHIP_PERIOD = "ownership.period"
 ENTITY_TYPE_LINEUP = "lineup.weekly"
+ENTITY_TYPE_LOCKOUT_TRIGGER = "lockout.trigger"
 
 
 def _now() -> str:

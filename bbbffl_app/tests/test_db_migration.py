@@ -54,6 +54,10 @@ EXPECTED_TABLES = {
     "weekly_lineup_submission",
     "weekly_lineup_submission_slot",
     "weekly_lineup_lock",
+    "bbbffl_round_lockout_trigger",
+    "bbbffl_round_lockout_trigger_revision",
+    "bbbffl_round_lockout_trigger_match",
+    "bbbffl_round_lockout_trigger_activation",
 }
 
 
@@ -308,6 +312,61 @@ def test_lock_evidence_table_is_immutable(tmp_path):
     with pytest.raises(DatabaseError, match="immutable"):
         with engine.begin() as conn:
             conn.execute(text("DELETE FROM weekly_lineup_lock"))
+
+
+def test_upgrade_from_lock_evidence_head_adds_lockout_trigger_tables(tmp_path):
+    url = _url(tmp_path / "trigger-upgrade.db")
+    migrate(url, "0012_lockouts")
+    engine = create_engine(url)
+    assert "bbbffl_round_lockout_trigger" not in set(inspect(engine).get_table_names())
+
+    migrate(url)
+    engine = create_engine(url)
+    tables = set(inspect(engine).get_table_names())
+    assert {
+        "bbbffl_round_lockout_trigger",
+        "bbbffl_round_lockout_trigger_revision",
+        "bbbffl_round_lockout_trigger_match",
+        "bbbffl_round_lockout_trigger_activation",
+    } <= tables
+    assert inspect(engine).get_pk_constraint("bbbffl_round_lockout_trigger_activation")["constrained_columns"] == ["trigger_id"]
+
+
+def test_lockout_trigger_activation_table_is_immutable(tmp_path):
+    from app.lockouts import LockoutTriggerRepository
+    from tests.test_competition_lifecycle import operational
+
+    url = _url(tmp_path / "trigger-immutable.db")
+    migrate(url)
+    connection = connect(url)
+    _, round_, _entries = operational(connection, 2026, 2)
+    trigger = LockoutTriggerRepository(connection).create(round_.bbbffl_round_id, "main", "main", 1, [1], reason="fixture")
+
+    engine = create_engine(url)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO bbbffl_round_lockout_trigger_activation "
+                "(trigger_id, revision, afl_match_id, observed_status, effective_lock_at, activation_reason, evaluated_at, created_at) "
+                "VALUES (:trigger, :revision, :match, :status, :start, :reason, :evaluated, :created)"
+            ),
+            {
+                "trigger": trigger.trigger_id,
+                "revision": trigger.revision,
+                "match": 1,
+                "status": "LIVE",
+                "start": "2026-01-01T00:00:00+00:00",
+                "reason": "match_status_live",
+                "evaluated": "2026-01-01T00:00:00+00:00",
+                "created": "2026-01-01T00:00:00+00:00",
+            },
+        )
+    with pytest.raises(DatabaseError, match="immutable"):
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE bbbffl_round_lockout_trigger_activation SET activation_reason='changed'"))
+    with pytest.raises(DatabaseError, match="immutable"):
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM bbbffl_round_lockout_trigger_activation"))
 
 
 def test_season_length_downgrade_refuses_non_default_configuration(tmp_path):

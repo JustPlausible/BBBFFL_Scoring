@@ -16,7 +16,7 @@ import pytest
 from app.afl_client import Match, Team
 from app.db import connect
 from app.lineups import LineupConflictError, WeeklyLineupRepository
-from app.lockouts import LockedSelectionError, LockoutRepository, LockState
+from app.lockouts import LockedSelectionError, LockoutRepository, LockoutTriggerRepository, LockState, TriggerAlreadyActivatedError
 from app.migrations import migrate
 
 EARLY_HOME = Team(5001, "Concurrency FC")
@@ -61,6 +61,7 @@ def postgres_context(url, year):
     ownership.acquire(incumbent.season_player_id, entries[0].season_entry_id)
     challenger = pool.refresh_player(scope["season_id"], year * 1000 + 1, "Challenger", afl_team_id=EARLY_HOME.team_id, afl_team_name=EARLY_HOME.name)
     ownership.acquire(challenger.season_player_id, entries[0].season_entry_id)
+    LockoutTriggerRepository(db).create(round_.bbbffl_round_id, "main", "main", 1, [match().match_id], reason="concurrency fixture")
     return db, round_, entries, scope, incumbent, challenger
 
 
@@ -165,3 +166,53 @@ def test_lock_guard_does_not_disturb_ordinary_submission_serialization(postgres_
 
     results = race([lambda: attempt(incumbent), lambda: attempt(challenger)])
     assert sorted(results) == ["committed", "conflict"]
+
+
+def test_trigger_replace_races_activation_and_serializes_to_one_safe_outcome(postgres_url):
+    """A commissioner reconfiguring a trigger and a coach/scorer read that
+    would materialize its activation race for the same trigger's header row
+    lock. Exactly one of two safe outcomes must result: either the replace
+    committed first (so activation observes the *new* configuration), or
+    activation committed first (so the replace is rejected as already-
+    activated) -- never a torn state where the persisted match set and the
+    persisted activation evidence disagree."""
+    db, round_, entries, scope, incumbent, _challenger = postgres_context(postgres_url, 2404)
+    triggers = LockoutTriggerRepository(db)
+    reader_db = connect(postgres_url)
+
+    def do_replace():
+        try:
+            triggers.replace(
+                round_.bbbffl_round_id, "main", trigger_type="main", sequence=1,
+                afl_match_ids=[match().match_id], reason="racing reconfiguration",
+            )
+            return "replaced"
+        except TriggerAlreadyActivatedError:
+            return "already_activated"
+
+    def do_materialize():
+        LockoutRepository(reader_db)._materialize_round_triggers(
+            round_.bbbffl_round_id, match_facts=FixedMatchFacts(), evaluation_at=START + timedelta(minutes=1),
+        )
+        return "materialized"
+
+    results = race([do_replace, do_materialize])
+    assert "materialized" in results
+
+    trigger = triggers.get(round_.bbbffl_round_id, "main")
+    activation = db.execute(
+        "SELECT revision FROM bbbffl_round_lockout_trigger_activation WHERE trigger_id=?", (trigger.trigger_id,)
+    ).fetchone()
+    if results[0] == "replaced":
+        # The replace committed before activation observed it: activation
+        # (if it happened at all) must be recorded against the *new*
+        # revision, never a stale one.
+        if activation:
+            assert activation["revision"] == trigger.revision
+    else:
+        # Activation won the race: the replace must have been rejected, and
+        # the trigger's configuration must remain exactly what it was when
+        # it activated.
+        assert results[0] == "already_activated"
+        assert activation is not None
+        assert activation["revision"] == trigger.revision == 1

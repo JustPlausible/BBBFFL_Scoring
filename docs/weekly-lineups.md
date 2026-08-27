@@ -35,9 +35,12 @@ integration remain packages 22, 24–26. Existing 2026 Grand Final and
 SuperScore JSON paths remain unchanged.
 
 `submit`'s optional `lock_guard` parameter is package 23's (issue #34)
-integration point: staged player-level AFL-match lockouts, implemented in
-`app/lockouts.py`, run inside this method's own transaction and may reject
-a submission that would mutate an already-locked position. See
-[`lockouts.md`](lockouts.md) for the full lock rule, irreversibility and
-concurrency design; this module has no lockout awareness beyond accepting
+integration point: staged player-level AFL-match lockouts driven by a
+persisted, commissioner/scorer-configured round lockout plan (`app/lockouts.py`).
+When `lock_guard` exposes a `.materialize(lineup_id)` method, `submit` calls
+it *before* opening its own transaction; the guard itself then runs inside
+this method's own transaction and may reject a submission that would
+mutate an already-locked position. See [`lockouts.md`](lockouts.md) for the
+full lock rule, irreversibility and concurrency design; this module has no
+lockout awareness beyond accepting
 that one optional callable.

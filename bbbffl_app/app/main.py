@@ -51,6 +51,7 @@ async def lifespan(app: FastAPI):
         timeout=settings.afl_api_timeout_seconds,
         connect_timeout=settings.afl_api_connect_timeout_seconds,
         read_timeout=settings.afl_api_read_timeout_seconds,
+        contract_version=settings.afl_api_contract_version,
     )
     # ResilientAflClient is a drop-in AflDataSource: it adds bounded
     # transient retry/backoff, per-endpoint stale-cache fallback, and
@@ -106,9 +107,13 @@ async def lifespan(app: FastAPI):
             )
 
     logger.info(
-        "BBBFFL Grand Final prototype starting up (teams=%s, afl_api=%s)",
-        [t.team_key for t in teams],
+        "BBBFFL Grand Final prototype starting up (environment=%s, afl_mode=%s, "
+        "afl_api=%s, afl_api_contract_version=%s, teams=%s)",
+        settings.environment,
+        settings.afl_mode,
         settings.afl_api_base_url,
+        settings.afl_api_contract_version,
+        [t.team_key for t in teams],
     )
     try:
         yield

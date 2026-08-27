@@ -18,6 +18,7 @@ from app.afl_client import (
     Round,
     Season,
     Team,
+    is_recognized_match_status,
     normalize_match_status,
 )
 
@@ -137,12 +138,44 @@ def test_get_matches_reads_matches_wrapper_and_nested_team_objects(client):
             home_team=Team(team_id=11, name="St Kilda"),
             away_team=Team(team_id=4, name="Gold Coast SUNS"),
             status="LIVE",
+            start_time_utc="2026-09-26T08:40:00Z",
         )
     ]
     assert matches[0].state == "live"
     assert matches[0].involves_team(4)
     assert matches[0].involves_team(11)
     assert not matches[0].involves_team(999)
+
+
+def test_get_matches_tolerates_missing_start_time_utc(client):
+    """A match entry that omits `start_time_utc` (afl-api documents it as
+    nullable/unknown, not a rescheduling guarantee) must parse to None
+    rather than raising -- app/lockouts.py treats a missing scheduled start
+    on an otherwise-upcoming match as an explicit indeterminate case, not a
+    parsing failure."""
+    handler_payload = {
+        "matches": [
+            {
+                "match_id": 9001,
+                "status": "UPCOMING",
+                "home_team": {"team_id": 1, "name": "Home"},
+                "away_team": {"team_id": 2, "name": "Away"},
+            }
+        ]
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=handler_payload)
+
+    api = AflApiClient(base_url="http://afl-api.test")
+    api._client = httpx.Client(base_url="http://afl-api.test", transport=httpx.MockTransport(handler))
+    try:
+        matches = api.get_matches(1)
+    finally:
+        api.close()
+    assert matches == [
+        Match(match_id=9001, home_team=Team(1, "Home"), away_team=Team(2, "Away"), status="UPCOMING", start_time_utc=None)
+    ]
 
 
 def test_get_player_unwraps_player_key_and_uses_display_name(client):
@@ -183,6 +216,30 @@ def test_get_player_unwraps_player_key_and_uses_display_name(client):
 )
 def test_normalize_match_status_maps_afl_api_v1_lifecycle_values(raw_status, expected):
     assert normalize_match_status(raw_status) == expected
+
+
+@pytest.mark.parametrize(
+    "raw_status,expected",
+    [
+        ("UPCOMING", True),
+        ("LIVE", True),
+        ("POSTGAME", True),
+        ("CONCLUDED", True),
+        ("live", True),
+        ("FINAL", True),
+        ("IN_PROGRESS", True),
+        ("SCHEDULED", True),
+        # Genuinely unusual/unknown values are NOT recognised, unlike
+        # normalize_match_status's permissive yet_to_play fallback -- a
+        # lockout decision must be able to tell the difference.
+        ("", False),
+        ("POSTPONED", False),
+        ("ABANDONED", False),
+        ("SOME_UNKNOWN_STATUS", False),
+    ],
+)
+def test_is_recognized_match_status_distinguishes_known_from_unusual(raw_status, expected):
+    assert is_recognized_match_status(raw_status) is expected
 
 
 def test_match_state_property_delegates_to_normalize_match_status():

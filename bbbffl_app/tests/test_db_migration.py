@@ -6,6 +6,7 @@ import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import DatabaseError
 
 from app.db import DecisionsRepository, connect
 from app.fixtures import FixtureRepository
@@ -52,6 +53,11 @@ EXPECTED_TABLES = {
     "weekly_lineup_draft_slot",
     "weekly_lineup_submission",
     "weekly_lineup_submission_slot",
+    "weekly_lineup_lock",
+    "bbbffl_round_lockout_trigger",
+    "bbbffl_round_lockout_trigger_revision",
+    "bbbffl_round_lockout_trigger_match",
+    "bbbffl_round_lockout_trigger_activation",
 }
 
 
@@ -240,6 +246,127 @@ def test_upgrade_from_previous_head_adds_lifecycle_without_rewriting_foundations
     tables = set(inspect(engine).get_table_names())
     assert {"bbbffl_round_lifecycle", "bbbffl_matchup", "bbbffl_official_result"} <= tables
     assert SeasonRepository(connect(url)).get_season(season.season_id).label == "2026 Replay"
+
+
+def test_upgrade_from_lineups_head_adds_lock_evidence_table(tmp_path):
+    url = _url(tmp_path / "lock-upgrade.db")
+    migrate(url, "0011_lineups")
+    engine = create_engine(url)
+    assert "weekly_lineup_lock" not in set(inspect(engine).get_table_names())
+
+    migrate(url)
+    engine = create_engine(url)
+    assert "weekly_lineup_lock" in set(inspect(engine).get_table_names())
+    assert inspect(engine).get_pk_constraint("weekly_lineup_lock")["constrained_columns"] == ["lineup_id", "position"]
+
+
+def test_lock_evidence_table_is_immutable(tmp_path):
+    from app.lineups import WeeklyLineupRepository
+    from app.player_pool import OwnershipRepository, PlayerPoolRepository
+    from tests.test_competition_lifecycle import operational
+
+    url = _url(tmp_path / "lock-immutable.db")
+    migrate(url)
+    connection = connect(url)
+    lifecycle, round_, entries = operational(connection, 2026, 1)
+    lifecycle.transition(round_.bbbffl_round_id, "open")
+    scope = connection.execute(
+        "SELECT c.season_id, c.competition_id FROM bbbffl_round r "
+        "JOIN competition_stream c ON c.competition_id=r.competition_id "
+        "WHERE r.bbbffl_round_id=?",
+        (round_.bbbffl_round_id,),
+    ).fetchone()
+    OwnershipRepository(connection).configure_squad_limit(scope["season_id"], 5)
+    player = PlayerPoolRepository(connection).refresh_player(scope["season_id"], 12345, "Lock Fixture Player")
+    OwnershipRepository(connection).acquire(player.season_player_id, entries[0].season_entry_id)
+    lineups = WeeklyLineupRepository(connection)
+    draft = lineups.save_draft(
+        scope["season_id"], scope["competition_id"], round_.bbbffl_round_id, entries[0].season_entry_id,
+        {"F1": player.season_player_id}, expected_revision=0,
+    )
+    lineups.submit(draft.lineup_id, expected_draft_revision=1, expected_submission_version=0)
+
+    engine = create_engine(url)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO weekly_lineup_lock "
+                "(lineup_id, position, season_player_id, afl_match_id, observed_status, effective_lock_at, lock_reason, locked_at, created_at) "
+                "VALUES (:lineup, :position, :player, :match, :status, :start, :reason, :locked, :created)"
+            ),
+            {
+                "lineup": draft.lineup_id,
+                "position": "F1",
+                "player": player.season_player_id,
+                "match": 1,
+                "status": "LIVE",
+                "start": "2026-01-01T00:00:00+00:00",
+                "reason": "match_status_live",
+                "locked": "2026-01-01T00:00:00+00:00",
+                "created": "2026-01-01T00:00:00+00:00",
+            },
+        )
+    with pytest.raises(DatabaseError, match="immutable"):
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE weekly_lineup_lock SET lock_reason='changed'"))
+    with pytest.raises(DatabaseError, match="immutable"):
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM weekly_lineup_lock"))
+
+
+def test_upgrade_from_lock_evidence_head_adds_lockout_trigger_tables(tmp_path):
+    url = _url(tmp_path / "trigger-upgrade.db")
+    migrate(url, "0012_lockouts")
+    engine = create_engine(url)
+    assert "bbbffl_round_lockout_trigger" not in set(inspect(engine).get_table_names())
+
+    migrate(url)
+    engine = create_engine(url)
+    tables = set(inspect(engine).get_table_names())
+    assert {
+        "bbbffl_round_lockout_trigger",
+        "bbbffl_round_lockout_trigger_revision",
+        "bbbffl_round_lockout_trigger_match",
+        "bbbffl_round_lockout_trigger_activation",
+    } <= tables
+    assert inspect(engine).get_pk_constraint("bbbffl_round_lockout_trigger_activation")["constrained_columns"] == ["trigger_id"]
+
+
+def test_lockout_trigger_activation_table_is_immutable(tmp_path):
+    from app.lockouts import LockoutTriggerRepository
+    from tests.test_competition_lifecycle import operational
+
+    url = _url(tmp_path / "trigger-immutable.db")
+    migrate(url)
+    connection = connect(url)
+    _, round_, _entries = operational(connection, 2026, 2)
+    trigger = LockoutTriggerRepository(connection).create(round_.bbbffl_round_id, "main", "main", 1, [1], reason="fixture")
+
+    engine = create_engine(url)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO bbbffl_round_lockout_trigger_activation "
+                "(trigger_id, revision, afl_match_id, observed_status, effective_lock_at, activation_reason, evaluated_at, created_at) "
+                "VALUES (:trigger, :revision, :match, :status, :start, :reason, :evaluated, :created)"
+            ),
+            {
+                "trigger": trigger.trigger_id,
+                "revision": trigger.revision,
+                "match": 1,
+                "status": "LIVE",
+                "start": "2026-01-01T00:00:00+00:00",
+                "reason": "match_status_live",
+                "evaluated": "2026-01-01T00:00:00+00:00",
+                "created": "2026-01-01T00:00:00+00:00",
+            },
+        )
+    with pytest.raises(DatabaseError, match="immutable"):
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE bbbffl_round_lockout_trigger_activation SET activation_reason='changed'"))
+    with pytest.raises(DatabaseError, match="immutable"):
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM bbbffl_round_lockout_trigger_activation"))
 
 
 def test_season_length_downgrade_refuses_non_default_configuration(tmp_path):

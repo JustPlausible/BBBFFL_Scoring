@@ -56,7 +56,7 @@ documented BBBFFL requirement yet).
 | `GET /api/v1/seasons` | **Required now** | `seasons[].season_id`, `.is_current`, `.current_round_number`, `.year`. BBBFFL selects the single `is_current: true` entry ([`app/afl_client.py:get_current_season`](../bbbffl_app/app/afl_client.py)). |
 | `GET /api/v1/seasons/{season_id}/rounds` | **Required now** | `rounds[].round_id`, `.round_number` (matched against a caller-supplied round number). `.byes` is **not yet consumed** — committed future dependency for package 24 (bye warnings). |
 | `GET /api/v1/rounds/{round_id}` | Potentially useful, non-contractual | Not called; BBBFFL currently reaches a round only via the season-scoped list. |
-| `GET /api/v1/rounds/{round_id}/matches` | **Required now** | `matches[].match_id`, `.status`, `.home_team{team_id,name}`, `.away_team{team_id,name}`. `.start_time_utc`, `.score_home`, `.score_away` are **not yet consumed** — committed future dependency for package 23 (staged lockouts) and Round Centre presentation. |
+| `GET /api/v1/rounds/{round_id}/matches` | **Required now** | `matches[].match_id`, `.status`, `.home_team{team_id,name}`, `.away_team{team_id,name}`, `.start_time_utc` (consumed by issue #34/package 23's lockout boundary — `app/afl_client.py`'s `Match.start_time_utc`). `.score_home`/`.score_away` are **not yet consumed** — committed future dependency for Round Centre presentation. |
 | `GET /api/v1/matches/{match_id}` | Potentially useful, non-contractual | Not called; BBBFFL currently reaches match identity only via the round-scoped list. |
 | `GET /api/v1/matches/{match_id}/player-stats` | **Required now** | `players[].canonical_player_id`, `.stats.{goals,behinds,disposals,marks,tackles,hitouts}`. `lifecycle.finality` and `metadata.source_updated_at` are **not yet consumed** — see [1.3](#13-player-stat-finality-and-corrections) and the known gap in [2](#2-bbbffl-assumptions-now-protected-by-tests). |
 | `GET /api/v1/players/{canonical_player_id}` | **Required now** | `player.canonical_player_id`, `.display_name`, `.current_team{team_id,name}`. `.identifiers` (AFL/Champion Data crosswalks) is **intentionally not persisted** — see [1.2](#12-identifiers). |
@@ -192,7 +192,7 @@ disagreement with the now-confirmed canonical vocabulary above.
 | Field | Meaning | BBBFFL usage |
 | --- | --- | --- |
 | `rounds[].start_time` / `.end_time` | Persisted round start/end. | **Not yet consumed** — round mapping (package 17) dependency. |
-| `matches[].start_time_utc` | Persisted **UTC** scheduled start, or `null` when unknown. Explicitly *not* a rescheduling/live-update guarantee (`docs/api_v1_matches.md`). | **Not yet consumed** — package 23 (staged lockouts) dependency; this is the field BBBFFL's future lockout-trigger logic must key off. |
+| `matches[].start_time_utc` | Persisted **UTC** scheduled start, or `null` when unknown. Explicitly *not* a rescheduling/live-update guarantee (`docs/api_v1_matches.md`). | **Consumed** by issue #34/package 23's lockout boundary (`docs/lockouts.md`) as `Match.start_time_utc`. A missing value on an otherwise-`UPCOMING` match is treated as an explicit indeterminate lock state, never guessed. |
 | `metadata.source_updated_at` (player-stats) | Newest authoritative source observation among **returned** rows; not request-serve time. | **Not yet consumed.** |
 
 **Timezone semantics, stated explicitly (this was a genuine open question

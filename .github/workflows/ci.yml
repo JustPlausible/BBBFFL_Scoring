@@ -201,5 +201,5 @@ jobs:
           assert rejected_tables == ["season_fixture_number", "season_fixture_matchup"]
           connection.close()
           PY
-      - name: Exercise PostgreSQL lifecycle concurrency guarantees
-        run: pytest -q tests/test_competition_lifecycle_concurrency.py
+      - name: Exercise PostgreSQL lifecycle/lineup/lockout concurrency guarantees
+        run: pytest -q tests/test_competition_lifecycle_concurrency.py tests/test_lineups_concurrency.py tests/test_lockouts_concurrency.py

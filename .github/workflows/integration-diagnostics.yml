@@ -1,0 +1,44 @@
+name: Integration diagnostics (manual, credentialed)
+
+# Deliberately NOT triggered by `pull_request` or `push` -- see
+# docs/ci-quality-gates.md#hermetic-vs-credentialed-diagnostics. This
+# workflow only ever runs when a maintainer explicitly dispatches it, so it
+# can never become an accidentally-required merge gate: promoting any part
+# of it to required CI would need a separate, deliberate change to this
+# file's triggers and to branch protection, not just leaving it enabled.
+#
+# It makes real, read-only network calls against a configured afl-api
+# deployment using repository secrets. Never run this against production
+# without confirming AFL_API_BASE_URL points where you intend.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  afl-contract-diagnostic:
+    name: afl-api /api/v1 contract diagnostic (issue #18)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bbbffl_app
+    env:
+      AFL_API_BASE_URL: ${{ secrets.AFL_API_BASE_URL }}
+      AFL_API_KEY: ${{ secrets.AFL_API_KEY }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            bbbffl_app/requirements.txt
+            bbbffl_app/requirements-dev.txt
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements-dev.txt
+
+      - name: Run live contract diagnostic
+        run: python -m scripts.afl_contract_diagnostic

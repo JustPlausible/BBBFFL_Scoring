@@ -33,6 +33,93 @@ jobs:
       - name: Run tests
         run: pytest
 
+  lint:
+    name: Lint and formatting (Ruff)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bbbffl_app
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            bbbffl_app/requirements.txt
+            bbbffl_app/requirements-dev.txt
+
+      - name: Install lint dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements-dev.txt
+
+      - name: ruff format --check
+        run: ruff format --check .
+
+      - name: ruff check
+        run: ruff check .
+
+  typecheck:
+    name: Type check (mypy, incremental scope)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bbbffl_app
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            bbbffl_app/requirements.txt
+            bbbffl_app/requirements-dev.txt
+
+      - name: Install type-check dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements-dev.txt
+
+      # Scope is documented in ../docs/ci-quality-gates.md and enforced by
+      # tests/test_type_checking_scope.py -- see [tool.mypy].files in
+      # pyproject.toml for the exact file list this checks.
+      - name: mypy
+        run: mypy
+
+  dependency-audit:
+    name: Dependency/security audit (pip-audit)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bbbffl_app
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            bbbffl_app/requirements.txt
+            bbbffl_app/requirements-dev.txt
+
+      - name: Install audit dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements-dev.txt
+
+      # Severity/exception policy documented in ../docs/ci-quality-gates.md;
+      # exceptions are time-boxed entries in security/pip-audit-ignore.toml,
+      # enforced (including expiry) by scripts/dependency_audit.py itself.
+      - name: pip-audit (with documented exception policy)
+        run: python -m scripts.dependency_audit
+
   docker-build:
     name: Docker build
     runs-on: ubuntu-latest

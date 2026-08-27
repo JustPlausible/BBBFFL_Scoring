@@ -21,9 +21,15 @@ of unrelated work.
 
 ## Active development
 
-The application CI runs the Python test suite from `bbbffl_app/` and builds
-that directory's Docker image. See the application README for the exact
-commands and current prototype scope.
+The application CI runs, as separate required checks so a failure names one
+concern: the Python test suite, formatting/lint (Ruff), an incremental
+type-check gate (mypy), migration integrity (SQLite and PostgreSQL), a
+dependency/security audit (pip-audit), and the Docker image build. See
+[`docs/ci-quality-gates.md`](docs/ci-quality-gates.md) (issue #39 / roadmap
+package 07) for what each gate covers, the local commands that reproduce
+every one of them, and how live/credentialed `afl-api` diagnostics stay
+separate from required CI. See the application README for current prototype
+scope.
 
 The legacy `clasp` pull/push helpers moved with the GAS projects to
 `legacy/gas/`. They are intentionally retired from the normal repository

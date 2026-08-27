@@ -37,29 +37,67 @@ A position's selected player is:
 ## Historical irreversibility
 
 Once a position's LOCKED state has actually been observed and durably
-recorded in `weekly_lineup_lock` (`_insert_lock`, called from
-`_evaluate_position` and `LockoutRepository.materialize`/`.lock_state`/
-`.guard_transition`), that row -- not a fresh recomputation against
-possibly-corrected afl-api facts -- is the answer for that lineup/position
-from then on. A later upstream schedule/status correction therefore cannot
-silently unlock history: `weekly_lineup_lock` rows are immutable (database
-triggers reject UPDATE/DELETE, mirroring `weekly_lineup_submission`), and
-`_evaluate_position` always prefers a matching persisted row over live
-`matches` data. Nothing here rewrites `app.lineups`' immutable submitted
-lineup versions; lock evidence is a separate, parallel append-only record.
+recorded in `weekly_lineup_lock` (`_insert_lock`), that row -- not a fresh
+recomputation against possibly-corrected afl-api facts -- is the answer for
+that lineup/position from then on (`_evaluate_position` always prefers a
+matching persisted row over live `matches` data). `weekly_lineup_lock` rows
+are immutable (database triggers reject UPDATE/DELETE, mirroring
+`weekly_lineup_submission`). Nothing here rewrites `app.lineups`' immutable
+submitted lineup versions; lock evidence is a separate, parallel append-only
+record.
+
+Two invariants make this durability real rather than aspirational:
+
+1. **Only the effective submission can be materialized.** `_evaluate_position`
+   only *writes* a lock row when its caller passes `materializable=True`,
+   and the only caller that does is `_materialize_lineup`, which always
+   derives the positions it evaluates from `weekly_lineup`'s own
+   `effective_submission_version` -- never from whatever a caller happens
+   to pass as a "positions" argument (which may be an unsubmitted, private
+   draft; see `LockoutRepository.lock_state`'s docstring). A draft
+   selection can therefore never occupy the one immutable evidence slot a
+   position has (`weekly_lineup_lock`'s primary key is `(lineup_id,
+   position)`) ahead of the player actually, officially selected there.
+2. **An observation survives a rejected mutation.** `_materialize_lineup`
+   runs in its own standalone transaction that commits independently of
+   whatever happens afterwards. `WeeklyLineupRepository.submit` calls it
+   *before* opening its own transaction (see `LockGuard.materialize`
+   below), so a lock discovered while evaluating a submission that is then
+   rejected is not lost when that submission's transaction rolls back.
+   Everything evaluated *inside* the guarded transaction itself
+   (`guard_transition`) is read-only with respect to `weekly_lineup_lock`
+   (`materializable=False`) for exactly this reason -- a write there could
+   never survive the `LockedSelectionError` it is often about to raise.
+   The residual: a match that reaches its lock boundary in the narrow
+   window between `materialize()` returning and `guard_transition` running
+   is still correctly rejected (live evaluation always governs the
+   accept/reject decision), but its evidence is not durably written until
+   the next observation (the next `lock_state` read or `submit` attempt)
+   -- a purely eventual-consistency gap, never a correctness one.
+
+Before a lock exists, a legitimate schedule correction *does* move the
+boundary -- there is nothing to protect yet, so the corrected
+`start_time_utc` simply governs the next evaluation.
 
 ## Concurrency
 
-`guard_transition` is designed to run inside the *same* transaction/
+`_materialize_lineup` and the read-only pass in `lock_state`/
+`guard_transition` each run in their own transaction rather than a nested
+one inside another already-open transaction: SQLite allows only one writer
+at a time, so nesting a second write transaction inside
+`WeeklyLineupRepository.submit`'s already-open one would deadlock/fail
+there. Sequencing them instead (materialize, *then* open the guarded
+transaction) avoids that while still giving PostgreSQL real concurrent-
+writer guarantees: `guard_transition` runs inside the same transaction/
 connection that already holds a row lock on the `weekly_lineup` header (see
-`app.lineups.WeeklyLineupRepository.submit`'s `FOR UPDATE` read). Two
-concurrent submissions for the same lineup therefore serialize on that row
-lock; the loser re-evaluates lock state (and reads any lock evidence the
-winner just committed) before its own compare-and-swap, so it can never
-commit a mutation against a player who was already locked at the
-authoritative decision point -- it either succeeds against genuinely
-pre-lock state or fails with `LockedSelectionError`. Nothing here uses
-client/browser-supplied timestamps.
+`submit`'s `FOR UPDATE` read), so two concurrent submissions for the same
+lineup serialize on that row lock; the loser re-evaluates lock state (and
+reads any lock evidence the winner's `materialize()` step already
+committed) before its own compare-and-swap. Two independent connections
+racing to *observe* (not mutate) a never-before-evaluated lock rely on
+`INSERT ... ON CONFLICT (lineup_id, position) DO NOTHING` to converge to one
+row rather than crashing or diverging. Nothing here uses client/browser-
+supplied timestamps. See `tests/test_lockouts_concurrency.py`.
 
 ## Non-goals (see issue #34)
 
@@ -67,12 +105,26 @@ No DNP/Interchange replacement decision, no carry-forward/proxy submission,
 no scorer override/correction workflow, no coach UI. `PositionLockState`/
 `LineupLockView` exist so a later UI can explain lock state without
 recomputing these rules itself.
+
+This module also does not model a scorer-configured "early lockout match
+set" or a separate "main lockout trigger" match (`docs/plans/
+2027-season-model.md`'s fuller lockout description, and the roadmap's
+package-23 row) -- every AFL match is its own independent trigger for the
+players who belong to it. Issue #34's own acceptance criteria and
+validation matrix describe and test exactly that per-match model and do not
+reference early-set/main-trigger configuration. Introducing that
+distinction would add a new scorer-configured entity (which matches count
+as "early", which one is "main") and materially different semantics (a
+main-trigger match starting would freeze *every* remaining position,
+including ones in AFL matches that have not started) -- a deliberately
+separate, larger follow-up rather than a silent expansion of this issue's
+scope. See docs/lockouts.md.
 """
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Callable, Protocol
+from typing import Protocol
 
 from app.afl_client import Match, is_recognized_match_status, normalize_match_status
 from app.db import transaction
@@ -191,6 +243,44 @@ def resolve_match(afl_team_id: int | None, matches: list[Match]) -> Match:
     return found[0]
 
 
+class LockGuard:
+    """The object returned by `LockoutRepository.guard`; usable directly as
+    `app.lineups.WeeklyLineupRepository.submit`'s `lock_guard` argument.
+
+    Two methods, called at two different points relative to `submit`'s own
+    transaction -- see this module's docstring ("Historical
+    irreversibility") for why that split exists:
+
+    - `materialize(lineup_id)`: called by `submit` *before* it opens its own
+      transaction. Durably records lock evidence for the lineup's current
+      *effective* submission, independent of whatever `submit` goes on to
+      do.
+    - `__call__(conn, lineup_row, previous_positions, proposed_positions)`:
+      called by `submit` *inside* its own transaction (on `conn`, the same
+      connection already holding a `FOR UPDATE` lock on `weekly_lineup`).
+      Accepts or rejects the proposed change; never writes to
+      `weekly_lineup_lock` itself.
+    """
+
+    def __init__(self, repository: "LockoutRepository", match_facts: MatchFactsProvider, evaluation_at: datetime | None):
+        self._repository = repository
+        self._match_facts = match_facts
+        self._evaluation_at = evaluation_at
+
+    def _at(self) -> datetime:
+        return self._evaluation_at or datetime.now(timezone.utc)
+
+    def materialize(self, lineup_id: str) -> None:
+        self._repository._materialize_lineup(lineup_id, match_facts=self._match_facts, evaluation_at=self._at())
+
+    def __call__(self, conn, lineup_row, previous_positions, proposed_positions) -> None:
+        at = self._at()
+        matches = self._match_facts.matches_for(lineup_row["bbbffl_round_id"])
+        self._repository.guard_transition(
+            conn, lineup_row["lineup_id"], previous_positions, proposed_positions, evaluation_at=at, matches=matches
+        )
+
+
 class LockoutRepository:
     """Durable lockout evidence and the enforcement/read-model boundary.
 
@@ -214,53 +304,40 @@ class LockoutRepository:
         match_facts: MatchFactsProvider,
         evaluation_at: datetime | None = None,
     ) -> LineupLockView:
-        """Evaluate (and durably materialize any newly-locked) positions for
-        one lineup. Safe to call from a read-only endpoint at any time --
-        this is the primary way lock evidence becomes durable in ordinary
-        operation, ahead of any particular submission attempt. Takes plain
-        identifiers (not a row/dataclass) so any caller -- a route, a test,
-        a future replay harness -- can supply them however it already has
-        them (a `LineupDraft`/`SubmittedLineup` from app.lineups, a raw DB
-        row, ...)."""
+        """Evaluate `positions` (which may be a private draft, the effective
+        submission, or any other `{position: season_player_id}` mapping the
+        caller has) for one lineup, for display/explanation purposes.
+
+        This always first durably materializes evidence for the lineup's
+        *actual effective submission* (never for `positions` itself, which
+        might not match it -- see this module's docstring's first
+        durability invariant), then separately evaluates `positions` purely
+        informationally: a position matching the effective selection comes
+        back backed by that now-guaranteed-persisted evidence; a position
+        that differs (an unsubmitted draft choice) is evaluated live and
+        reported, but never written to `weekly_lineup_lock`.
+        """
         unknown = set(positions) - set(POSITIONS)
         if unknown:
             raise LockoutIntegrityError(f"unknown scoring positions: {sorted(unknown)}")
         at = evaluation_at or datetime.now(timezone.utc)
+        self._materialize_lineup(lineup_id, match_facts=match_facts, evaluation_at=at)
         matches = match_facts.matches_for(bbbffl_round_id)
         with transaction(self.database) as conn:
             existing = self._existing_locks(conn, lineup_id)
             view = {
                 position: self._evaluate_position(
-                    conn, existing, lineup_id, position, season_player_id, at, matches
+                    conn, existing, lineup_id, position, season_player_id, at, matches, materializable=False
                 )
                 for position, season_player_id in positions.items()
             }
         return LineupLockView(lineup_id, bbbffl_round_id, season_entry_id, at.isoformat(), view)
 
     # -- Enforcement -------------------------------------------------------
-    def guard(
-        self, *, match_facts: MatchFactsProvider, evaluation_at: datetime | None = None
-    ) -> Callable:
-        """Build the `lock_guard` callable accepted by
-        `app.lineups.WeeklyLineupRepository.submit`. Kept as a plain
-        callable (not a shared type) so `app/lineups.py` never has to
-        import this module -- see this module's docstring on concurrency
-        for why the callable must run inside the caller's own transaction.
-        """
-
-        def _guard(conn, lineup_row, previous_positions, proposed_positions):
-            at = evaluation_at or datetime.now(timezone.utc)
-            matches = match_facts.matches_for(lineup_row["bbbffl_round_id"])
-            self.guard_transition(
-                conn,
-                lineup_row["lineup_id"],
-                previous_positions,
-                proposed_positions,
-                evaluation_at=at,
-                matches=matches,
-            )
-
-        return _guard
+    def guard(self, *, match_facts: MatchFactsProvider, evaluation_at: datetime | None = None) -> LockGuard:
+        """Build the `lock_guard` accepted by
+        `app.lineups.WeeklyLineupRepository.submit`. See `LockGuard`."""
+        return LockGuard(self, match_facts, evaluation_at)
 
     def guard_transition(
         self,
@@ -278,12 +355,17 @@ class LockoutRepository:
         the lineup -- which is what stops Interchange (or any other
         still-open position) being used to bypass a started club's lock,
         per issue #34's "no additional player from those AFL clubs may
-        subsequently be added" rule."""
+        subsequently be added" rule.
+
+        Read-only with respect to `weekly_lineup_lock` (`materializable=
+        False` throughout): this runs inside the caller's own transaction,
+        which may go on to roll back if this raises, so nothing durable can
+        be written here -- see `LockGuard`/this module's docstring."""
         existing = self._existing_locks(conn, lineup_id)
         for position, previous_player in previous_positions.items():
             proposed_player = proposed_positions.get(position)
             evaluated = self._evaluate_position(
-                conn, existing, lineup_id, position, previous_player, evaluation_at, matches
+                conn, existing, lineup_id, position, previous_player, evaluation_at, matches, materializable=False
             )
             if evaluated.state in (LockState.LOCKED, LockState.INDETERMINATE) and proposed_player != previous_player:
                 raise LockedSelectionError(
@@ -293,7 +375,7 @@ class LockoutRepository:
             if proposed_player is None or proposed_player == previous_positions.get(position):
                 continue
             evaluated = self._evaluate_position(
-                conn, existing, lineup_id, position, proposed_player, evaluation_at, matches
+                conn, existing, lineup_id, position, proposed_player, evaluation_at, matches, materializable=False
             )
             if evaluated.state != LockState.EDITABLE:
                 raise LockedSelectionError(
@@ -302,8 +384,44 @@ class LockoutRepository:
                 )
 
     # -- Internals ---------------------------------------------------------
+    def _materialize_lineup(self, lineup_id: str, *, match_facts: MatchFactsProvider, evaluation_at: datetime) -> None:
+        """Durably record lock evidence for `lineup_id`'s current effective
+        submitted selections, in a standalone transaction that commits
+        (or no-ops) independently of anything the caller does afterwards.
+
+        Always derives the positions to evaluate from `weekly_lineup`/
+        `weekly_lineup_submission_slot` itself -- never from a caller-
+        supplied positions mapping -- so an unsubmitted draft can never
+        occupy `weekly_lineup_lock`'s one evidence slot per position ahead
+        of the player actually, officially selected there. A lineup with no
+        submission yet is a safe no-op (nothing effective to protect).
+
+        Deliberately a separate transaction rather than nested inside a
+        caller's already-open one: SQLite allows only one writer, so
+        nesting here would conflict with `WeeklyLineupRepository.submit`'s
+        own open transaction on that dialect.
+        """
+        with transaction(self.database) as conn:
+            header = conn.execute(
+                "SELECT bbbffl_round_id, effective_submission_version FROM weekly_lineup WHERE lineup_id=?",
+                (lineup_id,),
+            ).fetchone()
+            if not header or not header["effective_submission_version"]:
+                return
+            slots = conn.execute(
+                "SELECT position, season_player_id FROM weekly_lineup_submission_slot WHERE lineup_id=? AND version=?",
+                (lineup_id, header["effective_submission_version"]),
+            ).fetchall()
+            effective = {row["position"]: row["season_player_id"] for row in slots}
+            matches = match_facts.matches_for(header["bbbffl_round_id"])
+            existing = self._existing_locks(conn, lineup_id)
+            for position, season_player_id in effective.items():
+                self._evaluate_position(
+                    conn, existing, lineup_id, position, season_player_id, evaluation_at, matches, materializable=True
+                )
+
     def _evaluate_position(
-        self, conn, existing: dict, lineup_id: str, position: str, season_player_id, evaluation_at, matches
+        self, conn, existing: dict, lineup_id: str, position: str, season_player_id, evaluation_at, matches, *, materializable: bool
     ) -> PositionLockState:
         if season_player_id is None:
             return PositionLockState(position, None, LockState.EDITABLE, "empty", None, None, None, False)
@@ -328,7 +446,7 @@ class LockoutRepository:
         except MatchResolutionError as exc:
             return PositionLockState(position, season_player_id, LockState.INDETERMINATE, str(exc), None, None, None, False)
         state, reason = evaluate_match_lock(match, evaluation_at)
-        if state == LockState.LOCKED:
+        if state == LockState.LOCKED and materializable:
             self._insert_lock(conn, lineup_id, position, season_player_id, match, reason, evaluation_at)
         return PositionLockState(
             position,
@@ -338,7 +456,7 @@ class LockoutRepository:
             match.match_id,
             match.start_time_utc,
             match.status,
-            state == LockState.LOCKED,
+            state == LockState.LOCKED and materializable,
         )
 
     def _season_player(self, conn, season_player_id):
@@ -373,4 +491,3 @@ class LockoutRepository:
                 _now(),
             ),
         )
-

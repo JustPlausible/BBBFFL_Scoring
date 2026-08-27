@@ -1,13 +1,18 @@
 """Durable boundary between private weekly drafts and official selections.
 
 `submit`'s optional `lock_guard` is the sole integration point with
-app/lockouts.py's player-level AFL-match lockout decision: when supplied, it
-is invoked inside this method's own transaction (after the previous
-effective submission is read, before the new version is written) and may
-raise to reject a submission that would mutate a locked/indeterminate
-position. This module has no other lockout awareness and does not import
-app/lockouts.py, keeping the two responsibilities -- immutable submission
-history here, lock evaluation/evidence there -- decoupled.
+app/lockouts.py's player-level AFL-match lockout decision. If `lock_guard`
+has a `materialize(lineup_id)` method, `submit` calls it *before* opening
+its own transaction, so app/lockouts.py can durably record any lock it
+observes independently of whatever this method goes on to do (see
+app.lockouts's module docstring on why that must happen outside this
+method's transaction, not inside it). `lock_guard` itself is then invoked
+as a plain callable inside this method's own transaction (after the
+previous effective submission is read, before the new version is written)
+and may raise to reject a submission that would mutate a locked/
+indeterminate position. This module has no other lockout awareness and does
+not import app/lockouts.py, keeping the two responsibilities -- immutable
+submission history here, lock evaluation/evidence there -- decoupled.
 """
 
 import json
@@ -138,6 +143,12 @@ class WeeklyLineupRepository:
     def submit(self, lineup_id, *, expected_draft_revision, expected_submission_version, actor=ActorContext.anonymous_operator("coach"), source_type="coach", source_detail=None, reason=None, lock_guard=None):
         if source_type not in SUBMISSION_SOURCES:
             raise LineupIntegrityError("unknown submission source")
+        if lock_guard is not None and hasattr(lock_guard, "materialize"):
+            # Runs in its own standalone transaction, deliberately *before*
+            # this method opens its own below -- see the module docstring
+            # and app.lockouts's docstring for why a lock observed here
+            # must survive even if this submission attempt is rejected.
+            lock_guard.materialize(lineup_id)
         with transaction(self.database) as conn:
             # SQLite obtains its single writer lock before reading; PostgreSQL
             # takes row locks below. Both then perform a compare-and-swap.

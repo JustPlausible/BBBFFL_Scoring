@@ -92,22 +92,53 @@ depend on a live `afl-api` connection.
 
 ## Historical lock irreversibility
 
-Once a position's lock has actually been *observed* -- by a coach/scorer
-read of lock state, or by a submission attempt that evaluates it -- it is
-durably recorded as one row in `weekly_lineup_lock` (PK
-`(lineup_id, position)`, matching `season_player_id`/`afl_match_id`/
-`observed_status`/`effective_lock_at`/`lock_reason`/`locked_at`). From then
-on, `LockoutRepository._evaluate_position` always prefers that persisted
-row over a fresh recomputation against `matches`. A later upstream
-schedule/status correction -- a rescheduled start time moved back, a status
-walked back from `LIVE` to `UPCOMING` -- therefore cannot silently unlock a
-selection that had already, legitimately, locked.
+Once a position's lock has actually been *observed*, it is durably recorded
+as one row in `weekly_lineup_lock` (PK `(lineup_id, position)`, matching
+`season_player_id`/`afl_match_id`/`observed_status`/`effective_lock_at`/
+`lock_reason`/`locked_at`). From then on, `LockoutRepository.
+_evaluate_position` always prefers that persisted row over a fresh
+recomputation against `matches`. A later upstream schedule/status
+correction -- a rescheduled start time moved back, a status walked back
+from `LIVE` to `UPCOMING` -- therefore cannot silently unlock a selection
+that had already, legitimately, locked.
 
 `weekly_lineup_lock` rows are immutable: database triggers reject
 `UPDATE`/`DELETE` on both SQLite and PostgreSQL, mirroring
 `weekly_lineup_submission`'s immutability from issue #33. Nothing here
 rewrites a submitted lineup version; lock evidence is a separate,
 append-only table keyed off the same `lineup_id`.
+
+Two invariants make "durably recorded" actually true, not just an
+intention:
+
+1. **Only the effective submission can be materialized.**
+   `_evaluate_position` only *writes* a row when its caller passes
+   `materializable=True`. The only caller that does is
+   `LockoutRepository._materialize_lineup`, and it always derives the
+   positions it evaluates from `weekly_lineup`/
+   `weekly_lineup_submission_slot`'s own `effective_submission_version` --
+   never from whatever a caller passes as a `positions` argument, which
+   `lock_state` explicitly documents may be an unsubmitted private draft.
+   A draft selection can therefore never occupy the one immutable evidence
+   slot a position has ahead of the player actually, officially selected
+   there; `lock_state` still reports a draft player's own live-evaluated
+   state for display, just never writes it.
+2. **An observation survives a rejected mutation.** `_materialize_lineup`
+   always runs in its own standalone transaction, independent of whatever
+   happens afterwards. `WeeklyLineupRepository.submit` calls
+   `lock_guard.materialize(lineup_id)` *before* opening its own
+   transaction (see [Interaction with #33](#interaction-with-33-submitted-versions)
+   below), so a lock discovered while evaluating a submission that is then
+   rejected is not lost when that submission's own transaction rolls back.
+   `guard_transition` -- which runs *inside* that transaction -- never
+   writes to `weekly_lineup_lock` at all (`materializable=False`
+   throughout), precisely because a write there could not survive the
+   `LockedSelectionError` it is often about to raise. The one residual
+   gap: a match reaching its lock boundary in the narrow window between
+   `materialize()` returning and `guard_transition` running is still
+   correctly *rejected* (live evaluation always governs the accept/reject
+   decision), but its evidence is not durably written until the next
+   observation -- an eventual-consistency gap, never a correctness one.
 
 Before a lock exists, a legitimate schedule correction *does* move the
 boundary -- there is nothing to protect yet, so the corrected
@@ -116,13 +147,17 @@ boundary -- there is nothing to protect yet, so the corrected
 ## Interaction with #33 submitted versions
 
 `WeeklyLineupRepository.submit`'s optional `lock_guard` parameter is the
-sole integration point. When supplied (a closure built by
-`LockoutRepository.guard(match_facts=..., evaluation_at=...)`), it runs
-*inside* `submit`'s existing transaction -- after the previous effective
-submission's positions are read, before the new version is written -- and
+sole integration point. `LockoutRepository.guard(match_facts=...,
+evaluation_at=...)` returns a `LockGuard` with two roles `submit` invokes at
+two different points: `.materialize(lineup_id)`, called *before* `submit`
+opens its own transaction (see [Historical lock irreversibility](#historical-lock-irreversibility)
+above for why); and the object itself as a callable, invoked *inside*
+`submit`'s existing transaction -- after the previous effective
+submission's positions are read, before the new version is written -- which
 may raise `LockedSelectionError` to abort the whole submission. `submit`
-never imports `app.lockouts`; the two modules stay decoupled through this
-plain callable.
+detects the `.materialize` method via `hasattr` (any plain callable without
+one still works, just skips that step); it never imports `app.lockouts`,
+keeping the two modules decoupled through this small duck-typed contract.
 
 The guard compares the previous effective submission's positions against
 the proposed ones:
@@ -146,10 +181,17 @@ earlier submitted version left untouched, exactly as issue #33 requires.
 
 ## Concurrency
 
-`submit`'s row lock on `weekly_lineup` (`SELECT ... FOR UPDATE` on
-PostgreSQL) already serializes concurrent submissions for the same lineup;
-`lock_guard` runs after that lock is acquired, so the loser of a race
-re-evaluates lock state (and observes any lock evidence the winner just
+`materialize()` and the read-only evaluation inside `guard_transition`/
+`lock_state` each run in their own transaction rather than nested inside
+another already-open one: SQLite allows only one writer at a time, so
+nesting a second write transaction inside `submit`'s already-open one would
+deadlock/fail there. Sequencing them instead (`materialize()` completes and
+commits, *then* `submit` opens its guarded transaction) avoids that while
+still giving PostgreSQL real concurrent-writer guarantees: `submit`'s row
+lock on `weekly_lineup` (`SELECT ... FOR UPDATE`) already serializes
+concurrent submissions for the same lineup; `guard_transition` runs after
+that lock is acquired, so the loser of a race re-evaluates lock state (and
+reads any lock evidence the winner's `materialize()` step already
 committed) before its own compare-and-swap. An edit prepared against stale
 (pre-lock) information therefore either commits against genuinely pre-lock
 authoritative state, or fails with `LockedSelectionError` -- it can never
@@ -208,3 +250,20 @@ and `app.afl_client.is_recognized_match_status` are the one narrow,
 documented `afl-api` client extension this issue required (both fields were
 already part of the validated v1 contract; only their consumption was
 missing -- see [`afl-api-v1-contract.md`](afl-api-v1-contract.md)).
+
+Also deliberately not modelled: a scorer-configured **early lockout match
+set** or a separate **main lockout trigger** match
+(`docs/plans/2027-season-model.md`'s fuller "Lockouts and staged team
+submission" section, echoed in the roadmap's package-23 row). Under that
+fuller model, only matches in a scorer-designated "early" set would trigger
+individual per-player locks as they start, while every other position stays
+undecided until a separately-designated "main" match starts -- at which
+point *everything* still open freezes at once, regardless of whether each
+remaining player's own match has started yet. This issue implements a
+simpler, purely per-match model instead: every AFL match is its own
+independent trigger for the players who belong to it, exactly as issue
+#34's own acceptance criteria and validation matrix describe and test, with
+no early/main distinction anywhere in them. Adding that distinction would
+introduce a new scorer-configured entity (which matches are "early", which
+one is "main") and materially different lock semantics -- a deliberately
+separate, larger follow-up rather than a silent expansion of this issue.

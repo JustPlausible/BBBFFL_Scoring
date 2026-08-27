@@ -494,3 +494,86 @@ def test_unresolvable_match_is_surfaced_as_indeterminate_in_read_model():
     )
     assert view.positions["F1"].state == LockState.INDETERMINATE
     assert "no AFL match found" in view.positions["F1"].reason
+
+
+# ---------------------------------------------------------------------------
+# Durability: an observation must survive independently of whatever mutation
+# prompted it, and must only ever come from the effective submission.
+# ---------------------------------------------------------------------------
+
+
+def test_rejected_submission_still_durably_materializes_the_observed_lock():
+    """A submission attempt that discovers a lock and is then rejected for
+    it must not lose that observation: submit's own transaction rolls back,
+    but the lock evidence -- written by a separate, already-committed
+    materialize() step -- must remain."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    entry = entries[0]
+    early = acquire(pool, ownership, scope, entry, 1, EARLY_HOME)
+    lineups = WeeklyLineupRepository(db)
+    matches = FakeMatchFacts([early_match()])
+    pre_lock_guard = LockoutRepository(db).guard(match_facts=matches, evaluation_at=EARLY_START - timedelta(minutes=5))
+    draft, submitted = establish(lineups, round_, entry, scope, {"F1": early.season_player_id}, guard=pre_lock_guard)
+
+    other = acquire(pool, ownership, scope, entry, 2, EARLY_HOME, name="Rejected Replacement")
+    late_guard = LockoutRepository(db).guard(match_facts=matches, evaluation_at=EARLY_START + timedelta(minutes=1))
+    draft2 = edit_draft(lineups, round_, entry, scope, draft.lineup_id, {"F1": other.season_player_id}, from_revision=draft.revision)
+    with pytest.raises(LockedSelectionError):
+        lineups.submit(draft2.lineup_id, expected_draft_revision=draft2.revision, expected_submission_version=submitted.version, lock_guard=late_guard)
+
+    # The rejected attempt's own writes (a new submission version) rolled
+    # back, but the lock it discovered along the way did not.
+    rows = db.execute("SELECT season_player_id, lock_reason FROM weekly_lineup_lock WHERE lineup_id=? AND position='F1'", (draft.lineup_id,)).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["season_player_id"] == early.season_player_id
+    assert rows[0]["lock_reason"] == "match_time_reached"
+
+    # A later upstream "correction" reporting the match as freshly
+    # rescheduled/UPCOMING must not be able to unlock it now that it has
+    # been observed -- proving the materialize-before-transaction ordering
+    # actually delivers the irreversibility guarantee end to end.
+    corrected = FakeMatchFacts([Match(match_id=9001, home_team=EARLY_HOME, away_team=EARLY_AWAY, status="UPCOMING", start_time_utc=(EARLY_START + timedelta(days=1)).isoformat())])
+    view = LockoutRepository(db).lock_state(
+        draft.lineup_id, round_.bbbffl_round_id, entry.season_entry_id, {"F1": early.season_player_id},
+        match_facts=corrected, evaluation_at=EARLY_START + timedelta(minutes=2),
+    )
+    assert view.positions["F1"].state == LockState.LOCKED
+    assert view.positions["F1"].irreversible is True
+
+
+def test_lock_state_never_materializes_evidence_for_a_non_effective_draft_selection():
+    """`lock_state` may be called with an unsubmitted draft's positions (its
+    docstring says so explicitly), but must never let a draft player occupy
+    the one immutable evidence slot ahead of whoever is actually, officially
+    selected there."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    entry = entries[0]
+    official = acquire(pool, ownership, scope, entry, 1, EARLY_HOME, name="Officially Submitted")
+    draft_only = acquire(pool, ownership, scope, entry, 2, EARLY_HOME, name="Unsubmitted Draft Choice")
+    lineups = WeeklyLineupRepository(db)
+    matches = FakeMatchFacts([early_match()])
+    draft, submitted = establish(lineups, round_, entry, scope, {"F1": official.season_player_id})
+
+    # The coach has since started editing a *draft* that swaps F1 to a
+    # different player, without submitting it. A dashboard read using the
+    # draft's (not the submission's) positions must not corrupt evidence.
+    unsubmitted_draft = edit_draft(lineups, round_, entry, scope, draft.lineup_id, {"F1": draft_only.season_player_id}, from_revision=draft.revision)
+    view = LockoutRepository(db).lock_state(
+        unsubmitted_draft.lineup_id, round_.bbbffl_round_id, entry.season_entry_id, unsubmitted_draft.positions,
+        match_facts=matches, evaluation_at=EARLY_START + timedelta(minutes=1),
+    )
+    # Informational: the draft's own player is reported as locked (their
+    # match has started too), but this must not be durably recorded.
+    assert view.positions["F1"].state == LockState.LOCKED
+    assert view.positions["F1"].irreversible is False
+
+    rows = db.execute("SELECT season_player_id FROM weekly_lineup_lock WHERE lineup_id=? AND position='F1'", (draft.lineup_id,)).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["season_player_id"] == official.season_player_id
+
+    # A subsequent legitimate submission attempt to actually change F1 away
+    # from the officially-submitted (and now locked) player is still
+    # correctly rejected.
+    guard = LockoutRepository(db).guard(match_facts=matches, evaluation_at=EARLY_START + timedelta(minutes=2))
+    with pytest.raises(LockedSelectionError):
+        lineups.submit(unsubmitted_draft.lineup_id, expected_draft_revision=unsubmitted_draft.revision, expected_submission_version=submitted.version, lock_guard=guard)

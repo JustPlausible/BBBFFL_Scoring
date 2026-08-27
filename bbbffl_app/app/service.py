@@ -71,10 +71,10 @@ class PositionResult:
     player_name: str | None
     afl_club: str | None
     match_state: PositionState
-    calculated_score: float
+    calculated_score: float | None
     override_score: float | None
     override_reason: str | None
-    effective_score: float
+    effective_score: float | None
     recommended_interchange: bool
     # The starting player's own DNP decision, independent of slot_source --
     # e.g. still true even once an interchange has been assigned to cover
@@ -95,8 +95,8 @@ class PositionResult:
     # Display-only football-style presentation of effective_score (see
     # app/presentation.py). Never used for scoring, lifecycle, or ranking --
     # goals * 6 + behinds always equals effective_score on an official row.
-    display_goals: Number
-    display_behinds: Number
+    display_goals: Number | None
+    display_behinds: Number | None
     # True only for a Forward position showing its player's literal AFL
     # goals/behinds; False for a Midfield/Ruck/Tackler conversion, or a
     # Forward whose override no longer matches their actual AFL stats.
@@ -118,10 +118,10 @@ class InterchangePotentialScores:
     never used to choose or apply an assignment; the scorer decides that
     (see InterchangeInfo.target_position / set_interchange_assignment)."""
 
-    forward: float
-    midfield: float
-    ruck: float
-    tackler: float
+    forward: float | None
+    midfield: float | None
+    ruck: float | None
+    tackler: float | None
 
 
 @dataclass(frozen=True)
@@ -419,7 +419,8 @@ def build_matchup_state(
                 if override and override.override_score is not None
                 else calculated_score
             )
-            total_score += effective_score
+            if effective_score is not None:
+                total_score += effective_score
             counts[match_state] += 1
 
             football = football_score_for_position(
@@ -434,8 +435,9 @@ def build_matchup_state(
                 and override.override_score is not None
                 and not football.is_actual_afl
             )
-            team_display_goals += football.goals
-            team_display_behinds += football.behinds
+            if football.goals is not None and football.behinds is not None:
+                team_display_goals += football.goals
+                team_display_behinds += football.behinds
 
             position_results.append(
                 PositionResult(

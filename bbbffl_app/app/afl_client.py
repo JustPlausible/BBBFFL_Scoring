@@ -171,12 +171,12 @@ class Player:
 @dataclass(frozen=True)
 class PlayerStatLine:
     canonical_player_id: int
-    goals: int = 0
-    behinds: int = 0
-    disposals: int = 0
-    marks: int = 0
-    hitouts: int = 0
-    tackles: int = 0
+    goals: int | None = 0
+    behinds: int | None = 0
+    disposals: int | None = 0
+    marks: int | None = 0
+    hitouts: int | None = 0
+    tackles: int | None = 0
 
 
 class AflApiError(RuntimeError):
@@ -262,11 +262,15 @@ class AflApiClient:
             row_stats = row.get("stats", {})
             stats[player_id] = PlayerStatLine(
                 canonical_player_id=player_id,
-                goals=int(row_stats.get("goals") or 0),
-                behinds=int(row_stats.get("behinds") or 0),
-                disposals=int(row_stats.get("disposals") or 0),
-                marks=int(row_stats.get("marks") or 0),
-                hitouts=int(row_stats.get("hitouts") or 0),
-                tackles=int(row_stats.get("tackles") or 0),
+                goals=_optional_int(row_stats.get("goals")),
+                behinds=_optional_int(row_stats.get("behinds")),
+                disposals=_optional_int(row_stats.get("disposals")),
+                marks=_optional_int(row_stats.get("marks")),
+                hitouts=_optional_int(row_stats.get("hitouts")),
+                tackles=_optional_int(row_stats.get("tackles")),
             )
         return stats
+
+
+def _optional_int(value):
+    return None if value is None else int(value)

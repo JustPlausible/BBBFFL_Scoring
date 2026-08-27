@@ -33,3 +33,18 @@ def test_zero_stats_score_zero():
 def test_interchange_cannot_be_scored_directly():
     with pytest.raises(ValueError):
         score_position("Interchange", PlayerStats(goals=5))
+
+
+def test_only_null_inputs_required_by_the_position_withhold_a_score():
+    partial = PlayerStats(
+        goals=2,
+        behinds=1,
+        disposals=20,
+        marks=3,
+        hitouts=None,
+        tackles=4,
+    )
+    assert score_position("Forward1", partial) == 13
+    assert score_position("Midfield1", partial) == 20
+    assert score_position("Ruck", partial) is None
+    assert score_position("Tackler", partial) == 24

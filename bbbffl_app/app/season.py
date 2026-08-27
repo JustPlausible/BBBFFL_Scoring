@@ -1,6 +1,7 @@
 """Repositories for explicit, season-scoped BBBFFL parent identities."""
 
 from dataclasses import dataclass
+import json
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -48,6 +49,7 @@ class RulesVersion:
     notes: str | None
     created_at: str
     created_by: str | None
+    scoring_rules: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -205,6 +207,7 @@ class SeasonRepository:
         name: str,
         *,
         notes: str | None = None,
+        scoring_rules: dict | None = None,
         actor: ActorContext = ActorContext.anonymous_operator("admin"),
     ) -> RulesVersion:
         item = RulesVersion(
@@ -216,12 +219,17 @@ class SeasonRepository:
             notes,
             _now(),
             actor.actor_id,
+            scoring_rules,
         )
         with transaction(self.database) as connection:
-            connection.execute(
-                "INSERT INTO season_rules_version VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                tuple(item.__dict__.values()),
-            )
+            columns = {column["name"] for column in inspect(self.database.engine).get_columns("season_rules_version")}
+            if "scoring_rules" in columns:
+                connection.execute(
+                    "INSERT INTO season_rules_version (rules_version_id, season_id, rules_key, version_number, name, notes, created_at, created_by, scoring_rules) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (*tuple(item.__dict__.values())[:-1], json.dumps(scoring_rules, sort_keys=True) if scoring_rules is not None else None),
+                )
+            else:
+                connection.execute("INSERT INTO season_rules_version VALUES (?, ?, ?, ?, ?, ?, ?, ?)", tuple(item.__dict__.values())[:-1])
             append_event(
                 connection,
                 actor=actor,
@@ -243,7 +251,12 @@ class SeasonRepository:
             "WHERE season_id=? ORDER BY rules_key, version_number",
             (season_id,),
         ).fetchall()
-        return [RulesVersion(**dict(row)) for row in rows]
+        result = []
+        for row in rows:
+            values = dict(row)
+            values["scoring_rules"] = json.loads(values["scoring_rules"]) if values.get("scoring_rules") else None
+            result.append(RulesVersion(**values))
+        return result
 
     def create_competition(
         self,

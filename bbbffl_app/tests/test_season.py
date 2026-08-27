@@ -154,7 +154,7 @@ def test_stream_type_is_sporting_context_not_execution_context(repository):
     ("statement", "parameters"),
     [
         (
-            "INSERT INTO season_rules_version VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO season_rules_version (rules_version_id, season_id, rules_key, version_number, name, notes, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             ("rules", "missing-season", "canonical", 1, "Rules", None, "t", None),
         ),
         (

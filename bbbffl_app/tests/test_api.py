@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.afl_client import Match, Player
+from app.db import DecisionsRepository, connect
 from app.service import PlayerIdentityCache
 from tests.conftest import CATS, PIES, TEAM_A_ROSTER, TEAM_B_ROSTER, FakeAflClient
 
@@ -78,6 +79,61 @@ def test_public_state_requires_no_token(client):
 def test_admin_state_requires_token(client):
     assert client.get("/api/admin/state").status_code == 401
     assert client.get("/api/admin/state", headers=ADMIN_HEADERS).status_code == 200
+
+
+def test_dnp_decision_crosses_route_service_repository_persistence_boundary(client, tmp_path):
+    """Demonstrates the layering issue #36 requires end-to-end for one real
+    persisted use case:
+
+        HTTP route (routes/admin.py)
+        -> application service (app.scorer_decisions.set_dnp)
+        -> repository (app.db.DecisionsRepository, opening its own
+           transaction)
+        -> persistence (the sqlite file on disk)
+
+    A DNP decision made through the HTTP surface is read back through a
+    brand-new DecisionsRepository/connection opened directly against the
+    same database file -- proving the write really reached durable storage,
+    not just in-process route/app.state -- and its domain row and audit
+    event are shown to have committed together as the one transaction
+    DecisionsRepository.set_dnp owns (see app/db.py's module docstring).
+    A rejected mutation (an unknown team_key, caught by the service layer
+    before any repository call is made) is then shown to have written
+    nothing at all, on either side of that same boundary.
+    """
+    team_key = client.get("/api/admin/state", headers=ADMIN_HEADERS).json()["teams"][0]["team_key"]
+
+    r = client.post(
+        "/api/admin/dnp",
+        json={"team_key": team_key, "slot": "Forward1", "dnp": True},
+        headers=ADMIN_HEADERS,
+    )
+    assert r.status_code == 200
+
+    # A second, independent repository/connection over the same database
+    # file the app is using -- not app.state.decisions -- so this can only
+    # pass if the route's mutation truly reached durable persistence.
+    direct = DecisionsRepository(connect(f"sqlite:///{tmp_path / 'test.db'}"))
+    assert direct.get_dnp_map() == {(team_key, "Forward1"): True}
+
+    events_after_first_write = client.get("/api/admin/audit-events", headers=ADMIN_HEADERS).json()
+    dnp_events = [e for e in events_after_first_write if e["action"] == "scoring.dnp.changed"]
+    assert len(dnp_events) == 1
+    assert dnp_events[0]["after_state"] == {"dnp": True}
+
+    # The service layer rejects an unknown team_key before ever calling the
+    # repository -- app.scorer_decisions.set_dnp's _ensure_known_team check
+    # runs ahead of DecisionsRepository.set_dnp's transaction, so this must
+    # leave both the domain table and the audit trail untouched.
+    r = client.post(
+        "/api/admin/dnp",
+        json={"team_key": "not_a_real_team", "slot": "Forward1", "dnp": True},
+        headers=ADMIN_HEADERS,
+    )
+    assert r.status_code == 404
+    assert direct.get_dnp_map() == {(team_key, "Forward1"): True}
+    events_after_rejected_write = client.get("/api/admin/audit-events", headers=ADMIN_HEADERS).json()
+    assert events_after_rejected_write == events_after_first_write
 
 
 def test_full_scorer_workflow(client):

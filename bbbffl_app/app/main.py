@@ -10,6 +10,13 @@ from app.config import get_settings
 from app.db import DecisionsRepository, connect
 from app.migrations import migrate
 from app.routes import admin, health, public, superscore as superscore_routes
+from app.scorer_decisions import (
+    CompetitionFinalizedError,
+    InvalidPositionError,
+    InvalidSlotError,
+    ResultNotReadyError,
+    UnknownTeamError,
+)
 from app.service import PlayerIdentityCache
 from app.superscore import competition_key as superscore_competition_key
 from app.superscore import get_superscore_config
@@ -110,3 +117,33 @@ async def afl_api_error_handler(request: Request, exc: AflApiError) -> JSONRespo
         status_code=502,
         content={"detail": "afl-api is currently unavailable. Scores will resume once it recovers."},
     )
+
+
+# app.scorer_decisions raises plain domain exceptions rather than
+# fastapi.HTTPException so it stays usable outside a request context (admin
+# scripts, replay, tests). These handlers are the one place that translates
+# each one to the HTTP status routes/admin.py and routes/superscore.py
+# returned before that orchestration moved out of the route handlers.
+@app.exception_handler(UnknownTeamError)
+async def unknown_team_handler(request: Request, exc: UnknownTeamError) -> JSONResponse:
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+
+@app.exception_handler(InvalidSlotError)
+async def invalid_slot_handler(request: Request, exc: InvalidSlotError) -> JSONResponse:
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+@app.exception_handler(InvalidPositionError)
+async def invalid_position_handler(request: Request, exc: InvalidPositionError) -> JSONResponse:
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+@app.exception_handler(CompetitionFinalizedError)
+async def competition_finalized_handler(request: Request, exc: CompetitionFinalizedError) -> JSONResponse:
+    return JSONResponse(status_code=423, content={"detail": str(exc)})
+
+
+@app.exception_handler(ResultNotReadyError)
+async def result_not_ready_handler(request: Request, exc: ResultNotReadyError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})

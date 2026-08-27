@@ -79,7 +79,10 @@ jobs:
           import os
           from app.db import DecisionsRepository, connect
           from app.audit import ActorContext, AuditEventRepository
-          from sqlalchemy.exc import IntegrityError
+          from app.fixtures import FixtureRepository
+          from app.identity import IdentityRepository
+          from app.season import SeasonRepository
+          from sqlalchemy.exc import DBAPIError, IntegrityError
 
           connection = connect(os.environ["BBBFFL_DATABASE_URL"])
           repository = DecisionsRepository(connection)
@@ -96,5 +99,57 @@ jobs:
               raise SystemExit("audit_event accepted an UPDATE on PostgreSQL -- append-only trigger regressed")
           except IntegrityError:
               pass
+
+          # PostgreSQL regression: an UPDATE must not move either kind of
+          # child row out of a frozen draw, even when its draft destination
+          # has been vacated and every foreign key would otherwise be valid.
+          identities = IdentityRepository(connection)
+          seasons = SeasonRepository(connection)
+          fixture_repository = FixtureRepository(connection)
+          draws = []
+          entries_by_season = []
+          for year in (2026, 2027):
+              season = seasons.create_season(year, str(year))
+              entries = []
+              for number in range(1, 11):
+                  coach = identities.create_coach(f"CI Coach {year}-{number}")
+                  entries.append(identities.create_entry(season.season_id, f"ci-{number}", coach.coach_id, f"CI Team {number}"))
+              entries_by_season.append(entries)
+              draws.append(fixture_repository.save_draft(season.season_id, [entry.season_entry_id for entry in entries]))
+          fixture_repository.freeze(draws[0].season_id)
+          rejected_tables = []
+          for table, key, participant_update, participants in (
+              (
+                  "season_fixture_number",
+                  "fixture_number=1",
+                  "season_entry_id=?",
+                  (entries_by_season[1][0].season_entry_id,),
+              ),
+              (
+                  "season_fixture_matchup",
+                  "bbbffl_round_number=1 AND matchup_order=1",
+                  "home_season_entry_id=?, away_season_entry_id=?",
+                  (
+                      entries_by_season[1][0].season_entry_id,
+                      entries_by_season[1][1].season_entry_id,
+                  ),
+              ),
+          ):
+              connection.execute(f"DELETE FROM {table} WHERE fixture_draw_id=? AND {key}", (draws[1].fixture_draw_id,))
+              try:
+                  connection.execute(
+                      f"UPDATE {table} SET fixture_draw_id=?, season_id=?, {participant_update} WHERE fixture_draw_id=? AND {key}",
+                      (draws[1].fixture_draw_id, draws[1].season_id, *participants, draws[0].fixture_draw_id),
+                  )
+                  raise SystemExit(f"{table} moved a child out of a frozen draw")
+              except DBAPIError as error:
+                  assert "frozen fixture draw is immutable" in str(error)
+                  rejected_tables.append(table)
+              # DatabaseConnection.execute uses a fresh pooled connection for
+              # each call. The failed implicit transaction above is rolled
+              # back when that short-lived connection closes, so this query
+              # proves the next child-table attempt can actually run.
+              assert connection.execute("SELECT 1 AS usable").fetchone()["usable"] == 1
+          assert rejected_tables == ["season_fixture_number", "season_fixture_matchup"]
           connection.close()
           PY

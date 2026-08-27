@@ -35,6 +35,9 @@ EXPECTED_TABLES = {
     "season_player_pool",
     "season_squad_configuration",
     "player_ownership_period",
+    "season_fixture_draw",
+    "season_fixture_number",
+    "season_fixture_matchup",
 }
 
 
@@ -129,6 +132,13 @@ def test_upgrade_from_identity_head_adds_player_ownership_schema(tmp_path):
     migrate(url)
     tables = set(inspect(create_engine(url)).get_table_names())
     assert {"season_player_pool", "season_squad_configuration", "player_ownership_period"} <= tables
+
+
+def test_upgrade_from_player_head_adds_fixture_schema(tmp_path):
+    url = _url(tmp_path / "fixture-upgrade.db")
+    migrate(url, "0006_players")
+    migrate(url)
+    assert {"season_fixture_draw", "season_fixture_number", "season_fixture_matchup"} <= set(inspect(create_engine(url)).get_table_names())
 
 
 def test_unrecognized_unversioned_schema_is_refused(tmp_path):

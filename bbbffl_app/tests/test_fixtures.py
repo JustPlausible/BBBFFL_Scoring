@@ -114,14 +114,34 @@ def test_configuration_change_cannot_regenerate_a_frozen_fixture():
     repository.freeze(season.season_id)
     before = repository.list_matchups(season.season_id)
 
-    with transaction(database) as conn:
-        conn.execute(
-            "UPDATE bbbffl_season SET regular_season_round_count=23 WHERE season_id=?",
-            (season.season_id,),
-        )
+    with pytest.raises(IntegrityError, match="frozen fixture draw fixes season length"):
+        with transaction(database) as conn:
+            conn.execute(
+                "UPDATE bbbffl_season SET regular_season_round_count=23 WHERE season_id=?",
+                (season.season_id,),
+            )
     with pytest.raises(ValueError, match="immutable"):
         repository.save_draft(season.season_id, [entry.season_entry_id for entry in entries])
     assert repository.list_matchups(season.season_id) == before
+
+
+def test_freeze_requires_each_configured_round_exactly_once(fixture_tree):
+    database, season, entries, repository = fixture_tree
+    draw = repository.save_draft(
+        season.season_id, [entry.season_entry_id for entry in entries]
+    )
+    # Preserve the total of 100 rows while replacing configured round 20 with
+    # an out-of-range round. A total-count-only validation would accept this.
+    with transaction(database) as conn:
+        conn.execute(
+            "UPDATE season_fixture_matchup SET bbbffl_round_number=21 "
+            "WHERE fixture_draw_id=? AND bbbffl_round_number=20",
+            (draw.fixture_draw_id,),
+        )
+
+    with pytest.raises(ValueError, match="incomplete"):
+        repository.freeze(season.season_id)
+    assert repository.get_draw(season.season_id).state == "draft"
 
 
 def test_persists_stable_entry_pairings_not_mutable_names(fixture_tree):

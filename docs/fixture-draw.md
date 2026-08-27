@@ -24,8 +24,10 @@ the before and after number maps.
 
 Freezing means the scorer/operator has accepted the draw. The database then
 rejects changes to its number assignments and its persisted pairings (five per
-configured regular-season round), and
-the application does not offer an unfreeze operation. Thus later code changes
+configured regular-season round), and also rejects changes to the season's
+configured round count. Freeze validation requires exactly rounds 1 through
+that count with exactly five matchups in every round; a matching total alone
+is not sufficient. The application does not offer an unfreeze operation. Thus later code changes
 to the generator cannot silently rewrite historical fixtures. The persisted
 rotation version explains how the accepted facts originated.
 

@@ -42,6 +42,16 @@ def upgrade():
             batch.drop_constraint("ck_fixture_round_range", type_="check")
             batch.create_check_constraint("ck_fixture_round_positive", "bbbffl_round_number >= 1")
         _sqlite_matchup_triggers()
+        op.execute("""
+        CREATE TRIGGER season_length_frozen_update
+        BEFORE UPDATE OF regular_season_round_count ON bbbffl_season
+        WHEN OLD.regular_season_round_count <> NEW.regular_season_round_count
+          AND EXISTS (
+            SELECT 1 FROM season_fixture_draw
+            WHERE season_id=OLD.season_id AND state='frozen'
+          )
+        BEGIN SELECT RAISE(ABORT, 'frozen fixture draw fixes season length'); END
+        """)
     else:
         op.add_column(
             "bbbffl_season",
@@ -54,16 +64,38 @@ def upgrade():
         op.create_check_constraint(
             "ck_fixture_round_positive", "season_fixture_matchup", "bbbffl_round_number >= 1"
         )
+        op.execute("""
+        CREATE FUNCTION enforce_frozen_fixture_season_length() RETURNS trigger AS $$
+        BEGIN
+          IF OLD.regular_season_round_count <> NEW.regular_season_round_count
+             AND EXISTS (
+               SELECT 1 FROM season_fixture_draw
+               WHERE season_id=OLD.season_id AND state='frozen'
+             )
+          THEN
+            RAISE EXCEPTION 'frozen fixture draw fixes season length';
+          END IF;
+          RETURN NEW;
+        END; $$ LANGUAGE plpgsql
+        """)
+        op.execute("""
+        CREATE TRIGGER season_length_frozen_update
+        BEFORE UPDATE OF regular_season_round_count ON bbbffl_season
+        FOR EACH ROW EXECUTE FUNCTION enforce_frozen_fixture_season_length()
+        """)
 
 
 def downgrade():
     bind = op.get_bind()
-    if (
-        bind.dialect.name == "sqlite"
-        and bind.execute(sa.text("SELECT COUNT(*) FROM bbbffl_season")).scalar_one()
-    ):
+    non_default_lengths = bind.execute(
+        sa.text(
+            "SELECT COUNT(*) FROM bbbffl_season "
+            "WHERE regular_season_round_count <> 20"
+        )
+    ).scalar_one()
+    if non_default_lengths:
         raise RuntimeError(
-            "0009 downgrade refused: season length configuration cannot be discarded"
+            "0009 downgrade refused: non-default season length configuration cannot be discarded"
         )
     too_long = bind.execute(
         sa.text("SELECT COUNT(*) FROM season_fixture_matchup WHERE bbbffl_round_number > 20")
@@ -81,8 +113,11 @@ def downgrade():
             "ck_fixture_round_range", "season_fixture_matchup", "bbbffl_round_number BETWEEN 1 AND 20"
         )
     if bind.dialect.name == "sqlite":
-        with op.batch_alter_table("bbbffl_season") as batch:
-            batch.drop_column("regular_season_round_count")
+        op.execute("DROP TRIGGER season_length_frozen_update")
+        # Supported SQLite versions can drop this leaf column in place. This
+        # preserves the season table identity and its populated FK graph.
+        op.execute("ALTER TABLE bbbffl_season DROP COLUMN regular_season_round_count")
     else:
+        op.execute("DROP FUNCTION enforce_frozen_fixture_season_length() CASCADE")
         op.drop_constraint("ck_season_regular_round_count", "bbbffl_season", type_="check")
         op.drop_column("bbbffl_season", "regular_season_round_count")

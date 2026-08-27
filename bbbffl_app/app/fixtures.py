@@ -121,7 +121,16 @@ class FixtureRepository:
                 raise KeyError(season_id)
             if row["state"] == "frozen":
                 raise ValueError("fixture draw is already frozen")
-            counts = conn.execute("SELECT (SELECT COUNT(*) FROM season_fixture_number WHERE fixture_draw_id=?) assignments, (SELECT COUNT(*) FROM season_fixture_matchup WHERE fixture_draw_id=?) matchups", (row["fixture_draw_id"], row["fixture_draw_id"])).fetchone()
+            assignments = conn.execute(
+                "SELECT COUNT(*) assignments FROM season_fixture_number WHERE fixture_draw_id=?",
+                (row["fixture_draw_id"],),
+            ).fetchone()["assignments"]
+            rounds = conn.execute(
+                "SELECT bbbffl_round_number, COUNT(*) matchups "
+                "FROM season_fixture_matchup WHERE fixture_draw_id=? "
+                "GROUP BY bbbffl_round_number ORDER BY bbbffl_round_number",
+                (row["fixture_draw_id"],),
+            ).fetchall()
             season = conn.execute(
                 "SELECT * FROM bbbffl_season WHERE season_id=?", (season_id,)
             ).fetchone()
@@ -130,7 +139,12 @@ class FixtureRepository:
                 if "regular_season_round_count" in season.keys()
                 else 20
             )
-            if counts["assignments"] != 10 or counts["matchups"] != round_count * 5:
+            expected_rounds = list(range(1, round_count + 1))
+            if (
+                assignments != 10
+                or [item["bbbffl_round_number"] for item in rounds] != expected_rounds
+                or any(item["matchups"] != 5 for item in rounds)
+            ):
                 raise ValueError("fixture draw is incomplete")
             now, version = _now(), row["version"] + 1
             conn.execute("UPDATE season_fixture_draw SET state='frozen', version=?, updated_at=?, frozen_at=? WHERE fixture_draw_id=?", (version, now, now, row["fixture_draw_id"]))

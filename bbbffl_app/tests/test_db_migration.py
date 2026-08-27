@@ -219,6 +219,40 @@ def test_season_length_upgrade_defaults_without_rewriting_frozen_fixture(tmp_pat
     assert FixtureRepository(upgraded).get_draw(season.season_id).fixture_draw_id == draw.fixture_draw_id
 
 
+def test_season_length_downgrade_refuses_non_default_configuration(tmp_path):
+    url = _url(tmp_path / "season-length-downgrade.db")
+    migrate(url)
+    connection = connect(url)
+    SeasonRepository(connection).create_season(
+        2027, "2027", regular_season_round_count=23
+    )
+    connection.close()
+
+    # No fixture rows exist, so refusal must be based on season configuration
+    # itself. The same dialect-independent query protects PostgreSQL.
+    with pytest.raises(RuntimeError, match="non-default season length"):
+        downgrade(url, "0008_round_map")
+
+
+def test_season_length_downgrade_preserves_default_season(tmp_path):
+    url = _url(tmp_path / "default-season-length-downgrade.db")
+    migrate(url)
+    connection = connect(url)
+    season = SeasonRepository(connection).create_season(2026, "2026 Replay")
+    connection.close()
+
+    downgrade(url, "0008_round_map")
+    engine = create_engine(url)
+    assert "regular_season_round_count" not in {
+        column["name"] for column in inspect(engine).get_columns("bbbffl_season")
+    }
+    with engine.connect() as raw:
+        assert raw.execute(
+            text("SELECT label FROM bbbffl_season WHERE season_id=:season_id"),
+            {"season_id": season.season_id},
+        ).scalar_one() == "2026 Replay"
+
+
 def test_unrecognized_unversioned_schema_is_refused(tmp_path):
     path = tmp_path / "unknown.db"
     conn = sqlite3.connect(path)

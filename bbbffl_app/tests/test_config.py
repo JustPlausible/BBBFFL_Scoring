@@ -40,6 +40,45 @@ def test_default_sqlite_path_is_used_when_neither_is_set(monkeypatch):
     assert settings.database_path.endswith("data/scorer_decisions.db")
 
 
+def test_afl_api_resilience_settings_default_sensibly(monkeypatch):
+    """Roadmap package 05 / issue #37: connect/read timeouts default to
+    unset (AflApiClient then falls back to afl_api_timeout_seconds for
+    both, preserving prior single-timeout behaviour), and retry policy has
+    small, bounded defaults."""
+    for name in (
+        "AFL_API_CONNECT_TIMEOUT_SECONDS",
+        "AFL_API_READ_TIMEOUT_SECONDS",
+        "AFL_API_RETRY_MAX_ATTEMPTS",
+        "AFL_API_RETRY_BASE_DELAY_SECONDS",
+        "AFL_API_RETRY_MAX_DELAY_SECONDS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    settings = get_settings()
+
+    assert settings.afl_api_connect_timeout_seconds is None
+    assert settings.afl_api_read_timeout_seconds is None
+    assert settings.afl_api_retry_max_attempts == 3
+    assert settings.afl_api_retry_base_delay_seconds == 0.2
+    assert settings.afl_api_retry_max_delay_seconds == 2.0
+
+
+def test_afl_api_resilience_settings_are_configurable(monkeypatch):
+    monkeypatch.setenv("AFL_API_CONNECT_TIMEOUT_SECONDS", "3")
+    monkeypatch.setenv("AFL_API_READ_TIMEOUT_SECONDS", "8")
+    monkeypatch.setenv("AFL_API_RETRY_MAX_ATTEMPTS", "5")
+    monkeypatch.setenv("AFL_API_RETRY_BASE_DELAY_SECONDS", "0.5")
+    monkeypatch.setenv("AFL_API_RETRY_MAX_DELAY_SECONDS", "10")
+
+    settings = get_settings()
+
+    assert settings.afl_api_connect_timeout_seconds == 3.0
+    assert settings.afl_api_read_timeout_seconds == 8.0
+    assert settings.afl_api_retry_max_attempts == 5
+    assert settings.afl_api_retry_base_delay_seconds == 0.5
+    assert settings.afl_api_retry_max_delay_seconds == 10.0
+
+
 def test_dockerfile_does_not_set_database_url_over_legacy_db_path():
     """The image must default BBBFFL_DB_PATH, not BBBFFL_DATABASE_URL, or an
     upgraded legacy deployment that only ever set BBBFFL_DB_PATH would have

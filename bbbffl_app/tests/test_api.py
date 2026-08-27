@@ -209,6 +209,49 @@ def test_audit_events_endpoint_requires_admin_token(client):
     assert client.get("/api/admin/audit-events", headers=ADMIN_HEADERS).status_code == 200
 
 
+def test_finalize_fails_closed_through_the_http_surface_when_evidence_is_stale(client):
+    """Roadmap package 05 / issue #37, end-to-end through the real HTTP
+    route: a client reporting non-fresh AFL evidence (a resilient client
+    that fell back to a stale cache, or an unavailable endpoint) must block
+    finalisation with 503, and must not record a finalisation audit event."""
+    from app.main import app as fastapi_app
+
+    fastapi_app.state.fake_afl_client.matches = [
+        Match(match_id=100, home_team=CATS, away_team=PIES, status="CONCLUDED")
+    ]
+
+    class _AlwaysStale:
+        def is_evidence_fresh(self) -> bool:
+            return False
+
+    fastapi_app.state.fake_afl_client.is_evidence_fresh = _AlwaysStale().is_evidence_fresh
+
+    r = client.post("/api/admin/finalize", json={"note": "confirmed"}, headers=ADMIN_HEADERS)
+    assert r.status_code == 503
+    assert fastapi_app.state.decisions.get_matchup_state().finalized is False
+
+    events = client.get("/api/admin/audit-events", headers=ADMIN_HEADERS).json()
+    assert "scoring.result.finalized" not in [event["action"] for event in events]
+
+    del fastapi_app.state.fake_afl_client.is_evidence_fresh
+    r = client.post("/api/admin/finalize", json={"note": "confirmed"}, headers=ADMIN_HEADERS)
+    assert r.status_code == 200
+    assert r.json()["status"] == "FINAL"
+
+
+def test_afl_diagnostics_endpoint_reports_empty_for_a_plain_fake_client(client):
+    """FakeAflClient (used throughout this test module) has no diagnostics
+    capability, so the endpoint must degrade to an empty-but-well-shaped
+    report rather than erroring."""
+    r = client.get("/api/admin/afl-diagnostics", headers=ADMIN_HEADERS)
+    assert r.status_code == 200
+    assert r.json() == {"dependency": "afl-api", "endpoints": {}}
+
+
+def test_afl_diagnostics_endpoint_requires_admin_token(client):
+    assert client.get("/api/admin/afl-diagnostics").status_code == 401
+
+
 def test_public_state_exposes_starting_player_identity_for_a_dnp_position(client):
     """The public page must keep showing the coach's original selection for
     a DNP'd position -- not just erase it -- per the DNP-visibility brief."""

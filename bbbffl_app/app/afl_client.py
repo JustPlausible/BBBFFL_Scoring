@@ -180,15 +180,79 @@ class PlayerStatLine:
 
 
 class AflApiError(RuntimeError):
-    pass
+    """Base class for every error this module raises for a failed afl-api
+    request. `app/main.py` maps this (and every subclass below) to a 502 by
+    default -- see `app/afl_resilience.py` for the retry/cache boundary that
+    sits above this transport and distinguishes these further."""
+
+
+class AflApiTimeoutError(AflApiError):
+    """The request did not complete within the configured timeout.
+
+    `phase` distinguishes *where* time ran out -- "connect" (TCP/TLS
+    handshake never completed) vs "read" (the connection was established but
+    the response body did not arrive in time) -- so a caller/diagnostic can
+    tell a dead host apart from a slow one. Never includes request headers
+    (so never the `x-api-key` value) in its message."""
+
+    def __init__(self, path: str, *, phase: str, cause: Exception | None = None) -> None:
+        super().__init__(f"afl-api request timed out ({phase}): GET {path}")
+        self.path = path
+        self.phase = phase
+        self.__cause__ = cause
+
+
+class AflApiConnectionError(AflApiError):
+    """The request could not reach afl-api at all (DNS, refused connection,
+    TLS failure, connection reset, etc.) -- distinct from a timeout, which
+    means a connection attempt was still in flight when the deadline hit."""
+
+    def __init__(self, path: str, *, cause: Exception | None = None) -> None:
+        super().__init__(f"afl-api connection failed: GET {path} ({type(cause).__name__ if cause else 'unknown'})")
+        self.path = path
+        self.__cause__ = cause
+
+
+class AflApiHttpStatusError(AflApiError):
+    """afl-api responded, but with a non-2xx status. `status_code` lets a
+    caller distinguish a transient upstream failure (5xx/429) from a
+    genuine client-side/contract problem (other 4xx)."""
+
+    def __init__(self, path: str, *, status_code: int, cause: Exception | None = None) -> None:
+        super().__init__(f"afl-api request failed: GET {path} (status={status_code})")
+        self.path = path
+        self.status_code = status_code
+        self.__cause__ = cause
 
 
 class AflApiClient:
-    """Thin sync client for afl-api /api/v1. One instance per app process."""
+    """Thin sync client for afl-api /api/v1. One instance per app process.
 
-    def __init__(self, base_url: str, api_key: str | None = None, timeout: float = 10.0):
+    Timeout policy is explicit rather than a single opaque number: `timeout`
+    remains the default applied to every phase (unchanged constructor
+    behaviour for existing callers), but `connect_timeout`/`read_timeout` let
+    a caller (see `app/config.py`'s `AFL_API_CONNECT_TIMEOUT_SECONDS`/
+    `AFL_API_READ_TIMEOUT_SECONDS`) size the "can we even reach the host"
+    budget independently of "how long may a slow response take" -- there is
+    no configuration under which a request can wait indefinitely.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str | None = None,
+        timeout: float = 10.0,
+        connect_timeout: float | None = None,
+        read_timeout: float | None = None,
+    ):
         headers = {"x-api-key": api_key} if api_key else {}
-        self._client = httpx.Client(base_url=base_url, headers=headers, timeout=timeout)
+        request_timeout = httpx.Timeout(
+            connect=connect_timeout if connect_timeout is not None else timeout,
+            read=read_timeout if read_timeout is not None else timeout,
+            write=timeout,
+            pool=timeout,
+        )
+        self._client = httpx.Client(base_url=base_url, headers=headers, timeout=request_timeout)
 
     def close(self) -> None:
         self._client.close()
@@ -197,9 +261,21 @@ class AflApiClient:
         try:
             response = self._client.get(path, params=params)
             response.raise_for_status()
+        except httpx.ConnectTimeout as exc:
+            logger.error("afl-api connect timed out: GET %s", path)
+            raise AflApiTimeoutError(path, phase="connect", cause=exc) from exc
+        except httpx.ReadTimeout as exc:
+            logger.error("afl-api read timed out: GET %s", path)
+            raise AflApiTimeoutError(path, phase="read", cause=exc) from exc
+        except httpx.TimeoutException as exc:
+            logger.error("afl-api request timed out: GET %s", path)
+            raise AflApiTimeoutError(path, phase="unknown", cause=exc) from exc
+        except httpx.HTTPStatusError as exc:
+            logger.error("afl-api request failed: GET %s (status=%s)", path, exc.response.status_code)
+            raise AflApiHttpStatusError(path, status_code=exc.response.status_code, cause=exc) from exc
         except httpx.HTTPError as exc:
             logger.error("afl-api request failed: GET %s (%s)", path, exc)
-            raise AflApiError(f"afl-api request failed: GET {path} ({exc})") from exc
+            raise AflApiConnectionError(path, cause=exc) from exc
         return response.json()
 
     def get_current_season(self) -> Season:

@@ -12,6 +12,10 @@ import pytest
 
 from app.afl_client import (
     AflApiClient,
+    AflApiConnectionError,
+    AflApiError,
+    AflApiHttpStatusError,
+    AflApiTimeoutError,
     Match,
     Player,
     PlayerStatLine,
@@ -260,6 +264,108 @@ def test_postgame_is_distinct_from_live_and_completed():
     assert postgame.state == "postgame"
     assert postgame.state != "live"
     assert postgame.state != "completed"
+
+
+def test_client_applies_explicit_connect_and_read_timeout_budgets():
+    """Explicit timeout policy (issue #37): connect and read timeouts are
+    independently configurable rather than one opaque number, and default
+    to `timeout` when not overridden -- see app/config.py's
+    AFL_API_CONNECT_TIMEOUT_SECONDS / AFL_API_READ_TIMEOUT_SECONDS."""
+    default_client = AflApiClient(base_url="http://afl-api.test", timeout=7.0)
+    try:
+        timeout = default_client._client.timeout
+        assert timeout.connect == 7.0
+        assert timeout.read == 7.0
+    finally:
+        default_client.close()
+
+    split_client = AflApiClient(
+        base_url="http://afl-api.test", timeout=7.0, connect_timeout=2.0, read_timeout=15.0
+    )
+    try:
+        timeout = split_client._client.timeout
+        assert timeout.connect == 2.0
+        assert timeout.read == 15.0
+    finally:
+        split_client.close()
+
+
+def test_connect_timeout_raises_typed_error_naming_the_phase():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("connect timed out", request=request)
+
+    api = AflApiClient(base_url="http://afl-api.test")
+    api._client = httpx.Client(base_url="http://afl-api.test", transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(AflApiTimeoutError) as excinfo:
+            api.get_matches(1)
+        assert excinfo.value.phase == "connect"
+        assert isinstance(excinfo.value, AflApiError)
+    finally:
+        api.close()
+
+
+def test_read_timeout_raises_typed_error_naming_the_phase():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("read timed out", request=request)
+
+    api = AflApiClient(base_url="http://afl-api.test")
+    api._client = httpx.Client(base_url="http://afl-api.test", transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(AflApiTimeoutError) as excinfo:
+            api.get_matches(1)
+        assert excinfo.value.phase == "read"
+    finally:
+        api.close()
+
+
+def test_connection_failure_raises_a_distinct_typed_error_from_timeout():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    api = AflApiClient(base_url="http://afl-api.test")
+    api._client = httpx.Client(base_url="http://afl-api.test", transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(AflApiConnectionError):
+            api.get_matches(1)
+    finally:
+        api.close()
+
+
+def test_http_status_error_carries_the_status_code():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"detail": "unavailable"})
+
+    api = AflApiClient(base_url="http://afl-api.test")
+    api._client = httpx.Client(base_url="http://afl-api.test", transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(AflApiHttpStatusError) as excinfo:
+            api.get_matches(1)
+        assert excinfo.value.status_code == 503
+    finally:
+        api.close()
+
+
+def test_no_error_message_ever_includes_the_api_key():
+    """AflApiTimeoutError/AflApiConnectionError/AflApiHttpStatusError build
+    their messages from the request path and status/phase only -- never
+    headers -- so a configured AFL_API_KEY can never leak into a log line or
+    diagnostic report built from str(exc)."""
+    secret = "super-secret-afl-api-key-do-not-leak"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    api = AflApiClient(base_url="http://afl-api.test", api_key=secret)
+    api._client = httpx.Client(
+        base_url="http://afl-api.test", headers={"x-api-key": secret}, transport=httpx.MockTransport(handler)
+    )
+    try:
+        with pytest.raises(AflApiConnectionError) as excinfo:
+            api.get_matches(1)
+        assert secret not in str(excinfo.value)
+    finally:
+        api.close()
 
 
 def test_get_match_player_stats_reads_players_wrapper_and_nested_stats(client):

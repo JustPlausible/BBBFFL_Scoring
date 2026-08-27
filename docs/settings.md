@@ -48,6 +48,15 @@ Set `BBBFFL_ENVIRONMENT=production` and provide every one of:
 Any other configured URL (`BBBFFL_DATABASE_URL`, `BBBFFL_PUBLIC_BASE_URL`,
 `AFL_API_BASE_URL`) is format-validated in every environment, not just
 production, so a typo fails fast during local development too.
+`BBBFFL_PUBLIC_BASE_URL` and `AFL_API_BASE_URL` additionally reject a
+non-numeric port and embedded userinfo credentials
+(`https://user:pass@host/...`) -- afl-api authentication has its own
+channel (`AFL_API_KEY`); a credential smuggled into the base URL would
+otherwise be written verbatim to the startup log line that reports it.
+`BBBFFL_DATABASE_URL`'s PostgreSQL scheme is matched exactly
+(`postgresql` or `postgresql+<driver>`), not by a `startswith` check, so a
+typo'd scheme is caught here rather than surfacing later as a confusing
+SQLAlchemy dialect error during migration.
 
 `get_settings()` collects *every* problem it finds and raises them together
 in one `SettingsError`, so a first production start with several missing

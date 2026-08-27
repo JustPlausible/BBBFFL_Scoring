@@ -63,6 +63,7 @@ silently trying to speak a contract it does not support.
 """
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -100,13 +101,40 @@ def _env_float(name: str) -> float | None:
 
 
 def _is_http_url(value: str) -> bool:
+    """True for a well-formed absolute http(s) URL suitable for a critical
+    endpoint setting.
+
+    Deliberately rejects embedded userinfo (`https://user:pass@host/...`):
+    afl-api/public URLs already have a dedicated credential channel
+    (`AFL_API_KEY`), and accepting one here would risk that credential
+    being written to a startup log line alongside the base URL --
+    violating "never log secret values" by construction rather than by
+    remembering to redact every call site that logs a configured URL.
+    Also rejects a malformed port (e.g. `https://host:notaport`), which
+    `urlsplit` alone accepts syntactically but which would otherwise only
+    fail later, inside `httpx`, well after settings validation claimed
+    success.
+    """
     parts = urlsplit(value)
-    return parts.scheme in ("http", "https") and bool(parts.netloc)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return False
+    if parts.username is not None or parts.password is not None:
+        return False
+    if not parts.hostname:
+        return False
+    try:
+        parts.port  # noqa: B018 -- raises ValueError for a non-numeric port
+    except ValueError:
+        return False
+    return True
+
+
+_POSTGRESQL_SCHEME = re.compile(r"^postgresql(\+[a-zA-Z0-9_]+)?$")
 
 
 def _is_database_url(value: str) -> bool:
     scheme = urlsplit(value).scheme
-    return scheme == "sqlite" or scheme.startswith("postgresql")
+    return scheme == "sqlite" or bool(_POSTGRESQL_SCHEME.match(scheme))
 
 
 @dataclass(frozen=True)
@@ -184,7 +212,10 @@ def get_settings() -> Settings:
     else:
         database_url = f"sqlite:///{database_path}"
     if database_url and not _is_database_url(database_url):
-        errors.append("BBBFFL_DATABASE_URL: must be a sqlite:/// or postgresql(+driver):// URL")
+        errors.append(
+            "BBBFFL_DATABASE_URL: must be a sqlite:/// or postgresql(+driver):// URL "
+            "(driver, if present, must be a plain alphanumeric DBAPI name)"
+        )
     elif database_url and is_production and not database_url.split("://", 1)[0].startswith("postgresql"):
         errors.append(
             "BBBFFL_DATABASE_URL: must be a PostgreSQL URL in production "
@@ -194,7 +225,10 @@ def get_settings() -> Settings:
     raw_public_base_url = (os.getenv("BBBFFL_PUBLIC_BASE_URL") or "").strip() or None
     public_base_url = raw_public_base_url
     if public_base_url is not None and not _is_http_url(public_base_url):
-        errors.append("BBBFFL_PUBLIC_BASE_URL: must be an absolute http(s) URL")
+        errors.append(
+            "BBBFFL_PUBLIC_BASE_URL: must be an absolute http(s) URL with a valid host/port "
+            "and no embedded userinfo credentials"
+        )
     elif public_base_url is None and is_production:
         errors.append("BBBFFL_PUBLIC_BASE_URL: required in production")
 
@@ -207,7 +241,10 @@ def get_settings() -> Settings:
     else:
         afl_api_base_url = "http://localhost:8000"
     if afl_api_base_url and not _is_http_url(afl_api_base_url):
-        errors.append("AFL_API_BASE_URL: must be an absolute http(s) URL")
+        errors.append(
+            "AFL_API_BASE_URL: must be an absolute http(s) URL with a valid host/port "
+            "and no embedded userinfo credentials -- use AFL_API_KEY for authentication"
+        )
 
     afl_api_contract_version = os.getenv("AFL_API_CONTRACT_VERSION", "v1").strip().lower()
     if afl_api_contract_version not in SUPPORTED_AFL_API_CONTRACT_VERSIONS:

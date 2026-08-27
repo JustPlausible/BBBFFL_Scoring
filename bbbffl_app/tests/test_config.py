@@ -432,6 +432,58 @@ def test_settings_error_message_never_contains_secret_values(clean_env):
     assert "s3cret" not in message
 
 
+def test_afl_api_base_url_with_embedded_userinfo_credentials_is_rejected(clean_env):
+    """Code review finding (PR #49): a URL with embedded userinfo
+    (`https://user:pass@host`) would otherwise pass URL-format validation
+    and then be written verbatim to app/main.py's startup log line,
+    leaking the credential -- afl-api authentication has a dedicated
+    channel (AFL_API_KEY) and must never be smuggled through the base
+    URL."""
+    clean_env.setenv("AFL_API_BASE_URL", "https://user:s3cret@afl-api.example.net")
+
+    with pytest.raises(SettingsError) as excinfo:
+        get_settings()
+
+    assert any("AFL_API_BASE_URL" in e for e in excinfo.value.errors)
+    assert "s3cret" not in str(excinfo.value)
+
+
+def test_public_base_url_with_embedded_userinfo_credentials_is_rejected(clean_env):
+    clean_env.setenv("BBBFFL_PUBLIC_BASE_URL", "https://user:s3cret@bbbffl.example.com")
+
+    with pytest.raises(SettingsError) as excinfo:
+        get_settings()
+
+    assert any("BBBFFL_PUBLIC_BASE_URL" in e for e in excinfo.value.errors)
+
+
+def test_afl_api_base_url_with_malformed_port_is_rejected(clean_env):
+    """Code review finding (PR #49): urlsplit() alone accepts a
+    non-numeric port syntactically; without an explicit check this would
+    only fail later inside httpx, well after settings validation claimed
+    success and after migrations had already run."""
+    clean_env.setenv("AFL_API_BASE_URL", "https://afl-api.example.net:notaport")
+
+    with pytest.raises(SettingsError) as excinfo:
+        get_settings()
+
+    assert any("AFL_API_BASE_URL" in e for e in excinfo.value.errors)
+
+
+def test_database_url_with_unsupported_postgresql_like_scheme_is_rejected(clean_env):
+    """Code review finding (PR #49): `scheme.startswith("postgresql")`
+    would also accept a scheme like "postgresqlfoo" that is not a real
+    SQLAlchemy dialect, deferring the failure to a confusing SQLAlchemy
+    error during migration instead of the settings boundary naming the
+    invalid variable."""
+    clean_env.setenv("BBBFFL_DATABASE_URL", "postgresqlfoo://db.internal/bbbffl")
+
+    with pytest.raises(SettingsError) as excinfo:
+        get_settings()
+
+    assert any("BBBFFL_DATABASE_URL" in e for e in excinfo.value.errors)
+
+
 def test_multiple_failures_are_all_reported_together(clean_env):
     """A production start with several problems at once should report all
     of them, not just the first, so an operator can fix everything in one

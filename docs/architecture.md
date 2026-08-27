@@ -77,6 +77,17 @@ cycle anywhere) rather than leaving it as prose that only this file states.
   Final/SuperScore vertical specifically, `app/service.py` (matchup-state
   orchestration: `build_matchup_state`/`build_superscore_state`) and the new
   `app/scorer_decisions.py` (see below).
+- **AFL resilience** (roadmap package 05, issue #37) — `app/afl_resilience.py`
+  (`ResilientAflClient`: retry/timeout policy and a non-authoritative,
+  freshness-tagged cache) and `app/afl_diagnostics.py`
+  (`AflDiagnosticsRegistry`: secret-safe per-endpoint diagnostic state),
+  sitting directly on top of the foundation `app.afl_client.AflApiClient`
+  transport. Only `app/main.py` (the composition root) constructs and wires
+  this wrapper; every domain/service module keeps depending on
+  `AflApiClient`'s plain dataclasses and duck-typed `AflDataSource` call
+  surface, never on the wrapper's concrete type, so it remains a drop-in
+  replacement rather than a new required dependency. See
+  `docs/afl-client-resilience.md` for the full design.
 
 ## What this PR adds: `app/scorer_decisions.py`
 

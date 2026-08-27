@@ -22,6 +22,7 @@ from app.scorer_decisions import (
     InvalidPositionError,
     InvalidSlotError,
     ResultNotReadyError,
+    StaleAflEvidenceError,
     UnknownTeamError,
     finalize,
     set_dnp,
@@ -108,6 +109,67 @@ def test_finalize_persists_the_supplied_result_as_the_frozen_snapshot(decisions)
     assert state.finalized is True
     assert state.finalized_note == "confirmed"
     assert state.snapshot["status"] == "FINAL"
+
+
+class _FreshnessStub:
+    def __init__(self, fresh: bool) -> None:
+        self._fresh = fresh
+
+    def is_evidence_fresh(self) -> bool:
+        return self._fresh
+
+
+def test_finalize_fails_closed_when_afl_client_reports_stale_evidence(decisions):
+    """Roadmap package 05 / issue #37: an authoritative finalisation must
+    fail closed rather than freeze a result computed from stale/unavailable
+    AFL evidence."""
+    with pytest.raises(StaleAflEvidenceError):
+        finalize(
+            _FakeResult("AWAITING_SCORER_SIGNOFF"),
+            decisions,
+            "confirmed",
+            afl_client=_FreshnessStub(fresh=False),
+        )
+    assert decisions.get_matchup_state().finalized is False
+
+
+def test_finalize_succeeds_when_afl_client_reports_fresh_evidence(decisions):
+    finalize(
+        _FakeResult("AWAITING_SCORER_SIGNOFF"),
+        decisions,
+        "confirmed",
+        afl_client=_FreshnessStub(fresh=True),
+    )
+    assert decisions.get_matchup_state().finalized is True
+
+
+def test_finalize_skips_the_freshness_check_when_no_afl_client_is_supplied(decisions):
+    """Backward compatibility: every existing caller that does not pass
+    afl_client (e.g. this module's other tests, and any test double without
+    an is_evidence_fresh() method) keeps its exact prior behaviour."""
+    finalize(_FakeResult("AWAITING_SCORER_SIGNOFF"), decisions, "confirmed")
+    assert decisions.get_matchup_state().finalized is True
+
+
+def test_finalize_skips_the_freshness_check_for_a_client_without_the_capability(decisions):
+    class PlainFakeClient:
+        pass
+
+    finalize(
+        _FakeResult("AWAITING_SCORER_SIGNOFF"),
+        decisions,
+        "confirmed",
+        afl_client=PlainFakeClient(),
+    )
+    assert decisions.get_matchup_state().finalized is True
+
+
+def test_finalize_checks_readiness_before_freshness(decisions):
+    """A result that is not yet ready to finalise must still raise
+    ResultNotReadyError even when the AFL evidence behind it is stale --
+    the two checks are independent and readiness is checked first."""
+    with pytest.raises(ResultNotReadyError):
+        finalize(_FakeResult("LIVE"), decisions, "too early", afl_client=_FreshnessStub(fresh=False))
 
 
 def test_actors_are_well_defined_non_impersonating_operators():

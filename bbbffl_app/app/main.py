@@ -5,6 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.afl_client import AflApiClient, AflApiError
+from app.afl_resilience import ResilientAflClient, RetryPolicy
 from app.audit import AuditEventRepository
 from app.config import get_settings
 from app.db import DecisionsRepository, connect
@@ -15,6 +16,7 @@ from app.scorer_decisions import (
     InvalidPositionError,
     InvalidSlotError,
     ResultNotReadyError,
+    StaleAflEvidenceError,
     UnknownTeamError,
 )
 from app.service import PlayerIdentityCache
@@ -43,10 +45,25 @@ async def lifespan(app: FastAPI):
     migrate(settings.database_url)
     database = connect(settings.database_url)
 
-    afl_client = AflApiClient(
+    afl_transport = AflApiClient(
         base_url=settings.afl_api_base_url,
         api_key=settings.afl_api_key,
         timeout=settings.afl_api_timeout_seconds,
+        connect_timeout=settings.afl_api_connect_timeout_seconds,
+        read_timeout=settings.afl_api_read_timeout_seconds,
+    )
+    # ResilientAflClient is a drop-in AflDataSource: it adds bounded
+    # transient retry/backoff, per-endpoint stale-cache fallback, and
+    # diagnostics around afl_transport without changing what any consumer
+    # (app/service.py, app/lockouts.py, app/calculations.py) calls or gets
+    # back. See app/afl_resilience.py and docs/afl-client-resilience.md.
+    afl_client = ResilientAflClient(
+        afl_transport,
+        retry_policy=RetryPolicy(
+            max_attempts=settings.afl_api_retry_max_attempts,
+            base_delay_seconds=settings.afl_api_retry_base_delay_seconds,
+            max_delay_seconds=settings.afl_api_retry_max_delay_seconds,
+        ),
     )
     teams = get_teams(settings.teams_config_path)
 
@@ -147,3 +164,9 @@ async def competition_finalized_handler(request: Request, exc: CompetitionFinali
 @app.exception_handler(ResultNotReadyError)
 async def result_not_ready_handler(request: Request, exc: ResultNotReadyError) -> JSONResponse:
     return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(StaleAflEvidenceError)
+async def stale_afl_evidence_handler(request: Request, exc: StaleAflEvidenceError) -> JSONResponse:
+    logger.warning("finalisation refused: %s", exc)
+    return JSONResponse(status_code=503, content={"detail": str(exc)})

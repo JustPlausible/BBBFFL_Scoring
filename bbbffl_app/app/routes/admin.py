@@ -116,8 +116,22 @@ def finalize(payload: FinalizeRequest, request: Request):
     # why a second afl-api round trip after the write commits would be
     # unsafe.
     result = build_matchup_state(state.afl_client, state.teams, state.decisions, state.identity_cache)
-    finalize_result(result, state.decisions, payload.note)
+    finalize_result(result, state.decisions, payload.note, afl_client=state.afl_client)
     return _current_state(request)
+
+
+@router.get("/afl-diagnostics", dependencies=[Depends(require_admin)])
+def afl_diagnostics(request: Request):
+    """Read-only, secret-safe diagnostic snapshot of the afl-api dependency:
+    per-endpoint evidence status (fresh/stale/unavailable/invalid), last
+    success/failure and failure class, and the most recent correlation ID
+    (see app/afl_resilience.py and app/afl_diagnostics.py). Never includes
+    AFL_API_KEY or any request header -- there is nothing secret in this
+    report by construction. Returns an empty report if the configured AFL
+    client does not support diagnostics (e.g. a bare AflApiClient)."""
+    afl_client = request.app.state.afl_client
+    evidence_report = getattr(afl_client, "evidence_report", None)
+    return evidence_report() if callable(evidence_report) else {"dependency": "afl-api", "endpoints": {}}
 
 
 @router.get("/audit-events", dependencies=[Depends(require_admin)])

@@ -190,7 +190,7 @@ def finalize_superscore(payload: FinalizeRequest, request: Request):
         state.afl_client, config.entries, state.superscore_decisions, config.season, config.afl_round,
         state.identity_cache,
     )
-    finalize_result(result, state.superscore_decisions, payload.note)
+    finalize_result(result, state.superscore_decisions, payload.note, afl_client=state.afl_client)
     return _current_state(request)
 
 

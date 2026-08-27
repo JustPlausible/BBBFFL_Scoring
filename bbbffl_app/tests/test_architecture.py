@@ -62,6 +62,15 @@ SEASON_MODEL = {
 # app.lineups for the POSITIONS vocabulary) but is still not HTTP-routed.
 LOCKOUTS = {"app.lockouts"}
 
+# AFL resilience boundary (roadmap package 05, issue #37): retry/backoff,
+# cache/evidence-state and diagnostics wrapped directly around the
+# foundation `app.afl_client` transport. Only the composition root
+# (app.main) constructs and wires this wrapper -- every domain/service
+# module keeps depending on app.afl_client's plain dataclasses/duck-typed
+# AflDataSource protocol, never on this wrapper's concrete type, so it stays
+# a drop-in replacement rather than a new required dependency.
+AFL_RESILIENCE = {"app.afl_resilience", "app.afl_diagnostics"}
+
 # The Grand Final/SuperScore prototype vertical: coach-declared team config,
 # the scoring orchestration service, and the scorer-decision application
 # service that routes call. A sibling of the season-model domain, not a
@@ -72,7 +81,16 @@ ROUTES = {"app.routes", "app.routes.admin", "app.routes.public", "app.routes.sup
 
 COMPOSITION_ROOT = {"app.main"}
 
-ALL_GROUPS = FOUNDATION | PERSISTENCE_CORE | SEASON_MODEL | LOCKOUTS | GRAND_FINAL_VERTICAL | ROUTES | COMPOSITION_ROOT
+ALL_GROUPS = (
+    FOUNDATION
+    | PERSISTENCE_CORE
+    | SEASON_MODEL
+    | LOCKOUTS
+    | AFL_RESILIENCE
+    | GRAND_FINAL_VERTICAL
+    | ROUTES
+    | COMPOSITION_ROOT
+)
 
 
 def _dotted_module_name(path: Path) -> str:
@@ -250,6 +268,17 @@ def test_season_model_and_lockouts_do_not_depend_on_routes_or_grand_final_vertic
     modules, never in a route handler (issue #36)."""
     forbidden = GRAND_FINAL_VERTICAL | ROUTES | COMPOSITION_ROOT
     for module in sorted(SEASON_MODEL | LOCKOUTS):
+        offending = graph[module] & forbidden
+        assert not offending, f"{module} must not depend on {sorted(offending)}"
+
+
+def test_afl_resilience_depends_only_on_foundation(graph):
+    """The retry/cache/diagnostics wrapper around afl-api (roadmap package
+    05, issue #37) sits directly on top of app.afl_client and app.audit --
+    it must not reach into any domain, lockouts, routes, the Grand Final
+    vertical, or the composition root."""
+    forbidden = SEASON_MODEL | LOCKOUTS | GRAND_FINAL_VERTICAL | ROUTES | COMPOSITION_ROOT
+    for module in sorted(AFL_RESILIENCE):
         offending = graph[module] & forbidden
         assert not offending, f"{module} must not depend on {sorted(offending)}"
 

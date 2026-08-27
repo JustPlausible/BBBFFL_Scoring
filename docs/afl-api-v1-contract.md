@@ -365,15 +365,18 @@ not this contract-validation issue, per its explicit non-goals.
 
 ## 4. Future work belonging to package 05 or package 08
 
-Explicitly **not** done here, per this issue's non-goals — listed so
-nobody mistakes their absence for an oversight:
+**Package 05 is now done** — see
+[`docs/afl-client-resilience.md`](afl-client-resilience.md) (issue #37) for
+the explicit timeout policy, bounded retry/backoff, request correlation,
+and response cache with freshness/provenance metadata built around
+`AflApiClient`. The remaining items below were explicitly **not** done as
+part of this issue (#18) — listed so nobody mistakes their absence for an
+oversight:
 
-- retry/backoff, timeouts-as-policy, request-ID correlation, or a response
-  cache with freshness/provenance (package 05);
 - consuming `lifecycle.finality`, `metadata.source_updated_at`, roster,
   injury, or interchange data in application/scoring code (packages
-  05/11/23/27, as annotated per-endpoint above);
-- fixing the null-vs-zero coercion gap in §2 (package 05/27);
+  11/23/27, as annotated per-endpoint above);
+- fixing the null-vs-zero coercion gap in §2 (package 27);
 - the full deterministic AFL evidence fixture corpus for the 2026 replay
   (package 08) — this issue's fixtures are deliberately the smaller,
   representative set the issue asks for, not that corpus;

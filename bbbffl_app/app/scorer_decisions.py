@@ -69,6 +69,16 @@ class ResultNotReadyError(ScorerDecisionError):
     """Finalisation was attempted before every relevant AFL match completed."""
 
 
+class StaleAflEvidenceError(ScorerDecisionError):
+    """Finalisation was attempted, but the AFL evidence `result` was computed
+    from was not confirmed fresh (a resilient client fell back to a stale
+    cache, or an endpoint it needed is currently unavailable). Roadmap
+    package 05 / issue #37 requires authoritative BBBFFL finalisation to
+    fail closed rather than silently freeze a result against evidence that
+    might not reflect afl-api's current truth -- retry once afl-api (or the
+    client's cache) recovers."""
+
+
 def _ensure_known_team(team_keys, team_key: str) -> None:
     if team_key not in team_keys:
         raise UnknownTeamError(f"Unknown team_key: {team_key}")
@@ -120,7 +130,14 @@ def set_override(
     decisions.set_override(team_key, position, override_score, reason, actor=actor)
 
 
-def finalize(result, decisions, note: str | None, *, actor: ActorContext = ADMIN_ACTOR) -> None:
+def finalize(
+    result,
+    decisions,
+    note: str | None,
+    *,
+    actor: ActorContext = ADMIN_ACTOR,
+    afl_client=None,
+) -> None:
     """Freeze an already-computed `result` (a `service.MatchupResult` or
     `service.SuperScoreResult`) as the official outcome.
 
@@ -132,11 +149,29 @@ def finalize(result, decisions, note: str | None, *, actor: ActorContext = ADMIN
     finalisation. `decisions.finalize()` remains the sole owner of the
     write transaction (domain row + audit event, see `app/db.py`); this
     function only decides whether finalising is currently legal.
+
+    `afl_client` is the same client `result` was just computed from. If it
+    exposes `is_evidence_fresh()` (see `app.afl_resilience.
+    ResilientAflClient`) and that reports False -- i.e. some AFL fact this
+    result depends on was served from a stale cache, or is currently
+    unavailable -- finalisation is refused with `StaleAflEvidenceError`
+    rather than freezing a result that might not reflect afl-api's current
+    truth (roadmap package 05 / issue #37: authoritative BBBFFL workflows
+    fail closed on stale/unavailable AFL evidence). Omitting `afl_client`
+    (the default) skips this check entirely -- every existing caller that
+    does not pass one keeps its exact prior behaviour.
     """
     if result.status != "AWAITING_SCORER_SIGNOFF":
         raise ResultNotReadyError(
             "Cannot finalise until all relevant AFL matches are complete "
             "(status must be AWAITING_SCORER_SIGNOFF)."
+        )
+    is_evidence_fresh = getattr(afl_client, "is_evidence_fresh", None)
+    if callable(is_evidence_fresh) and not is_evidence_fresh():
+        raise StaleAflEvidenceError(
+            "Refusing to finalise: the AFL evidence behind this result was not "
+            "confirmed fresh (a stale cache fallback or an unavailable afl-api "
+            "endpoint was used). Retry once afl-api recovers."
         )
     snapshot = dataclasses.asdict(result)
     decisions.finalize(note, snapshot, actor=actor)

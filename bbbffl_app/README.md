@@ -286,6 +286,21 @@ diagnostic that validates a real deployment is in
 `scripts/afl_contract_diagnostic.py` — see the contract report for how to
 run it; it is never part of CI or plain `pytest`.
 
+## afl-api resilience, cache and diagnostics
+
+`app/afl_client.py`'s `AflApiClient` (the validated transport) is wrapped by
+`app/afl_resilience.py`'s `ResilientAflClient`, which adds explicit
+connect/read timeout budgets, bounded transient retry/backoff, a
+non-authoritative per-endpoint stale-fallback cache with explicit
+freshness metadata, and secret-safe diagnostics
+(`GET /api/admin/afl-diagnostics`). Authoritative finalisation
+(`app.scorer_decisions.finalize`, used by both the Grand Final and
+SuperScore admin routes) fails closed with HTTP `503` when the AFL evidence
+behind a result was not confirmed fresh. Full design, retry/cache policy,
+and stale-data rules are documented in
+[`../docs/afl-client-resilience.md`](../docs/afl-client-resilience.md)
+(issue #37 / roadmap package 05).
+
 ## Remaining known assumptions / blockers
 
 1. `data/grand_final_teams.json` currently contains **placeholder**

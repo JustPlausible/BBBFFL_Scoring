@@ -26,12 +26,12 @@ ROSTER_SLOTS = SCORABLE_POSITIONS + ("Interchange",)
 class PlayerStats:
     """A single player's raw AFL statistics for one match, as sourced from afl-api."""
 
-    goals: int = 0
-    behinds: int = 0
-    disposals: int = 0
-    marks: int = 0
-    hitouts: int = 0
-    tackles: int = 0
+    goals: int | None = 0
+    behinds: int | None = 0
+    disposals: int | None = 0
+    marks: int | None = 0
+    hitouts: int | None = 0
+    tackles: int | None = 0
 
 
 @dataclass(frozen=True)
@@ -50,7 +50,9 @@ class ScoringRules:
         return cls(**(value or {}))
 
 
-def score_position(position: str, stats: PlayerStats, rules: ScoringRules | None = None) -> float:
+def score_position(
+    position: str, stats: PlayerStats, rules: ScoringRules | None = None
+) -> float | None:
     """Compute the BBBFFL score for a starting position given a player's stats.
 
     `position` must be one of SCORABLE_POSITIONS. "Interchange" is deliberately
@@ -58,12 +60,20 @@ def score_position(position: str, stats: PlayerStats, rules: ScoringRules | None
     """
     rules = rules or ScoringRules()
     if position in FORWARD_POSITIONS:
+        if stats.goals is None or stats.behinds is None:
+            return None
         return rules.forward_goal * stats.goals + rules.forward_behind * stats.behinds
     if position in MIDFIELD_POSITIONS:
+        if stats.disposals is None:
+            return None
         return rules.midfield_disposal * stats.disposals
     if position == "Ruck":
+        if stats.marks is None or stats.hitouts is None:
+            return None
         return rules.ruck_mark * stats.marks + rules.ruck_hitout * stats.hitouts
     if position == "Tackler":
+        if stats.tackles is None:
+            return None
         return rules.tackler_tackle * stats.tackles
     raise ValueError(
         f"'{position}' cannot be scored directly. Interchange must be scored "

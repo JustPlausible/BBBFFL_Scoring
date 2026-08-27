@@ -25,6 +25,22 @@ def test_starting_player_scores_from_afl_stats(teams, decisions, single_match, p
     assert fwd1.match_state == "live"
 
 
+def test_partial_stat_line_keeps_required_null_unscored_without_crashing(
+    teams, decisions, single_match, players_on_one_match
+):
+    stats = {100: {1: stat_line(1, goals=3, behinds=None, hitouts=None)}}
+    result = build_matchup_state(
+        FakeAflClient([single_match], players_on_one_match, stats), teams, decisions
+    )
+
+    team_a = next(t for t in result.teams if t.team_key == "team_a")
+    forward = _positions_by_name(team_a)["Forward1"]
+    assert forward.calculated_score is None
+    assert forward.effective_score is None
+    assert forward.football_line == "—"
+    assert team_a.total_score == 0
+
+
 def test_dnp_starter_leaves_position_vacant_and_recommends_interchange(
     teams, decisions, single_match, players_on_one_match
 ):

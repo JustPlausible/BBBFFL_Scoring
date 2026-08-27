@@ -91,6 +91,35 @@ def test_potential_scores_use_the_canonical_scoring_engine(
     assert ir.potential_scores.tackler == score_position("Tackler", raw) == 30
 
 
+def test_partial_interchange_stats_only_withhold_affected_potential_formulas(
+    partial_teams, decisions, single_match, players_on_one_match
+):
+    stats = {
+        100: {
+            9: stat_line(
+                9,
+                goals=2,
+                behinds=1,
+                disposals=20,
+                marks=3,
+                hitouts=None,
+                tackles=4,
+            )
+        }
+    }
+    result = build_matchup_state(
+        FakeAflClient([single_match], players_on_one_match, stats),
+        partial_teams,
+        decisions,
+    )
+
+    potential = _team(result, "team_a").interchange.potential_scores
+    assert potential.forward == 13
+    assert potential.midfield == 20
+    assert potential.ruck is None
+    assert potential.tackler == 24
+
+
 def test_potential_scores_update_from_fresh_stat_line(
     partial_teams, decisions, single_match, players_on_one_match
 ):

@@ -12,6 +12,8 @@ from app.db import connect
 from app.migrations import migrate
 from app.round_mapping import RoundMappingRepository
 from tests.test_competition_lifecycle import KnownRound, operational
+from tests.test_calculations import Facts, setup_round
+from app.calculations import MatchupCalculationService
 
 
 @pytest.fixture(scope="module")
@@ -98,3 +100,28 @@ def test_concurrent_first_calculation_creates_revisions_one_and_two(
         (matchup_id,),
     ).fetchone()
     assert persisted["revision"] == 2
+
+
+def test_concurrent_identical_first_service_calculations_settle_at_revision_one(
+    postgres_database,
+):
+    database, lifecycle, round_, stats = setup_round(postgres_database, year=2104)
+    matchup_id = lifecycle.list_matchups(round_.bbbffl_round_id)[0].matchup_id
+    ready = threading.Barrier(2)
+
+    def calculate():
+        ready.wait(timeout=5)
+        return MatchupCalculationService(database, Facts(stats)).calculate_matchup(
+            matchup_id, upstream_revision="same", observed_at="2104-01-01T00:00:00Z"
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: calculate(), range(2)))
+
+    assert [result.revision for result in results] == [1, 1]
+    persisted = postgres_database.execute(
+        "SELECT revision, input_fingerprint FROM bbbffl_matchup_calculation WHERE matchup_id=?",
+        (matchup_id,),
+    ).fetchone()
+    assert persisted["revision"] == 1
+    assert persisted["input_fingerprint"] == results[0].input_fingerprint

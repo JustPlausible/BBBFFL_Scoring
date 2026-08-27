@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 import hashlib
 import json
 
-from app.db import _for_update_suffix, transaction
+from app.db import transaction
 from app.scoring import PlayerStats, ScoringRules, score_position
 from app.season import _now
 
@@ -77,7 +77,7 @@ class MatchupCalculationService:
             if slot["position"] != "Interchange":
                 if stat is None:
                     score = 0
-                elif all(value is not None for key, value in raw.items() if key != "canonical_player_id"):
+                else:
                     score = score_position(POSITION_MAP[slot["position"]], PlayerStats(**{key: value for key, value in raw.items() if key != "canonical_player_id"}), rules)
                 if score is not None:
                     total += score
@@ -87,16 +87,24 @@ class MatchupCalculationService:
     def _persist(self, matchup, context, home, away, snapshot, fingerprint, upstream_revision, observed_at):
         encoded = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
         with transaction(self.database) as conn:
-            current = conn.execute("SELECT * FROM bbbffl_matchup_calculation WHERE matchup_id=?" + _for_update_suffix(self.database), (matchup["matchup_id"],)).fetchone()
-            if current and current["input_fingerprint"] == fingerprint:
-                return current["revision"]
-            revision = current["revision"] + 1 if current else 1
-            values = (revision, encoded, fingerprint, context["season_id"], context["rules_version_id"], context["bbbffl_round_id"], home["season_entry_id"], away["season_entry_id"], home["lineup_id"], home["lineup_version"], away["lineup_id"], away["lineup_version"], upstream_revision, observed_at, ENGINE_VERSION, _now(), matchup["matchup_id"])
-            if current:
-                conn.execute("UPDATE bbbffl_matchup_calculation SET revision=?, snapshot=?, input_fingerprint=?, season_id=?, rules_version_id=?, bbbffl_round_id=?, home_season_entry_id=?, away_season_entry_id=?, home_lineup_id=?, home_lineup_version=?, away_lineup_id=?, away_lineup_version=?, upstream_revision=?, upstream_observed_at=?, engine_version=?, updated_at=? WHERE matchup_id=?", values)
-            else:
-                conn.execute("INSERT INTO bbbffl_matchup_calculation (revision,snapshot,input_fingerprint,season_id,rules_version_id,bbbffl_round_id,home_season_entry_id,away_season_entry_id,home_lineup_id,home_lineup_version,away_lineup_id,away_lineup_version,upstream_revision,upstream_observed_at,engine_version,updated_at,matchup_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", values)
-        return revision
+            # A missing row cannot be protected by SELECT FOR UPDATE.  This
+            # upsert makes first-write creation and revision comparison one
+            # PostgreSQL operation: identical contenders retain revision 1;
+            # different facts serialize and advance it monotonically.
+            row = conn.execute(
+                "INSERT INTO bbbffl_matchup_calculation "
+                "(matchup_id,revision,snapshot,input_fingerprint,season_id,rules_version_id,bbbffl_round_id,home_season_entry_id,away_season_entry_id,home_lineup_id,home_lineup_version,away_lineup_id,away_lineup_version,upstream_revision,upstream_observed_at,engine_version,updated_at) "
+                "VALUES (?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT (matchup_id) DO UPDATE SET "
+                "revision=CASE WHEN bbbffl_matchup_calculation.input_fingerprint=excluded.input_fingerprint THEN bbbffl_matchup_calculation.revision ELSE bbbffl_matchup_calculation.revision+1 END, "
+                "snapshot=CASE WHEN bbbffl_matchup_calculation.input_fingerprint=excluded.input_fingerprint THEN bbbffl_matchup_calculation.snapshot ELSE excluded.snapshot END, "
+                "input_fingerprint=excluded.input_fingerprint, season_id=excluded.season_id, rules_version_id=excluded.rules_version_id, bbbffl_round_id=excluded.bbbffl_round_id, "
+                "home_season_entry_id=excluded.home_season_entry_id, away_season_entry_id=excluded.away_season_entry_id, home_lineup_id=excluded.home_lineup_id, home_lineup_version=excluded.home_lineup_version, "
+                "away_lineup_id=excluded.away_lineup_id, away_lineup_version=excluded.away_lineup_version, upstream_revision=excluded.upstream_revision, upstream_observed_at=excluded.upstream_observed_at, engine_version=excluded.engine_version, updated_at=excluded.updated_at "
+                "RETURNING revision",
+                (matchup["matchup_id"], encoded, fingerprint, context["season_id"], context["rules_version_id"], context["bbbffl_round_id"], home["season_entry_id"], away["season_entry_id"], home["lineup_id"], home["lineup_version"], away["lineup_id"], away["lineup_version"], upstream_revision, observed_at, ENGINE_VERSION, _now()),
+            ).fetchone()
+        return row["revision"]
 
     def _round_context(self, round_id):
         row = self.database.execute("SELECT l.*, c.rules_version_id, v.scoring_rules FROM bbbffl_round_lifecycle l JOIN competition_stream c ON c.competition_id=l.competition_id JOIN season_rules_version v ON v.rules_version_id=c.rules_version_id WHERE l.bbbffl_round_id=?", (round_id,)).fetchone()

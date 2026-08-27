@@ -21,23 +21,23 @@ class Facts:
         return self.stats
 
 
-def setup_round():
-    db = migrated_connection()
-    lifecycle, round_, entries = operational(db, 2027, 77)
+def setup_round(db=None, *, year=2027):
+    db = db or migrated_connection()
+    lifecycle, round_, entries = operational(db, year, 77)
     lifecycle.transition(round_.bbbffl_round_id, "open")
     scope = db.execute("SELECT c.season_id,c.competition_id FROM bbbffl_round r JOIN competition_stream c ON c.competition_id=r.competition_id WHERE r.bbbffl_round_id=?", (round_.bbbffl_round_id,)).fetchone()
     stats = {}
     now = _now()
     with db.engine.begin() as conn:
         for index, entry in enumerate(entries):
-            lineup_id = f"lineup-{index}"
+            lineup_id = f"lineup-{year}-{index}"
             conn.exec_driver_sql("INSERT INTO weekly_lineup VALUES (?,?,?,?,?,?,1,?,?)", (lineup_id, scope["season_id"], scope["competition_id"], round_.bbbffl_round_id, entry.season_entry_id, 1, now, now))
             conn.exec_driver_sql("INSERT INTO weekly_lineup_submission VALUES (?,1,1,?,'coach',NULL,'coach','coach',NULL,NULL)", (lineup_id, now))
             for position in POSITIONS:
                 player = None
                 if position in ("F1", "Interchange"):
                     canonical = 1000 + index * 2 + (position == "Interchange")
-                    player = f"player-{canonical}"
+                    player = f"player-{year}-{canonical}"
                     conn.exec_driver_sql("INSERT INTO season_player_pool VALUES (?,?,?,?,?,NULL,1,'afl-api',?,NULL,?,?)", (player, scope["season_id"], canonical, f"P{canonical}", 1, now, now, now))
                     if index != 0 or position != "F1":
                         stats[canonical] = PlayerStatLine(canonical, goals=index + 1)
@@ -79,3 +79,22 @@ def test_two_rule_versions_drive_the_shared_scoring_core():
     facts = PlayerStats(goals=2, behinds=1)
     assert score_position("Forward1", facts, ScoringRules.from_dict(None)) == 13
     assert score_position("Forward1", facts, ScoringRules.from_dict({"forward_goal": 10})) == 21
+
+
+def test_partial_upstream_stat_is_retained_and_slot_score_remains_unresolved():
+    db, _, round_, stats = setup_round()
+    player_id = next(player_id for player_id in stats if player_id % 2 == 0)
+    stats[player_id] = PlayerStatLine(player_id, goals=2, behinds=None)
+
+    calculations = MatchupCalculationService(db, Facts(stats)).calculate_round(
+        round_.bbbffl_round_id
+    )
+    evidence = [
+        slot
+        for calculation in calculations
+        for side in ("home", "away")
+        for slot in calculation.snapshot[side]["slots"]
+        if slot["canonical_player_id"] == player_id
+    ]
+    assert evidence[0]["stats"]["behinds"] is None
+    assert evidence[0]["score"] is None

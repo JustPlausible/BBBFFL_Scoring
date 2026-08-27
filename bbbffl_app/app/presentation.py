@@ -56,8 +56,8 @@ def format_football_line(goals: Number, behinds: Number) -> str:
 
 @dataclass(frozen=True)
 class FootballScore:
-    goals: Number
-    behinds: Number
+    goals: Number | None
+    behinds: Number | None
     # True only when goals/behinds are the player's literal AFL statistics
     # for a Forward position; False for every Midfield/Ruck/Tackler
     # conversion, and for a Forward whose override no longer matches their
@@ -66,12 +66,14 @@ class FootballScore:
 
     @property
     def line(self) -> str:
+        if self.goals is None or self.behinds is None:
+            return "—"
         return format_football_line(self.goals, self.behinds)
 
 
 def football_score_for_position(
     position: str,
-    effective_score: Number,
+    effective_score: Number | None,
     stat_goals: int | None = None,
     stat_behinds: int | None = None,
 ) -> FootballScore:
@@ -83,6 +85,8 @@ def football_score_for_position(
     known; pass None when there is no stat line (e.g. an unnamed/vacant/DNP
     position, or a match that hasn't produced stats yet).
     """
+    if effective_score is None:
+        return FootballScore(goals=None, behinds=None, is_actual_afl=False)
     if (
         position in FORWARD_POSITIONS
         and stat_goals is not None

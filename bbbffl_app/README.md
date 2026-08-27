@@ -50,6 +50,10 @@ bbbffl_app/
                        # entries and is shared, unmodified in its scoring
                        # logic, by both the Grand Final (2 teams) and
                        # SuperScore (N entries, ranked instead of compared)
+    scorer_decisions.py # application service the routes below call for
+                         # DNP/interchange/override/finalize -- validates
+                         # team_key/slot/position and lock state, then
+                         # delegates the write to db.py's DecisionsRepository
     routes/            # health, public (read-only), admin (scorer-gated),
                         # superscore (public + admin, opt-in, 404s when
                         # SuperScore isn't configured)
@@ -71,6 +75,15 @@ sheet, matching the brief:
 AFL stats -> calculated BBBFFL score -> optional scorer override -> effective BBBFFL score
 coach selection + AFL facts + scorer decisions -> official BBBFFL score
 ```
+
+This directory also holds the season-aware 2027 domain modules not yet wired
+to any route (`season.py`, `identity.py`, `player_pool.py`, `fixtures.py`,
+`round_mapping.py`, `competition_lifecycle.py`, `lineups.py`, `lockouts.py`,
+`calculations.py`) -- each documented in its own file under `../docs/`. See
+[`../docs/architecture.md`](../docs/architecture.md) for how all of the
+modules above (routed and not-yet-routed) fit together: the intended
+dependency direction, the service/repository boundary each one implements,
+and where transaction ownership sits for a multi-write operation.
 
 ## Scoring rules
 

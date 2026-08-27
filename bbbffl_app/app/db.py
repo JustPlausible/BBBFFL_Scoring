@@ -109,6 +109,7 @@ class _Result:
     them after the connection that produced them has already been released
     back to the pool."""
     def __init__(self, sa_result):
+        self.rowcount = sa_result.rowcount
         self._rows = sa_result.mappings().all() if sa_result.returns_rows else []
     def fetchall(self):
         return self._rows

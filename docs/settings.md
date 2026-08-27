@@ -83,9 +83,16 @@ same rule: `app/main.py`'s startup log line reports `environment`,
 
 This issue validates and exposes the mode; it does not itself build the
 replay harness (`Replay: Not required` in issue #38's own scope, and
-roadmap package 32 is separate, later work). Today only `live` is wired
-into `app/main.py`'s `AflApiClient` construction. A consumer that actually
-swaps in deterministic evidence for `replay` arrives with package 32.
+roadmap package 32 is separate, later work). No replay-backed
+`AflDataSource` exists in this codebase yet, so `get_settings()` accepting
+a well-formed `replay` declaration as valid configuration is not the same
+as this build being able to run one. `app/main.py`'s lifespan closes that
+gap: it refuses to start outright when `settings.afl_mode == "replay"`
+(raising `ReplayModeNotWiredError`), before migrations run or
+`AflApiClient` is constructed. This is what makes "declaring replay must
+make live AFL access impossible" hold today, not just once package 32
+lands. A consumer that actually swaps in deterministic evidence -- and
+removes this refusal -- arrives with package 32.
 
 ## AFL consumer contract version
 

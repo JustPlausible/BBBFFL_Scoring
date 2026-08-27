@@ -46,10 +46,18 @@ evidence instead of a live afl-api deployment, and must be declared
 explicitly: setting it also requires `BBBFFL_AFL_REPLAY_EVIDENCE_PATH`, so
 a replay/deterministic run can never silently fall back to live afl-api
 access just because that path was left unset. "replay" is refused outright
-in production, which must always use live access. Today only "live" is
-wired into `app/main.py`'s AFL client construction -- validating and
-exposing "replay" here is this issue's scope; a consumer that actually
-swaps in deterministic evidence arrives with roadmap package 32.
+in production, which must always use live access.
+
+`get_settings()` accepts a well-formed "replay" declaration as valid
+configuration -- the settings boundary's job is validating shape, not
+implementing behaviour. No replay-backed `AflDataSource` exists in this
+codebase yet, though (that consumer is roadmap package 32), so
+`app/main.py`'s lifespan refuses to start outright when
+`settings.afl_mode == "replay"`, before migrations run or `AflApiClient`
+is constructed (`ReplayModeNotWiredError`). This is what makes "declaring
+replay must make live AFL access impossible" hold today, not just once
+package 32 lands -- a settings value this build cannot yet fulfill fails
+closed rather than quietly falling through to `AflApiClient`.
 
 ## AFL consumer contract version
 
@@ -163,7 +171,10 @@ class Settings:
     # "live" (default) talks to the configured afl-api deployment. "replay"
     # declares a deterministic/replay run and requires
     # afl_replay_evidence_path -- see the module docstring's "AFL access
-    # mode" section. Forbidden in production.
+    # mode" section. Forbidden in production. A well-formed "replay" value
+    # passes validation here, but app/main.py's lifespan refuses to start
+    # with it (no replay-backed AflDataSource exists yet) -- this field is
+    # not itself a guarantee that replay execution is available.
     afl_mode: str
     afl_replay_evidence_path: str | None
     database_path: str

@@ -73,9 +73,10 @@ avoidably-stale data when afl-api is healthy.
 from __future__ import annotations
 
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Protocol, TypeVar
+from typing import Any, Callable, Iterator, Protocol, TypeVar
 
 from app.afl_client import (
     AflApiConnectionError,
@@ -245,6 +246,36 @@ class CacheEntry:
     fetched_at: float
 
 
+class EvidenceBatch:
+    """Observes every `ResilientAflClient` call made while active (see
+    `ResilientAflClient.evidence_batch`) and answers whether *all of them*
+    were FRESH.
+
+    `ResilientAflClient.is_evidence_fresh()` alone only reflects each
+    endpoint *label*'s single most recent call -- if a build fetches
+    player-stats for two different matches and the first falls back to a
+    stale cache while the second succeeds live, the second call's FRESH
+    record overwrites the first's STALE one under the shared "player_stats"
+    label, so `is_evidence_fresh()` would wrongly report True even though
+    part of the result is stale. A batch instead tracks every distinct call
+    made during it (regardless of endpoint or cache key), so one stale fact
+    among many still fails the batch. Exposes the same `is_evidence_fresh()`
+    name as `ResilientAflClient` so `app.scorer_decisions.finalize`'s
+    duck-typed check works against either."""
+
+    def __init__(self) -> None:
+        self._touched = False
+        self._all_fresh = True
+
+    def _observe(self, status: EvidenceStatus) -> None:
+        self._touched = True
+        if status != EvidenceStatus.FRESH:
+            self._all_fresh = False
+
+    def is_evidence_fresh(self) -> bool:
+        return self._touched and self._all_fresh
+
+
 class AflTransport(Protocol):
     """The subset of `AflApiClient` this module wraps -- also satisfied by
     any fake transport a test supplies."""
@@ -289,6 +320,7 @@ class ResilientAflClient:
         self._cache_policies = {**DEFAULT_CACHE_POLICIES, **(cache_policies or {})}
         self._cache: dict[tuple[str, Any], CacheEntry] = {}
         self.diagnostics = diagnostics or AflDiagnosticsRegistry()
+        self._active_batch: EvidenceBatch | None = None
 
     def close(self) -> None:
         close = getattr(self._transport, "close", None)
@@ -337,53 +369,87 @@ class ResilientAflClient:
         `app.afl_diagnostics.AflDiagnosticsRegistry.as_dict`."""
         return self.diagnostics.as_dict()
 
+    @contextmanager
+    def evidence_batch(self) -> Iterator[EvidenceBatch]:
+        """Scopes freshness checking to exactly the calls made inside this
+        `with` block -- see `EvidenceBatch`. Prefer this over
+        `is_evidence_fresh()` around a "build a result, then maybe finalise
+        it" sequence (see `app/routes/admin.py`'s finalize handler), since
+        `is_evidence_fresh()` alone can miss a stale fact mixed in among
+        several fresh ones fetched under the same endpoint label. The app
+        only ever opens one such sequence at a time, but nesting is still
+        well-defined: only the innermost open batch observes calls made
+        while it is open, and the outer batch (unaware of those calls)
+        becomes active again once the inner one exits.
+        """
+        batch = EvidenceBatch()
+        previous = self._active_batch
+        self._active_batch = batch
+        try:
+            yield batch
+        finally:
+            self._active_batch = previous
+
     # -- internals ----------------------------------------------------------
 
     def _call(self, endpoint: str, cache_key: Any, fetch: Callable[[], T]) -> T:
         correlation_id = new_correlation_id()
         policy = self._cache_policies.get(endpoint, EndpointCachePolicy(stale_ttl_seconds=0))
-        now = self._clock.now()
         try:
             value = call_with_retry(fetch, policy=self._retry_policy, sleeper=self._sleeper)
         except Exception as exc:  # noqa: BLE001 -- reclassified and re-raised below
+            # Sampled *after* every retry/backoff attempt, not before --
+            # retries can consume real time, and the stale-window check
+            # below must charge that elapsed time against the cache entry's
+            # age rather than pretending the whole retry sequence was
+            # instantaneous (a P2 review finding on this PR).
+            now = self._clock.now()
             failure_class = classify_failure(exc)
             if failure_class in RETRYABLE_FAILURE_CLASSES:
                 entry = self._cache.get((endpoint, cache_key))
                 if entry is not None and (now - entry.fetched_at) <= policy.stale_ttl_seconds:
-                    self.diagnostics.record(
-                        endpoint,
-                        EvidenceStatus.STALE,
-                        failure_class=failure_class,
-                        correlation_id=correlation_id,
-                        cache_age_seconds=now - entry.fetched_at,
-                        detail=_safe_detail(exc),
-                    )
+                    self._record(endpoint, EvidenceStatus.STALE, correlation_id, failure_class=failure_class,
+                                 cache_age_seconds=now - entry.fetched_at, detail=_safe_detail(exc))
                     return entry.value
-                self.diagnostics.record(
-                    endpoint,
-                    EvidenceStatus.UNAVAILABLE,
-                    failure_class=failure_class,
-                    correlation_id=correlation_id,
-                    detail=_safe_detail(exc),
-                )
+                self._record(endpoint, EvidenceStatus.UNAVAILABLE, correlation_id, failure_class=failure_class,
+                             detail=_safe_detail(exc))
                 raise AflEvidenceUnavailableError(endpoint, cause=exc) from exc
             # Non-retryable: a contract/schema incompatibility or a genuine
             # client-side error. Never consult the cache here -- an
             # incompatible upstream response must stay visible, not be
             # hidden behind stale-but-structurally-valid cached data.
             status = EvidenceStatus.INVALID if failure_class == FailureClass.CONTRACT_ERROR else EvidenceStatus.UNAVAILABLE
-            self.diagnostics.record(
-                endpoint,
-                status,
-                failure_class=failure_class,
-                correlation_id=correlation_id,
-                detail=_safe_detail(exc),
-            )
+            self._record(endpoint, status, correlation_id, failure_class=failure_class, detail=_safe_detail(exc))
             raise
         else:
+            # Sampled after the live fetch completes (see the comment in the
+            # except branch above) -- fetched_at reflects when the value was
+            # actually obtained, not when this call started.
+            now = self._clock.now()
             self._cache[(endpoint, cache_key)] = CacheEntry(value=value, fetched_at=now)
-            self.diagnostics.record(endpoint, EvidenceStatus.FRESH, correlation_id=correlation_id)
+            self._record(endpoint, EvidenceStatus.FRESH, correlation_id)
             return value
+
+    def _record(
+        self,
+        endpoint: str,
+        status: EvidenceStatus,
+        correlation_id: str,
+        *,
+        failure_class: FailureClass | None = None,
+        detail: str | None = None,
+        cache_age_seconds: float | None = None,
+    ) -> None:
+        self.diagnostics.record(
+            endpoint,
+            status,
+            failure_class=failure_class,
+            correlation_id=correlation_id,
+            detail=detail,
+            cache_age_seconds=cache_age_seconds,
+        )
+        if self._active_batch is not None:
+            self._active_batch._observe(status)
 
 
 def _safe_detail(exc: BaseException) -> str:

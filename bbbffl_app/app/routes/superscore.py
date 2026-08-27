@@ -13,6 +13,8 @@ main.py) -- opt-in means the feature is invisible, not just inert, when
 disabled.
 """
 
+from contextlib import nullcontext
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
@@ -183,14 +185,22 @@ def set_superscore_override(payload: OverrideRequest, request: Request):
 def finalize_superscore(payload: FinalizeRequest, request: Request):
     state = request.app.state
     config = state.superscore_config
-    # Computed once and passed to finalize_result() as the frozen snapshot --
-    # see app.scorer_decisions.finalize's docstring for why a second afl-api
-    # round trip after the write commits would be unsafe.
-    result = build_superscore_state(
-        state.afl_client, config.entries, state.superscore_decisions, config.season, config.afl_round,
-        state.identity_cache,
-    )
-    finalize_result(result, state.superscore_decisions, payload.note, afl_client=state.afl_client)
+    afl_client = state.afl_client
+    # See app/routes/admin.py's finalize handler for why this scopes the
+    # freshness check to an evidence_batch() rather than
+    # is_evidence_fresh() alone.
+    evidence_batch = getattr(afl_client, "evidence_batch", None)
+    scope = evidence_batch() if callable(evidence_batch) else nullcontext(afl_client)
+    with scope as evidence:
+        # Computed once and passed to finalize_result() as the frozen
+        # snapshot -- see app.scorer_decisions.finalize's docstring for why
+        # a second afl-api round trip after the write commits would be
+        # unsafe.
+        result = build_superscore_state(
+            afl_client, config.entries, state.superscore_decisions, config.season, config.afl_round,
+            state.identity_cache,
+        )
+        finalize_result(result, state.superscore_decisions, payload.note, afl_client=evidence)
     return _current_state(request)
 
 

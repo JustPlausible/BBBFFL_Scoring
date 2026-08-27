@@ -399,6 +399,105 @@ def test_close_delegates_to_transport_close():
 # -- Secret redaction -----------------------------------------------------
 
 
+def test_evidence_batch_catches_a_stale_call_masked_by_a_later_fresh_one():
+    """Regression for a review finding on this PR: is_evidence_fresh() alone
+    only reflects each endpoint *label*'s single most recent call. Scoring a
+    round with two matches fetches player-stats twice under the same
+    "player_stats" label -- if the first falls back to stale and the second
+    succeeds live, the plain per-endpoint status would show FRESH even
+    though part of the result is stale. evidence_batch() must still catch
+    it because it tracks every call made during the batch, not just the
+    latest one per label."""
+    transport = ScriptedTransport(
+        [["match-1-stats"], AflApiConnectionError("/x"), ["match-2-stats"]]
+    )
+    clock = FakeClock()
+    client = ResilientAflClient(
+        transport,
+        clock=clock,
+        sleeper=FakeSleeper(clock),
+        retry_policy=RetryPolicy(max_attempts=1),
+        cache_policies={"player_stats": EndpointCachePolicy(stale_ttl_seconds=100)},
+    )
+    with client.evidence_batch() as batch:
+        client.get_match_player_stats(1)  # fresh, primes the cache under key 1
+        client.get_match_player_stats(1)  # fails live -> served stale from cache
+        client.get_match_player_stats(2)  # fresh, a *different* cache key
+
+    # The naive per-endpoint-label view would say "fresh" (endpoint
+    # "player_stats"'s single most recent call succeeded) -- proving the
+    # bug this batch exists to catch.
+    assert client.evidence_report()["endpoints"]["player_stats"]["status"] == "fresh"
+    assert client.is_evidence_fresh() is True
+
+    # The batch, having observed all three calls, correctly reports False.
+    assert batch.is_evidence_fresh() is False
+
+
+def test_evidence_batch_reports_fresh_when_every_call_inside_it_is_fresh():
+    transport = ScriptedTransport([["a"], ["b"]])
+    client = ResilientAflClient(transport, sleeper=FakeSleeper(FakeClock()))
+    with client.evidence_batch() as batch:
+        client.get_matches(1)
+        client.get_player(2)
+    assert batch.is_evidence_fresh() is True
+
+
+def test_evidence_batch_reports_not_fresh_when_untouched():
+    client = ResilientAflClient(ScriptedTransport([]), sleeper=FakeSleeper(FakeClock()))
+    with client.evidence_batch() as batch:
+        pass
+    assert batch.is_evidence_fresh() is False
+
+
+def test_evidence_batch_does_not_observe_calls_made_outside_it():
+    transport = ScriptedTransport([["before"], AflApiConnectionError("/x")])
+    clock = FakeClock()
+    client = ResilientAflClient(
+        transport, clock=clock, sleeper=FakeSleeper(clock), retry_policy=RetryPolicy(max_attempts=1)
+    )
+    client.get_matches(1)  # fresh, outside any batch
+    with client.evidence_batch() as batch:
+        with pytest.raises(AflEvidenceUnavailableError):
+            client.get_player(2)  # unavailable, inside the batch
+    assert batch.is_evidence_fresh() is False
+
+
+def test_stale_ttl_accounts_for_time_consumed_during_retries():
+    """Regression for a review finding on this PR: the clock used to decide
+    whether a cached value is still within its stale window must be sampled
+    *after* retries/backoff, not before -- otherwise a slow retry sequence
+    can serve a cache entry that is already older than its configured
+    maximum age. Uses the default multi-attempt RetryPolicy so the fake
+    sleeper's backoff delays actually advance the clock mid-call."""
+    transport = ScriptedTransport(
+        [
+            ["live-value"],
+            AflApiConnectionError("/x"),
+            AflApiConnectionError("/x"),
+            AflApiConnectionError("/x"),
+        ]
+    )
+    clock = FakeClock()
+    sleeper = FakeSleeper(clock)
+    client = ResilientAflClient(
+        transport,
+        clock=clock,
+        sleeper=sleeper,
+        retry_policy=RetryPolicy(max_attempts=3, base_delay_seconds=3.0, multiplier=1.0, max_delay_seconds=3.0),
+        cache_policies={"matches": EndpointCachePolicy(stale_ttl_seconds=5)},
+    )
+    assert client.get_matches(1) == ["live-value"]
+    clock.advance(4)  # entry is 4s old -- within the 5s window at call start
+    # Three attempts fail, sleeping 3s after each of the first two (bounded
+    # by max_attempts=3) -- 6s of retry time elapses during this one call,
+    # so by the time the stale-fallback decision is made the entry is 10s
+    # old, past the 5s window.
+    with pytest.raises(AflEvidenceUnavailableError):
+        client.get_matches(1)
+    assert sum(sleeper.calls) == 6.0
+
+
 def test_diagnostics_never_expose_the_api_key_or_headers():
     """Even when the underlying transport failure text could theoretically
     carry request context, AflApiTimeoutError/AflApiConnectionError/

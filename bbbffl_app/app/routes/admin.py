@@ -17,6 +17,7 @@ surface over that trail -- not an audit UI.
 """
 
 import dataclasses
+from contextlib import nullcontext
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -111,12 +112,24 @@ def set_override(payload: OverrideRequest, request: Request):
 @router.post("/finalize", dependencies=[Depends(require_admin)])
 def finalize(payload: FinalizeRequest, request: Request):
     state = request.app.state
-    # Computed exactly once here and passed to finalize_result() as the
-    # frozen snapshot -- see app.scorer_decisions.finalize's docstring for
-    # why a second afl-api round trip after the write commits would be
-    # unsafe.
-    result = build_matchup_state(state.afl_client, state.teams, state.decisions, state.identity_cache)
-    finalize_result(result, state.decisions, payload.note, afl_client=state.afl_client)
+    afl_client = state.afl_client
+    # A ResilientAflClient's evidence_batch() scopes the freshness check
+    # passed to finalize_result() to exactly the calls build_matchup_state
+    # makes here -- is_evidence_fresh() alone can miss a stale fact fetched
+    # under the same endpoint label as a later fresh one (see
+    # app.afl_resilience.EvidenceBatch). Falls back to the plain client
+    # (nullcontext) for any AFL client that doesn't support batching, e.g.
+    # a bare AflApiClient or a test double -- finalize_result() already
+    # handles a client with no is_evidence_fresh() at all.
+    evidence_batch = getattr(afl_client, "evidence_batch", None)
+    scope = evidence_batch() if callable(evidence_batch) else nullcontext(afl_client)
+    with scope as evidence:
+        # Computed exactly once here and passed to finalize_result() as the
+        # frozen snapshot -- see app.scorer_decisions.finalize's docstring
+        # for why a second afl-api round trip after the write commits would
+        # be unsafe.
+        result = build_matchup_state(afl_client, state.teams, state.decisions, state.identity_cache)
+        finalize_result(result, state.decisions, payload.note, afl_client=evidence)
     return _current_state(request)
 
 

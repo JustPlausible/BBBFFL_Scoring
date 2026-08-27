@@ -159,6 +159,25 @@ read. This is what stale AFL data cannot silently masquerade as fresh
 evidence: any consumer that cares about that distinction (see below) can
 ask.
 
+`is_evidence_fresh()` alone tracks freshness per *endpoint label*
+("matches", "player_stats", ...), not per distinct fact -- if a round has
+two matches, fetching player-stats for both makes two calls under the same
+"player_stats" label, and a later fresh call's record would overwrite an
+earlier stale one. `ResilientAflClient.evidence_batch()` (a context
+manager) fixes this by tracking every distinct call made while it is open,
+so one stale fact mixed in among several fresh ones still fails the batch:
+
+```python
+with afl_client.evidence_batch() as evidence:
+    result = build_matchup_state(afl_client, teams, decisions, identity_cache)
+    finalize(result, decisions, note, afl_client=evidence)  # checks evidence.is_evidence_fresh()
+```
+
+Both admin routes (`app/routes/admin.py`, `app/routes/superscore.py`) use
+this pattern, falling back to the plain client (via `contextlib.nullcontext`)
+for any AFL client that does not support batching -- `finalize()` already
+tolerates a client with no `is_evidence_fresh()` at all.
+
 ## How stale evidence is represented, and how finalisation fails closed
 
 `app/scorer_decisions.py::finalize` -- the function both the Grand Final
@@ -169,9 +188,11 @@ routes call to freeze an official result -- accepts an optional
 any AFL fact the just-computed result depends on was served stale or is
 currently unavailable, finalisation is refused with `StaleAflEvidenceError`
 (mapped to HTTP `503` by `app/main.py`) rather than freezing a result that
-might not reflect afl-api's current truth. Both admin routes pass
-`state.afl_client` (the real `ResilientAflClient` in production) into this
-call.
+might not reflect afl-api's current truth. Both admin routes pass an
+`EvidenceBatch` (see above) scoped to the `build_matchup_state`/
+`build_superscore_state` call that produced the result, not the client's
+own `is_evidence_fresh()` directly, so a stale fact fetched under the same
+endpoint label as a later fresh one is still caught.
 
 This check is purely additive and backward compatible: `afl_client`
 defaults to `None`, and any caller that omits it (every existing direct
@@ -272,6 +293,10 @@ cover, entirely offline and without real time:
   retried and never masked by an available stale cache;
 - diagnostics accurately reflecting dependency, endpoint, failure class and
   correlation ID;
+- an `evidence_batch()` catching a stale call masked by a later fresh one
+  under the same endpoint label, which `is_evidence_fresh()` alone misses;
+- the stale-window check charging elapsed retry/backoff time against a
+  cache entry's age, not just the time before retries started;
 - credential/API-key redaction (by construction, exercised end-to-end);
 - `scorer_decisions.finalize` failing closed on stale/unavailable evidence,
   succeeding on fresh evidence, and staying backward compatible for every

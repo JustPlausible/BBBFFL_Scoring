@@ -73,6 +73,22 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Upgrade twice and exercise scorer persistence and audit boundary
         run: |
+          python -m app.migrations upgrade 0007_fixture
+          python - <<'PY'
+          import os
+          from sqlalchemy import text
+          from app.db import connect
+          from app.season import SeasonRepository
+
+          connection = connect(os.environ["BBBFFL_DATABASE_URL"])
+          seasons = SeasonRepository(connection)
+          season = seasons.create_season(2026, "2026 migration replay")
+          rules = seasons.create_rules_version(season.season_id, "ci", 1, "CI")
+          competition = seasons.create_competition(season.season_id, rules.rules_version_id, "ci", "CI", "ordinary")
+          round_ = seasons.create_round(competition.competition_id, "r1", "Round 1", 1)
+          with connection.engine.begin() as raw:
+              raw.execute(text("INSERT INTO bbbffl_round_afl_reference VALUES ('ci-legacy-map', :round, 'afl-api-v1', 84, 1300, 't')"), {"round": round_.bbbffl_round_id})
+          PY
           python -m app.migrations upgrade
           python -m app.migrations upgrade
           python - <<'PY'
@@ -82,9 +98,14 @@ jobs:
           from app.fixtures import FixtureRepository
           from app.identity import IdentityRepository
           from app.season import SeasonRepository
+          from app.round_mapping import RoundMappingRepository
           from sqlalchemy.exc import DBAPIError, IntegrityError
 
           connection = connect(os.environ["BBBFFL_DATABASE_URL"])
+          migrated_round = connection.execute("SELECT bbbffl_round_id FROM round_afl_mapping WHERE mapping_id='ci-legacy-map'").fetchone()
+          resolved = RoundMappingRepository(connection).resolve(migrated_round["bbbffl_round_id"])
+          assert resolved and resolved.afl_season_id == 84 and resolved.afl_round_id == 1300
+          assert "bbbffl_round_afl_reference" not in {row["tablename"] for row in connection.execute("SELECT tablename FROM pg_tables WHERE schemaname='public'").fetchall()}
           repository = DecisionsRepository(connection)
           repository.set_dnp("ci-team", "Forward1", True, actor=ActorContext.anonymous_operator(role="scorer"))
           assert repository.get_dnp_map() == {("ci-team", "Forward1"): True}

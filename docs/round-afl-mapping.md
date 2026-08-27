@@ -16,6 +16,13 @@ authorised correction requires a reason, appends a new accepted revision, moves
 the current pointer, and records before/after state in the common append-only
 audit log. The prior revision remains queryable as mapping history.
 
+Migration `0008_round_map` promotes each unambiguous legacy
+`bbbffl_round_afl_reference` row to accepted revision 1 while retaining its
+mapping ID, provider IDs and timestamp, then removes the legacy table. A legacy
+round with multiple references stops the upgrade for an explicit ruling rather
+than silently selecting one. `RoundMappingRepository` is consequently the only
+writable and resolvable mapping boundary after upgrade.
+
 ## 2026 evidence
 
 The 2026 workbook findings establish 20 ordinary rounds followed by a four-week

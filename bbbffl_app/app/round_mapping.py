@@ -62,12 +62,14 @@ class RoundMappingRepository:
                 if current["state"] == "accepted":
                     raise ValueError("accepted mapping requires authorised correction")
                 mapping_id, revision = head["mapping_id"], head["current_revision"] + 1
+                before = self._state(current)
                 conn.execute("UPDATE round_afl_mapping SET current_revision=? WHERE mapping_id=?", (revision, mapping_id))
             else:
                 mapping_id, revision = _id(), 1
+                before = None
                 conn.execute("INSERT INTO round_afl_mapping VALUES (?, ?, ?, ?)", (mapping_id, bbbffl_round_id, revision, _now()))
             self._insert_revision(conn, mapping_id, revision, state, provider, afl_season_id, afl_round_id, actor, reason)
-            append_event(conn, actor=actor, action=MAPPING_REVISED, entity_type="round.afl_mapping", entity_id=mapping_id, entity_version=str(revision), after_state={"state": state, "afl_season_id": afl_season_id, "afl_round_id": afl_round_id}, reason=reason)
+            append_event(conn, actor=actor, action=MAPPING_REVISED, entity_type="round.afl_mapping", entity_id=mapping_id, entity_version=str(revision), before_state=before, after_state={"state": state, "afl_season_id": afl_season_id, "afl_round_id": afl_round_id}, reason=reason)
             return self._get(conn, mapping_id)
 
     def accept(self, bbbffl_round_id: str, afl_season_id: int, afl_round_id: int, validator: AflReferenceValidator, *, provider: str = "afl-api-v1", actor: ActorContext = ActorContext.anonymous_operator("admin"), reason: str | None = None) -> RoundMapping:
@@ -118,6 +120,10 @@ class RoundMappingRepository:
     @staticmethod
     def _current(conn, mapping_id):
         return conn.execute("SELECT r.* FROM round_afl_mapping m JOIN round_afl_mapping_revision r ON r.mapping_id=m.mapping_id AND r.revision=m.current_revision WHERE m.mapping_id=?", (mapping_id,)).fetchone()
+
+    @staticmethod
+    def _state(row):
+        return {"state": row["state"], "afl_season_id": row["afl_season_id"], "afl_round_id": row["afl_round_id"]}
 
     @staticmethod
     def _select(current=True):

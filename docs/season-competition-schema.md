@@ -28,7 +28,7 @@ season being reconstructed did; isolation comes from its distinct `season_id`,
 not by misclassifying those streams as `replay`.
 
 `bbbffl_round` belongs to a competition stream and has a stable UUID plus a
-stream-scoped key, label and sequence. `bbbffl_round_afl_reference` maps it to
+stream-scoped key, label and sequence. The versioned round mapping boundary maps it to
 the integer `season_id` and `round_id` supplied by the pinned `afl-api` v1
 contract. The provider reference is not a BBBFFL primary key and no AFL fixture,
 statistics or other upstream facts are copied. Multiple BBBFFL stream rounds may

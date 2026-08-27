@@ -65,6 +65,32 @@ def test_unresolved_and_ambiguous_mappings_fail_closed(domain):
     assert mappings.resolve(ambiguous.bbbffl_round_id) is None
 
 
+def test_revised_proposal_audit_preserves_before_and_after(domain):
+    database, mappings, make = domain
+    round_ = make(2026)
+    first = mappings.propose(round_.bbbffl_round_id, state="unresolved")
+    mappings.propose(
+        round_.bbbffl_round_id,
+        state="ambiguous",
+        afl_season_id=84,
+        afl_round_id=1390,
+        reason="Two historical interpretations remain",
+    )
+    events = AuditEventRepository(database).list_events(
+        entity_type="round.afl_mapping", entity_id=first.mapping_id
+    )
+    assert events[-1].before_state == {
+        "state": "unresolved",
+        "afl_season_id": None,
+        "afl_round_id": None,
+    }
+    assert events[-1].after_state == {
+        "state": "ambiguous",
+        "afl_season_id": 84,
+        "afl_round_id": 1390,
+    }
+
+
 def test_ordinary_and_superscore_independently_share_afl_context(domain):
     _, mappings, make = domain
     ordinary = make(2027, round_key="final-1")

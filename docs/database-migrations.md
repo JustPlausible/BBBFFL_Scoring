@@ -1,5 +1,9 @@
 # Relational database and migration policy
 
+Weekly lineup drafts and immutable submission versions are introduced by
+`0011_lineups`; see [weekly lineup persistence](weekly-lineups.md) for their
+authority, revision and concurrency guarantees.
+
 ## Supported databases and approach
 
 PostgreSQL is the supported production database. SQLite remains supported for

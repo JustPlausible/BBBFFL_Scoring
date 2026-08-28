@@ -148,6 +148,96 @@ def test_both_response_and_facts_present_is_rejected(tmp_path, monkeypatch):
         afl_evidence.load("v1/synthetic/season.json")
 
 
+def test_player_stats_match_id_mismatch_against_provenance_is_rejected(tmp_path, monkeypatch):
+    """A player-stats capture filed under match_9503 (and whose provenance
+    says match_id=9503) but whose embedded response.match.match_id is
+    accidentally 9504 must fail loudly -- build_client() would otherwise
+    silently serve the wrong match's stats for the 9503 route."""
+    monkeypatch.setattr(afl_evidence, "FIXTURES_ROOT", tmp_path)
+    provenance = _base_provenance(
+        endpoint_kind="player_stats",
+        endpoint="GET /api/v1/matches/{match_id}/player-stats",
+        match_id=9503,
+        round_id=1500,
+        season_id=85,
+    )
+    response = {
+        "match": {"match_id": 9504, "round_id": 1500, "season_id": 85, "status": "CONCLUDED"},
+        "lifecycle": {"finality": "final"},
+        "players": [],
+    }
+    _write(
+        tmp_path,
+        "v1/synthetic/season_85/round_1500/match_9503/player_stats.json",
+        {"provenance": provenance, "response": response},
+    )
+    with pytest.raises(EvidenceValidationError, match="match.match_id"):
+        afl_evidence.load("v1/synthetic/season_85/round_1500/match_9503/player_stats.json")
+
+
+def test_malformed_nested_match_team_shape_raises_validation_error_not_typeerror(tmp_path, monkeypatch):
+    """A malformed matches fixture with a null home_team must raise
+    EvidenceValidationError, not an uncaught TypeError from dereferencing
+    the malformed shape."""
+    monkeypatch.setattr(afl_evidence, "FIXTURES_ROOT", tmp_path)
+    provenance = _base_provenance(endpoint_kind="matches", endpoint="GET /api/v1/rounds/{round_id}/matches")
+    response = {
+        "matches": [{"match_id": 1, "status": "UPCOMING", "home_team": None, "away_team": {"team_id": 1, "name": "A"}}]
+    }
+    _write(tmp_path, "v1/synthetic/season.json", {"provenance": provenance, "response": response})
+    with pytest.raises(EvidenceValidationError, match="home_team"):
+        afl_evidence.load("v1/synthetic/season.json")
+
+
+def test_malformed_lifecycle_shape_raises_validation_error_not_attributeerror(tmp_path, monkeypatch):
+    monkeypatch.setattr(afl_evidence, "FIXTURES_ROOT", tmp_path)
+    provenance = _base_provenance(endpoint_kind="player_stats", endpoint="GET /api/v1/matches/{match_id}/player-stats")
+    response = {"match": {"match_id": 1}, "lifecycle": None, "players": []}
+    _write(tmp_path, "v1/synthetic/season.json", {"provenance": provenance, "response": response})
+    with pytest.raises(EvidenceValidationError, match="lifecycle.finality"):
+        afl_evidence.load("v1/synthetic/season.json")
+
+
+def test_captured_bbbffl_historical_record_loads_via_the_bbbffl_record_envelope(tmp_path, monkeypatch):
+    """The captured_bbbffl_historical classification must actually be
+    usable: a persisted BBBFFL record (not an afl-api response) loads
+    through a 'bbbffl_record' envelope key, distinct from 'response' and
+    'facts'."""
+    monkeypatch.setattr(afl_evidence, "FIXTURES_ROOT", tmp_path)
+    provenance = _base_provenance(
+        classification="captured_bbbffl_historical",
+        derivation="bbbffl_recorded",
+        endpoint=None,
+        endpoint_kind="bbbffl_record",
+    )
+    envelope = {
+        "provenance": provenance,
+        "bbbffl_record": {"record_kind": "matchup_calculation", "matchup_id": "m-1", "home": {"score": 55}},
+    }
+    _write(tmp_path, "v1/captured_bbbffl_historical/record.json", envelope)
+    fixture = afl_evidence.load("v1/captured_bbbffl_historical/record.json")
+    assert fixture.bbbffl_record["record_kind"] == "matchup_calculation"
+    assert fixture.response is None
+    assert fixture.facts is None
+
+
+def test_bbbffl_record_without_record_kind_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(afl_evidence, "FIXTURES_ROOT", tmp_path)
+    provenance = _base_provenance(
+        classification="captured_bbbffl_historical",
+        derivation="bbbffl_recorded",
+        endpoint=None,
+        endpoint_kind="bbbffl_record",
+    )
+    _write(
+        tmp_path,
+        "v1/captured_bbbffl_historical/record.json",
+        {"provenance": provenance, "bbbffl_record": {"matchup_id": "m-1"}},
+    )
+    with pytest.raises(EvidenceValidationError, match="record_kind"):
+        afl_evidence.load("v1/captured_bbbffl_historical/record.json")
+
+
 # --- No credentials/secrets in committed fixture metadata -------------------
 
 

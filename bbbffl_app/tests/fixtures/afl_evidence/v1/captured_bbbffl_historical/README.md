@@ -11,4 +11,7 @@ afl-api evidence and the loader/classification infrastructure only; no
 2026 BBBFFL round has produced historical evidence for this repository to
 capture yet. Populate this directory the same way as `captured/` (see
 `docs/afl-evidence-fixtures.md`) once there is real BBBFFL history to
-record, using `derivation: "bbbffl_recorded"`.
+record, using `derivation: "bbbffl_recorded"` and the
+`{"provenance": {...}, "bbbffl_record": {"record_kind": "...", ...}}`
+envelope (not `response` -- a BBBFFL-internal record is never an
+`afl-api` response shape).

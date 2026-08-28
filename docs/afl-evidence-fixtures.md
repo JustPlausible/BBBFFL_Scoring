@@ -96,6 +96,25 @@ of its own:
 }
 ```
 
+or, for a `captured_bbbffl_historical` snapshot of a persisted BBBFFL
+record (also not an `afl-api` response):
+
+```json
+{
+  "provenance": { "...": "..." },
+  "bbbffl_record": { "record_kind": "matchup_calculation", "...": "..." }
+}
+```
+
+A fixture has **exactly one** of `response`/`facts`/`bbbffl_record` —
+`endpoint_kind: "scorer_ruling_note"` pairs only with `facts` and
+`classification: "unresolved"`; `endpoint_kind: "bbbffl_record"` pairs
+only with `bbbffl_record` and `classification: "captured_bbbffl_historical"`;
+every other `endpoint_kind` pairs only with `response`. `bbbffl_record` is
+not validated against the `afl-api` contract (it isn't one) but must at
+least be a self-describing object with a non-empty `record_kind`, not an
+arbitrary untyped blob.
+
 **Provenance travels embedded in the same file as the payload it
 describes.** This is deliberate: issue #40 requires provenance to "remain
 attached to the fixture if files are later reorganised or copied", and an
@@ -213,11 +232,24 @@ call) structurally validates the fixture:
   `season_<id>`/`round_<id>`/`match_<id>` path segments;
 - an `unresolved`/`facts` fixture sets `endpoint: null`,
   `endpoint_kind: "scorer_ruling_note"`, and `facts.requires_scorer_ruling: true`;
-  every other fixture has exactly one of `response`/`facts` and a real
-  `afl-api`-shaped `response` for its `endpoint_kind` (required wrapper
-  key(s) and fields per `seasons`/`rounds`/`matches`/`player_stats`/
+  a `captured_bbbffl_historical`/`bbbffl_record` fixture sets `endpoint: null`,
+  `endpoint_kind: "bbbffl_record"`, and a non-empty `bbbffl_record.record_kind`;
+  every other fixture has exactly one of `response`/`facts`/`bbbffl_record`
+  and a real `afl-api`-shaped `response` for its `endpoint_kind` (required
+  wrapper key(s) and fields per `seasons`/`rounds`/`matches`/`player_stats`/
   `player_detail` — e.g. `matches` entries need `match_id`, `status`,
-  `home_team{team_id,name}`, `away_team{team_id,name}`);
+  `home_team{team_id,name}`, `away_team{team_id,name}`, with both team
+  objects validated as objects before their own fields are checked, so a
+  malformed `home_team: null` fails as `EvidenceValidationError` rather
+  than an uncaught `TypeError`);
+- a `response`'s own embedded identifiers agree with the fixture's
+  provenance: a `matches`/`rounds` entry's `season_id`/`round_id`, a
+  `player_stats` response's `match.match_id`/`round_id`/`season_id`, and a
+  `player_detail` response's `player.canonical_player_id` (when provenance
+  lists specific `canonical_player_ids`) must all match what the fixture's
+  own provenance claims — this catches a fixture accidentally filed under
+  the right path/provenance but actually containing a *different* match's
+  or player's data, which structural shape-checking alone cannot see;
 - no field anywhere in the file looks like a credential/secret (`api_key`,
   `x-api-key`, `token`, `authorization`, `password`, `secret`, `bearer`,
   case/punctuation-insensitive).
@@ -285,9 +317,12 @@ replacing history.
 ### Populating `captured_bbbffl_historical`
 
 Follow the same "new file, real provenance, never edit history" approach,
-using `derivation: "bbbffl_recorded"` and citing the BBBFFL record (e.g. a
-persisted `bbbffl_matchup_calculation` snapshot) the fixture was taken
-from.
+using `derivation: "bbbffl_recorded"`, `endpoint: null`,
+`endpoint_kind: "bbbffl_record"`, and the `{"provenance": {...},
+"bbbffl_record": {"record_kind": "...", ...}}` envelope (not `response` —
+a BBBFFL-internal record is never an `afl-api` response shape). Cite the
+BBBFFL record (e.g. a persisted `bbbffl_matchup_calculation` snapshot) the
+fixture was taken from in `provenance.source`.
 
 ## Known limitations and follow-up
 

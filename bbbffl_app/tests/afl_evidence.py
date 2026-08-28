@@ -8,15 +8,20 @@ test-only branch or fixture awareness from this issue -- see
 `docs/afl-evidence-fixtures.md` for the full design rationale, directory
 convention, and refresh/addition policy.
 
-Every fixture file is a small JSON envelope:
+Every fixture file is a small JSON envelope, exactly one of:
 
-    {"provenance": {...}, "response": {...}}   -- a captured/synthetic
-                                                   afl-api endpoint response
-  or
-    {"provenance": {...}, "facts": {...}}      -- an "unresolved" scorer-
-                                                   ruling note with no
-                                                   afl-api response of its
-                                                   own
+    {"provenance": {...}, "response": {...}}       -- a captured/synthetic
+                                                       afl-api endpoint
+                                                       response
+    {"provenance": {...}, "facts": {...}}          -- an "unresolved"
+                                                       scorer-ruling note
+                                                       with no afl-api
+                                                       response of its own
+    {"provenance": {...}, "bbbffl_record": {...}}  -- a "captured_bbbffl_
+                                                       historical" snapshot
+                                                       of a persisted
+                                                       BBBFFL record, not
+                                                       an afl-api response
 
 Provenance travels embedded in the same file as the payload it describes,
 specifically so it survives a later file copy/reorganisation (issue #40's
@@ -69,7 +74,9 @@ _ALLOWED_DERIVATIONS = {
     "unresolved": {"hand_authored_edge_case"},
 }
 
-_ENDPOINT_KINDS = frozenset({"seasons", "rounds", "matches", "player_stats", "player_detail", "scorer_ruling_note"})
+_ENDPOINT_KINDS = frozenset(
+    {"seasons", "rounds", "matches", "player_stats", "player_detail", "scorer_ruling_note", "bbbffl_record"}
+)
 
 _REQUIRED_PROVENANCE_KEYS = frozenset(
     {
@@ -169,6 +176,7 @@ class EvidenceFixture:
     provenance: Provenance
     response: Any | None
     facts: dict | None
+    bbbffl_record: dict | None = None
 
 
 def _normalise_key(key: str) -> str:
@@ -254,7 +262,38 @@ def _validate_provenance(where: str, raw: Any, path_parts: tuple[str, ...]) -> N
         )
 
 
-def _validate_response_shape(where: str, endpoint_kind: str, response: Any) -> None:
+def _check_matches_identity(where: str, entry: dict, provenance: dict) -> None:
+    """A match row's own season_id/round_id must agree with the fixture's
+    provenance -- otherwise a fixture filed under the wrong season/round
+    path (or containing a copy-paste error) would pass structural
+    validation while actually describing a different match entirely."""
+    for field in ("season_id", "round_id"):
+        actual, expected = entry.get(field), provenance.get(field)
+        _require(
+            expected is None or actual is None or actual == expected,
+            where,
+            f"match entry {field} {actual!r} does not match this fixture's provenance {field} {expected!r}",
+        )
+
+
+def _check_player_stats_identity(where: str, response: dict, provenance: dict) -> None:
+    """The embedded `match` block's own identifiers must agree with the
+    fixture's provenance match/round/season_id -- otherwise a player-stats
+    capture filed under (say) match_9503 but actually describing match 9504
+    would pass structural validation and get silently served for the wrong
+    match by `build_client()`."""
+    match = response["match"]
+    for field in ("match_id", "round_id", "season_id"):
+        actual, expected = match.get(field), provenance.get(field)
+        _require(
+            expected is None or actual is None or actual == expected,
+            where,
+            f"player_stats match.{field} {actual!r} does not match this fixture's provenance {field} {expected!r}",
+        )
+
+
+def _validate_response_shape(where: str, provenance: dict, response: Any) -> None:
+    endpoint_kind = provenance["endpoint_kind"]
     if endpoint_kind == "seasons":
         _require(
             isinstance(response, dict) and isinstance(response.get("seasons"), list), where, "expected a 'seasons' list"
@@ -275,36 +314,50 @@ def _validate_response_shape(where: str, endpoint_kind: str, response: Any) -> N
                 where,
                 "each round entry needs round_id, round_number and byes",
             )
+            _require(
+                provenance.get("season_id") is None or entry.get("season_id") in (None, provenance["season_id"]),
+                where,
+                f"round entry season_id {entry.get('season_id')!r} does not match this fixture's provenance season_id {provenance['season_id']!r}",
+            )
     elif endpoint_kind == "matches":
         _require(
             isinstance(response, dict) and isinstance(response.get("matches"), list), where, "expected a 'matches' list"
         )
         for entry in response["matches"]:
+            has_required_keys = isinstance(entry, dict) and {"match_id", "status", "home_team", "away_team"} <= set(
+                entry
+            )
+            has_team_shapes = has_required_keys and all(
+                isinstance(entry[side], dict) and {"team_id", "name"} <= set(entry[side])
+                for side in ("home_team", "away_team")
+            )
             _require(
-                isinstance(entry, dict)
-                and {"match_id", "status", "home_team", "away_team"} <= set(entry)
-                and {"team_id", "name"} <= set(entry["home_team"])
-                and {"team_id", "name"} <= set(entry["away_team"]),
+                has_team_shapes,
                 where,
                 "each match entry needs match_id, status, home_team{team_id,name}, away_team{team_id,name}",
             )
+            _check_matches_identity(where, entry, provenance)
     elif endpoint_kind == "player_stats":
         _require(
             isinstance(response, dict) and {"match", "lifecycle", "players"} <= set(response),
             where,
             "expected top-level match, lifecycle and players keys",
         )
+        _require(isinstance(response["match"], dict), where, "player_stats 'match' must be an object")
         _require(
-            response["lifecycle"].get("finality") in ("final", "partial", "not_available"),
+            isinstance(response["lifecycle"], dict)
+            and response["lifecycle"].get("finality") in ("final", "partial", "not_available"),
             where,
             "lifecycle.finality must be one of final/partial/not_available",
         )
+        _require(isinstance(response["players"], list), where, "player_stats 'players' must be a list")
         for entry in response["players"]:
             _require(
                 isinstance(entry, dict) and "canonical_player_id" in entry and isinstance(entry.get("stats"), dict),
                 where,
                 "each player-stats row needs canonical_player_id and a stats object",
             )
+        _check_player_stats_identity(where, response, provenance)
     elif endpoint_kind == "player_detail":
         _require(
             isinstance(response, dict) and isinstance(response.get("player"), dict), where, "expected a 'player' object"
@@ -315,6 +368,13 @@ def _validate_response_shape(where: str, endpoint_kind: str, response: Any) -> N
             where,
             "player object needs canonical_player_id and display_name",
         )
+        ids = provenance.get("canonical_player_ids") or []
+        _require(
+            not ids or player.get("canonical_player_id") in ids,
+            where,
+            f"player.canonical_player_id {player.get('canonical_player_id')!r} is not in this fixture's "
+            f"provenance canonical_player_ids {ids!r}",
+        )
     else:  # pragma: no cover - guarded by _ENDPOINT_KINDS membership above
         raise EvidenceValidationError(f"{where}: endpoint_kind {endpoint_kind!r} has no response payload of its own")
 
@@ -323,8 +383,16 @@ def _validate_envelope(path: Path, envelope: Any) -> None:
     where = str(path)
     _require(isinstance(envelope, dict), where, "fixture file must contain a single JSON object")
     _require("provenance" in envelope, where, "missing 'provenance'")
-    has_response, has_facts = "response" in envelope, "facts" in envelope
-    _require(has_response != has_facts, where, "fixture must have exactly one of 'response' or 'facts'")
+    has_response, has_facts, has_bbbffl_record = (
+        "response" in envelope,
+        "facts" in envelope,
+        "bbbffl_record" in envelope,
+    )
+    _require(
+        sum((has_response, has_facts, has_bbbffl_record)) == 1,
+        where,
+        "fixture must have exactly one of 'response', 'facts' or 'bbbffl_record'",
+    )
 
     path_parts = path.relative_to(FIXTURES_ROOT).parts
     _validate_provenance(where, envelope["provenance"], path_parts)
@@ -346,13 +414,40 @@ def _validate_envelope(path: Path, envelope: Any) -> None:
             where,
             "facts.requires_scorer_ruling must be true",
         )
+    elif has_bbbffl_record:
+        # A persisted BBBFFL record (a past round's scoring/lockout/lineup
+        # snapshot) is not an afl-api response, so it never goes through
+        # `_validate_response_shape`'s afl-api contract checks -- but it
+        # still carries a minimal self-describing shape (a non-empty
+        # `record_kind`) rather than being an arbitrary untyped blob.
+        _require(
+            provenance["endpoint"] is None,
+            where,
+            "a 'bbbffl_record' fixture must not set an endpoint (it is not an afl-api response)",
+        )
+        _require(
+            provenance["endpoint_kind"] == "bbbffl_record",
+            where,
+            "a 'bbbffl_record' fixture must use endpoint_kind 'bbbffl_record'",
+        )
+        _require(
+            provenance["classification"] == "captured_bbbffl_historical",
+            where,
+            "a 'bbbffl_record' fixture must be classified 'captured_bbbffl_historical'",
+        )
+        record = envelope["bbbffl_record"]
+        _require(
+            isinstance(record, dict) and bool(record.get("record_kind")),
+            where,
+            "bbbffl_record must be an object with a non-empty record_kind",
+        )
     else:
         _require(
-            provenance["endpoint_kind"] != "scorer_ruling_note",
+            provenance["endpoint_kind"] not in ("scorer_ruling_note", "bbbffl_record"),
             where,
-            "endpoint_kind 'scorer_ruling_note' must use 'facts', not 'response'",
+            f"endpoint_kind {provenance['endpoint_kind']!r} must not use 'response'",
         )
-        _validate_response_shape(where, provenance["endpoint_kind"], envelope["response"])
+        _validate_response_shape(where, provenance, envelope["response"])
 
     _scan_for_secrets(envelope, where)
 
@@ -378,6 +473,7 @@ def load(relative_path: str) -> EvidenceFixture:
         provenance=provenance,
         response=envelope.get("response"),
         facts=envelope.get("facts"),
+        bbbffl_record=envelope.get("bbbffl_record"),
     )
 
 

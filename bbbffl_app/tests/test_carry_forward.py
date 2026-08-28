@@ -319,7 +319,7 @@ def test_source_resubmitted_between_resolution_and_commit_fails_the_carry_forwar
                 scope["competition_id"],
                 rounds[0],
                 entry.season_entry_id,
-                {"F1": players[1].season_player_id},
+                complete_lineup(db, scope, entry, {"F1": players[1].season_player_id}),
                 expected_revision=1,
             )
             lineups.submit(draft.lineup_id, expected_draft_revision=draft.revision, expected_submission_version=1)

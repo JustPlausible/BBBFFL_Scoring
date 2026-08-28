@@ -15,6 +15,7 @@ from app.db import connect
 from app.lineup_proxy import LineupProxyService
 from app.lineups import WeeklyLineupRepository
 from app.migrations import migrate
+from app.player_pool import OwnershipRepository, PlayerPoolRepository
 from tests.test_lineups_concurrency import race
 
 
@@ -142,3 +143,79 @@ def test_two_concurrent_carry_forward_attempts_have_one_winner(postgres_url):
         scope["season_id"], scope["competition_id"], round2.bbbffl_round_id, entry.season_entry_id
     )
     assert lineups.get_effective_submission(lineup_id).version == 1
+
+
+def test_carry_forward_racing_a_resubmission_of_its_own_source_never_records_a_stale_source(postgres_url):
+    """The race the P1 review comment on this PR flagged: `resolve_source`
+    is a plain, unlocked read, done *before* `submit_positions` opens its
+    own transaction. If round 1 (the source) is resubmitted concurrently
+    with round 2's carry-forward, `require_unchanged` must make the
+    outcome safe either way -- never a carry-forward that both succeeds
+    and records a source_version that was no longer current by the time it
+    committed.
+
+    Only the resubmission (`attempt_resubmit_source`) ever mutates round
+    1's own row, so it always eventually succeeds (nothing else contends
+    for its `expected_submission_version` CAS); only the carry-forward can
+    lose, and only to `LineupConflictError` -- never by silently committing
+    stale provenance."""
+    db, round1, round2, entries, scope, player = postgres_context(postgres_url, 2303)
+    entry = entries[0]
+    other_player = PlayerPoolRepository(db).refresh_player(
+        scope["season_id"], 2303 * 100 + 1, "Second Concurrent Player"
+    )
+    OwnershipRepository(db).acquire(other_player.season_player_id, entry.season_entry_id)
+    lineups = WeeklyLineupRepository(db)
+    draft = lineups.save_draft(
+        scope["season_id"],
+        scope["competition_id"],
+        round1.bbbffl_round_id,
+        entry.season_entry_id,
+        {"F1": player.season_player_id},
+        expected_revision=0,
+    )
+    lineups.submit(draft.lineup_id, expected_draft_revision=1, expected_submission_version=0)
+    resubmit_draft = lineups.save_draft(
+        scope["season_id"],
+        scope["competition_id"],
+        round1.bbbffl_round_id,
+        entry.season_entry_id,
+        {"F1": other_player.season_player_id},
+        expected_revision=1,
+    )
+    carry_forward = CarryForwardService(db)
+
+    def attempt_carry_forward():
+        return carry_forward.carry_forward(
+            scope["season_id"],
+            scope["competition_id"],
+            round2.bbbffl_round_id,
+            entry.season_entry_id,
+            expected_submission_version=0,
+            actor=ActorContext.system(),
+            reason="not submitted by lockout",
+        )
+
+    def attempt_resubmit_source():
+        return lineups.submit(
+            resubmit_draft.lineup_id, expected_draft_revision=resubmit_draft.revision, expected_submission_version=1
+        )
+
+    carry_forward_result, resubmit_result = race([attempt_carry_forward, attempt_resubmit_source])
+
+    assert resubmit_result != "conflict"
+    assert resubmit_result.version == 2
+    if carry_forward_result != "conflict":
+        submitted, source = carry_forward_result
+        # If the carry-forward won the race to lock round 1's row, it must
+        # have observed (and recorded) round 1 still genuinely at version 1
+        # -- not a stale read papered over by luck.
+        assert source.source_version == 1
+        assert submitted.positions["F1"] == player.season_player_id
+
+    # Whichever order won, round 1's own history is untouched by the
+    # carry-forward attempt: only the resubmission ever changes it.
+    round1_lineup_id, _ = lineups.get_or_create_header(
+        scope["season_id"], scope["competition_id"], round1.bbbffl_round_id, entry.season_entry_id
+    )
+    assert lineups.get_effective_submission(round1_lineup_id).version == 2

@@ -11,7 +11,7 @@ from app.carry_forward import CarryForwardService, NoCarryForwardSourceError, re
 from app.competition_lifecycle import CompetitionLifecycleRepository
 from app.fixtures import FixtureRepository
 from app.identity import IdentityRepository
-from app.lineups import LineupIntegrityError, WeeklyLineupRepository
+from app.lineups import LineupConflictError, LineupIntegrityError, WeeklyLineupRepository
 from app.player_pool import OwnershipRepository, PlayerPoolRepository
 from app.round_mapping import RoundMappingRepository
 from app.season import SeasonRepository
@@ -273,6 +273,88 @@ def test_ownership_change_since_source_submission_fails_explicitly_rather_than_r
         scope["season_id"], scope["competition_id"], rounds[1], entry.season_entry_id
     )
     assert version == 0
+
+
+# ---------------------------------------------------------------------------
+# Concurrency: the source round itself can race the carry-forward
+# ---------------------------------------------------------------------------
+
+
+def test_source_resubmitted_between_resolution_and_commit_fails_the_carry_forward_atomically():
+    """`resolve_source` is a plain, unlocked read. If the *source* round's
+    own lineup is resubmitted after that read but before the target write
+    commits, `submit_positions`'s `require_unchanged` re-check (run under
+    the source row's own lock, inside the same transaction as the target
+    write) must catch it -- the carry-forward must never silently persist
+    a now-stale snapshot of the source, nor record stale source provenance.
+
+    Simulated deterministically (no threads) by monkeypatching
+    `get_or_create_header` -- called by `carry_forward` right after
+    `resolve_source`, before `submit_positions` -- to resubmit the source
+    round as a side effect, exactly the same injection technique
+    `tests/test_lineups.py::test_draft_read_cannot_mix_header_revision_
+    with_newer_slots` uses for its own read/write race."""
+    db, _, rounds, entries, scope, pool, ownership = context(rounds=2)
+    entry = entries[0]
+    players = acquire_players(pool, ownership, scope, entry, 1, 2)
+    lineups = WeeklyLineupRepository(db)
+    _, first = submit_round(lineups, scope, rounds[0], entry, {"F1": players[0].season_player_id})
+
+    service = CarryForwardService(db)
+    real_get_or_create_header = lineups.get_or_create_header
+    resubmitted_once = False
+
+    def resubmit_source_then_get_or_create_header(*args, **kwargs):
+        nonlocal resubmitted_once
+        if not resubmitted_once:
+            resubmitted_once = True
+            # A concurrent operation resubmits round 1 (a new version)
+            # between resolve_source's read and this call.
+            draft = lineups.save_draft(
+                scope["season_id"],
+                scope["competition_id"],
+                rounds[0],
+                entry.season_entry_id,
+                {"F1": players[1].season_player_id},
+                expected_revision=1,
+            )
+            lineups.submit(draft.lineup_id, expected_draft_revision=draft.revision, expected_submission_version=1)
+        return real_get_or_create_header(*args, **kwargs)
+
+    service._lineups.get_or_create_header = resubmit_source_then_get_or_create_header
+    try:
+        with pytest.raises(LineupConflictError, match="resubmitted"):
+            service.carry_forward(
+                scope["season_id"],
+                scope["competition_id"],
+                rounds[1],
+                entry.season_entry_id,
+                expected_submission_version=0,
+                actor=CARRY_FORWARD_ACTOR,
+            )
+    finally:
+        service._lineups.get_or_create_header = real_get_or_create_header
+
+    # Nothing was persisted for the target round -- the stale attempt left
+    # no trace, and the source's resubmission (version 2) is untouched.
+    lineup_id, version = lineups.get_or_create_header(
+        scope["season_id"], scope["competition_id"], rounds[1], entry.season_entry_id
+    )
+    assert version == 0
+    assert lineups.get_effective_submission(first.lineup_id).version == 2
+
+    # A fresh resolve now correctly picks up the resubmitted (version 2)
+    # source -- the mechanism fails safe, it doesn't wedge the round.
+    submitted, source = service.carry_forward(
+        scope["season_id"],
+        scope["competition_id"],
+        rounds[1],
+        entry.season_entry_id,
+        expected_submission_version=0,
+        actor=CARRY_FORWARD_ACTOR,
+    )
+    assert source.source_version == 2
+    assert submitted.positions["F1"] == players[1].season_player_id
 
 
 # ---------------------------------------------------------------------------

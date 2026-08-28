@@ -138,6 +138,16 @@ class CarryForwardService:
         submission (coach, another carry-forward, or a proxy submission)
         that lands first makes this one fail with `LineupConflictError`
         rather than silently overwrite newer authoritative state.
+
+        `resolve_source` above is a plain, unlocked read, so the source
+        round's own submission could in principle be resubmitted between
+        that read and this method's commit. `submit_positions` closes that
+        window: it re-locks and re-checks the source lineup's effective
+        version *inside* the same transaction as the target write (via
+        `require_unchanged`), so a source resubmitted mid-flight makes this
+        call fail with `LineupConflictError` rather than silently carrying
+        forward a now-stale snapshot -- never a second, independent
+        read-then-write race.
         """
         source = self.resolve_source(season_id, competition_id, bbbffl_round_id, season_entry_id)
         if source is None:
@@ -160,6 +170,7 @@ class CarryForwardService:
             source_detail=source_detail,
             reason=reason,
             lock_guard=lock_guard,
+            require_unchanged=(source.source_lineup_id, source.source_version),
         )
         return submitted, source
 

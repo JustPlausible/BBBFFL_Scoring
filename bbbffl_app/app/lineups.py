@@ -224,6 +224,7 @@ class WeeklyLineupRepository:
         source_detail=None,
         reason=None,
         lock_guard=None,
+        require_unchanged=None,
     ):
         """Submit an explicit `positions` mapping -- e.g. an exact copy of a
         prior round's submitted lineup (see `app.carry_forward`) -- as a new
@@ -241,6 +242,21 @@ class WeeklyLineupRepository:
         `lock_guard` integration point -- via `_finalize_submission`, so
         lock evaluation is never duplicated for this submission source (see
         app/lockouts.py's module docstring).
+
+        `require_unchanged`, if given, is a `(lineup_id, expected_version)`
+        pair for a *second* lineup this submission's `positions` were
+        derived from (e.g. carry-forward's source round) -- typically
+        resolved by the caller via a separate, unlocked read before calling
+        this method. That second row is locked (`FOR UPDATE`) and its
+        `effective_submission_version` re-checked *inside this same
+        transaction*, atomically with the target write: if the source was
+        resubmitted after the caller resolved it but before this commits,
+        this raises `LineupConflictError` instead of silently persisting a
+        now-stale copy. Carry-forward's target round always has a strictly
+        later `bbbffl_round.sequence` than any legitimate source round, so
+        this always locks the (later) target first and the (earlier)
+        source second, in the same order across every caller -- no
+        cross-operation lock-order deadlock is possible.
         """
         if source_type == "coach":
             raise LineupIntegrityError("coach submissions must go through submit(), which reads live draft content")
@@ -251,6 +267,14 @@ class WeeklyLineupRepository:
             lock_guard.materialize(lineup_id)
         with transaction(self.database) as conn:
             lineup = self._lock_lineup_row(conn, lineup_id)
+            if require_unchanged is not None:
+                source_lineup_id, expected_source_version = require_unchanged
+                source_row = self._lock_lineup_row(conn, source_lineup_id)
+                source_current = source_row["effective_submission_version"] or 0
+                if source_current != expected_source_version:
+                    raise LineupConflictError(
+                        "source lineup was resubmitted after being resolved; re-resolve and retry"
+                    )
             version = self._finalize_submission(
                 conn,
                 lineup,

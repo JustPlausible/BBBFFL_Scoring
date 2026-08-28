@@ -13,7 +13,6 @@ from app.lineup_validation import LineupValidationError, LineupValidationService
 from app.lineups import POSITIONS, WeeklyLineupRepository
 from app.player_pool import PlayerPoolRepository
 from tests.test_carry_forward import context as carry_context
-from tests.test_carry_forward import submit_round
 from tests.test_lineups import context, save
 
 
@@ -111,7 +110,19 @@ def test_carry_forward_cannot_bypass_hard_validation():
     db, _, rounds, entries, scope, pool, ownership = carry_context(rounds=2)
     player = pool.refresh_player(scope["season_id"], 999001, "Only Player")
     ownership.acquire(player.season_player_id, entries[0].season_entry_id)
-    submit_round(WeeklyLineupRepository(db), scope, rounds[0], entries[0], {"F1": player.season_player_id})
+    # Seed a legacy pre-Issue-56 partial submission through the persistence
+    # primitive; carry-forward must refuse to turn it into new submitted state.
+    legacy = WeeklyLineupRepository(db).save_draft(
+        scope["season_id"],
+        scope["competition_id"],
+        rounds[0],
+        entries[0].season_entry_id,
+        {"F1": player.season_player_id},
+        expected_revision=0,
+    )
+    WeeklyLineupRepository(db).submit(
+        legacy.lineup_id, expected_draft_revision=legacy.revision, expected_submission_version=0
+    )
     with pytest.raises(LineupValidationError):
         CarryForwardService(db).carry_forward(
             scope["season_id"],

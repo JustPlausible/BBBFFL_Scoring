@@ -13,6 +13,7 @@ from app.audit import ENTITY_TYPE_LINEUP, LINEUP_SUBMITTED, ActorContext, AuditE
 from app.lineup_proxy import LineupProxyError, LineupProxyService, UnauthorizedProxyActorError
 from app.lineups import LineupIntegrityError, WeeklyLineupRepository
 from app.lockouts import LockedSelectionError, LockoutRepository, LockoutTriggerRepository
+from tests.lineup_helpers import complete_lineup
 from tests.test_carry_forward import acquire_players, context
 from tests.test_carry_forward_lockouts import acquire_club_player
 from tests.test_lockouts import (
@@ -30,11 +31,29 @@ ADMIN = ActorContext.anonymous_operator("admin")
 COACH = ActorContext.anonymous_operator("coach")
 
 
+class CompleteLineupProxy(LineupProxyService):
+    """Keep historical proxy scenarios complete under Issue #56."""
+
+    def create_or_amend(self, season_id, competition_id, bbbffl_round_id, season_entry_id, positions, **kwargs):
+        entry = self.database.execute(
+            "SELECT * FROM season_entry WHERE season_entry_id=?", (season_entry_id,)
+        ).fetchone()
+        scope = {"season_id": season_id, "competition_id": competition_id}
+
+        class Entry:
+            pass
+
+        target = Entry()
+        target.season_entry_id = entry["season_entry_id"]
+        positions = complete_lineup(self.database, scope, target, positions, neutral_team=LATE_HOME)
+        return super().create_or_amend(season_id, competition_id, bbbffl_round_id, season_entry_id, positions, **kwargs)
+
+
 def test_scorer_can_create_and_submit_a_lineup_on_behalf_of_an_entry_with_provenance():
     db, _, rounds, entries, scope, pool, ownership = context(rounds=1)
     entry = entries[0]
     players = acquire_players(pool, ownership, scope, entry, 1, 2)
-    proxy = LineupProxyService(db)
+    proxy = CompleteLineupProxy(db)
 
     draft = proxy.create_or_amend(
         scope["season_id"],
@@ -53,11 +72,7 @@ def test_scorer_can_create_and_submit_a_lineup_on_behalf_of_an_entry_with_proven
         reason="coach unreachable before lockout, entering on their behalf",
     )
 
-    assert submitted.positions == {
-        "F1": players[0].season_player_id,
-        "M1": players[1].season_player_id,
-        **{p: None for p in ("F2", "F3", "M2", "M3", "Ruck", "Tackler", "Interchange")},
-    }
+    assert submitted.positions == draft.positions
     assert submitted.source_type == "scorer_proxy"
     assert submitted.source_type != "coach"
     assert submitted.actor_type == "anonymous_operator"
@@ -70,7 +85,7 @@ def test_scorer_can_create_and_submit_a_lineup_on_behalf_of_an_entry_with_proven
 def test_proxy_submission_requires_a_reason():
     db, _, rounds, entries, scope, pool, ownership = context(rounds=1)
     entry = entries[0]
-    proxy = LineupProxyService(db)
+    proxy = CompleteLineupProxy(db)
     draft = proxy.create_or_amend(
         scope["season_id"],
         scope["competition_id"],
@@ -94,7 +109,7 @@ def test_proxy_submission_requires_a_reason():
 def test_non_operator_or_non_scorer_admin_actor_is_rejected(bad_actor):
     db, _, rounds, entries, scope, pool, ownership = context(rounds=1)
     entry = entries[0]
-    proxy = LineupProxyService(db)
+    proxy = CompleteLineupProxy(db)
     with pytest.raises(UnauthorizedProxyActorError):
         proxy.create_or_amend(
             scope["season_id"],
@@ -116,7 +131,7 @@ def test_admin_role_is_also_an_authorised_proxy_actor():
     db, _, rounds, entries, scope, pool, ownership = context(rounds=1)
     entry = entries[0]
     players = acquire_players(pool, ownership, scope, entry, 1, 1)
-    proxy = LineupProxyService(db)
+    proxy = CompleteLineupProxy(db)
     draft = proxy.create_or_amend(
         scope["season_id"],
         scope["competition_id"],
@@ -141,7 +156,7 @@ def test_proxy_resubmission_preserves_every_prior_immutable_version():
     db, _, rounds, entries, scope, pool, ownership = context(rounds=1)
     entry = entries[0]
     players = acquire_players(pool, ownership, scope, entry, 1, 2)
-    proxy = LineupProxyService(db)
+    proxy = CompleteLineupProxy(db)
     lineups = WeeklyLineupRepository(db)
 
     draft = proxy.create_or_amend(
@@ -189,7 +204,7 @@ def test_proxy_submission_writes_one_attributable_append_only_audit_event():
     db, _, rounds, entries, scope, pool, ownership = context(rounds=1)
     entry = entries[0]
     players = acquire_players(pool, ownership, scope, entry, 1, 1)
-    proxy = LineupProxyService(db)
+    proxy = CompleteLineupProxy(db)
     draft = proxy.create_or_amend(
         scope["season_id"],
         scope["competition_id"],
@@ -234,7 +249,7 @@ def test_ordinary_coach_submission_of_a_proxy_touched_draft_is_prevented():
     db, _, rounds, entries, scope, pool, ownership = context(rounds=1)
     entry = entries[0]
     players = acquire_players(pool, ownership, scope, entry, 1, 1)
-    lineups, proxy = WeeklyLineupRepository(db), LineupProxyService(db)
+    lineups, proxy = WeeklyLineupRepository(db), CompleteLineupProxy(db)
 
     # 1. Scorer proxy creates lineup state on the entry's behalf.
     draft = proxy.create_or_amend(
@@ -275,7 +290,7 @@ def test_coachs_own_subsequent_draft_edit_lifts_the_proxy_submission_gate():
     db, _, rounds, entries, scope, pool, ownership = context(rounds=1)
     entry = entries[0]
     players = acquire_players(pool, ownership, scope, entry, 1, 2)
-    lineups, proxy = WeeklyLineupRepository(db), LineupProxyService(db)
+    lineups, proxy = WeeklyLineupRepository(db), CompleteLineupProxy(db)
 
     proxy_draft = proxy.create_or_amend(
         scope["season_id"],
@@ -313,7 +328,7 @@ def test_proxy_cannot_replace_an_already_locked_player():
     entry = entries[0]
     early = acquire_club_player(pool, ownership, scope, entry, 1, EARLY_HOME)
     other_early = acquire_club_player(pool, ownership, scope, entry, 2, EARLY_HOME, name="Bench")
-    lineups, proxy = WeeklyLineupRepository(db), LineupProxyService(db)
+    lineups, proxy = WeeklyLineupRepository(db), CompleteLineupProxy(db)
     triggers = LockoutTriggerRepository(db)
     configure_selective(triggers, rounds[0], [EARLY_MATCH_ID], key="early-1", sequence=1)
     matches = FakeMatchFacts(ALL_MATCHES)
@@ -357,7 +372,7 @@ def test_proxy_can_still_change_editable_positions_after_lockout():
     entry = entries[0]
     early = acquire_club_player(pool, ownership, scope, entry, 1, EARLY_HOME)
     interchange_player = acquire_club_player(pool, ownership, scope, entry, 100, LATE_HOME, name="Interchange Late")
-    lineups, proxy = WeeklyLineupRepository(db), LineupProxyService(db)
+    lineups, proxy = WeeklyLineupRepository(db), CompleteLineupProxy(db)
     triggers = LockoutTriggerRepository(db)
     configure_selective(triggers, rounds[0], [EARLY_MATCH_ID], key="early-1", sequence=1)
     matches = FakeMatchFacts(ALL_MATCHES)

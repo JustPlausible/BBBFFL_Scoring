@@ -11,11 +11,13 @@ from app.carry_forward import CarryForwardService, NoCarryForwardSourceError, re
 from app.competition_lifecycle import CompetitionLifecycleRepository
 from app.fixtures import FixtureRepository
 from app.identity import IdentityRepository
-from app.lineups import LineupConflictError, LineupIntegrityError, WeeklyLineupRepository
+from app.lineup_validation import LineupValidationError
+from app.lineups import LineupConflictError, WeeklyLineupRepository
 from app.player_pool import OwnershipRepository, PlayerPoolRepository
 from app.round_mapping import RoundMappingRepository
 from app.season import SeasonRepository
 from tests.db_helpers import migrated_connection
+from tests.lineup_helpers import complete_lineup
 from tests.test_competition_lifecycle import KnownRound, operational
 
 CARRY_FORWARD_ACTOR = ActorContext.system()
@@ -56,7 +58,8 @@ def acquire_players(pool, ownership, scope, entry, start, count):
     return players
 
 
-def submit_round(lineups, scope, round_id, entry, positions, *, revision=0, version=0):
+def submit_round(lineups, scope, round_id, entry, positions, *, revision=0, version=0, neutral_team=None):
+    positions = complete_lineup(lineups.database, scope, entry, positions, neutral_team=neutral_team)
     draft = lineups.save_draft(
         scope["season_id"],
         scope["competition_id"],
@@ -259,7 +262,7 @@ def test_ownership_change_since_source_submission_fails_explicitly_rather_than_r
     submit_round(lineups, scope, rounds[0], entry, {"F1": players[0].season_player_id})
     ownership.release(players[0].season_player_id)
 
-    with pytest.raises(LineupIntegrityError, match="not currently owned"):
+    with pytest.raises(LineupValidationError) as caught:
         CarryForwardService(db).carry_forward(
             scope["season_id"],
             scope["competition_id"],
@@ -268,6 +271,7 @@ def test_ownership_change_since_source_submission_fails_explicitly_rather_than_r
             expected_submission_version=0,
             actor=CARRY_FORWARD_ACTOR,
         )
+    assert "player_not_owned" in {message.code for message in caught.value.result.errors}
     # The attempt left no submission behind -- no silent substitute team.
     lineup_id, version = lineups.get_or_create_header(
         scope["season_id"], scope["competition_id"], rounds[1], entry.season_entry_id

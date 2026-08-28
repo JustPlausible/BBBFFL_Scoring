@@ -64,6 +64,16 @@ SEASON_MODEL = {
 # app.lineups for the POSITIONS vocabulary) but is still not HTTP-routed.
 LOCKOUTS = {"app.lockouts"}
 
+# Non-coach weekly-lineup submission sources (roadmap package 22, issue
+# #55): carry-forward and scorer/admin proxy entry. Each sits one layer
+# above the season model -- both depend on app.lineups for
+# WeeklyLineupRepository/POSITIONS, and app.lineup_proxy also depends on
+# app.audit for ActorContext -- but neither is HTTP-routed. Like
+# app.lockouts, both accept an optional `lock_guard` as a duck-typed
+# collaborator rather than importing app.lockouts directly, keeping
+# immutable submission history decoupled from lock evaluation/evidence.
+WEEKLY_SUBMISSION_SOURCES = {"app.carry_forward", "app.lineup_proxy"}
+
 # AFL resilience boundary (roadmap package 05, issue #37): retry/backoff,
 # cache/evidence-state and diagnostics wrapped directly around the
 # foundation `app.afl_client` transport. Only the composition root
@@ -96,6 +106,7 @@ ALL_GROUPS = (
     | PERSISTENCE_CORE
     | SEASON_MODEL
     | LOCKOUTS
+    | WEEKLY_SUBMISSION_SOURCES
     | AFL_RESILIENCE
     | GRAND_FINAL_VERTICAL
     | ROUTES
@@ -272,14 +283,25 @@ def test_migrations_depends_only_on_db(graph):
 
 
 def test_season_model_and_lockouts_do_not_depend_on_routes_or_grand_final_vertical(graph):
-    """The season-model domain (and lockouts, one layer above it) must not
-    reach sideways into the Grand Final/SuperScore vertical, nor up into
-    routes or the composition root -- new 2027 domain rules belong in these
-    modules, never in a route handler (issue #36)."""
+    """The season-model domain (and lockouts/weekly-submission-sources, one
+    layer above it) must not reach sideways into the Grand Final/SuperScore
+    vertical, nor up into routes or the composition root -- new 2027 domain
+    rules belong in these modules, never in a route handler (issue #36)."""
     forbidden = GRAND_FINAL_VERTICAL | ROUTES | COMPOSITION_ROOT
-    for module in sorted(SEASON_MODEL | LOCKOUTS):
+    for module in sorted(SEASON_MODEL | LOCKOUTS | WEEKLY_SUBMISSION_SOURCES):
         offending = graph[module] & forbidden
         assert not offending, f"{module} must not depend on {sorted(offending)}"
+
+
+def test_weekly_submission_sources_stay_decoupled_from_lockouts(graph):
+    """app.carry_forward and app.lineup_proxy accept an optional
+    `lock_guard` as a duck-typed collaborator (mirroring
+    `WeeklyLineupRepository.submit`) rather than importing app.lockouts
+    directly -- see this file's WEEKLY_SUBMISSION_SOURCES docstring and
+    app/lineups.py's module docstring on why lock evaluation/evidence must
+    stay decoupled from immutable submission history."""
+    for module in sorted(WEEKLY_SUBMISSION_SOURCES):
+        assert "app.lockouts" not in graph[module], f"{module} must not depend on app.lockouts"
 
 
 def test_afl_resilience_depends_only_on_foundation(graph):

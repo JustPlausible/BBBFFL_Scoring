@@ -13,6 +13,19 @@ and may raise to reject a submission that would mutate a locked/
 indeterminate position. This module has no other lockout awareness and does
 not import app/lockouts.py, keeping the two responsibilities -- immutable
 submission history here, lock evaluation/evidence there -- decoupled.
+
+`submit` and `submit_positions` share one core (`_finalize_submission`): the
+same `weekly_lineup` row lock, the same `expected_submission_version`
+compare-and-swap, and the same `lock_guard` integration point, so every
+submission source enforces identical lock-integrity/concurrency rules.
+`submit` is the coach path -- it reads live content from
+`weekly_lineup_draft_slot`. `submit_positions` accepts an explicit
+`positions` mapping instead, for any non-coach source whose content
+originates elsewhere: `app.carry_forward` (`source_type="carry_forward"`,
+an exact copy of a prior round's submitted lineup) and `app.lineup_proxy`
+submissions that go through the ordinary draft (`source_type=
+"scorer_proxy"`) may use either, but a source that must not read/displace
+the entry's own private draft always uses `submit_positions`.
 """
 
 import json
@@ -156,6 +169,17 @@ class WeeklyLineupRepository:
         reason=None,
         lock_guard=None,
     ):
+        """Submit the lineup's own current private draft content
+        (`weekly_lineup_draft_slot`) as a new immutable version.
+
+        `source_type="coach"` (the default) is the only source whose
+        submitted content is read live from the draft -- every other
+        declared source (`scorer_proxy`, `carry_forward`, `system_derived`)
+        supplies its content explicitly via `submit_positions` instead, so
+        it can never silently diverge from, or be confused with, whatever
+        the coach currently has open in their own private draft (see
+        `submit_positions`, app/carry_forward.py, app/lineup_proxy.py).
+        """
         if source_type not in SUBMISSION_SOURCES:
             raise LineupIntegrityError("unknown submission source")
         if lock_guard is not None and hasattr(lock_guard, "materialize"):
@@ -165,88 +189,198 @@ class WeeklyLineupRepository:
             # must survive even if this submission attempt is rejected.
             lock_guard.materialize(lineup_id)
         with transaction(self.database) as conn:
-            # SQLite obtains its single writer lock before reading; PostgreSQL
-            # takes row locks below. Both then perform a compare-and-swap.
-            if self.database.engine.dialect.name == "sqlite":
-                conn.execute("UPDATE weekly_lineup SET updated_at=updated_at WHERE lineup_id=?", (lineup_id,))
-            lineup = conn.execute(
-                "SELECT * FROM weekly_lineup WHERE lineup_id=?" + _for_update_suffix(self.database), (lineup_id,)
-            ).fetchone()
-            if not lineup:
-                raise KeyError(lineup_id)
+            lineup = self._lock_lineup_row(conn, lineup_id)
             if lineup["draft_revision"] != expected_draft_revision:
                 raise LineupConflictError("stale draft revision at submission")
-            current = lineup["effective_submission_version"] or 0
-            if current != expected_submission_version:
-                raise LineupConflictError("stale submission version")
-            lifecycle = conn.execute(
-                "SELECT state FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?" + _for_update_suffix(self.database),
-                (lineup["bbbffl_round_id"],),
-            ).fetchone()
-            if not lifecycle or lifecycle["state"] != "open":
-                raise LineupIntegrityError("BBBFFL round does not currently permit submission")
             slots = conn.execute(
                 "SELECT position, season_player_id FROM weekly_lineup_draft_slot WHERE lineup_id=?", (lineup_id,)
             ).fetchall()
-            positions = {row["position"]: row["season_player_id"] for row in slots}
-            positions = self._normalise(positions)
-            self._validate_players(conn, lineup["season_id"], positions, lock=True)
-            self._validate_ownership(conn, lineup["season_entry_id"], positions)
-            if lock_guard is not None:
-                # `guard_transition`'s caller-owned invariant: this must run
-                # under the `weekly_lineup` row lock already taken above, so
-                # two concurrent submissions for the same lineup serialize
-                # against each other and against the lock evidence each one
-                # observes/materializes (see app/lockouts.py).
-                if current:
-                    previous_rows = conn.execute(
-                        "SELECT position, season_player_id FROM weekly_lineup_submission_slot WHERE lineup_id=? AND version=?",
-                        (lineup_id, current),
-                    ).fetchall()
-                    previous_positions = {row["position"]: row["season_player_id"] for row in previous_rows}
-                else:
-                    previous_positions = {position: None for position in POSITIONS}
-                lock_guard(conn, lineup, previous_positions, positions)
-            version, now = current + 1, _now()
-            conn.execute(
-                "INSERT INTO weekly_lineup_submission VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    lineup_id,
-                    version,
-                    expected_draft_revision,
-                    now,
-                    actor.actor_type,
-                    actor.actor_id,
-                    actor.actor_role,
-                    source_type,
-                    json.dumps(source_detail, sort_keys=True) if source_detail is not None else None,
-                    reason,
-                ),
-            )
-            for position in POSITIONS:
-                conn.execute(
-                    "INSERT INTO weekly_lineup_submission_slot VALUES (?, ?, ?, ?)",
-                    (lineup_id, version, position, positions[position]),
-                )
-            result = conn.execute(
-                "UPDATE weekly_lineup SET effective_submission_version=?, updated_at=? WHERE lineup_id=? AND "
-                "((effective_submission_version IS NULL AND ?=0) OR effective_submission_version=?)",
-                (version, now, lineup_id, expected_submission_version, expected_submission_version),
-            )
-            if not result.rowcount:
-                raise LineupConflictError("concurrent submission")
-            append_event(
+            positions = self._normalise({row["position"]: row["season_player_id"] for row in slots})
+            version = self._finalize_submission(
                 conn,
+                lineup,
+                positions,
+                based_on_draft_revision=expected_draft_revision,
+                expected_submission_version=expected_submission_version,
                 actor=actor,
-                action=LINEUP_SUBMITTED,
-                entity_type=ENTITY_TYPE_LINEUP,
-                entity_id=lineup_id,
-                entity_version=str(version),
+                source_type=source_type,
+                source_detail=source_detail,
                 reason=reason,
-                after_state={"effective_submission_version": version},
-                payload={"source_type": source_type, "based_on_draft_revision": expected_draft_revision},
+                lock_guard=lock_guard,
             )
+        # Read back outside the transaction: `self.database.execute` (used by
+        # `get_submission`) is a separate connection/session that cannot see
+        # this transaction's writes until it has committed above.
         return self.get_submission(lineup_id, version)
+
+    def submit_positions(
+        self,
+        lineup_id,
+        positions,
+        *,
+        expected_submission_version,
+        actor,
+        source_type,
+        source_detail=None,
+        reason=None,
+        lock_guard=None,
+    ):
+        """Submit an explicit `positions` mapping -- e.g. an exact copy of a
+        prior round's submitted lineup (see `app.carry_forward`) -- as a new
+        immutable version, *without* reading or displacing whatever the
+        entry currently has saved in its own private draft
+        (`weekly_lineup_draft_slot` is never touched).
+
+        `source_type` must not be `"coach"`: a coach's own submission always
+        goes through `submit()`, which reads live draft content, so its
+        history can never silently diverge from what they see on screen.
+
+        Shares every concurrency/lock-integrity rule with `submit()` --
+        the same `weekly_lineup` row lock, the same
+        `expected_submission_version` compare-and-swap, the same
+        `lock_guard` integration point -- via `_finalize_submission`, so
+        lock evaluation is never duplicated for this submission source (see
+        app/lockouts.py's module docstring).
+        """
+        if source_type == "coach":
+            raise LineupIntegrityError("coach submissions must go through submit(), which reads live draft content")
+        if source_type not in SUBMISSION_SOURCES:
+            raise LineupIntegrityError("unknown submission source")
+        positions = self._normalise(positions)
+        if lock_guard is not None and hasattr(lock_guard, "materialize"):
+            lock_guard.materialize(lineup_id)
+        with transaction(self.database) as conn:
+            lineup = self._lock_lineup_row(conn, lineup_id)
+            version = self._finalize_submission(
+                conn,
+                lineup,
+                positions,
+                based_on_draft_revision=lineup["draft_revision"],
+                expected_submission_version=expected_submission_version,
+                actor=actor,
+                source_type=source_type,
+                source_detail=source_detail,
+                reason=reason,
+                lock_guard=lock_guard,
+            )
+        # See submit()'s matching comment: read back only after commit.
+        return self.get_submission(lineup_id, version)
+
+    def get_or_create_header(self, season_id, competition_id, round_id, entry_id):
+        """Return `(lineup_id, effective_submission_version)` for this
+        season/competition/round/entry, creating an empty (all-`None`)
+        private draft header via `save_draft` if this entry has never
+        touched this round at all -- so a non-coach submission source
+        (carry-forward, proxy) always has a `weekly_lineup` row to submit
+        into without inventing or pre-populating draft content. A
+        concurrent first-touch race is resolved the same way any other
+        concurrent draft creation is (`LineupConflictError`; see
+        `save_draft`)."""
+        row = self.database.execute(
+            "SELECT lineup_id, effective_submission_version FROM weekly_lineup "
+            "WHERE season_id=? AND competition_id=? AND bbbffl_round_id=? AND season_entry_id=?",
+            (season_id, competition_id, round_id, entry_id),
+        ).fetchone()
+        if row is not None:
+            return row["lineup_id"], row["effective_submission_version"] or 0
+        draft = self.save_draft(season_id, competition_id, round_id, entry_id, {}, expected_revision=0)
+        return draft.lineup_id, 0
+
+    def _lock_lineup_row(self, conn, lineup_id):
+        # SQLite obtains its single writer lock before reading; PostgreSQL
+        # takes row locks below. Both then perform a compare-and-swap.
+        if self.database.engine.dialect.name == "sqlite":
+            conn.execute("UPDATE weekly_lineup SET updated_at=updated_at WHERE lineup_id=?", (lineup_id,))
+        lineup = conn.execute(
+            "SELECT * FROM weekly_lineup WHERE lineup_id=?" + _for_update_suffix(self.database), (lineup_id,)
+        ).fetchone()
+        if not lineup:
+            raise KeyError(lineup_id)
+        return lineup
+
+    def _finalize_submission(
+        self,
+        conn,
+        lineup,
+        positions,
+        *,
+        based_on_draft_revision,
+        expected_submission_version,
+        actor,
+        source_type,
+        source_detail,
+        reason,
+        lock_guard,
+    ):
+        lineup_id = lineup["lineup_id"]
+        current = lineup["effective_submission_version"] or 0
+        if current != expected_submission_version:
+            raise LineupConflictError("stale submission version")
+        lifecycle = conn.execute(
+            "SELECT state FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?" + _for_update_suffix(self.database),
+            (lineup["bbbffl_round_id"],),
+        ).fetchone()
+        if not lifecycle or lifecycle["state"] != "open":
+            raise LineupIntegrityError("BBBFFL round does not currently permit submission")
+        self._validate_players(conn, lineup["season_id"], positions, lock=True)
+        self._validate_ownership(conn, lineup["season_entry_id"], positions)
+        if lock_guard is not None:
+            # `guard_transition`'s caller-owned invariant: this must run
+            # under the `weekly_lineup` row lock already taken above, so
+            # two concurrent submissions for the same lineup serialize
+            # against each other and against the lock evidence each one
+            # observes/materializes (see app/lockouts.py). Identical for
+            # every submission source -- carry-forward and proxy submissions
+            # get no special exemption from a locked/indeterminate position.
+            if current:
+                previous_rows = conn.execute(
+                    "SELECT position, season_player_id FROM weekly_lineup_submission_slot WHERE lineup_id=? AND version=?",
+                    (lineup_id, current),
+                ).fetchall()
+                previous_positions = {row["position"]: row["season_player_id"] for row in previous_rows}
+            else:
+                previous_positions = {position: None for position in POSITIONS}
+            lock_guard(conn, lineup, previous_positions, positions)
+        version, now = current + 1, _now()
+        conn.execute(
+            "INSERT INTO weekly_lineup_submission VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                lineup_id,
+                version,
+                based_on_draft_revision,
+                now,
+                actor.actor_type,
+                actor.actor_id,
+                actor.actor_role,
+                source_type,
+                json.dumps(source_detail, sort_keys=True) if source_detail is not None else None,
+                reason,
+            ),
+        )
+        for position in POSITIONS:
+            conn.execute(
+                "INSERT INTO weekly_lineup_submission_slot VALUES (?, ?, ?, ?)",
+                (lineup_id, version, position, positions[position]),
+            )
+        result = conn.execute(
+            "UPDATE weekly_lineup SET effective_submission_version=?, updated_at=? WHERE lineup_id=? AND "
+            "((effective_submission_version IS NULL AND ?=0) OR effective_submission_version=?)",
+            (version, now, lineup_id, expected_submission_version, expected_submission_version),
+        )
+        if not result.rowcount:
+            raise LineupConflictError("concurrent submission")
+        append_event(
+            conn,
+            actor=actor,
+            action=LINEUP_SUBMITTED,
+            entity_type=ENTITY_TYPE_LINEUP,
+            entity_id=lineup_id,
+            entity_version=str(version),
+            reason=reason,
+            after_state={"effective_submission_version": version},
+            payload={"source_type": source_type, "based_on_draft_revision": based_on_draft_revision},
+        )
+        return version
 
     def get_effective_submission(self, lineup_id):
         row = self.database.execute(

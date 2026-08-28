@@ -1,0 +1,46 @@
+{
+  "provenance": {
+    "schema_version": 1,
+    "fixture_id": "afl-evidence:v1:synthetic:season_85:season",
+    "classification": "synthetic",
+    "derivation": "afl_api_source_derived",
+    "contract_version": "v1",
+    "endpoint": "GET /api/v1/seasons",
+    "endpoint_kind": "seasons",
+    "request_params": {},
+    "season_id": 85,
+    "round_id": null,
+    "match_id": null,
+    "canonical_player_ids": [],
+    "captured_at": null,
+    "authored_at": "2026-08-28T00:00:00Z",
+    "source": {
+      "kind": "afl_api_source",
+      "repository": "https://github.com/JustPlausible/AFL-api",
+      "commit": "af4bf93f50140fa7d1465a446c63588abc5e376c",
+      "release_version": "0.7.0",
+      "references": ["api/routes_v1.py", "docs/api_v1_seasons.md"]
+    },
+    "notes": "Synthetic seasons-list evidence for roadmap package 08's replay corpus (issue #40). This session's outbound network access to the configured afl-api deployment is blocked by organisation egress policy (see docs/afl-evidence-fixtures.md and docs/afl-api-v1-contract.md's 'Live validation status'), so no live capture was possible; the shape below is reproduced from the AFL-api source/docs cited above, matching the same derivation already used for issue #18's contract-pinning fixtures (tests/fixtures/afl_api_v1/). Values (round numbers) are illustrative, not a real 2026 fact. This fixture set uses its own season/round/match identifiers, distinct from tests/fixtures/afl_api_v1/, so the two corpora are never confused with one another.",
+    "supersedes": null,
+    "superseded_by": null
+  },
+  "response": {
+    "seasons": [
+      {
+        "season_id": 85,
+        "year": 2026,
+        "name": "2026 Toyota AFL Premiership",
+        "is_current": true,
+        "current_round_number": 15
+      },
+      {
+        "season_id": 84,
+        "year": 2025,
+        "name": "2025 Toyota AFL Premiership",
+        "is_current": false,
+        "current_round_number": null
+      }
+    ]
+  }
+}

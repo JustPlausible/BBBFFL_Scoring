@@ -1,0 +1,53 @@
+{
+  "provenance": {
+    "schema_version": 1,
+    "fixture_id": "afl-evidence:v1:synthetic:season_85:round_1500:match_9502:player_stats",
+    "classification": "synthetic",
+    "derivation": "afl_api_source_derived",
+    "contract_version": "v1",
+    "endpoint": "GET /api/v1/matches/{match_id}/player-stats",
+    "endpoint_kind": "player_stats",
+    "request_params": {"match_id": 9502},
+    "season_id": 85,
+    "round_id": 1500,
+    "match_id": 9502,
+    "canonical_player_ids": [9706],
+    "captured_at": null,
+    "authored_at": "2026-08-28T00:00:00Z",
+    "source": {
+      "kind": "afl_api_source",
+      "repository": "https://github.com/JustPlausible/AFL-api",
+      "commit": "af4bf93f50140fa7d1465a446c63588abc5e376c",
+      "release_version": "0.7.0",
+      "references": ["api/routes_v1.py", "docs/api_v1_player_stats.md"]
+    },
+    "notes": "Partial (lifecycle.finality=partial) player-stats for the still-LIVE match 9502, with hitouts still null (not yet collected) alongside populated fields -- the null-vs-zero case, included in this corpus so a replay/domain test can observe an in-progress match's evidence without depending on tests/fixtures/afl_api_v1/'s separate contract-pinning copy of the same semantic case.",
+    "supersedes": null,
+    "superseded_by": null
+  },
+  "response": {
+    "match": {
+      "match_id": 9502,
+      "match_provider_id": "SYN_M20260704001",
+      "round_id": 1500,
+      "season_id": 85,
+      "status": "LIVE"
+    },
+    "lifecycle": {"finality": "partial"},
+    "metadata": {"source_updated_at": "2026-07-04T09:55:00Z"},
+    "players": [
+      {
+        "champion_data_player_id": "CD_SYN9706",
+        "canonical_player_id": 9706,
+        "afl_player_id": 590006,
+        "display_name": "R. Castow",
+        "side": "home",
+        "team_id": 6003,
+        "stats": {
+          "goals": 1, "behinds": 1, "kicks": 8, "handballs": 4,
+          "disposals": 12, "marks": 3, "tackles": 2, "hitouts": null
+        }
+      }
+    ]
+  }
+}

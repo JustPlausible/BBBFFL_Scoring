@@ -7,6 +7,7 @@ from app.calculations import MatchupCalculationService
 from app.db import transaction
 from app.lineups import POSITIONS
 from app.season import _now
+from tests import afl_evidence
 from tests.db_helpers import migrated_connection
 from tests.test_competition_lifecycle import operational
 
@@ -170,3 +171,143 @@ def test_partial_upstream_stat_is_retained_and_slot_score_remains_unresolved():
     ]
     assert evidence[0]["stats"]["behinds"] is None
     assert evidence[0]["score"] is None
+
+
+# ---------------------------------------------------------------------------
+# Replay-oriented: round/per-match scoring driven by curated AFL evidence
+# fixtures (issue #40 / roadmap package 08), not a hand-built Facts stub.
+# ---------------------------------------------------------------------------
+
+
+def _seed_evidence_lineup(conn, scope, round_id, entry_id, side, position_players, now):
+    """Raw-SQL lineup seeding for one matchup side, mirroring setup_round()
+    above but scoped to only the scorable positions a curated-evidence test
+    cares about (see tests/afl_evidence.py's provenance for canonical_player_id
+    / afl_team_id values, which must match the fixture's own team_ids)."""
+    lineup_id = f"lineup-evidence-{side}"
+    conn.execute(
+        text(
+            "INSERT INTO weekly_lineup "
+            "(lineup_id, season_id, competition_id, bbbffl_round_id, "
+            "season_entry_id, draft_revision, effective_submission_version, "
+            "created_at, updated_at) "
+            "VALUES (:lineup_id, :season_id, :competition_id, :round_id, "
+            ":entry_id, 1, 1, :now, :now)"
+        ),
+        {
+            "lineup_id": lineup_id,
+            "season_id": scope["season_id"],
+            "competition_id": scope["competition_id"],
+            "round_id": round_id,
+            "entry_id": entry_id,
+            "now": now,
+        },
+    )
+    conn.execute(
+        text(
+            "INSERT INTO weekly_lineup_submission "
+            "(lineup_id, version, based_on_draft_revision, submitted_at, "
+            "actor_type, actor_id, actor_role, source_type, source_detail, reason) "
+            "VALUES (:lineup_id, 1, 1, :now, 'coach', NULL, 'coach', "
+            "'coach', NULL, NULL)"
+        ),
+        {"lineup_id": lineup_id, "now": now},
+    )
+    for position, (canonical_id, team_id) in position_players.items():
+        player_id = f"player-evidence-{side}-{canonical_id}"
+        conn.execute(
+            text(
+                "INSERT INTO season_player_pool "
+                "(season_player_id, season_id, canonical_player_id, "
+                "display_name, afl_team_id, afl_team_name, eligible, "
+                "source_provider, source_fetched_at, source_updated_at, "
+                "created_at, updated_at) "
+                "VALUES (:player_id, :season_id, :canonical_id, :name, "
+                ":team_id, NULL, TRUE, 'afl-api', :now, NULL, :now, :now)"
+            ),
+            {
+                "player_id": player_id,
+                "season_id": scope["season_id"],
+                "canonical_id": canonical_id,
+                "name": f"Evidence Player {canonical_id}",
+                "team_id": team_id,
+                "now": now,
+            },
+        )
+        conn.execute(
+            text(
+                "INSERT INTO weekly_lineup_draft_slot (lineup_id, position, season_player_id) "
+                "VALUES (:lineup_id, :position, :player_id)"
+            ),
+            {"lineup_id": lineup_id, "position": position, "player_id": player_id},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO weekly_lineup_submission_slot (lineup_id, version, position, season_player_id) "
+                "VALUES (:lineup_id, 1, :position, :player_id)"
+            ),
+            {"lineup_id": lineup_id, "position": position, "player_id": player_id},
+        )
+
+
+def test_calculate_matchup_scores_from_curated_afl_evidence_fixtures():
+    """Proves roadmap package 08's evidence corpus is useful to #35's round/
+    per-match scoring, not just to `tests/test_afl_evidence.py`'s loader
+    tests. `client` is a real `AflApiClient` wired to
+    `tests/fixtures/afl_evidence/v1/synthetic/season_85/round_1500/` via
+    `httpx.MockTransport` (see `tests.afl_evidence`) -- `MatchupCalculationService`
+    receives it exactly as it would the production client, with no network
+    call possible.
+
+    Round 1500's fixture match 9503 (Hawthorn v Adelaide, CONCLUDED, final
+    stats) carries one player per BBBFFL scorable position type: a home
+    Forward (goals=4, behinds=2 -> 26) and Midfield (disposals=29 -> 29),
+    and an away Ruck (marks=6, hitouts=34 -> 40) and Tackler (tackles=9 ->
+    54) -- see that fixture's own provenance notes for the full stat lines.
+    """
+    db = migrated_connection()
+    lifecycle, round_, entries = operational(db, 2027, 1500)
+    matchup = lifecycle.list_matchups(round_.bbbffl_round_id)[0]
+    scope = db.execute(
+        "SELECT c.season_id,c.competition_id FROM bbbffl_round r JOIN competition_stream c ON c.competition_id=r.competition_id WHERE r.bbbffl_round_id=?",
+        (round_.bbbffl_round_id,),
+    ).fetchone()
+
+    now = _now()
+    with db.engine.begin() as conn:
+        _seed_evidence_lineup(
+            conn,
+            scope,
+            round_.bbbffl_round_id,
+            matchup.home_season_entry_id,
+            "home",
+            {"F1": (9701, 6005), "M1": (9702, 6005)},
+            now,
+        )
+        _seed_evidence_lineup(
+            conn,
+            scope,
+            round_.bbbffl_round_id,
+            matchup.away_season_entry_id,
+            "away",
+            {"Ruck": (9703, 6006), "Tackler": (9704, 6006)},
+            now,
+        )
+
+    client = afl_evidence.build_client(
+        {
+            "/api/v1/rounds/1500/matches": "v1/synthetic/season_85/round_1500/matches.json",
+            "/api/v1/matches/9501/player-stats": "v1/synthetic/season_85/round_1500/match_9501/player_stats.json",
+            "/api/v1/matches/9502/player-stats": "v1/synthetic/season_85/round_1500/match_9502/player_stats.json",
+            "/api/v1/matches/9503/player-stats": "v1/synthetic/season_85/round_1500/match_9503/player_stats.json",
+        }
+    )
+    try:
+        result = MatchupCalculationService(db, client).calculate_matchup(
+            matchup.matchup_id, upstream_revision="evidence-fixture", observed_at="2026-07-06T00:00:00Z"
+        )
+    finally:
+        client.close()
+
+    assert result.snapshot["home"]["score"] == 4 * 6 + 2 + 29
+    assert result.snapshot["away"]["score"] == 6 + 34 + 9 * 6

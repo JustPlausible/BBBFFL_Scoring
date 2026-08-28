@@ -24,6 +24,7 @@ from app.lockouts import (
     resolve_match,
 )
 from app.player_pool import OwnershipRepository, PlayerPoolRepository
+from tests import afl_evidence
 from tests.db_helpers import migrated_connection
 from tests.test_competition_lifecycle import operational
 
@@ -178,9 +179,9 @@ def test_resolve_match_fails_explicitly_rather_than_guessing():
 # ---------------------------------------------------------------------------
 
 
-def context(year=2027, squad_limit=10, db=None):
+def context(year=2027, squad_limit=10, db=None, afl_round=None):
     db = db or migrated_connection()
-    lifecycle, round_, entries = operational(db, year, year)
+    lifecycle, round_, entries = operational(db, year, afl_round if afl_round is not None else year)
     lifecycle.transition(round_.bbbffl_round_id, "open")
     scope = db.execute(
         "SELECT c.season_id, c.competition_id FROM bbbffl_round r "
@@ -1087,3 +1088,69 @@ def test_guard_transition_runs_inside_the_submit_transaction_and_rolls_back_toge
     effective = lineups.get_effective_submission(draft.lineup_id)
     assert effective.version == submitted.version
     assert effective.positions["M1"] is None
+
+
+# ---------------------------------------------------------------------------
+# Replay-oriented: the round lockout plan driven by curated AFL evidence
+# fixtures (issue #40 / roadmap package 08), not a hand-built Match list.
+# ---------------------------------------------------------------------------
+
+
+def test_round_lockout_plan_activates_from_curated_afl_evidence_fixtures():
+    """Proves roadmap package 08's evidence corpus is actually useful to
+    #34's staged lockouts: `RoundMatchFacts` sources match facts from
+    `tests/fixtures/afl_evidence/v1/synthetic/season_85/round_1500/matches.json`,
+    parsed by the real `AflApiClient` (zero network -- see
+    `tests/test_afl_evidence.py`), and the same
+    `LockoutTriggerRepository`/`LockoutRepository` machinery used throughout
+    this module reacts to it exactly as it would to live afl-api data.
+
+    Round 1500's fixture has match 9502 (Geelong v GWS Giants) already LIVE
+    -- an early/selective trigger on it activates immediately regardless of
+    evaluation time -- and match 9501 (Richmond v Fremantle) still UPCOMING
+    with a scheduled start, driving the round's main trigger once that time
+    passes.
+    """
+    db, _, round_, entries, scope, pool, ownership = context(afl_round=1500)
+    entry = entries[0]
+    client = afl_evidence.build_client(
+        {"/api/v1/rounds/1500/matches": "v1/synthetic/season_85/round_1500/matches.json"}
+    )
+    try:
+        match_facts = afl_evidence.RoundMatchFacts(client, afl_round_id=1500)
+        triggers = LockoutTriggerRepository(db)
+        configure_selective(triggers, round_.bbbffl_round_id, [9502], key="early-1", sequence=1)
+        configure_main(triggers, round_.bbbffl_round_id, [9501], sequence=2)
+        early = acquire(pool, ownership, scope, entry, 900001, Team(6003, "Geelong"))
+        other = acquire(pool, ownership, scope, entry, 900002, Team(6001, "Richmond"))
+        lineups = WeeklyLineupRepository(db)
+        draft, submitted = establish(
+            lineups, round_, entry, scope, {"F1": early.season_player_id, "M1": other.season_player_id}
+        )
+        lock_repo = LockoutRepository(db)
+
+        before_main_start = lock_repo.lock_state(
+            draft.lineup_id,
+            round_.bbbffl_round_id,
+            entry.season_entry_id,
+            submitted.positions,
+            match_facts=match_facts,
+            evaluation_at=datetime(2026, 7, 4, 10, 0, tzinfo=timezone.utc),
+        )
+        assert before_main_start.positions["F1"].state == LockState.LOCKED
+        assert before_main_start.positions["F1"].reason == "selective_trigger_activated"
+        assert before_main_start.positions["M1"].state == LockState.EDITABLE
+
+        after_main_start = lock_repo.lock_state(
+            draft.lineup_id,
+            round_.bbbffl_round_id,
+            entry.season_entry_id,
+            submitted.positions,
+            match_facts=match_facts,
+            evaluation_at=datetime(2026, 7, 5, 9, 0, tzinfo=timezone.utc),
+        )
+        assert after_main_start.positions["F1"].state == LockState.LOCKED  # unchanged, still via the early trigger
+        assert after_main_start.positions["M1"].state == LockState.LOCKED
+        assert after_main_start.positions["M1"].reason == "main_lockout_triggered"
+    finally:
+        client.close()

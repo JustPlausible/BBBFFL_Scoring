@@ -384,9 +384,11 @@ oversight:
   injury, or interchange data in application/scoring code (packages
   11/23/27, as annotated per-endpoint above);
 - fixing the null-vs-zero coercion gap in §2 (package 27);
-- the full deterministic AFL evidence fixture corpus for the 2026 replay
-  (package 08) — this issue's fixtures are deliberately the smaller,
-  representative set the issue asks for, not that corpus;
+- ~~the full deterministic AFL evidence fixture corpus for the 2026
+  replay (package 08)~~ — delivered by issue #40; see
+  [`afl-evidence-fixtures.md`](afl-evidence-fixtures.md). This issue's own
+  fixtures (`tests/fixtures/afl_api_v1/`) remain the smaller,
+  contract-pinning set, separate from that corpus;
 - season player pool, lockout engine, replay harness, or scoring
   generalisation (explicitly out of scope for issue #18).
 

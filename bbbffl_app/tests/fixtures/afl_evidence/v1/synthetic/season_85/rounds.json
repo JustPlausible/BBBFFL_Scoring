@@ -1,0 +1,42 @@
+{
+  "provenance": {
+    "schema_version": 1,
+    "fixture_id": "afl-evidence:v1:synthetic:season_85:rounds",
+    "classification": "synthetic",
+    "derivation": "afl_api_source_derived",
+    "contract_version": "v1",
+    "endpoint": "GET /api/v1/seasons/{season_id}/rounds",
+    "endpoint_kind": "rounds",
+    "request_params": {"season_id": 85},
+    "season_id": 85,
+    "round_id": null,
+    "match_id": null,
+    "canonical_player_ids": [],
+    "captured_at": null,
+    "authored_at": "2026-08-28T00:00:00Z",
+    "source": {
+      "kind": "afl_api_source",
+      "repository": "https://github.com/JustPlausible/AFL-api",
+      "commit": "af4bf93f50140fa7d1465a446c63588abc5e376c",
+      "release_version": "0.7.0",
+      "references": ["api/routes_v1.py", "docs/api_v1_rounds.md"]
+    },
+    "notes": "Synthetic single-round listing for season 85's evidence corpus (round_id 1500, used throughout this fixture set's round-scoped evidence). See season.json's provenance for why this is source-derived rather than live-captured in this environment.",
+    "supersedes": null,
+    "superseded_by": null
+  },
+  "response": {
+    "rounds": [
+      {
+        "round_id": 1500,
+        "season_id": 85,
+        "round_number": 15,
+        "name": "Round 15",
+        "abbreviation": "Rd 15",
+        "start_time": "2026-07-03T00:00:00Z",
+        "end_time": "2026-07-06T09:00:00Z",
+        "byes": []
+      }
+    ]
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "provenance": {
+    "schema_version": 1,
+    "fixture_id": "afl-evidence:v1:unresolved:season_85:round_1500:match_9503:participation_9706",
+    "classification": "unresolved",
+    "derivation": "hand_authored_edge_case",
+    "contract_version": "v1",
+    "endpoint": null,
+    "endpoint_kind": "scorer_ruling_note",
+    "request_params": {},
+    "season_id": 85,
+    "round_id": 1500,
+    "match_id": 9503,
+    "canonical_player_ids": [9706],
+    "captured_at": null,
+    "authored_at": "2026-08-28T00:00:00Z",
+    "source": {
+      "kind": "bbbffl_analysis",
+      "references": [
+        "docs/afl-api-v1-contract.md#14-player-stat-finality-and-corrections",
+        "docs/plans/2027-season-model.md"
+      ]
+    },
+    "notes": "Player 9706 (used elsewhere in this corpus as a same-round LIVE-match player, see round_1500/match_9502/player_stats.json) is hypothesised, for this synthetic scenario only, to have also been named in match 9503's home-team pre-match selection context but has no row in round_1500/match_9503/player_stats.json and no corresponding injury record. afl-api's own contract confirms an absent stats row is not by itself proof of DNP ('Stat endpoints omit non-participants... a selected player receiving zero statistics is not by itself proof that they did not play', docs/afl-api-v1-contract.md section 1.4). Whether player 9706 actually took the field in match 9503 is therefore a genuinely unresolved historical fact for this scenario: neither this fixture nor any loader/replay code may guess an answer. This is the fourth evidence classification issue #40 asks for -- a fact requiring scorer-owned treatment -- not a contract-shape example, so it carries no afl-api `response` payload of its own; see `facts` below and docs/afl-evidence-fixtures.md's 'Evidence classifications' section for how replay/scoring code is expected to consult this classification (surface it to a scorer, never resolve it silently).",
+    "supersedes": null,
+    "superseded_by": null
+  },
+  "facts": {
+    "selected_but_no_stat_row": true,
+    "known_injury_record": false,
+    "requires_scorer_ruling": true,
+    "ruling_recorded": false,
+    "ruling": null
+  }
+}

@@ -40,6 +40,10 @@ from app.season import _now
 
 POSITIONS = ("F1", "F2", "F3", "M1", "M2", "M3", "Ruck", "Tackler", "Interchange")
 SUBMISSION_SOURCES = frozenset({"coach", "scorer_proxy", "carry_forward", "system_derived"})
+# Whole-draft (not per-position) origin of the *current* draft revision --
+# see migrations/versions/0018_proxy_draft_source.py's docstring and
+# `submit`'s use of it below.
+DRAFT_SOURCES = frozenset({"coach", "scorer_proxy"})
 
 
 class LineupConflictError(RuntimeError):
@@ -61,6 +65,7 @@ class LineupDraft:
     positions: dict
     created_at: str
     updated_at: str
+    draft_source: str
 
 
 @dataclass(frozen=True)
@@ -82,7 +87,20 @@ class WeeklyLineupRepository:
     def __init__(self, database):
         self.database = database
 
-    def save_draft(self, season_id, competition_id, round_id, entry_id, positions, *, expected_revision):
+    def save_draft(
+        self, season_id, competition_id, round_id, entry_id, positions, *, expected_revision, draft_source="coach"
+    ):
+        """`draft_source` records the whole-draft origin of the resulting
+        revision -- `"coach"` (default, ordinary editing) or
+        `"scorer_proxy"` (only `app.lineup_proxy.LineupProxyService.
+        create_or_amend` passes this). See `DRAFT_SOURCES` and `submit`'s
+        use of it, and migrations/versions/0018_proxy_draft_source.py's
+        docstring for why this exists. A coach's own subsequent edit
+        (leaving `draft_source` at its default) resets it back to
+        `"coach"` -- this tracks only the *current* revision's origin, not
+        a history of every edit."""
+        if draft_source not in DRAFT_SOURCES:
+            raise LineupIntegrityError(f"unknown draft source: {draft_source!r}")
         selected = self._normalise(positions)
         now = _now()
         try:
@@ -99,16 +117,26 @@ class WeeklyLineupRepository:
                         raise LineupConflictError("draft does not exist at expected revision")
                     lineup_id, revision, created = str(uuid4()), 1, now
                     conn.execute(
-                        "INSERT INTO weekly_lineup VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)",
-                        (lineup_id, season_id, competition_id, round_id, entry_id, revision, created, now),
+                        "INSERT INTO weekly_lineup VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+                        (
+                            lineup_id,
+                            season_id,
+                            competition_id,
+                            round_id,
+                            entry_id,
+                            revision,
+                            created,
+                            now,
+                            draft_source,
+                        ),
                     )
                 else:
                     if row["draft_revision"] != expected_revision:
                         raise LineupConflictError("stale draft revision")
                     lineup_id, revision, created = row["lineup_id"], expected_revision + 1, row["created_at"]
                     result = conn.execute(
-                        "UPDATE weekly_lineup SET draft_revision=?, updated_at=? WHERE lineup_id=? AND draft_revision=?",
-                        (revision, now, lineup_id, expected_revision),
+                        "UPDATE weekly_lineup SET draft_revision=?, updated_at=?, draft_source=? WHERE lineup_id=? AND draft_revision=?",
+                        (revision, now, draft_source, lineup_id, expected_revision),
                     )
                     # SELECT FOR UPDATE serializes PostgreSQL writers; this CAS
                     # also documents and protects the authoritative transition.
@@ -122,7 +150,9 @@ class WeeklyLineupRepository:
                     )
         except IntegrityError as exc:
             raise LineupConflictError("concurrent draft creation or edit") from exc
-        return LineupDraft(lineup_id, season_id, competition_id, round_id, entry_id, revision, selected, created, now)
+        return LineupDraft(
+            lineup_id, season_id, competition_id, round_id, entry_id, revision, selected, created, now, draft_source
+        )
 
     def get_draft(self, season_id, competition_id, round_id, entry_id):
         # Materialise the header and slots in one database statement. Under
@@ -155,6 +185,7 @@ class WeeklyLineupRepository:
             positions,
             row["created_at"],
             row["updated_at"],
+            row["draft_source"],
         )
 
     def submit(
@@ -179,6 +210,16 @@ class WeeklyLineupRepository:
         it can never silently diverge from, or be confused with, whatever
         the coach currently has open in their own private draft (see
         `submit_positions`, app/carry_forward.py, app/lineup_proxy.py).
+
+        If the draft's current revision was last written by a scorer/admin
+        proxy operation (`weekly_lineup.draft_source == "scorer_proxy"`,
+        set only by `app.lineup_proxy.LineupProxyService.create_or_amend`),
+        this refuses unless `source_type="scorer_proxy"` too -- a proxy-
+        authored draft can never silently become a `source_type="coach"`
+        submission with no trace of the intervention (see
+        migrations/versions/0018_proxy_draft_source.py's docstring). A
+        coach's own subsequent `save_draft` call resets `draft_source` back
+        to `"coach"`, lifting this again.
         """
         if source_type not in SUBMISSION_SOURCES:
             raise LineupIntegrityError("unknown submission source")
@@ -192,6 +233,12 @@ class WeeklyLineupRepository:
             lineup = self._lock_lineup_row(conn, lineup_id)
             if lineup["draft_revision"] != expected_draft_revision:
                 raise LineupConflictError("stale draft revision at submission")
+            if lineup["draft_source"] == "scorer_proxy" and source_type != "scorer_proxy":
+                raise LineupIntegrityError(
+                    "this draft's current content was last saved by a scorer/admin proxy operation; "
+                    "submit it via LineupProxyService.submit (source_type='scorer_proxy'), not the "
+                    "ordinary coach path -- or have the coach save their own draft edit first"
+                )
             slots = conn.execute(
                 "SELECT position, season_player_id FROM weekly_lineup_draft_slot WHERE lineup_id=?", (lineup_id,)
             ).fetchall()

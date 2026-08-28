@@ -11,7 +11,7 @@ import pytest
 
 from app.audit import ENTITY_TYPE_LINEUP, LINEUP_SUBMITTED, ActorContext, AuditEventRepository
 from app.lineup_proxy import LineupProxyError, LineupProxyService, UnauthorizedProxyActorError
-from app.lineups import WeeklyLineupRepository
+from app.lineups import LineupIntegrityError, WeeklyLineupRepository
 from app.lockouts import LockedSelectionError, LockoutRepository, LockoutTriggerRepository
 from tests.test_carry_forward import acquire_players, context
 from tests.test_carry_forward_lockouts import acquire_club_player
@@ -214,6 +214,93 @@ def test_proxy_submission_writes_one_attributable_append_only_audit_event():
     assert event.actor_role == "scorer"
     assert event.reason == "proxy entry"
     assert event.entity_version == str(submitted.version)
+
+
+# ---------------------------------------------------------------------------
+# Draft-handoff provenance: a proxy-touched draft can't quietly surface as
+# a coach submission (migrations/versions/0018_proxy_draft_source.py).
+# ---------------------------------------------------------------------------
+
+
+def test_ordinary_coach_submission_of_a_proxy_touched_draft_is_prevented():
+    """1. Scorer/admin proxy creates lineup state via `create_or_amend`.
+    2. A *different* actor -- the coach, via the ordinary, unattributed
+    `WeeklyLineupRepository.submit()` path -- attempts to submit that same
+    draft as-is.
+    3. That coach-path submission is explicitly prevented (never silently
+    recorded as `source_type="coach"` with no trace of the proxy
+    intervention); submitting the same content correctly attributed via
+    `LineupProxyService.submit` still succeeds."""
+    db, _, rounds, entries, scope, pool, ownership = context(rounds=1)
+    entry = entries[0]
+    players = acquire_players(pool, ownership, scope, entry, 1, 1)
+    lineups, proxy = WeeklyLineupRepository(db), LineupProxyService(db)
+
+    # 1. Scorer proxy creates lineup state on the entry's behalf.
+    draft = proxy.create_or_amend(
+        scope["season_id"],
+        scope["competition_id"],
+        rounds[0],
+        entry.season_entry_id,
+        {"F1": players[0].season_player_id},
+        expected_revision=0,
+        actor=SCORER,
+    )
+    assert draft.draft_source == "scorer_proxy"
+
+    # 2. A different actor attempts the ordinary coach submission path.
+    with pytest.raises(LineupIntegrityError, match="scorer/admin proxy"):
+        lineups.submit(draft.lineup_id, expected_draft_revision=draft.revision, expected_submission_version=0)
+
+    # Nothing was persisted by the prevented attempt.
+    assert lineups.get_effective_submission(draft.lineup_id) is None
+
+    # 3. Submitting the same content correctly attributed still works.
+    submitted = proxy.submit(
+        draft.lineup_id,
+        expected_draft_revision=draft.revision,
+        expected_submission_version=0,
+        actor=SCORER,
+        reason="proxy entered on coach's behalf",
+    )
+    assert submitted.source_type == "scorer_proxy"
+    assert submitted.positions["F1"] == players[0].season_player_id
+
+
+def test_coachs_own_subsequent_draft_edit_lifts_the_proxy_submission_gate():
+    """If the coach reviews and re-saves the draft themselves after a
+    proxy touched it, `draft_source` resets to `"coach"` and the ordinary
+    coach submission path is available again -- the gate tracks current
+    draft origin, not a permanent lock."""
+    db, _, rounds, entries, scope, pool, ownership = context(rounds=1)
+    entry = entries[0]
+    players = acquire_players(pool, ownership, scope, entry, 1, 2)
+    lineups, proxy = WeeklyLineupRepository(db), LineupProxyService(db)
+
+    proxy_draft = proxy.create_or_amend(
+        scope["season_id"],
+        scope["competition_id"],
+        rounds[0],
+        entry.season_entry_id,
+        {"F1": players[0].season_player_id},
+        expected_revision=0,
+        actor=SCORER,
+    )
+    coach_draft = lineups.save_draft(
+        scope["season_id"],
+        scope["competition_id"],
+        rounds[0],
+        entry.season_entry_id,
+        {"F1": players[0].season_player_id, "M1": players[1].season_player_id},
+        expected_revision=proxy_draft.revision,
+    )
+    assert coach_draft.draft_source == "coach"
+
+    submitted = lineups.submit(
+        coach_draft.lineup_id, expected_draft_revision=coach_draft.revision, expected_submission_version=0
+    )
+    assert submitted.source_type == "coach"
+    assert submitted.positions["M1"] == players[1].season_player_id
 
 
 # ---------------------------------------------------------------------------

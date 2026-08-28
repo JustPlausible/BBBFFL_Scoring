@@ -23,13 +23,16 @@ any write is attempted.
 ## Provenance
 
 `WeeklyLineupRepository.submit`'s existing columns already carry every
-piece of provenance issue #55 asks for -- `actor_type`/`actor_id`/
-`actor_role` (operator identity/role), `reason` (the required note),
-`source_type="scorer_proxy"` (never `"coach"`), and the lineup's own
-`season_entry_id` (the affected entry, via the `weekly_lineup` header) --
-so this module adds no new columns or tables; it only enforces that a
-proxy submission is always attributed and always tagged as proxy state,
-never miscategorised as `"coach"`.
+piece of *submission* provenance issue #55 asks for -- `actor_type`/
+`actor_id`/`actor_role` (operator identity/role), `reason` (the required
+note), `source_type="scorer_proxy"` (never `"coach"`), and the lineup's
+own `season_entry_id` (the affected entry, via the `weekly_lineup`
+header). The one addition this module needs is `weekly_lineup.
+draft_source` (migrations/versions/0018_proxy_draft_source.py) -- a
+single, whole-draft, non-history column, not a second audit log or a
+per-position/per-edit trail -- so that a proxy intervention in a *draft*
+can never silently disappear once submitted; see "Draft-handoff
+provenance" below.
 
 ## What is (and is not) separately audited
 
@@ -39,24 +42,29 @@ is never audited and `submit` (the immutable, official transition) always
 is (see app/audit.py's module docstring: "audit events explain the
 sequence of changes that produced current state"). `create_or_amend` here
 is the same `save_draft` a coach's own editing uses, so proxy draft edits
-carry the same (lack of) audit trail a coach's own draft edits do today --
-a deliberate scope-consistent choice, not an oversight; see this package's
-PR description for the follow-up this leaves open. `submit` is the
-material, attributable, transactionally-audited action.
+carry the same (lack of) *audit-event* trail a coach's own draft edits do
+today -- a deliberate scope-consistent choice, not an oversight. `submit`
+is the material, attributable, transactionally-audited action.
 
-A consequence, accepted rather than overlooked: `weekly_lineup_draft_slot`
-has no per-position or per-edit authorship of its own (never has, even for
-a coach's own multiple edits across sessions), so if an operator edits a
-draft via `create_or_amend` and a *different* actor -- the coach's own
-ordinary `submit()`, never this module -- later submits that same draft
-as-is, the resulting submission is correctly attributed to whoever
-performed *that* submit action (`source_type="coach"`), not to the
-operator who last touched the draft's content. This module's provenance
-guarantee is action-scoped ("who submitted"), matching issue #55's actual
-requirement ("Proxy actions must capture... actual operator actor
-identity"), not content-scoped ("who typed this position"); the latter
-would need new persisted draft-level authorship state (a schema change)
-and is an explicit candidate follow-up, not something to bolt on here.
+## Draft-handoff provenance
+
+`weekly_lineup_draft_slot` has no per-position or per-edit authorship of
+its own (never has, even for a coach's own multiple edits across
+sessions) -- `create_or_amend` does not change that, and this module adds
+no general per-edit draft history. What it does add is coarser but
+sufficient: `create_or_amend` marks the resulting draft revision
+`draft_source="scorer_proxy"`. `WeeklyLineupRepository.submit` (the
+ordinary coach path) then refuses to submit a draft whose current
+`draft_source` is `"scorer_proxy"` unless `source_type="scorer_proxy"`
+too -- see `submit`'s docstring. A proxy-authored draft can therefore
+never quietly become a `source_type="coach"` submission with no trace of
+the intervention: either the operator submits it themselves (correctly
+attributed), or the coach must first save their own draft edit (which
+resets `draft_source` back to `"coach"`, since the coach has then
+reviewed/rewritten it). This is action-scoped, not content-scoped: it
+tracks who most recently wrote the *whole* draft, not which positions
+came from whom -- deliberately the narrowest fix for the reported
+misattribution risk, not a parallel lineup model or a second audit log.
 """
 
 from app.audit import ActorContext
@@ -106,10 +114,25 @@ class LineupProxyService:
         amend the entry's private draft for this round, on the operator's
         behalf. Shares `save_draft`'s ordinary optimistic-concurrency
         contract, so a proxy edit racing the coach's own concurrent draft
-        edit fails safely rather than silently clobbering it."""
+        edit fails safely rather than silently clobbering it.
+
+        Marks the resulting draft revision `draft_source="scorer_proxy"`
+        (see migrations/versions/0018_proxy_draft_source.py), so
+        `WeeklyLineupRepository.submit`'s ordinary coach path refuses to
+        submit it until either this module's own `submit` does (correctly
+        attributed `source_type="scorer_proxy"`) or the coach saves their
+        own draft edit on top of it -- the proxy intervention can no
+        longer silently disappear into a `source_type="coach"` submission.
+        """
         _ensure_operator(actor)
         return self._lineups.save_draft(
-            season_id, competition_id, bbbffl_round_id, season_entry_id, positions, expected_revision=expected_revision
+            season_id,
+            competition_id,
+            bbbffl_round_id,
+            season_entry_id,
+            positions,
+            expected_revision=expected_revision,
+            draft_source="scorer_proxy",
         )
 
     def submit(

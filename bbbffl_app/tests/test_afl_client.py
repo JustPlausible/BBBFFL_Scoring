@@ -131,7 +131,9 @@ def test_get_current_season_reads_seasons_wrapper_and_season_id(client):
 
 def test_get_round_reads_rounds_wrapper_and_round_id(client):
     round_ = client.get_round(85, 24)
-    assert round_ == Round(round_id=1367, round_number=24)
+    # The fixture explicitly supplies ``byes: []``. That is known no-bye
+    # evidence, distinct from omitted/null (unresolved) evidence.
+    assert round_ == Round(round_id=1367, round_number=24, byes=())
 
 
 def test_get_matches_reads_matches_wrapper_and_nested_team_objects(client):

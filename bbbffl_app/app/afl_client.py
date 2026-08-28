@@ -139,6 +139,10 @@ class Season:
 class Round:
     round_id: int
     round_number: int
+    # ``None`` is an explicit upstream "not resolved" value; an empty tuple
+    # means afl-api positively reports no byes.  Keeping those states apart is
+    # important to lineup advice (and avoids manufacturing availability).
+    byes: tuple[Team, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -307,7 +311,13 @@ class AflApiClient:
         """Return stable identities from the public versioned rounds endpoint."""
         payload = self._get(f"/api/{self._contract_version}/seasons/{season_id}/rounds")
         return [
-            Round(round_id=entry["round_id"], round_number=entry["round_number"])
+            Round(
+                round_id=entry["round_id"],
+                round_number=entry["round_number"],
+                byes=(
+                    None if entry.get("byes") is None else tuple(Team.from_json(team) for team in entry.get("byes", []))
+                ),
+            )
             for entry in _unwrap(payload, "rounds")
         ]
 

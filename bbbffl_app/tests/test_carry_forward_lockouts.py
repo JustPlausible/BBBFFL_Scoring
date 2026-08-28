@@ -15,7 +15,9 @@ from app.audit import ActorContext
 from app.carry_forward import CarryForwardService, NoCarryForwardSourceError
 from app.lineups import WeeklyLineupRepository
 from app.lockouts import LockedSelectionError, LockoutRepository, LockoutTriggerRepository
-from tests.test_carry_forward import context, submit_round
+from tests.lineup_helpers import complete_lineup
+from tests.test_carry_forward import context
+from tests.test_carry_forward import submit_round as _submit_round
 from tests.test_lockouts import (
     ALL_MATCHES,
     EARLY_HOME,
@@ -27,6 +29,12 @@ from tests.test_lockouts import (
 )
 
 CARRY_FORWARD_ACTOR = ActorContext.system()
+
+
+def submit_round(*args, **kwargs):
+    """All unrelated slots use the scheduled late club, so these scenarios
+    reach the specific staged-lockout decision they are intended to test."""
+    return _submit_round(*args, neutral_team=LATE_HOME, **kwargs)
 
 
 def acquire_club_player(pool, ownership, scope, entry, canonical_id, team, name=None):
@@ -102,7 +110,9 @@ def test_carry_forward_cannot_overwrite_an_already_locked_effective_assignment()
         scope["competition_id"],
         rounds[1],
         entry.season_entry_id,
-        {"F1": early.season_player_id, "M1": late.season_player_id},
+        complete_lineup(
+            db, scope, entry, {"F1": early.season_player_id, "M1": late.season_player_id}, neutral_team=LATE_HOME
+        ),
         expected_revision=0,
     )
     round2_first = lineups.submit(
@@ -144,7 +154,9 @@ def test_still_editable_positions_remain_changeable_by_carry_forward():
         scope["competition_id"],
         rounds[1],
         entry.season_entry_id,
-        {"F1": early.season_player_id, "M1": late_old.season_player_id},
+        complete_lineup(
+            db, scope, entry, {"F1": early.season_player_id, "M1": late_old.season_player_id}, neutral_team=LATE_HOME
+        ),
         expected_revision=0,
     )
     round2_first = lineups.submit(
@@ -192,7 +204,7 @@ def test_interchange_cannot_provide_a_carry_forward_lockout_bypass():
         scope["competition_id"],
         rounds[1],
         entry.season_entry_id,
-        {"F1": early.season_player_id},
+        complete_lineup(db, scope, entry, {"F1": early.season_player_id}, neutral_team=LATE_HOME),
         expected_revision=0,
     )
     round2_first = lineups.submit(

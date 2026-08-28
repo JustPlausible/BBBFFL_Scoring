@@ -78,7 +78,14 @@ AFL_RESILIENCE = {"app.afl_resilience", "app.afl_diagnostics"}
 # dependency of it.
 GRAND_FINAL_VERTICAL = {"app.teams", "app.superscore", "app.presentation", "app.service", "app.scorer_decisions"}
 
-ROUTES = {"app.routes", "app.routes.admin", "app.routes.public", "app.routes.superscore", "app.routes.health"}
+ROUTES = {
+    "app.routes",
+    "app.routes.admin",
+    "app.routes.public",
+    "app.routes.superscore",
+    "app.routes.health",
+    "app.routes.draft",
+}
 
 COMPOSITION_ROOT = {"app.main"}
 

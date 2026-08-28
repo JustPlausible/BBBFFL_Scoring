@@ -63,6 +63,7 @@ EXPECTED_TABLES = {
     "draft_order_position",
     "draft_pick",
     "draft_pick_transfer",
+    "draft_pick_correction",
 }
 
 

@@ -169,6 +169,38 @@ class PlayerPoolRepository:
         ).fetchone()
         return _player(row) if row else None
 
+    def get_by_id(self, season_player_id):
+        row = self.database.execute(
+            "SELECT * FROM season_player_pool WHERE season_player_id=?",
+            (season_player_id,),
+        ).fetchone()
+        return _player(row) if row else None
+
+    def list_available(self, season_id):
+        """Eligible season players with no currently-open ownership period --
+        i.e. what a draft selection screen must offer (see app.draft), not
+        merely `list_selectable`'s eligibility-only view."""
+        rows = self.database.execute(
+            "SELECT p.* FROM season_player_pool p WHERE p.season_id=? AND p.eligible=TRUE "
+            "AND NOT EXISTS (SELECT 1 FROM player_ownership_period o "
+            "WHERE o.season_player_id=p.season_player_id AND o.released_at IS NULL) "
+            "ORDER BY p.display_name, p.canonical_player_id",
+            (season_id,),
+        ).fetchall()
+        return [_player(row) for row in rows]
+
+    def search_available(self, season_id, query=None, limit=50):
+        """`list_available` narrowed by a case-insensitive substring of
+        `display_name`. Filtered in Python rather than SQL `LIKE`/`ILIKE` so
+        matching behaves identically on SQLite and PostgreSQL (see
+        app.db._translate/`_for_update_suffix` for the same cross-dialect
+        philosophy elsewhere in this codebase)."""
+        available = self.list_available(season_id)
+        if query:
+            needle = query.strip().lower()
+            available = [player for player in available if needle in player.display_name.lower()]
+        return available[: max(limit, 0)]
+
 
 class OwnershipRepository:
     def __init__(self, database):
@@ -384,46 +416,69 @@ class OwnershipRepository:
         reason=None,
         correlation_id=None,
     ):
+        with transaction(self.database) as conn:
+            item = self.release_in_transaction(
+                conn,
+                season_player_id,
+                effective_at=effective_at,
+                actor=actor,
+                reason=reason,
+                correlation_id=correlation_id,
+            )
+        return item
+
+    def release_in_transaction(
+        self,
+        conn,
+        season_player_id,
+        *,
+        effective_at=None,
+        actor=ActorContext.anonymous_operator("admin"),
+        reason=None,
+        correlation_id=None,
+    ):
+        """Release using an existing transaction (for compound domain commands,
+        e.g. app.draft's correction workflow releasing an erroneous pick's
+        acquisition in the same transaction as reopening the pick)."""
         at = effective_at or _now()
         correlation_id = correlation_id or new_correlation_id()
-        with transaction(self.database) as conn:
-            if self.database.engine.dialect.name == "sqlite":
-                conn.execute(
-                    "UPDATE season_player_pool SET updated_at=updated_at WHERE season_player_id=?",
-                    (season_player_id,),
-                )
+        if self.database.engine.dialect.name == "sqlite":
             conn.execute(
-                "SELECT season_player_id FROM season_player_pool WHERE season_player_id=?"
-                + _for_update_suffix(self.database),
+                "UPDATE season_player_pool SET updated_at=updated_at WHERE season_player_id=?",
                 (season_player_id,),
-            ).fetchone()
-            current = conn.execute(
-                "SELECT * FROM player_ownership_period WHERE season_player_id=? AND released_at IS NULL",
-                (season_player_id,),
-            ).fetchone()
-            if not current:
-                raise PlayerUnavailableError("player is not currently owned")
-            if at <= current["acquired_at"]:
-                raise ValueError("release must be after acquisition")
-            conn.execute(
-                "UPDATE player_ownership_period SET released_at=? WHERE ownership_period_id=?",
-                (at, current["ownership_period_id"]),
             )
-            append_event(
-                conn,
-                actor=actor,
-                action=PLAYER_RELEASED,
-                entity_type=ENTITY_TYPE_OWNERSHIP_PERIOD,
-                entity_id=current["ownership_period_id"],
-                correlation_id=correlation_id,
-                reason=reason,
-                before_state={"released_at": None},
-                after_state={"released_at": at},
-                payload={
-                    "season_player_id": season_player_id,
-                    "season_entry_id": current["season_entry_id"],
-                },
-            )
+        conn.execute(
+            "SELECT season_player_id FROM season_player_pool WHERE season_player_id=?"
+            + _for_update_suffix(self.database),
+            (season_player_id,),
+        ).fetchone()
+        current = conn.execute(
+            "SELECT * FROM player_ownership_period WHERE season_player_id=? AND released_at IS NULL",
+            (season_player_id,),
+        ).fetchone()
+        if not current:
+            raise PlayerUnavailableError("player is not currently owned")
+        if at <= current["acquired_at"]:
+            raise ValueError("release must be after acquisition")
+        conn.execute(
+            "UPDATE player_ownership_period SET released_at=? WHERE ownership_period_id=?",
+            (at, current["ownership_period_id"]),
+        )
+        append_event(
+            conn,
+            actor=actor,
+            action=PLAYER_RELEASED,
+            entity_type=ENTITY_TYPE_OWNERSHIP_PERIOD,
+            entity_id=current["ownership_period_id"],
+            correlation_id=correlation_id,
+            reason=reason,
+            before_state={"released_at": None},
+            after_state={"released_at": at},
+            payload={
+                "season_player_id": season_player_id,
+                "season_entry_id": current["season_entry_id"],
+            },
+        )
         values = dict(current)
         values["released_at"] = at
         return OwnershipPeriod(**values)

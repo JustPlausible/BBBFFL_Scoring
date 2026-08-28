@@ -24,5 +24,15 @@ before validation for development and tests. Any rejection rolls everything back
 
 Completed picks retain durable season-entry and season-player IDs, independent
 of mutable names or subsequent roster ownership. Database triggers reject
-ordinary completed-result rewrites and deletion. Auditable correction and undo commands are
-deliberately deferred to roadmap package 14.
+ordinary completed-result rewrites and deletion.
+
+Roadmap package 14 (issue #53) builds the scorer-operated draft workflow on
+top of this ledger: persisted pause/resume, an auditable correction/undo
+mechanism for the most recently completed pick, and guarded finalisation,
+all as an operator surface over this same repository. See
+[`scorer-draft-workflow.md`](scorer-draft-workflow.md) for that workflow and
+migration `0016_draft_operations` for the small additions it required
+(`season_draft.paused_at`/`finalized_at`, `draft_pick.superseded_by_draft_pick_id`,
+and the append-only `draft_pick_correction` table) — the correction
+mechanism never rewrites or deletes a completed pick's row; it points it at
+a fresh replacement row for the same slot instead.

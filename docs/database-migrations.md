@@ -95,6 +95,16 @@ row exists there. Downgrade only succeeds while `audit_event` is empty --
 i.e. before the first DNP/Interchange/override/finalize mutation on that
 database.
 
+Revision `0016_draft_ops` adds the scorer-operated draft workflow's small
+persistence additions on top of `0015_draft`: persisted pause/finalisation
+state on `season_draft`, a `superseded_by_draft_pick_id` pointer plus a
+partial unique index on `draft_pick` (exactly one active row per slot), and
+the append-only `draft_pick_correction` table. See
+[`scorer-draft-workflow.md`](scorer-draft-workflow.md) for the full
+workflow and why the pointer's foreign key is declared `DEFERRABLE
+INITIALLY DEFERRED`. Downgrade refuses once any correction exists or any
+draft is finalised.
+
 ## Migration authoring and rollback
 
 Every relational change must be a new ordered revision. Do not add startup DDL

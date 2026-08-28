@@ -3,8 +3,9 @@ submission from the previous relevant submitted lineup, for the same
 BBBFFL season, competition stream and season entry (roadmap package 22,
 issue #55).
 
-Builds directly on `app.lineups.WeeklyLineupRepository.submit_positions` --
-the same immutable submission/version boundary from #33, the same
+Builds on `app.lineup_validation.ValidatedLineupSubmissionService`, which
+enforces package 24 and then delegates to `WeeklyLineupRepository.submit_positions` --
+the same immutable submission/version boundary from #33 and the same
 `lock_guard`/compare-and-swap concurrency rule -- rather than a second
 lineup model, a proxy-only selection store, or a parallel audit mechanism.
 Nothing here computes lock state itself; a `lock_guard` (see
@@ -37,15 +38,16 @@ explicit state that requires scorer/admin confirmation or proxy entry
 The source submission's positions are copied verbatim into the new
 submission: the same player in the same position, never optimised,
 substituted, reordered or "repaired". Any resulting ownership,
-availability or DNP question is left entirely to the normal downstream
-validation/scoring workflow -- `submit_positions` still runs the same
-`_validate_players`/`_validate_ownership` checks a coach's own submission
-does, so a source player no longer owned by this entry fails the attempt
-explicitly rather than being silently substituted or dropped.
+availability or DNP question is never used to alter the copy. The shared
+submission validator enforces completeness/identity/ownership first, and
+`submit_positions` retains its transactional ownership and lock checks, so a
+source player no longer owned by this entry fails explicitly rather than being
+silently substituted or dropped.
 """
 
 from dataclasses import dataclass
 
+from app.lineup_validation import ValidatedLineupSubmissionService
 from app.lineups import LineupIntegrityError, WeeklyLineupRepository
 
 CARRY_FORWARD_SOURCE_TYPE = "carry_forward"
@@ -76,9 +78,10 @@ class CarryForwardSource:
 
 
 class CarryForwardService:
-    def __init__(self, database):
+    def __init__(self, database, afl_client=None):
         self.database = database
         self._lineups = WeeklyLineupRepository(database)
+        self._submissions = ValidatedLineupSubmissionService(database, afl_client)
 
     def resolve_source(
         self, season_id: str, competition_id: str, bbbffl_round_id: str, season_entry_id: str
@@ -161,7 +164,7 @@ class CarryForwardService:
             "source_lineup_id": source.source_lineup_id,
             "source_version": source.source_version,
         }
-        submitted = self._lineups.submit_positions(
+        submitted = self._submissions.submit_positions(
             lineup_id,
             source.positions,
             expected_submission_version=expected_submission_version,
@@ -171,7 +174,7 @@ class CarryForwardService:
             reason=reason,
             lock_guard=lock_guard,
             require_unchanged=(source.source_lineup_id, source.source_version),
-        )
+        ).submission
         return submitted, source
 
 

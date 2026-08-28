@@ -1,19 +1,37 @@
 """Issue #56 weekly lineup hard-validation/advisory boundary."""
 
+from contextlib import contextmanager
+
 import pytest
 
-from app.afl_client import Round, Team
+from app.afl_client import AflApiConnectionError, Round, Team
+from app.afl_resilience import ResilientAflClient, RetryPolicy
+from app.audit import ActorContext
+from app.carry_forward import CarryForwardService
+from app.lineup_proxy import LineupProxyService
 from app.lineup_validation import LineupValidationError, LineupValidationService, ValidatedLineupSubmissionService
 from app.lineups import POSITIONS, WeeklyLineupRepository
+from app.player_pool import PlayerPoolRepository
+from tests.test_carry_forward import context as carry_context
+from tests.test_carry_forward import submit_round
 from tests.test_lineups import context, save
 
 
 class AvailabilityFixture:
-    def __init__(self, round_):
+    def __init__(self, round_, *, stale=False):
         self.round = round_
+        self.stale = stale
 
     def get_rounds(self, season_id):
         return [self.round]
+
+    @contextmanager
+    def evidence_batch(self):
+        class Batch:
+            def is_evidence_fresh(inner_self):
+                return not self.stale
+
+        yield Batch()
 
 
 def full(players):
@@ -28,12 +46,15 @@ def mapped_context(*, year=2026, stale=False, unresolved=False):
         (round_record.bbbffl_round_id,),
     ).fetchone()
     bye = Team(77, "Bye Club")
-    db.execute(
-        "UPDATE season_player_pool SET afl_team_id=?, afl_team_name=? WHERE season_player_id=?",
-        (bye.team_id, bye.name, players[0].season_player_id),
+    players[0] = PlayerPoolRepository(db).refresh_player(
+        scope["season_id"],
+        players[0].canonical_player_id,
+        players[0].display_name,
+        afl_team_id=bye.team_id,
+        afl_team_name=bye.name,
     )
-    afl_round = Round(mapping["afl_round_id"], 1, None if unresolved else (bye,), "stale" if stale else "current")
-    return db, round_record, entries, scope, players, foreign, AvailabilityFixture(afl_round)
+    afl_round = Round(mapping["afl_round_id"], 1, None if unresolved else (bye,))
+    return db, round_record, entries, scope, players, foreign, AvailabilityFixture(afl_round, stale=stale)
 
 
 def test_valid_owned_nine_player_lineup_submits_with_bye_advice_and_no_mutation():
@@ -64,6 +85,57 @@ def test_incomplete_draft_saves_but_submission_validation_rejects_it():
     assert WeeklyLineupRepository(db).get_effective_submission(draft.lineup_id) is None
 
 
+def test_scorer_proxy_cannot_bypass_hard_validation():
+    db, round_, entries, scope, players, _, _ = mapped_context()
+    proxy = LineupProxyService(db)
+    draft = proxy.create_or_amend(
+        scope["season_id"],
+        scope["competition_id"],
+        round_.bbbffl_round_id,
+        entries[0].season_entry_id,
+        {"F1": players[0].season_player_id},
+        expected_revision=0,
+        actor=ActorContext.anonymous_operator("scorer"),
+    )
+    with pytest.raises(LineupValidationError):
+        proxy.submit(
+            draft.lineup_id,
+            expected_draft_revision=draft.revision,
+            expected_submission_version=0,
+            actor=ActorContext.anonymous_operator("scorer"),
+            reason="proxy",
+        )
+
+
+def test_carry_forward_cannot_bypass_hard_validation():
+    db, _, rounds, entries, scope, pool, ownership = carry_context(rounds=2)
+    player = pool.refresh_player(scope["season_id"], 999001, "Only Player")
+    ownership.acquire(player.season_player_id, entries[0].season_entry_id)
+    submit_round(WeeklyLineupRepository(db), scope, rounds[0], entries[0], {"F1": player.season_player_id})
+    with pytest.raises(LineupValidationError):
+        CarryForwardService(db).carry_forward(
+            scope["season_id"],
+            scope["competition_id"],
+            rounds[1],
+            entries[0].season_entry_id,
+            expected_submission_version=0,
+            actor=ActorContext.anonymous_operator("scorer"),
+        )
+
+
+def test_validated_submission_still_delegates_to_authoritative_lock_guard():
+    db, round_, entries, scope, players, _, afl = mapped_context()
+    draft = save(WeeklyLineupRepository(db), round_, entries, scope, full(players))
+
+    def locked(*args):
+        raise RuntimeError("locked by staged authority")
+
+    with pytest.raises(RuntimeError, match="staged authority"):
+        ValidatedLineupSubmissionService(db, afl).submit(
+            draft.lineup_id, expected_draft_revision=1, expected_submission_version=0, lock_guard=locked
+        )
+
+
 def test_duplicate_and_foreign_player_failures_are_structured():
     db, round_, entries, scope, players, foreign, afl = mapped_context()
     draft = save(WeeklyLineupRepository(db), round_, entries, scope, full(players))
@@ -87,4 +159,28 @@ def test_2026_replay_represents_stale_and_unknown_evidence_without_dnp(stale, un
     result = LineupValidationService(db, afl).validate_submission(draft.lineup_id, draft.positions)
     assert result.valid
     assert code in {message.code for message in result.messages}
+    assert db.execute("SELECT COUNT(*) n FROM slot_dnp").fetchone()["n"] == 0
+
+
+def test_resilient_cached_round_fallback_is_reported_stale_not_as_current_bye():
+    db, round_, entries, scope, players, _, fixture = mapped_context()
+
+    class Transport:
+        failed = False
+
+        def get_rounds(self, season_id):
+            if self.failed:
+                raise AflApiConnectionError("/rounds")
+            return [fixture.round]
+
+    transport = Transport()
+    resilient = ResilientAflClient(transport, retry_policy=RetryPolicy(max_attempts=1))
+    draft = save(WeeklyLineupRepository(db), round_, entries, scope, full(players))
+    current = LineupValidationService(db, resilient).validate_submission(draft.lineup_id, draft.positions)
+    assert "afl_club_bye" in {message.code for message in current.messages}
+
+    transport.failed = True
+    stale = LineupValidationService(db, resilient).validate_submission(draft.lineup_id, draft.positions)
+    assert "availability_evidence_stale" in {message.code for message in stale.messages}
+    assert "afl_club_bye" not in {message.code for message in stale.messages}
     assert db.execute("SELECT COUNT(*) n FROM slot_dnp").fetchone()["n"] == 0

@@ -1,5 +1,6 @@
 """Side-effect-free weekly-lineup validation and AFL availability advice."""
 
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -129,21 +130,29 @@ class LineupValidationService:
         if mapping is None:
             out.append(ValidationMessage("unknown", "availability", "availability_context_unmapped"))
             return
+        # ResilientAflClient deliberately keeps freshness out of the cached
+        # value. Its evidence batch is therefore the authority for whether
+        # this particular read was live or a stale fallback. Plain contract
+        # clients/fakes have no batch and a successful response is current.
+        batch_context = (
+            self.afl_client.evidence_batch() if hasattr(self.afl_client, "evidence_batch") else nullcontext(None)
+        )
         try:
-            round_ = next(
-                (
-                    r
-                    for r in self.afl_client.get_rounds(mapping["afl_season_id"])
-                    if r.round_id == mapping["afl_round_id"]
-                ),
-                None,
-            )
+            with batch_context as batch:
+                round_ = next(
+                    (
+                        r
+                        for r in self.afl_client.get_rounds(mapping["afl_season_id"])
+                        if r.round_id == mapping["afl_round_id"]
+                    ),
+                    None,
+                )
         except (AflApiError, LookupError):
             round_ = None
         if round_ is None or round_.byes is None:
             out.append(ValidationMessage("unknown", "availability", "availability_evidence_indeterminate"))
             return
-        if round_.evidence_status == "stale":
+        if batch is not None and not batch.is_evidence_fresh():
             out.append(
                 ValidationMessage(
                     "unknown", "availability", "availability_evidence_stale", details={"source": "afl-api-v1"}
@@ -202,6 +211,20 @@ class ValidatedLineupSubmissionService:
         submitted = self.lineups.submit(
             lineup_id,
             expected_draft_revision=expected_draft_revision,
+            expected_submission_version=expected_submission_version,
+            lock_guard=lock_guard,
+            **kwargs,
+        )
+        return ValidatedSubmission(submitted, result)
+
+    def submit_positions(self, lineup_id, positions, *, expected_submission_version, lock_guard=None, **kwargs):
+        """The same boundary for carry-forward/system-derived content."""
+        result = self.validation.validate_submission(lineup_id, positions)
+        if not result.valid:
+            raise LineupValidationError(result)
+        submitted = self.lineups.submit_positions(
+            lineup_id,
+            positions,
             expected_submission_version=expected_submission_version,
             lock_guard=lock_guard,
             **kwargs,

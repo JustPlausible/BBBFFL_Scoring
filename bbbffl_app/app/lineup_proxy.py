@@ -2,7 +2,8 @@
 aggregate an ordinary coach submission uses (roadmap package 22, issue
 #55).
 
-Builds directly on `app.lineups.WeeklyLineupRepository` -- the same private
+Builds on the shared package-24 submission validator and
+`app.lineups.WeeklyLineupRepository` -- the same private
 draft / immutable submission boundary from #33, the same `lock_guard`
 integration with app/lockouts.py, and the same append-only audit event
 from #17 that `submit()` already writes on every submission (`app.audit`,
@@ -68,6 +69,7 @@ misattribution risk, not a parallel lineup model or a second audit log.
 """
 
 from app.audit import ActorContext
+from app.lineup_validation import ValidatedLineupSubmissionService
 from app.lineups import LineupIntegrityError, WeeklyLineupRepository
 
 SCORER_PROXY_SOURCE_TYPE = "scorer_proxy"
@@ -95,9 +97,10 @@ class LineupProxyService:
     """Scorer/admin proxy entry point over `WeeklyLineupRepository`, for an
     authorised operator acting on behalf of a season entry."""
 
-    def __init__(self, database):
+    def __init__(self, database, afl_client=None):
         self.database = database
         self._lineups = WeeklyLineupRepository(database)
+        self._submissions = ValidatedLineupSubmissionService(database, afl_client)
 
     def create_or_amend(
         self,
@@ -161,7 +164,7 @@ class LineupProxyService:
         _ensure_operator(actor)
         if not reason:
             raise LineupProxyError("a scorer/admin proxy submission requires a reason")
-        return self._lineups.submit(
+        return self._submissions.submit(
             lineup_id,
             expected_draft_revision=expected_draft_revision,
             expected_submission_version=expected_submission_version,
@@ -169,4 +172,4 @@ class LineupProxyService:
             source_type=SCORER_PROXY_SOURCE_TYPE,
             reason=reason,
             lock_guard=lock_guard,
-        )
+        ).submission

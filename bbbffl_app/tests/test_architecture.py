@@ -72,7 +72,7 @@ LOCKOUTS = {"app.lockouts"}
 # app.lockouts, both accept an optional `lock_guard` as a duck-typed
 # collaborator rather than importing app.lockouts directly, keeping
 # immutable submission history decoupled from lock evaluation/evidence.
-WEEKLY_SUBMISSION_SOURCES = {"app.carry_forward", "app.lineup_proxy"}
+WEEKLY_SUBMISSION_SOURCES = {"app.carry_forward", "app.lineup_proxy", "app.lineup_validation"}
 
 # AFL resilience boundary (roadmap package 05, issue #37): retry/backoff,
 # cache/evidence-state and diagnostics wrapped directly around the

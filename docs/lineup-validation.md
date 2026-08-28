@@ -8,8 +8,11 @@ and retain a consistent season/competition/round/entry scope. Ownership is read
 only from package 21's ownership periods. Draft saves remain deliberately
 permissive so a coach can build a lineup progressively.
 
-`ValidatedLineupSubmissionService` performs that validation before delegating
-the write to `WeeklyLineupRepository.submit`. Callers pass package 34's
+`ValidatedLineupSubmissionService` is the single application submission
+boundary for coach drafts and explicit-position sources. Scorer proxy and
+carry-forward both use it rather than calling the repository submission
+methods directly. It performs validation before delegating the write to
+`WeeklyLineupRepository.submit` or `submit_positions`. Callers pass package 34's
 `lock_guard` unchanged; validation neither calculates nor bypasses staged
 lockout. Failed hard validation produces `LineupValidationError.result` and no
 submission.
@@ -21,3 +24,7 @@ unavailable, indeterminate, or stale evidence. AFL club byes come from
 `rounds[].byes` in the public afl-api v1 contract. A bye warning never removes a
 selection, writes lineup/scoring state, or creates a DNP decision. In particular
 `byes: null` is unknown while `byes: []` is factual evidence of no byes.
+Freshness is obtained from `ResilientAflClient.evidence_batch()` around the
+round read: cached fallback is stale even though the cached round value itself
+is unchanged. Plain afl-api contract clients treat a successful live read as
+current.

@@ -143,7 +143,6 @@ class Round:
     # means afl-api positively reports no byes.  Keeping those states apart is
     # important to lineup advice (and avoids manufacturing availability).
     byes: tuple[Team, ...] | None = None
-    evidence_status: Literal["current", "stale"] = "current"
 
 
 @dataclass(frozen=True)

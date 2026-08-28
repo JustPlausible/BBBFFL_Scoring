@@ -1,5 +1,8 @@
 # Module boundaries and dependency direction
 
+The authoritative preseason draft boundary and its atomic integration with the
+player ownership ledger are described in [draft-ledger.md](draft-ledger.md).
+
 This document is the roadmap package 03 (issue #36) deliverable: it names the
 explicit service/repository boundaries the 2027 season model already has,
 consolidates the one place that still mixed HTTP orchestration with business

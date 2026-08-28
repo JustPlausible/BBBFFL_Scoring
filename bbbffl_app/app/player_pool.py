@@ -285,72 +285,51 @@ class OwnershipRepository:
         reason=None,
         correlation_id=None,
     ):
+        with transaction(self.database) as conn:
+            item = self.acquire_in_transaction(
+                conn, season_player_id, season_entry_id, effective_at=effective_at,
+                actor=actor, reason=reason, correlation_id=correlation_id,
+            )
+        return item
+
+    def acquire_in_transaction(
+        self, conn, season_player_id, season_entry_id, *, effective_at=None,
+        actor=ActorContext.anonymous_operator("admin"), reason=None, correlation_id=None,
+    ):
+        """Acquire using an existing transaction (for compound domain commands)."""
         at = effective_at or _now()
         correlation_id = correlation_id or new_correlation_id()
-        with transaction(self.database) as conn:
-            # SQLite has no SELECT FOR UPDATE. Acquire its writer lock before
-            # any availability snapshot so a waiter reads the winner's commit.
-            if self.database.engine.dialect.name == "sqlite":
-                conn.execute(
-                    "UPDATE season_player_pool SET updated_at=updated_at WHERE season_player_id=?",
-                    (season_player_id,),
-                )
-                conn.execute(
-                    "UPDATE season_entry SET created_at=created_at WHERE season_entry_id=?",
-                    (season_entry_id,),
-                )
-            player = conn.execute(
-                "SELECT season_id, eligible FROM season_player_pool WHERE season_player_id=?"
-                + _for_update_suffix(self.database),
-                (season_player_id,),
-            ).fetchone()
-            if not player:
-                raise KeyError(season_player_id)
-            entry = conn.execute(
-                "SELECT season_id FROM season_entry WHERE season_entry_id=?" + _for_update_suffix(self.database),
-                (season_entry_id,),
-            ).fetchone()
-            if not entry:
-                raise KeyError(season_entry_id)
-            if entry["season_id"] != player["season_id"]:
-                raise ValueError("player and entry must belong to the same season")
-            if not player["eligible"]:
-                raise PlayerUnavailableError("player is not selectable")
-            overlap = conn.execute(
-                "SELECT 1 FROM player_ownership_period WHERE season_player_id=? AND acquired_at<=? AND (released_at IS NULL OR released_at>?)",
-                (season_player_id, at, at),
-            ).fetchone()
-            if overlap:
-                raise PlayerUnavailableError("player is already owned at the effective time")
-            self.validate_squad_capacity(season_entry_id, effective_at=at, connection=conn)
-            item = OwnershipPeriod(
-                _id(),
-                season_player_id,
-                player["season_id"],
-                season_entry_id,
-                at,
-                None,
-                reason,
-                _now(),
-            )
-            conn.execute(
-                "INSERT INTO player_ownership_period VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                tuple(item.__dict__.values()),
-            )
-            append_event(
-                conn,
-                actor=actor,
-                action=PLAYER_ACQUIRED,
-                entity_type=ENTITY_TYPE_OWNERSHIP_PERIOD,
-                entity_id=item.ownership_period_id,
-                correlation_id=correlation_id,
-                reason=reason,
-                after_state={
-                    "season_player_id": season_player_id,
-                    "season_entry_id": season_entry_id,
-                    "acquired_at": at,
-                },
-            )
+        if self.database.engine.dialect.name == "sqlite":
+            conn.execute("UPDATE season_player_pool SET updated_at=updated_at WHERE season_player_id=?", (season_player_id,))
+            conn.execute("UPDATE season_entry SET created_at=created_at WHERE season_entry_id=?", (season_entry_id,))
+        player = conn.execute(
+            "SELECT season_id, eligible FROM season_player_pool WHERE season_player_id=?" + _for_update_suffix(self.database),
+            (season_player_id,),
+        ).fetchone()
+        entry = conn.execute(
+            "SELECT season_id FROM season_entry WHERE season_entry_id=?" + _for_update_suffix(self.database),
+            (season_entry_id,),
+        ).fetchone()
+        if not player or not entry:
+            raise KeyError(season_player_id if not player else season_entry_id)
+        if entry["season_id"] != player["season_id"]:
+            raise ValueError("player and entry must belong to the same season")
+        if not player["eligible"]:
+            raise PlayerUnavailableError("player is not selectable")
+        overlap = conn.execute(
+            "SELECT 1 FROM player_ownership_period WHERE season_player_id=? AND acquired_at<=? AND (released_at IS NULL OR released_at>?)",
+            (season_player_id, at, at),
+        ).fetchone()
+        if overlap:
+            raise PlayerUnavailableError("player is already owned at the effective time")
+        self.validate_squad_capacity(season_entry_id, effective_at=at, connection=conn)
+        item = OwnershipPeriod(_id(), season_player_id, player["season_id"], season_entry_id, at, None, reason, _now())
+        conn.execute("INSERT INTO player_ownership_period VALUES (?, ?, ?, ?, ?, ?, ?, ?)", tuple(item.__dict__.values()))
+        append_event(
+            conn, actor=actor, action=PLAYER_ACQUIRED, entity_type=ENTITY_TYPE_OWNERSHIP_PERIOD,
+            entity_id=item.ownership_period_id, correlation_id=correlation_id, reason=reason,
+            after_state={"season_player_id": season_player_id, "season_entry_id": season_entry_id, "acquired_at": at},
+        )
         return item
 
     def release(

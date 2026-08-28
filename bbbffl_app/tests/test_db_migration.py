@@ -14,7 +14,8 @@ from app.draft import DraftRepository
 from app.fixtures import FixtureRepository
 from app.identity import IdentityRepository
 from app.migrations import HEAD, downgrade, migrate
-from app.player_pool import OwnershipRepository
+from app.player_pool import OwnershipRepository, PlayerPoolRepository
+from app.preseason import PreseasonRepository
 from app.round_mapping import RoundMappingRepository
 from app.season import SeasonRepository
 
@@ -66,6 +67,11 @@ EXPECTED_TABLES = {
     "draft_pick",
     "draft_pick_transfer",
     "draft_pick_correction",
+    "season_preseason_window",
+    "preseason_trade",
+    "preseason_trade_leg",
+    "preseason_opening_snapshot",
+    "preseason_opening_snapshot_entry",
 }
 
 
@@ -496,6 +502,75 @@ def test_draft_downgrade_refuses_loss_of_paused_state(tmp_path):
 
     with pytest.raises(RuntimeError, match="pause state would be lost"):
         downgrade(url, "0015_draft")
+
+
+def test_upgrade_from_draft_ops_head_adds_preseason_schema(tmp_path):
+    url = _url(tmp_path / "preseason-upgrade.db")
+    migrate(url, "0016_draft_ops")
+    migrate(url)
+    tables = set(inspect(create_engine(url)).get_table_names())
+    assert {
+        "season_preseason_window",
+        "preseason_trade",
+        "preseason_trade_leg",
+        "preseason_opening_snapshot",
+        "preseason_opening_snapshot_entry",
+    } <= tables
+
+
+def _seed_preseason_window(database):
+    season = SeasonRepository(database).create_season(2027, "2027")
+    identities = IdentityRepository(database)
+    entries = [
+        identities.create_entry(season.season_id, f"l{n}", identities.create_coach(f"C{n}").coach_id, f"T{n}")
+        for n in range(2)
+    ]
+    OwnershipRepository(database).configure_squad_limit(season.season_id, 1)
+    pool = PlayerPoolRepository(database)
+    pool_players = [pool.refresh_player(season.season_id, n + 1, f"P{n}") for n in range(2)]
+    draft = DraftRepository(database)
+    draft.accept_order(season.season_id, [entry.season_entry_id for entry in entries])
+    for n, entry in enumerate(entries):
+        draft.execute_pick(season.season_id, entry.season_entry_id, pool_players[n].season_player_id)
+    draft.finalize(season.season_id)
+    return season, entries
+
+
+def test_preseason_window_downgrade_refuses_loss_of_window_history(tmp_path):
+    url = _url(tmp_path / "preseason-window-irreversible.db")
+    migrate(url)
+    database = connect(url)
+    season, _entries = _seed_preseason_window(database)
+    PreseasonRepository(database).open_window(season.season_id)
+    database.close()
+
+    with pytest.raises(RuntimeError, match="history would be lost"):
+        downgrade(url, "0016_draft_ops")
+
+
+def test_preseason_downgrade_refuses_loss_of_trade_and_snapshot_history(tmp_path):
+    url = _url(tmp_path / "preseason-trade-irreversible.db")
+    migrate(url)
+    database = connect(url)
+    season, entries = _seed_preseason_window(database)
+    preseason = PreseasonRepository(database)
+    preseason.open_window(season.season_id)
+    ownership = OwnershipRepository(database)
+    e0, e1 = (entry.season_entry_id for entry in entries)
+    p0 = ownership.squad_at(e0, "9999-01-01")[0].season_player_id
+    p1 = ownership.squad_at(e1, "9999-01-01")[0].season_player_id
+    preseason.submit_trade(
+        season.season_id,
+        [
+            {"season_player_id": p0, "from_season_entry_id": e0, "to_season_entry_id": e1},
+            {"season_player_id": p1, "from_season_entry_id": e1, "to_season_entry_id": e0},
+        ],
+    )
+    preseason.close_window(season.season_id)
+    database.close()
+
+    with pytest.raises(RuntimeError, match="history would be lost"):
+        downgrade(url, "0016_draft_ops")
 
 
 def test_downgrade_to_0002_succeeds_when_audit_event_is_empty(tmp_path):

@@ -289,4 +289,4 @@ jobs:
           connection.close()
           PY
       - name: Exercise PostgreSQL lifecycle/lineup/lockout concurrency guarantees
-        run: pytest -q tests/test_competition_lifecycle_concurrency.py tests/test_lineups_concurrency.py tests/test_lockouts_concurrency.py tests/test_draft_postgresql.py
+        run: pytest -q tests/test_competition_lifecycle_concurrency.py tests/test_lineups_concurrency.py tests/test_lockouts_concurrency.py tests/test_draft_postgresql.py tests/test_preseason_postgresql.py

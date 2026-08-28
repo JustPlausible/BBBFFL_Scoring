@@ -23,8 +23,19 @@ from app.draft import (
 from app.identity import IdentityRepository
 from app.migrations import migrate
 from app.player_pool import PlayerPoolRepository, PlayerUnavailableError, SquadCapacityError
+from app.preseason import (
+    PreseasonDraftNotFinalizedError,
+    PreseasonRepository,
+    PreseasonSnapshotError,
+    PreseasonSquadValidationError,
+    PreseasonStateError,
+    PreseasonTradeValidationError,
+    PreseasonWindowClosedError,
+    PreseasonWindowExistsError,
+)
 from app.routes import admin, health, public
 from app.routes import draft as draft_routes
+from app.routes import preseason as preseason_routes
 from app.routes import superscore as superscore_routes
 from app.scorer_decisions import (
     CompetitionFinalizedError,
@@ -113,6 +124,10 @@ async def lifespan(app: FastAPI):
     app.state.identities = IdentityRepository(database)
     app.state.player_pool = PlayerPoolRepository(database)
     app.state.draft = DraftRepository(database)
+    # Roadmap package 15's preseason trade/finalisation window (issue #54,
+    # app/routes/preseason.py) is an operator surface over this same
+    # authoritative repository -- see docs/preseason-trades.md.
+    app.state.preseason = PreseasonRepository(database)
     app.state.afl_client = afl_client
     app.state.identity_cache = PlayerIdentityCache(afl_client)
     app.state.teams = teams
@@ -173,6 +188,7 @@ app.include_router(superscore_routes.router)
 app.include_router(superscore_routes.page_router)
 app.include_router(draft_routes.router)
 app.include_router(draft_routes.page_router)
+app.include_router(preseason_routes.router)
 
 
 @app.exception_handler(AflApiError)
@@ -282,3 +298,64 @@ async def squad_capacity_error_handler(request: Request, exc: SquadCapacityError
 @app.exception_handler(KeyError)
 async def key_error_handler(request: Request, exc: KeyError) -> JSONResponse:
     return JSONResponse(status_code=404, content={"detail": f"not found: {exc}"})
+
+
+# A fallback net, not a substitute for a specific handler: FastAPI/Starlette
+# dispatch a raised exception to the handler for the most-derived class in
+# its MRO that is registered, so every subclass-specific handler above still
+# wins over this one. This exists because a domain method's plain
+# precondition failure (e.g. `DraftRepository.reopen`'s "reopening a
+# finalized draft requires an explicit reason", or
+# `PreseasonRepository.correct_opening_snapshot`'s "an opening-squad
+# correction requires an explicit reason") is a genuine bad request, not an
+# unexpected server error -- it must never surface as an opaque 500.
+@app.exception_handler(ValueError)
+async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+# app.preseason raises plain domain exceptions for the same reason app.draft
+# does (see the comment above its handlers) -- these are the sole place that
+# translates each one to an HTTP status for app/routes/preseason.py.
+# PreseasonWindowClosedError gets 423 (Locked), matching
+# DraftFinalizedError's convention: the window is a stable, closed fact, not
+# a conflict the operator resolves by retrying.
+@app.exception_handler(PreseasonWindowClosedError)
+async def preseason_window_closed_error_handler(request: Request, exc: PreseasonWindowClosedError) -> JSONResponse:
+    return JSONResponse(status_code=423, content={"detail": str(exc)})
+
+
+@app.exception_handler(PreseasonDraftNotFinalizedError)
+async def preseason_draft_not_finalized_error_handler(
+    request: Request, exc: PreseasonDraftNotFinalizedError
+) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(PreseasonWindowExistsError)
+async def preseason_window_exists_error_handler(request: Request, exc: PreseasonWindowExistsError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(PreseasonSquadValidationError)
+async def preseason_squad_validation_error_handler(
+    request: Request, exc: PreseasonSquadValidationError
+) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc), "issues": exc.issues})
+
+
+@app.exception_handler(PreseasonTradeValidationError)
+async def preseason_trade_validation_error_handler(
+    request: Request, exc: PreseasonTradeValidationError
+) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc), "issues": exc.issues})
+
+
+@app.exception_handler(PreseasonSnapshotError)
+async def preseason_snapshot_error_handler(request: Request, exc: PreseasonSnapshotError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(PreseasonStateError)
+async def preseason_state_error_handler(request: Request, exc: PreseasonStateError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})

@@ -52,6 +52,7 @@ SEASON_MODEL = {
     "app.identity",
     "app.player_pool",
     "app.draft",
+    "app.preseason",
     "app.fixtures",
     "app.round_mapping",
     "app.competition_lifecycle",
@@ -85,6 +86,7 @@ ROUTES = {
     "app.routes.superscore",
     "app.routes.health",
     "app.routes.draft",
+    "app.routes.preseason",
 }
 
 COMPOSITION_ROOT = {"app.main"}

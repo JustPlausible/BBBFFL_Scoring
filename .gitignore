@@ -11,3 +11,9 @@ node_modules/
 # Ignore build or temp files if using TypeScript or bundlers
 dist/
 build/
+
+# Python virtual environments
+.venv/
+venv/
+__pycache__/
+*.pyc

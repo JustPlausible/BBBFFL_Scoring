@@ -353,6 +353,27 @@ class DraftRepository:
                 raise DraftCorrectionError(
                     "only the most recently completed pick can be corrected -- correct that one first"
                 )
+            # release_in_transaction releases whatever ownership period is
+            # currently open for this player -- safe only if that period is
+            # still the exact one this pick created. If the player was since
+            # released or transferred by something other than this pick
+            # (e.g. an out-of-band admin correction), the currently open
+            # period belongs to a different acquisition entirely and must
+            # not be silently released on this pick's behalf.
+            current_ownership = conn.execute(
+                "SELECT * FROM player_ownership_period WHERE season_player_id=? AND released_at IS NULL"
+                + _for_update_suffix(self.database),
+                (original["selected_season_player_id"],),
+            ).fetchone()
+            if (
+                not current_ownership
+                or current_ownership["season_entry_id"] != original["current_season_entry_id"]
+                or current_ownership["acquired_at"] != original["completed_at"]
+            ):
+                raise DraftCorrectionError(
+                    "player ownership has changed since this pick (released or transferred) -- "
+                    "correction is no longer safe"
+                )
             self.ownership.release_in_transaction(
                 conn,
                 original["selected_season_player_id"],
@@ -428,11 +449,18 @@ class DraftRepository:
             # guarantees this once every pick is completed (see
             # docs/draft-ledger.md), but finalisation is the one place that
             # must refuse outright if that invariant is ever violated rather
-            # than silently freezing an inconsistent squad.
+            # than silently freezing an inconsistent squad. Counts *active*
+            # player_ownership_period rows, not draft_pick allocations --
+            # a completed pick's ownership can still have been released
+            # out-of-band (e.g. OwnershipRepository.release called directly)
+            # without changing the pick's own completed_at/current_season_entry_id,
+            # so counting picks alone would miss that entirely.
             uneven = conn.execute(
-                "SELECT current_season_entry_id, COUNT(*) AS n FROM draft_pick "
-                "WHERE draft_id=? AND superseded_by_draft_pick_id IS NULL "
-                "GROUP BY current_season_entry_id HAVING COUNT(*) <> ?",
+                "SELECT o.season_entry_id, COUNT(p.ownership_period_id) AS n FROM draft_order_position o "
+                "LEFT JOIN player_ownership_period p "
+                "  ON p.season_entry_id=o.season_entry_id AND p.released_at IS NULL "
+                "WHERE o.draft_id=? "
+                "GROUP BY o.season_entry_id HAVING COUNT(p.ownership_period_id) <> ?",
                 (draft["draft_id"], draft["target_squad_size"]),
             ).fetchall()
             if uneven:

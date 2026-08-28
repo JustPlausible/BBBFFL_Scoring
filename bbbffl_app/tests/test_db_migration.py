@@ -10,9 +10,11 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import DatabaseError
 
 from app.db import DecisionsRepository, connect
+from app.draft import DraftRepository
 from app.fixtures import FixtureRepository
 from app.identity import IdentityRepository
 from app.migrations import HEAD, downgrade, migrate
+from app.player_pool import OwnershipRepository
 from app.round_mapping import RoundMappingRepository
 from app.season import SeasonRepository
 
@@ -474,6 +476,26 @@ def test_downgrade_refuses_loss_of_audit_history(tmp_path):
     repo.conn.close()
     with pytest.raises(RuntimeError, match="audit_event holds history"):
         downgrade(url, "0002_competition")
+
+
+def test_draft_downgrade_refuses_loss_of_paused_state(tmp_path):
+    url = _url(tmp_path / "draft-paused-irreversible.db")
+    migrate(url)
+    database = connect(url)
+    season = SeasonRepository(database).create_season(2027, "2027")
+    identities = IdentityRepository(database)
+    entries = [
+        identities.create_entry(season.season_id, f"l{n}", identities.create_coach(f"C{n}").coach_id, f"T{n}")
+        for n in range(2)
+    ]
+    OwnershipRepository(database).configure_squad_limit(season.season_id, 1)
+    draft = DraftRepository(database)
+    draft.accept_order(season.season_id, [entry.season_entry_id for entry in entries])
+    draft.pause(season.season_id, reason="downgrade guard check")
+    database.close()
+
+    with pytest.raises(RuntimeError, match="pause state would be lost"):
+        downgrade(url, "0015_draft")
 
 
 def test_downgrade_to_0002_succeeds_when_audit_event_is_empty(tmp_path):

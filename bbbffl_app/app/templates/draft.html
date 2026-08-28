@@ -140,6 +140,17 @@ async function api(path, body) {
   return res.json();
 }
 
+// Every string below comes from the database (team/player names, scorer-
+// entered pause/finalise/correction reasons) or a request body -- never
+// trust it to be safe HTML before interpolating into innerHTML, since the
+// admin token lives in localStorage and a stored script would run with
+// full scorer/admin access.
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[char]);
+}
+
 function statusLabel(status) {
   if (status.finalized_at) return { text: 'Finalised', cls: 'status-finalized' };
   if (status.paused_at) return { text: 'Paused', cls: 'status-paused' };
@@ -152,19 +163,19 @@ function renderStatus(board) {
   const line = document.getElementById('status-line');
   line.innerHTML = `<span class="pill ${label.cls}">${label.text}</span>` +
     `<span>${board.status.completed_picks}/${board.status.total_picks} picks completed</span>` +
-    (board.status.paused_reason ? `<span class="muted">— paused: ${board.status.paused_reason}</span>` : '') +
-    (board.status.finalized_note ? `<span class="muted">— ${board.status.finalized_note}</span>` : '');
+    (board.status.paused_reason ? `<span class="muted">— paused: ${escapeHtml(board.status.paused_reason)}</span>` : '') +
+    (board.status.finalized_note ? `<span class="muted">— ${escapeHtml(board.status.finalized_note)}</span>` : '');
 }
 
 function renderOrder(board) {
   const currentEntry = board.current_pick ? board.current_pick.current_season_entry_id : null;
   document.getElementById('order-list').innerHTML = board.order.map(o =>
-    `<span class="${o.season_entry_id === currentEntry ? 'current' : ''}">${o.position}. ${o.team_name}</span>`
+    `<span class="${o.season_entry_id === currentEntry ? 'current' : ''}">${o.position}. ${escapeHtml(o.team_name)}</span>`
   ).join('');
 }
 
 function tradedPill(pick) {
-  return pick.traded ? `<span class="pill traded" title="Originally ${pick.original_team_name}">traded</span>` : '';
+  return pick.traded ? `<span class="pill traded" title="Originally ${escapeHtml(pick.original_team_name)}">traded</span>` : '';
 }
 
 function renderCurrentPick(board) {
@@ -174,21 +185,21 @@ function renderCurrentPick(board) {
   document.getElementById('current-pick-block').style.display = pick ? '' : 'none';
   document.getElementById('player-search').disabled = !searchable;
   if (!pick) { el.textContent = 'No pick outstanding.'; return; }
-  el.innerHTML = `Round ${pick.round}, Pick ${pick.overall_number} — <strong>${pick.current_team_name}</strong> ${tradedPill(pick)}`;
+  el.innerHTML = `Round ${pick.round}, Pick ${pick.overall_number} — <strong>${escapeHtml(pick.current_team_name)}</strong> ${tradedPill(pick)}`;
   if (board.status.paused_at) el.innerHTML += ' <span class="muted">(draft is paused)</span>';
 }
 
 function renderUpcoming(board) {
   document.getElementById('upcoming-body').innerHTML = board.upcoming_picks.map(p => `
-    <tr><td>${p.overall_number}</td><td>${p.round}</td><td>${p.current_team_name} ${tradedPill(p)}</td></tr>
+    <tr><td>${p.overall_number}</td><td>${p.round}</td><td>${escapeHtml(p.current_team_name)} ${tradedPill(p)}</td></tr>
   `).join('');
 }
 
 function renderCompleted(board) {
   document.getElementById('completed-body').innerHTML = board.completed_picks.map(p => `
     <tr>
-      <td>${p.overall_number}</td><td>${p.round}</td><td>${p.current_team_name} ${tradedPill(p)}</td>
-      <td>${p.selected_player_name || ''}</td>
+      <td>${p.overall_number}</td><td>${p.round}</td><td>${escapeHtml(p.current_team_name)} ${tradedPill(p)}</td>
+      <td>${escapeHtml(p.selected_player_name || '')}</td>
       <td>${p.draft_pick_id === board.correctable_draft_pick_id
         ? `<button class="correct-btn" data-pick="${p.draft_pick_id}">Correct this pick</button>`
         : ''}</td>
@@ -202,7 +213,7 @@ function renderCompleted(board) {
     };
   });
   document.getElementById('corrections-list').innerHTML = board.corrections.length
-    ? 'Corrections: ' + board.corrections.map(c => `${c.corrected_at}${c.reason ? ` — ${c.reason}` : ''}`).join('; ')
+    ? 'Corrections: ' + board.corrections.map(c => `${escapeHtml(c.corrected_at)}${c.reason ? ` — ${escapeHtml(c.reason)}` : ''}`).join('; ')
     : '';
 }
 
@@ -216,8 +227,8 @@ async function renderPlayers(query) {
   const players = await api(`${API}/available-players?q=${encodeURIComponent(query || '')}`);
   results.innerHTML = players.map(p => `
     <div class="player-row">
-      <span>${p.display_name}${p.afl_team_name ? ` <span class="muted">(${p.afl_team_name})</span>` : ''}</span>
-      <button class="primary pick-btn" data-player="${p.season_player_id}">Draft for ${board.current_pick.current_team_name}</button>
+      <span>${escapeHtml(p.display_name)}${p.afl_team_name ? ` <span class="muted">(${escapeHtml(p.afl_team_name)})</span>` : ''}</span>
+      <button class="primary pick-btn" data-player="${p.season_player_id}">Draft for ${escapeHtml(board.current_pick.current_team_name)}</button>
     </div>
   `).join('') || '<p class="muted">No matching available players.</p>';
   document.querySelectorAll('.pick-btn').forEach(btn => {

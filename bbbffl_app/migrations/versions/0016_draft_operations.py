@@ -124,6 +124,8 @@ def downgrade():
         raise RuntimeError("0016 downgrade refused: draft correction history would be lost")
     if bind.execute(sa.text("SELECT COUNT(*) FROM season_draft WHERE finalized_at IS NOT NULL")).scalar_one():
         raise RuntimeError("0016 downgrade refused: draft finalisation state would be lost")
+    if bind.execute(sa.text("SELECT COUNT(*) FROM season_draft WHERE paused_at IS NOT NULL")).scalar_one():
+        raise RuntimeError("0016 downgrade refused: draft pause state would be lost")
 
     if bind.dialect.name == "sqlite":
         op.execute("DROP TRIGGER IF EXISTS draft_pick_correction_immutable_delete")

@@ -214,6 +214,29 @@ def test_correction_is_rejected_once_the_draft_is_finalized():
         draft.correct_pick(season.season_id, p1.draft_pick_id, reason="too late")
 
 
+def test_correction_is_rejected_if_the_pick_ownership_moved_out_of_band():
+    """A correction must undo *this pick's* acquisition specifically -- not
+    whatever ownership period happens to be open for the player now. If the
+    player was released or transferred by something other than this pick
+    since it completed, blindly releasing "the" open period would either
+    fail confusingly or release an unrelated entry's acquisition."""
+    _db, season, entries, players, ownership, _pool, draft = domain(entries=3, limit=2)
+    p1 = draft.execute_pick(
+        season.season_id, entries[0].season_entry_id, players[0].season_player_id, completed_at="2027-01-01"
+    )
+
+    # The picked player is transferred away from the drafting entry by an
+    # unrelated ownership operation before the pick is corrected.
+    ownership.transfer(players[0].season_player_id, entries[2].season_entry_id, effective_at="2027-01-05")
+
+    with pytest.raises(DraftCorrectionError, match="ownership has changed"):
+        draft.correct_pick(season.season_id, p1.draft_pick_id, reason="too late", corrected_at="2027-01-06")
+
+    # Neither the pick nor the (now unrelated) transferred ownership moved.
+    assert draft.picks(season.season_id)[0].draft_pick_id == p1.draft_pick_id
+    assert ownership.owner_at(players[0].season_player_id, "2027-01-06").season_entry_id == entries[2].season_entry_id
+
+
 # -- Finalisation ------------------------------------------------------------
 
 
@@ -224,6 +247,33 @@ def test_finalize_is_blocked_until_every_pick_is_completed():
     with pytest.raises(DraftNotCompleteError, match="1/4"):
         draft.finalize(season.season_id)
     assert draft.status(season.season_id).is_finalized is False
+
+
+def test_finalize_is_blocked_if_a_completed_picks_ownership_was_released_out_of_band():
+    """Defence in depth: every draft_pick can show completed_at set and the
+    right pick-count per entry while an entry's *actual* active squad is
+    short, if something released a player's ownership without going through
+    the draft (e.g. OwnershipRepository.release called directly). Counting
+    picks alone would miss this; finalize must count live ownership."""
+    _db, season, entries, players, ownership, _pool, draft = domain(entries=2, limit=2)
+    draft.execute_pick(
+        season.season_id, entries[0].season_entry_id, players[0].season_player_id, completed_at="2027-01-01"
+    )
+    draft.execute_pick(
+        season.season_id, entries[1].season_entry_id, players[1].season_player_id, completed_at="2027-01-02"
+    )
+    draft.execute_pick(
+        season.season_id, entries[1].season_entry_id, players[2].season_player_id, completed_at="2027-01-03"
+    )
+    draft.execute_pick(
+        season.season_id, entries[0].season_entry_id, players[3].season_player_id, completed_at="2027-01-04"
+    )
+    assert draft.status(season.season_id).is_complete
+
+    ownership.release(players[0].season_player_id, effective_at="2027-01-05")
+
+    with pytest.raises(DraftNotCompleteError, match="squad size"):
+        draft.finalize(season.season_id)
 
 
 def test_finalize_succeeds_once_complete_and_blocks_ordinary_mutation_after():

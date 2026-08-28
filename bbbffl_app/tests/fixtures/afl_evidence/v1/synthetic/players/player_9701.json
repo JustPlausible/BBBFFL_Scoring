@@ -1,0 +1,36 @@
+{
+  "provenance": {
+    "schema_version": 1,
+    "fixture_id": "afl-evidence:v1:synthetic:players:player_9701",
+    "classification": "synthetic",
+    "derivation": "afl_api_source_derived",
+    "contract_version": "v1",
+    "endpoint": "GET /api/v1/players/{canonical_player_id}",
+    "endpoint_kind": "player_detail",
+    "request_params": {"canonical_player_id": 9701},
+    "season_id": null,
+    "round_id": null,
+    "match_id": null,
+    "canonical_player_ids": [9701],
+    "captured_at": null,
+    "authored_at": "2026-08-28T00:00:00Z",
+    "source": {
+      "kind": "afl_api_source",
+      "repository": "https://github.com/JustPlausible/AFL-api",
+      "commit": "af4bf93f50140fa7d1465a446c63588abc5e376c",
+      "release_version": "0.7.0",
+      "references": ["api/routes_v1.py", "docs/api_v1_players.md"]
+    },
+    "notes": "Canonical player-detail evidence for one of round_1500/match_9503's scoring players, showing the current-team projection and provider-crosswalk identifiers BBBFFL never persists (see docs/afl-api-v1-contract.md section 1.2). Not season/round/match-scoped in the real endpoint's URL, so this file lives outside those directories, per docs/afl-evidence-fixtures.md's directory convention.",
+    "supersedes": null,
+    "superseded_by": null
+  },
+  "response": {
+    "player": {
+      "canonical_player_id": 9701,
+      "display_name": "J. Ashwood-Vale",
+      "current_team": {"team_id": 6005, "name": "Hawthorn"},
+      "identifiers": {"afl_player_id": 590001, "champion_data_player_id": "CD_SYN9701"}
+    }
+  }
+}

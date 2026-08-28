@@ -52,3 +52,9 @@ inventory, semantic contract (identifiers, match lifecycle, stat finality,
 timing, player membership), known upstream gaps, and compatibility/pinning
 policy are documented in
 [`docs/afl-api-v1-contract.md`](docs/afl-api-v1-contract.md).
+
+A versioned, provenance-rich, offline corpus of `afl-api` v1 evidence for
+tests and historical replay (never a live data source) lives in
+`bbbffl_app/tests/fixtures/afl_evidence/`, loaded through
+`bbbffl_app/tests/afl_evidence.py`. See
+[`docs/afl-evidence-fixtures.md`](docs/afl-evidence-fixtures.md).

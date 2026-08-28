@@ -1,0 +1,65 @@
+{
+  "provenance": {
+    "schema_version": 1,
+    "fixture_id": "afl-evidence:v1:synthetic:season_85:round_1500:matches",
+    "classification": "synthetic",
+    "derivation": "afl_api_source_derived",
+    "contract_version": "v1",
+    "endpoint": "GET /api/v1/rounds/{round_id}/matches",
+    "endpoint_kind": "matches",
+    "request_params": {"round_id": 1500},
+    "season_id": 85,
+    "round_id": 1500,
+    "match_id": null,
+    "canonical_player_ids": [],
+    "captured_at": null,
+    "authored_at": "2026-08-28T00:00:00Z",
+    "source": {
+      "kind": "afl_api_source",
+      "repository": "https://github.com/JustPlausible/AFL-api",
+      "commit": "af4bf93f50140fa7d1465a446c63588abc5e376c",
+      "release_version": "0.7.0",
+      "references": ["api/routes_v1.py", "docs/api_v1_matches.md"]
+    },
+    "notes": "Three matches spanning UPCOMING (match 9501, no lockout trigger has fired yet), LIVE (match 9502, drives the staged/selective lockout scenario in tests/test_lockouts.py) and CONCLUDED-with-final-stats (match 9503, drives the scoring scenario in tests/test_calculations.py) lifecycle states in one round -- the minimal representative set roadmap package 08 asks for to exercise #34 (staged lockouts) and #35 (round/per-match scoring) without a full-season dump. Team names/ids are illustrative, not a real 2026 draw.",
+    "supersedes": null,
+    "superseded_by": null
+  },
+  "response": {
+    "matches": [
+      {
+        "match_id": 9501,
+        "round_id": 1500,
+        "season_id": 85,
+        "status": "UPCOMING",
+        "start_time_utc": "2026-07-05T08:40:00Z",
+        "home_team": {"team_id": 6001, "name": "Richmond"},
+        "away_team": {"team_id": 6002, "name": "Fremantle"},
+        "score_home": null,
+        "score_away": null
+      },
+      {
+        "match_id": 9502,
+        "round_id": 1500,
+        "season_id": 85,
+        "status": "LIVE",
+        "start_time_utc": "2026-07-04T09:20:00Z",
+        "home_team": {"team_id": 6003, "name": "Geelong"},
+        "away_team": {"team_id": 6004, "name": "GWS Giants"},
+        "score_home": 34,
+        "score_away": 28
+      },
+      {
+        "match_id": 9503,
+        "round_id": 1500,
+        "season_id": 85,
+        "status": "CONCLUDED",
+        "start_time_utc": "2026-07-03T05:10:00Z",
+        "home_team": {"team_id": 6005, "name": "Hawthorn"},
+        "away_team": {"team_id": 6006, "name": "Adelaide"},
+        "score_home": 88,
+        "score_away": 71
+      }
+    ]
+  }
+}

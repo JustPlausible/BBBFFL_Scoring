@@ -327,6 +327,25 @@ GitHub Actions workflow (`workflow_dispatch` trigger only, so it can never
 run on a PR or become a required merge gate) — see
 [`../docs/ci-quality-gates.md`](../docs/ci-quality-gates.md).
 
+## AFL evidence fixtures (replay foundation)
+
+`tests/fixtures/afl_evidence/` is a versioned, provenance-rich, offline
+corpus of `afl-api` v1 evidence (season/round/match/player/player-stat
+payloads) that BBBFFL's tests and later historical replay (roadmap
+packages 32–36) load deterministically, with no network access, through
+`tests/afl_evidence.py`. It records enough provenance to know exactly what
+each fixture is, classifies evidence as captured/BBBFFL-historical/
+synthetic/unresolved so a test or replay tool never has to infer that from
+a filename, and is validated on every load. See
+[`../docs/afl-evidence-fixtures.md`](../docs/afl-evidence-fixtures.md)
+(issue #40 / roadmap package 08) for the full directory/manifest
+convention, classification model, loader API, validation rules, and the
+refresh/addition policy (evidence is never edited to make a failing replay
+pass — a correction is always a new, provenance-linked file). This is a
+separate, larger-scoped corpus from `tests/fixtures/afl_api_v1/` (issue
+#18's consumer-contract-pinning fixtures, described above) — it is
+evidence for testing/replay only, never an operational AFL data source.
+
 ## afl-api resilience, cache and diagnostics
 
 `app/afl_client.py`'s `AflApiClient` (the validated transport) is wrapped by
@@ -364,7 +383,14 @@ and stale-data rules are documented in
    against the actual deployed dev instance is outstanding (blocked by this
    development environment's network egress policy when issue #18 was
    done, not a design gap) — see that report's "Live validation status"
-   section for the required follow-up before roadmap packages 08/32.
+   section for the required follow-up. The same restriction is why
+   `tests/fixtures/afl_evidence/`'s `captured`/`captured_bbbffl_historical`
+   classifications are still empty placeholders — see
+   [`../docs/afl-evidence-fixtures.md`](../docs/afl-evidence-fixtures.md)'s
+   "Known limitations" for the procedure to populate them once network
+   access exists; roadmap package 08's loader/classification/validation
+   infrastructure and its `synthetic`/`unresolved` evidence are otherwise
+   complete.
 
 ## Database migrations
 

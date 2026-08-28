@@ -1,0 +1,101 @@
+{
+  "provenance": {
+    "schema_version": 1,
+    "fixture_id": "afl-evidence:v1:synthetic:season_85:round_1500:match_9503:player_stats",
+    "classification": "synthetic",
+    "derivation": "afl_api_source_derived",
+    "contract_version": "v1",
+    "endpoint": "GET /api/v1/matches/{match_id}/player-stats",
+    "endpoint_kind": "player_stats",
+    "request_params": {"match_id": 9503},
+    "season_id": 85,
+    "round_id": 1500,
+    "match_id": 9503,
+    "canonical_player_ids": [9701, 9702, 9703, 9704],
+    "captured_at": null,
+    "authored_at": "2026-08-28T00:00:00Z",
+    "source": {
+      "kind": "afl_api_source",
+      "repository": "https://github.com/JustPlausible/AFL-api",
+      "commit": "af4bf93f50140fa7d1465a446c63588abc5e376c",
+      "release_version": "0.7.0",
+      "references": ["api/routes_v1.py", "docs/api_v1_player_stats.md"]
+    },
+    "notes": "Final (lifecycle.finality=final) player-stats for CONCLUDED match 9503 (Hawthorn v Adelaide), covering one player per BBBFFL scorable position (Forward/Midfield/Ruck/Tackler) so tests/test_calculations.py can drive app.scoring.score_position for every branch from real AflApiClient-parsed evidence. Player 9705's row deliberately has canonical_player_id null (unresolved Champion Data crosswalk), mirroring the drop-not-guess identity rule already pinned by issue #18's tests/test_afl_contract_v1.py -- included here so this corpus's own loader/validation tests can exercise the same case independently of tests/fixtures/afl_api_v1/. All player names are fictional; no real AFL player's real statistics are represented (see docs/afl-evidence-fixtures.md).",
+    "supersedes": null,
+    "superseded_by": null
+  },
+  "response": {
+    "match": {
+      "match_id": 9503,
+      "match_provider_id": "SYN_M20260703001",
+      "round_id": 1500,
+      "season_id": 85,
+      "status": "CONCLUDED"
+    },
+    "lifecycle": {"finality": "final"},
+    "metadata": {"source_updated_at": "2026-07-03T07:45:00Z"},
+    "players": [
+      {
+        "champion_data_player_id": "CD_SYN9701",
+        "canonical_player_id": 9701,
+        "afl_player_id": 590001,
+        "display_name": "J. Ashwood-Vale",
+        "side": "home",
+        "team_id": 6005,
+        "stats": {
+          "goals": 4, "behinds": 2, "kicks": 14, "handballs": 9,
+          "disposals": 23, "marks": 5, "tackles": 2, "hitouts": 0
+        }
+      },
+      {
+        "champion_data_player_id": "CD_SYN9702",
+        "canonical_player_id": 9702,
+        "afl_player_id": 590002,
+        "display_name": "T. Marrong",
+        "side": "home",
+        "team_id": 6005,
+        "stats": {
+          "goals": 0, "behinds": 1, "kicks": 17, "handballs": 12,
+          "disposals": 29, "marks": 4, "tackles": 5, "hitouts": 0
+        }
+      },
+      {
+        "champion_data_player_id": "CD_SYN9703",
+        "canonical_player_id": 9703,
+        "afl_player_id": 590003,
+        "display_name": "K. Denhall",
+        "side": "away",
+        "team_id": 6006,
+        "stats": {
+          "goals": 0, "behinds": 0, "kicks": 6, "handballs": 3,
+          "disposals": 9, "marks": 6, "tackles": 1, "hitouts": 34
+        }
+      },
+      {
+        "champion_data_player_id": "CD_SYN9704",
+        "canonical_player_id": 9704,
+        "afl_player_id": 590004,
+        "display_name": "S. Corrigan",
+        "side": "away",
+        "team_id": 6006,
+        "stats": {
+          "goals": 0, "behinds": 0, "kicks": 4, "handballs": 5,
+          "disposals": 9, "marks": 2, "tackles": 9, "hitouts": 0
+        }
+      },
+      {
+        "champion_data_player_id": "CD_SYN9705",
+        "canonical_player_id": null,
+        "afl_player_id": 590005,
+        "display_name": "Unresolved Player",
+        "side": "away",
+        "team_id": 6006,
+        "stats": {
+          "goals": 1, "behinds": 0, "kicks": 3, "handballs": 2,
+          "disposals": 5, "marks": 1, "tackles": 0, "hitouts": 0
+        }
+      }
+    ]
+  }
+}

@@ -39,13 +39,23 @@ an upstream worked example (`docs/api_v1_players.md`'s Nick/Josh Daicos
 example) for continuity with an authoritative source example.
 
 **This is a documented gap, not a substitute for live evidence.** Before
-package 08 (deterministic AFL evidence fixtures) or the 2026 replay
-(packages 32-36) proceed, the opt-in diagnostic in
+the 2026 replay (packages 32-36) proceeds, the opt-in diagnostic in
 `scripts/afl_contract_diagnostic.py` must be run from an environment with
 network access to the configured `afl-api` deployment, and any live-capture
 discrepancy against these source-derived fixtures must be resolved before
 trusting them further. See `docs/afl-api-v1-contract.md` for the tracked
 follow-up.
+
+**Update (issue #40 / roadmap package 08):** package 08's fixture
+directory/manifest convention, classification model, deterministic loader
+and validation now exist (`tests/fixtures/afl_evidence/`, documented in
+`docs/afl-evidence-fixtures.md`) and were built without that live
+validation ever completing -- the same network restriction described above
+was still in effect. Package 08's evidence is therefore `synthetic`
+(source-derived, exactly like this directory's own fixtures), never
+`captured`; its `captured`/`captured_bbbffl_historical` classifications
+remain empty placeholders until a live capture is actually possible. This
+does not change the requirement above for packages 32-36.
 
 ## Sanitisation note
 

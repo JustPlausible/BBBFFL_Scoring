@@ -1,0 +1,40 @@
+{
+  "provenance": {
+    "schema_version": 1,
+    "fixture_id": "afl-evidence:v1:synthetic:season_85:round_1500:match_9501:player_stats",
+    "classification": "synthetic",
+    "derivation": "afl_api_source_derived",
+    "contract_version": "v1",
+    "endpoint": "GET /api/v1/matches/{match_id}/player-stats",
+    "endpoint_kind": "player_stats",
+    "request_params": {"match_id": 9501},
+    "season_id": 85,
+    "round_id": 1500,
+    "match_id": 9501,
+    "canonical_player_ids": [],
+    "captured_at": null,
+    "authored_at": "2026-08-28T00:00:00Z",
+    "source": {
+      "kind": "afl_api_source",
+      "repository": "https://github.com/JustPlausible/AFL-api",
+      "commit": "af4bf93f50140fa7d1465a446c63588abc5e376c",
+      "release_version": "0.7.0",
+      "references": ["api/routes_v1.py", "docs/api_v1_player_stats.md"]
+    },
+    "notes": "lifecycle.finality=not_available with an empty players list, for the still-UPCOMING match 9501 -- afl-api's own contract never synthesises zero/null rows for a match that has not started (docs/afl-api-v1-contract.md section 1.4). Included so a round-scoped replay/scoring test that fetches player-stats for every match in the round (as app.calculations.MatchupCalculationService does) has a complete, valid response for all three of round_1500's matches, not just the CONCLUDED one it actually scores from.",
+    "supersedes": null,
+    "superseded_by": null
+  },
+  "response": {
+    "match": {
+      "match_id": 9501,
+      "match_provider_id": "SYN_M20260705001",
+      "round_id": 1500,
+      "season_id": 85,
+      "status": "UPCOMING"
+    },
+    "lifecycle": {"finality": "not_available"},
+    "metadata": {"source_updated_at": null},
+    "players": []
+  }
+}

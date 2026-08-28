@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BBBFFL Preseason Draft — Scorer</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 12px; background: #0f1115; color: #e7e9ee; }
+  h1 { font-size: 1.2rem; }
+  h2 { font-size: 1rem; margin-top: 20px; }
+  .token-bar { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+  input, select, button { font-size: 0.9rem; padding: 5px 8px; border-radius: 6px; border: 1px solid #333a48; background: #171a21; color: inherit; }
+  button { cursor: pointer; }
+  button.primary { background: #3a6ea5; border-color: #3a6ea5; color: white; }
+  button.danger { background: #a53a3a; border-color: #a53a3a; color: white; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 8px; font-size: 0.85rem; }
+  th, td { padding: 6px; border-bottom: 1px solid #2a2f3a; text-align: left; vertical-align: middle; }
+  .block { background: #171a21; border: 1px solid #2a2f3a; border-radius: 10px; padding: 10px 14px; margin-bottom: 16px; }
+  .pill { font-size: 0.7rem; padding: 1px 6px; border-radius: 6px; background: #2a2f3a; display: inline-block; }
+  .pill.status-active { background: #2f6e3a; }
+  .pill.status-paused { background: #a5823a; }
+  .pill.status-finalized { background: #a53a3a; }
+  .pill.status-completed { background: #3a6ea5; }
+  .pill.traded { background: #6b3aa5; margin-left: 4px; }
+  #status-line { margin-bottom: 10px; font-size: 0.95rem; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .page-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  .order-list { display: flex; gap: 6px; flex-wrap: wrap; font-size: 0.8rem; }
+  .order-list span { padding: 3px 8px; border-radius: 999px; background: #171a21; border: 1px solid #2a2f3a; }
+  .order-list span.current { background: #3a6ea5; border-color: #3a6ea5; color: white; font-weight: 600; }
+  .current-pick { font-size: 1.05rem; margin-bottom: 8px; }
+  .search-row { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+  .search-row input[type=text] { flex: 1; min-width: 160px; }
+  .player-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; border-bottom: 1px solid #2a2f3a; }
+  .danger-zone { margin-top: 24px; padding: 12px; border: 1px solid #a53a3a; border-radius: 10px; }
+  .danger-zone summary { cursor: pointer; color: #e07a3f; }
+  .muted { color: #9aa3b2; font-size: 0.8rem; }
+  .corrections-list { font-size: 0.78rem; color: #9aa3b2; }
+</style>
+</head>
+<body>
+  <div class="page-head">
+    <h1>BBBFFL Preseason Draft — Scorer</h1>
+  </div>
+  <div class="token-bar">
+    <input type="password" id="token" placeholder="Admin token (if required)">
+    <button id="save-token">Save token</button>
+    <input type="text" id="scorer-name" placeholder="Your name (recorded as the entering scorer)">
+    <button id="save-scorer">Save name</button>
+  </div>
+  <div id="status-line">Loading…</div>
+
+  <div class="block">
+    <h2>Draft order</h2>
+    <div class="order-list" id="order-list"></div>
+  </div>
+
+  <div class="block" id="current-pick-block">
+    <h2>Current pick</h2>
+    <div class="current-pick" id="current-pick"></div>
+    <div class="search-row">
+      <input type="text" id="player-search" placeholder="Search available players…">
+      <input type="text" id="pick-reason" placeholder="Reason (optional)">
+    </div>
+    <div id="player-results"></div>
+  </div>
+
+  <div class="block">
+    <h2>Upcoming picks</h2>
+    <table>
+      <thead><tr><th>#</th><th>Round</th><th>Team</th></tr></thead>
+      <tbody id="upcoming-body"></tbody>
+    </table>
+  </div>
+
+  <div class="block">
+    <h2>Completed picks</h2>
+    <table>
+      <thead><tr><th>#</th><th>Round</th><th>Team</th><th>Player</th><th></th></tr></thead>
+      <tbody id="completed-body"></tbody>
+    </table>
+    <div class="corrections-list" id="corrections-list"></div>
+  </div>
+
+  <div class="block">
+    <h2>Pause / resume</h2>
+    <div class="search-row">
+      <input type="text" id="pause-reason" placeholder="Reason (optional)">
+      <button id="pause-btn">Pause draft</button>
+      <button id="resume-btn" class="primary">Resume draft</button>
+    </div>
+  </div>
+
+  <div class="block finalize-box">
+    <h2>Finalise draft</h2>
+    <p class="muted">Only possible once every configured pick is completed. This locks ordinary draft controls.</p>
+    <input type="text" id="finalize-note" placeholder="Optional sign-off note">
+    <button class="danger" id="finalize-btn">Finalise draft</button>
+  </div>
+
+  <details class="danger-zone">
+    <summary>Danger zone: reopen a finalised draft</summary>
+    <p class="muted">Deliberately not a one-click control. Type the exact confirmation phrase and a reason to reopen.</p>
+    <div class="search-row">
+      <input type="text" id="reopen-reason" placeholder="Reason (required)">
+      <input type="text" id="reopen-confirm" placeholder="Type: REOPEN FINALIZED DRAFT">
+      <button class="danger" id="reopen-btn">Reopen finalised draft</button>
+    </div>
+  </details>
+
+<script>
+const SEASON_ID = {{ season_id | tojson }};
+const API = `/api/admin/draft/${SEASON_ID}`;
+
+function getToken() { return localStorage.getItem('bbbffl_admin_token') || ''; }
+function getScorerName() { return localStorage.getItem('bbbffl_scorer_name') || ''; }
+
+document.getElementById('token').value = getToken();
+document.getElementById('save-token').onclick = () => {
+  localStorage.setItem('bbbffl_admin_token', document.getElementById('token').value);
+  refresh();
+};
+document.getElementById('scorer-name').value = getScorerName();
+document.getElementById('save-scorer').onclick = () => {
+  localStorage.setItem('bbbffl_scorer_name', document.getElementById('scorer-name').value);
+};
+
+async function api(path, body) {
+  const res = await fetch(path, {
+    method: body ? 'POST' : 'GET',
+    headers: { 'Content-Type': 'application/json', 'X-Admin-Token': getToken() },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    alert('Error: ' + (err.detail || res.statusText));
+    throw new Error(err.detail);
+  }
+  return res.json();
+}
+
+// Every string below comes from the database (team/player names, scorer-
+// entered pause/finalise/correction reasons) or a request body -- never
+// trust it to be safe HTML before interpolating into innerHTML, since the
+// admin token lives in localStorage and a stored script would run with
+// full scorer/admin access.
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[char]);
+}
+
+function statusLabel(status) {
+  if (status.finalized_at) return { text: 'Finalised', cls: 'status-finalized' };
+  if (status.paused_at) return { text: 'Paused', cls: 'status-paused' };
+  if (status.total_picks > 0 && status.completed_picks === status.total_picks) return { text: 'Completed (awaiting finalisation)', cls: 'status-completed' };
+  return { text: 'Active', cls: 'status-active' };
+}
+
+function renderStatus(board) {
+  const label = statusLabel(board.status);
+  const line = document.getElementById('status-line');
+  line.innerHTML = `<span class="pill ${label.cls}">${label.text}</span>` +
+    `<span>${board.status.completed_picks}/${board.status.total_picks} picks completed</span>` +
+    (board.status.paused_reason ? `<span class="muted">— paused: ${escapeHtml(board.status.paused_reason)}</span>` : '') +
+    (board.status.finalized_note ? `<span class="muted">— ${escapeHtml(board.status.finalized_note)}</span>` : '');
+}
+
+function renderOrder(board) {
+  const currentEntry = board.current_pick ? board.current_pick.current_season_entry_id : null;
+  document.getElementById('order-list').innerHTML = board.order.map(o =>
+    `<span class="${o.season_entry_id === currentEntry ? 'current' : ''}">${o.position}. ${escapeHtml(o.team_name)}</span>`
+  ).join('');
+}
+
+function tradedPill(pick) {
+  return pick.traded ? `<span class="pill traded" title="Originally ${escapeHtml(pick.original_team_name)}">traded</span>` : '';
+}
+
+function renderCurrentPick(board) {
+  const el = document.getElementById('current-pick');
+  const pick = board.current_pick;
+  const searchable = !board.status.finalized_at && !board.status.paused_at && pick;
+  document.getElementById('current-pick-block').style.display = pick ? '' : 'none';
+  document.getElementById('player-search').disabled = !searchable;
+  if (!pick) { el.textContent = 'No pick outstanding.'; return; }
+  el.innerHTML = `Round ${pick.round}, Pick ${pick.overall_number} — <strong>${escapeHtml(pick.current_team_name)}</strong> ${tradedPill(pick)}`;
+  if (board.status.paused_at) el.innerHTML += ' <span class="muted">(draft is paused)</span>';
+}
+
+function renderUpcoming(board) {
+  document.getElementById('upcoming-body').innerHTML = board.upcoming_picks.map(p => `
+    <tr><td>${p.overall_number}</td><td>${p.round}</td><td>${escapeHtml(p.current_team_name)} ${tradedPill(p)}</td></tr>
+  `).join('');
+}
+
+function renderCompleted(board) {
+  document.getElementById('completed-body').innerHTML = board.completed_picks.map(p => `
+    <tr>
+      <td>${p.overall_number}</td><td>${p.round}</td><td>${escapeHtml(p.current_team_name)} ${tradedPill(p)}</td>
+      <td>${escapeHtml(p.selected_player_name || '')}</td>
+      <td>${p.draft_pick_id === board.correctable_draft_pick_id
+        ? `<button class="correct-btn" data-pick="${p.draft_pick_id}">Correct this pick</button>`
+        : ''}</td>
+    </tr>
+  `).join('');
+  document.querySelectorAll('.correct-btn').forEach(btn => {
+    btn.onclick = () => {
+      const reason = prompt('Reason for correcting this pick?');
+      if (reason === null) return;
+      api(`${API}/correct`, { draft_pick_id: btn.dataset.pick, reason }).then(refresh);
+    };
+  });
+  document.getElementById('corrections-list').innerHTML = board.corrections.length
+    ? 'Corrections: ' + board.corrections.map(c => `${escapeHtml(c.corrected_at)}${c.reason ? ` — ${escapeHtml(c.reason)}` : ''}`).join('; ')
+    : '';
+}
+
+async function renderPlayers(query) {
+  const results = document.getElementById('player-results');
+  const board = window._lastBoard;
+  if (!board || !board.current_pick || board.status.finalized_at || board.status.paused_at) {
+    results.innerHTML = '';
+    return;
+  }
+  const players = await api(`${API}/available-players?q=${encodeURIComponent(query || '')}`);
+  results.innerHTML = players.map(p => `
+    <div class="player-row">
+      <span>${escapeHtml(p.display_name)}${p.afl_team_name ? ` <span class="muted">(${escapeHtml(p.afl_team_name)})</span>` : ''}</span>
+      <button class="primary pick-btn" data-player="${p.season_player_id}">Draft for ${escapeHtml(board.current_pick.current_team_name)}</button>
+    </div>
+  `).join('') || '<p class="muted">No matching available players.</p>';
+  document.querySelectorAll('.pick-btn').forEach(btn => {
+    btn.onclick = () => {
+      api(`${API}/pick`, {
+        season_entry_id: board.current_pick.current_season_entry_id,
+        season_player_id: btn.dataset.player,
+        scorer_name: getScorerName() || null,
+        reason: document.getElementById('pick-reason').value || null,
+      }).then(refresh);
+    };
+  });
+}
+
+let searchTimer = null;
+document.getElementById('player-search').oninput = (e) => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => renderPlayers(e.target.value), 200);
+};
+
+document.getElementById('pause-btn').onclick = () => {
+  api(`${API}/pause`, { reason: document.getElementById('pause-reason').value || null }).then(refresh);
+};
+document.getElementById('resume-btn').onclick = () => {
+  api(`${API}/resume`, { reason: document.getElementById('pause-reason').value || null }).then(refresh);
+};
+document.getElementById('finalize-btn').onclick = () => {
+  if (!confirm('Finalise the draft? Ordinary draft controls will stop mutating it.')) return;
+  api(`${API}/finalize`, { note: document.getElementById('finalize-note').value || null }).then(refresh);
+};
+document.getElementById('reopen-btn').onclick = () => {
+  const reason = document.getElementById('reopen-reason').value;
+  const confirmText = document.getElementById('reopen-confirm').value;
+  if (!confirm('Reopen the finalised draft? This is a deliberately unusual action.')) return;
+  api(`${API}/reopen`, { reason, confirm: confirmText }).then(refresh);
+};
+
+async function refresh() {
+  try {
+    const board = await api(`${API}/board`);
+    window._lastBoard = board;
+    renderStatus(board);
+    renderOrder(board);
+    renderCurrentPick(board);
+    renderUpcoming(board);
+    renderCompleted(board);
+    renderPlayers(document.getElementById('player-search').value);
+  } catch (e) {
+    document.getElementById('status-line').textContent = 'Failed to load draft board — check admin token and season ID.';
+  }
+}
+
+refresh();
+</script>
+</body>
+</html>

@@ -9,8 +9,22 @@ from app.afl_resilience import ResilientAflClient, RetryPolicy
 from app.audit import AuditEventRepository
 from app.config import get_settings
 from app.db import DecisionsRepository, connect
+from app.draft import (
+    DraftCorrectionError,
+    DraftFinalizedError,
+    DraftNotCompleteError,
+    DraftOrderError,
+    DraftPausedError,
+    DraftPickCompletedError,
+    DraftRepository,
+    DraftStateError,
+    DraftTurnError,
+)
+from app.identity import IdentityRepository
 from app.migrations import migrate
+from app.player_pool import PlayerPoolRepository, PlayerUnavailableError, SquadCapacityError
 from app.routes import admin, health, public
+from app.routes import draft as draft_routes
 from app.routes import superscore as superscore_routes
 from app.scorer_decisions import (
     CompetitionFinalizedError,
@@ -93,6 +107,12 @@ async def lifespan(app: FastAPI):
     app.state.database = database
     app.state.decisions = DecisionsRepository(database)
     app.state.audit_events = AuditEventRepository(database)
+    # Roadmap package 14's scorer-operated draft workflow (app/routes/draft.py)
+    # is an operator surface over these authoritative repositories -- see
+    # docs/draft-ledger.md and docs/scorer-draft-workflow.md.
+    app.state.identities = IdentityRepository(database)
+    app.state.player_pool = PlayerPoolRepository(database)
+    app.state.draft = DraftRepository(database)
     app.state.afl_client = afl_client
     app.state.identity_cache = PlayerIdentityCache(afl_client)
     app.state.teams = teams
@@ -151,6 +171,8 @@ app.include_router(admin.router)
 app.include_router(admin.page_router)
 app.include_router(superscore_routes.router)
 app.include_router(superscore_routes.page_router)
+app.include_router(draft_routes.router)
+app.include_router(draft_routes.page_router)
 
 
 @app.exception_handler(AflApiError)
@@ -196,3 +218,67 @@ async def result_not_ready_handler(request: Request, exc: ResultNotReadyError) -
 async def stale_afl_evidence_handler(request: Request, exc: StaleAflEvidenceError) -> JSONResponse:
     logger.warning("finalisation refused: %s", exc)
     return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
+# app.draft raises plain domain exceptions for the same reason
+# app.scorer_decisions does (see the comment above) -- these handlers are
+# the sole place that translates each one to an HTTP status for
+# app/routes/draft.py. DraftFinalizedError gets 423 (Locked), matching
+# CompetitionFinalizedError's convention above; every other draft-specific
+# error is a 409 Conflict the operator resolves by refreshing the board
+# (a stale turn, a pick completed/paused/corrected concurrently, a
+# correction that is no longer the most recent pick) or a 400 for a
+# structurally invalid request (a malformed/incomplete draft order).
+@app.exception_handler(DraftOrderError)
+async def draft_order_error_handler(request: Request, exc: DraftOrderError) -> JSONResponse:
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+@app.exception_handler(DraftFinalizedError)
+async def draft_finalized_error_handler(request: Request, exc: DraftFinalizedError) -> JSONResponse:
+    return JSONResponse(status_code=423, content={"detail": str(exc)})
+
+
+@app.exception_handler(DraftTurnError)
+async def draft_turn_error_handler(request: Request, exc: DraftTurnError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(DraftPickCompletedError)
+async def draft_pick_completed_error_handler(request: Request, exc: DraftPickCompletedError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(DraftPausedError)
+async def draft_paused_error_handler(request: Request, exc: DraftPausedError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(DraftNotCompleteError)
+async def draft_not_complete_error_handler(request: Request, exc: DraftNotCompleteError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(DraftCorrectionError)
+async def draft_correction_error_handler(request: Request, exc: DraftCorrectionError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(DraftStateError)
+async def draft_state_error_handler(request: Request, exc: DraftStateError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(PlayerUnavailableError)
+async def player_unavailable_error_handler(request: Request, exc: PlayerUnavailableError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(SquadCapacityError)
+async def squad_capacity_error_handler(request: Request, exc: SquadCapacityError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(KeyError)
+async def key_error_handler(request: Request, exc: KeyError) -> JSONResponse:
+    return JSONResponse(status_code=404, content={"detail": f"not found: {exc}"})

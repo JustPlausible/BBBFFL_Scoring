@@ -63,6 +63,16 @@ def load_suppressions(path: Path = DEFAULT_IGNORE_FILE, *, today: dt.date | None
         missing = REQUIRED_FIELDS - entry.keys()
         if missing:
             raise SuppressionPolicyError(f"suppression entry {entry!r} is missing required field(s): {sorted(missing)}")
+        blank = [
+            field
+            for field in ("id", "reason", "owner")
+            if not isinstance(entry[field], str) or not entry[field].strip()
+        ]
+        if blank:
+            raise SuppressionPolicyError(
+                f"suppression entry {entry!r} has blank/non-string value(s) for: {sorted(blank)} "
+                "-- an unowned or unjustified suppression is not a valid exception"
+            )
         review_by = entry["review_by"]
         if isinstance(review_by, str):
             review_by = dt.date.fromisoformat(review_by)

@@ -57,6 +57,24 @@ def test_entry_missing_a_required_field_is_rejected(tmp_path):
         load_suppressions(path)
 
 
+def test_entry_with_blank_reason_or_owner_is_rejected(tmp_path):
+    """All four keys present isn't enough -- a blank `reason`/`owner` would
+    let an unjustified, unowned suppression through unnoticed, defeating the
+    whole point of requiring them (Codex review on PR #50)."""
+    path = _write(
+        tmp_path,
+        """
+        [[suppressions]]
+        id = "PYSEC-0000-0000"
+        reason = "   "
+        owner = ""
+        review_by = "2999-01-01"
+        """,
+    )
+    with pytest.raises(SuppressionPolicyError, match="blank"):
+        load_suppressions(path)
+
+
 def test_expired_entry_is_rejected_rather_than_silently_dropped(tmp_path):
     """An exception whose review date has passed must fail the audit loudly
     -- not fall back to permanently suppressing the finding, and not

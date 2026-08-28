@@ -106,6 +106,26 @@ def test_window_can_be_explicitly_closed_and_closing_again_is_rejected():
         preseason.close_window(season.season_id)
 
 
+def test_closing_is_blocked_if_the_draft_was_reopened_after_the_window_opened():
+    """`DraftRepository.reopen` can clear `finalized_at` at any point after
+    `open_window` already succeeded once. `close_window` must re-check that
+    precondition at closing time, not only trust that it held when the
+    window opened -- otherwise it would mint the authoritative opening
+    snapshot while its prerequisite draft is explicitly unfinalized."""
+    _db, season, _entries, _players, _ownership, _pool, draft, preseason = domain()
+    preseason.open_window(season.season_id)
+    draft.reopen(season.season_id, reason="scorer found a mistaken pick")
+
+    with pytest.raises(PreseasonDraftNotFinalizedError):
+        preseason.close_window(season.season_id)
+    assert preseason.get_window(season.season_id).is_open
+    assert preseason.current_snapshot(season.season_id) is None
+
+    draft.finalize(season.season_id, note="re-finalised after correction")
+    closed = preseason.close_window(season.season_id)
+    assert not closed.is_open
+
+
 def test_closed_window_rejects_trades_and_direct_ownership_mutation():
     """Rejection must live below the route/UI layer: both `submit_trade`
     and a completely direct `OwnershipRepository` call (the "existing

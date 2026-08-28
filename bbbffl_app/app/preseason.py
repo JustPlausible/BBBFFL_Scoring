@@ -191,19 +191,29 @@ class PreseasonRepository:
         """Open the preseason trade/finalisation window for a season. Only
         legal once, and only once that season's draft has been finalized
         (`app.draft.DraftRepository.finalize`) -- see the module docstring's
-        lifecycle diagram."""
+        lifecycle diagram.
+
+        Locks the season's `season_draft` row -- which stably exists once a
+        draft has been accepted, unlike the not-yet-created
+        `season_preseason_window` row -- *before* checking whether a window
+        already exists. Two concurrent opens for the same season then
+        properly serialize: the second call only re-checks window absence
+        (and correctly raises `PreseasonWindowExistsError`) after the first
+        has committed and released this lock, rather than both racing past
+        an unlockable absent row and the second hitting an unhandled
+        uniqueness `IntegrityError` on the insert below."""
         with transaction(self.database) as conn:
             if self.database.engine.dialect.name == "sqlite":
                 conn.execute("UPDATE bbbffl_season SET updated_at=updated_at WHERE season_id=?", (season_id,))
-            if conn.execute(
-                "SELECT 1 FROM season_preseason_window WHERE season_id=?" + _for_update_suffix(self.database),
-                (season_id,),
-            ).fetchone():
-                raise PreseasonWindowExistsError("a preseason window already exists for this season")
             draft = conn.execute(
                 "SELECT draft_id, finalized_at FROM season_draft WHERE season_id=?" + _for_update_suffix(self.database),
                 (season_id,),
             ).fetchone()
+            if conn.execute(
+                "SELECT 1 FROM season_preseason_window WHERE season_id=?",
+                (season_id,),
+            ).fetchone():
+                raise PreseasonWindowExistsError("a preseason window already exists for this season")
             if not draft or draft["finalized_at"] is None:
                 raise PreseasonDraftNotFinalizedError(
                     "the season draft must be finalized before the preseason window can open"
@@ -279,13 +289,30 @@ class PreseasonRepository:
         this again once closed raises `PreseasonWindowClosedError` rather
         than silently doing nothing -- repeated calls are safe (nothing is
         double-applied), just not silently idempotent, matching this
-        repository's `DraftFinalizedError` convention."""
+        repository's `DraftFinalizedError` convention.
+
+        Re-checks that the season's draft is *still* finalized, not only
+        that it was at `open_window` time: the draft's own admin surface
+        (`POST /api/admin/draft/{season_id}/reopen`) can clear
+        `finalized_at` at any point after the window has opened, and this
+        method must refuse to mint the authoritative opening snapshot while
+        its prerequisite draft is explicitly unfinalized, rather than
+        silently freezing squads that may still be mid-correction."""
         with transaction(self.database) as conn:
             if self.database.engine.dialect.name == "sqlite":
                 conn.execute("UPDATE bbbffl_season SET updated_at=updated_at WHERE season_id=?", (season_id,))
             window = self._locked_window(conn, season_id)
             if window["closed_at"] is not None:
                 raise PreseasonWindowClosedError("preseason window is already closed")
+            draft = conn.execute(
+                "SELECT finalized_at FROM season_draft WHERE draft_id=?" + _for_update_suffix(self.database),
+                (window["draft_id"],),
+            ).fetchone()
+            if not draft or draft["finalized_at"] is None:
+                raise PreseasonDraftNotFinalizedError(
+                    "the season draft was reopened after this window opened; "
+                    "it must be finalized again before the window can close"
+                )
             issues = self.validate_squads(season_id, connection=conn)
             if issues:
                 raise PreseasonSquadValidationError(

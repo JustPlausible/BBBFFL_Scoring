@@ -57,7 +57,7 @@ class PreseasonWindowClosedError(ValueError):
     """
 
 
-def _assert_ownership_mutation_allowed(conn, season_id, *, allow_closed_window=False):
+def _assert_ownership_mutation_allowed(conn, database, season_id, *, allow_closed_window=False):
     """No row for `season_id` means no preseason window has ever opened for
     it (e.g. a season still mid-draft, or one that predates this package) --
     that must not block the draft's own ownership acquisitions. Once a
@@ -66,6 +66,15 @@ def _assert_ownership_mutation_allowed(conn, season_id, *, allow_closed_window=F
     transfer calls -- including any future caller that has not gone through
     `app.preseason.PreseasonRepository` -- are refused here, not only in a
     route or UI layer.
+
+    The read is taken under `_for_update_suffix`'s row lock (a no-op on
+    SQLite, which serializes via its single writer lock instead, same as
+    everywhere else in this module) so an ordinary mutation cannot read
+    `closed_at` while still open, race a concurrent `close_window`, and
+    commit its change *after* closure -- which would both defeat the
+    closed-window guarantee and leave the just-frozen opening snapshot
+    silently stale. Locking here serializes with `close_window`'s own
+    `SELECT ... FOR UPDATE` on the same row.
 
     `allow_closed_window` is a narrow, explicit escape hatch for exactly one
     caller: `app.preseason.PreseasonRepository.correct_opening_snapshot`'s
@@ -77,7 +86,7 @@ def _assert_ownership_mutation_allowed(conn, season_id, *, allow_closed_window=F
     if allow_closed_window:
         return
     window = conn.execute(
-        "SELECT closed_at FROM season_preseason_window WHERE season_id=?",
+        "SELECT closed_at FROM season_preseason_window WHERE season_id=?" + _for_update_suffix(database),
         (season_id,),
     ).fetchone()
     if window is not None and window["closed_at"] is not None:
@@ -420,7 +429,9 @@ class OwnershipRepository:
             raise KeyError(season_player_id if not player else season_entry_id)
         if entry["season_id"] != player["season_id"]:
             raise ValueError("player and entry must belong to the same season")
-        _assert_ownership_mutation_allowed(conn, player["season_id"], allow_closed_window=allow_closed_window)
+        _assert_ownership_mutation_allowed(
+            conn, self.database, player["season_id"], allow_closed_window=allow_closed_window
+        )
         if not player["eligible"]:
             raise PlayerUnavailableError("player is not selectable")
         overlap = conn.execute(
@@ -509,7 +520,9 @@ class OwnershipRepository:
         ).fetchone()
         if not current:
             raise PlayerUnavailableError("player is not currently owned")
-        _assert_ownership_mutation_allowed(conn, current["season_id"], allow_closed_window=allow_closed_window)
+        _assert_ownership_mutation_allowed(
+            conn, self.database, current["season_id"], allow_closed_window=allow_closed_window
+        )
         if at <= current["acquired_at"]:
             raise ValueError("release must be after acquisition")
         conn.execute(
@@ -575,7 +588,7 @@ class OwnershipRepository:
                 raise PlayerUnavailableError("player, current owner, or destination is unavailable")
             if entry["season_id"] != player["season_id"]:
                 raise ValueError("player and entry must belong to the same season")
-            _assert_ownership_mutation_allowed(conn, player["season_id"])
+            _assert_ownership_mutation_allowed(conn, self.database, player["season_id"])
             if not player["eligible"]:
                 raise PlayerUnavailableError("player is not selectable")
             if at <= current["acquired_at"]:

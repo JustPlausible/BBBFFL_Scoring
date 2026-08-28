@@ -19,14 +19,22 @@ from app.draft import DraftRepository
 from app.identity import IdentityRepository
 from app.migrations import migrate
 from app.player_pool import OwnershipRepository, PlayerPoolRepository, PlayerUnavailableError, SquadCapacityError
-from app.preseason import PreseasonRepository, PreseasonTradeValidationError, PreseasonWindowClosedError
+from app.preseason import (
+    PreseasonRepository,
+    PreseasonTradeValidationError,
+    PreseasonWindowClosedError,
+    PreseasonWindowExistsError,
+)
 from app.season import SeasonRepository
 
 _contested_trade_years = itertools.count(2240)
 
 
 @pytest.fixture
-def contested_trade():
+def finalized_draft_season():
+    """A finalized draft for three entries, squad_limit=2 -- the preseason
+    window has deliberately *not* been opened yet, for tests that exercise
+    `open_window` itself concurrently."""
     url = os.getenv("BBBFFL_DATABASE_URL")
     if not url or not url.startswith("postgresql"):
         pytest.skip("PostgreSQL preseason concurrency semantics require BBBFFL_DATABASE_URL")
@@ -56,10 +64,16 @@ def contested_trade():
             season.season_id, pick.current_season_entry_id, players[pick.overall_number - 1].season_player_id
         )
     draft.finalize(season.season_id)
+    yield database, season, entries, ownership, players
+    database.close()
+
+
+@pytest.fixture
+def contested_trade(finalized_draft_season):
+    database, season, entries, ownership, players = finalized_draft_season
     preseason = PreseasonRepository(database)
     preseason.open_window(season.season_id)
     yield database, season, entries, ownership, preseason, players
-    database.close()
 
 
 def test_postgresql_two_concurrent_trades_for_the_same_player_exactly_one_succeeds(contested_trade):
@@ -137,3 +151,78 @@ def test_postgresql_close_window_waits_for_the_window_row_lock(contested_trade):
     assert not preseason.get_window(season.season_id).is_open
     with pytest.raises(PreseasonWindowClosedError):
         preseason.close_window(season.season_id)
+
+
+def test_postgresql_two_concurrent_opens_for_the_same_season_yield_exactly_one_clean_conflict(finalized_draft_season):
+    """Before locking the stably-existing `season_draft` row ahead of the
+    window-absence check, a losing concurrent `open_window` attempt could
+    race past that unlockable absent row and hit an unhandled uniqueness
+    `IntegrityError` on the insert instead of the documented
+    `PreseasonWindowExistsError` domain conflict."""
+    database, season, _entries, _ownership, _players = finalized_draft_season
+    preseason = PreseasonRepository(database)
+    ready = threading.Barrier(2)
+
+    def attempt():
+        ready.wait(timeout=5)
+        try:
+            return preseason.open_window(season.season_id)
+        except PreseasonWindowExistsError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _n: attempt(), range(2)))
+
+    assert sum(result is not None for result in results) == 1, (
+        "exactly one concurrent open_window() call should succeed -- the other must raise "
+        "PreseasonWindowExistsError cleanly, not an unhandled IntegrityError"
+    )
+    assert preseason.get_window(season.season_id).is_open
+
+
+def test_postgresql_ordinary_ownership_mutation_waits_for_the_window_row_lock(contested_trade):
+    """`_assert_ownership_mutation_allowed`'s read of `closed_at` must be
+    taken under the same row lock `close_window` holds while it freezes the
+    opening snapshot -- otherwise an ordinary mutation could read the
+    still-open value, race a concurrent close, and commit its ownership
+    change *after* closure: defeating the closed-window guarantee and
+    leaving the just-frozen opening snapshot silently stale. This holds the
+    window row locked (standing in for `close_window`'s own transaction)
+    and proves a concurrent `OwnershipRepository.transfer` blocks until
+    that lock is released, then correctly observes the now-closed window."""
+    database, season, entries, ownership, _preseason, players = contested_trade
+    e0, e1 = (entry.season_entry_id for entry in entries[:2])
+    player = players[0].season_player_id
+    ready_to_transfer = threading.Event()
+    result: dict = {}
+
+    def attempt_transfer():
+        ready_to_transfer.wait(timeout=5)
+        try:
+            ownership.transfer(player, e1)
+            result["outcome"] = "transferred"
+        except PreseasonWindowClosedError:
+            result["outcome"] = "blocked"
+
+    transfer_thread = threading.Thread(target=attempt_transfer)
+    with database.engine.connect() as blocker_connection:
+        with blocker_connection.begin():
+            blocker_connection.execute(
+                text("SELECT * FROM season_preseason_window WHERE season_id=:season_id FOR UPDATE"),
+                {"season_id": season.season_id},
+            )
+            transfer_thread.start()
+            ready_to_transfer.set()
+            time.sleep(0.2)
+            assert transfer_thread.is_alive(), "transfer() did not wait for the season_preseason_window row lock"
+            # Simulate close_window's effect while still holding the lock, as
+            # close_window's own transaction would.
+            blocker_connection.execute(
+                text("UPDATE season_preseason_window SET closed_at=:now WHERE season_id=:season_id"),
+                {"now": "2027-01-01T00:00:00+00:00", "season_id": season.season_id},
+            )
+        # blocker_connection's transaction commits here (releasing the lock).
+    transfer_thread.join(timeout=5)
+    assert not transfer_thread.is_alive(), "transfer() never completed after the lock was released"
+    assert result["outcome"] == "blocked", "transfer() must observe the now-closed window, not a stale open read"
+    assert ownership.owner_at(player, "9999-01-01").season_entry_id == e0

@@ -3,7 +3,6 @@
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from sqlalchemy.exc import IntegrityError
 
 from app.audit import AuditEventRepository
 from app.identity import IdentityRepository
@@ -43,7 +42,7 @@ def test_concurrent_acquisition_has_exactly_one_winner():
                 entry.season_entry_id,
                 effective_at="2027-03-01T00:00:00+00:00",
             )
-        except (PlayerUnavailableError, IntegrityError):
+        except PlayerUnavailableError:
             return None
 
     with ThreadPoolExecutor(max_workers=2) as executor:

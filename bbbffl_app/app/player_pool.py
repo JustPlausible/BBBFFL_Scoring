@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from sqlalchemy.exc import IntegrityError
+
 from app.audit import (
     ENTITY_TYPE_OWNERSHIP_PERIOD,
     PLAYER_ACQUIRED,
@@ -33,6 +35,10 @@ class PlayerUnavailableError(ValueError):
 
 
 class SquadCapacityError(ValueError):
+    pass
+
+
+class SquadConfigurationFrozenError(ValueError):
     pass
 
 
@@ -192,6 +198,12 @@ class OwnershipRepository:
                 + _for_update_suffix(self.database),
                 (season_id,),
             ).fetchone()
+            accepted_draft = conn.execute(
+                "SELECT target_squad_size FROM season_draft WHERE season_id=?" + _for_update_suffix(self.database),
+                (season_id,),
+            ).fetchone()
+            if accepted_draft and accepted_draft["target_squad_size"] != squad_limit:
+                raise SquadConfigurationFrozenError("squad limit cannot change after the season draft is accepted")
             entries = conn.execute(
                 "SELECT season_entry_id FROM season_entry WHERE season_id=?" + _for_update_suffix(self.database),
                 (season_id,),
@@ -287,23 +299,38 @@ class OwnershipRepository:
     ):
         with transaction(self.database) as conn:
             item = self.acquire_in_transaction(
-                conn, season_player_id, season_entry_id, effective_at=effective_at,
-                actor=actor, reason=reason, correlation_id=correlation_id,
+                conn,
+                season_player_id,
+                season_entry_id,
+                effective_at=effective_at,
+                actor=actor,
+                reason=reason,
+                correlation_id=correlation_id,
             )
         return item
 
     def acquire_in_transaction(
-        self, conn, season_player_id, season_entry_id, *, effective_at=None,
-        actor=ActorContext.anonymous_operator("admin"), reason=None, correlation_id=None,
+        self,
+        conn,
+        season_player_id,
+        season_entry_id,
+        *,
+        effective_at=None,
+        actor=ActorContext.anonymous_operator("admin"),
+        reason=None,
+        correlation_id=None,
     ):
         """Acquire using an existing transaction (for compound domain commands)."""
         at = effective_at or _now()
         correlation_id = correlation_id or new_correlation_id()
         if self.database.engine.dialect.name == "sqlite":
-            conn.execute("UPDATE season_player_pool SET updated_at=updated_at WHERE season_player_id=?", (season_player_id,))
+            conn.execute(
+                "UPDATE season_player_pool SET updated_at=updated_at WHERE season_player_id=?", (season_player_id,)
+            )
             conn.execute("UPDATE season_entry SET created_at=created_at WHERE season_entry_id=?", (season_entry_id,))
         player = conn.execute(
-            "SELECT season_id, eligible FROM season_player_pool WHERE season_player_id=?" + _for_update_suffix(self.database),
+            "SELECT season_id, eligible FROM season_player_pool WHERE season_player_id=?"
+            + _for_update_suffix(self.database),
             (season_player_id,),
         ).fetchone()
         entry = conn.execute(
@@ -317,17 +344,33 @@ class OwnershipRepository:
         if not player["eligible"]:
             raise PlayerUnavailableError("player is not selectable")
         overlap = conn.execute(
-            "SELECT 1 FROM player_ownership_period WHERE season_player_id=? AND acquired_at<=? AND (released_at IS NULL OR released_at>?)",
-            (season_player_id, at, at),
+            "SELECT 1 FROM player_ownership_period WHERE season_player_id=? AND (released_at IS NULL OR released_at>?)",
+            (season_player_id, at),
         ).fetchone()
         if overlap:
-            raise PlayerUnavailableError("player is already owned at the effective time")
+            raise PlayerUnavailableError("player ownership would overlap an existing period")
         self.validate_squad_capacity(season_entry_id, effective_at=at, connection=conn)
         item = OwnershipPeriod(_id(), season_player_id, player["season_id"], season_entry_id, at, None, reason, _now())
-        conn.execute("INSERT INTO player_ownership_period VALUES (?, ?, ?, ?, ?, ?, ?, ?)", tuple(item.__dict__.values()))
+        try:
+            conn.execute(
+                "INSERT INTO player_ownership_period VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                tuple(item.__dict__.values()),
+            )
+        except IntegrityError as error:
+            message = str(error.orig).lower()
+            if "overlapping player ownership period" in message or (
+                "unique" in message and "player_ownership_period.season_player_id" in message
+            ):
+                raise PlayerUnavailableError("player ownership changed concurrently") from error
+            raise
         append_event(
-            conn, actor=actor, action=PLAYER_ACQUIRED, entity_type=ENTITY_TYPE_OWNERSHIP_PERIOD,
-            entity_id=item.ownership_period_id, correlation_id=correlation_id, reason=reason,
+            conn,
+            actor=actor,
+            action=PLAYER_ACQUIRED,
+            entity_type=ENTITY_TYPE_OWNERSHIP_PERIOD,
+            entity_id=item.ownership_period_id,
+            correlation_id=correlation_id,
+            reason=reason,
             after_state={"season_player_id": season_player_id, "season_entry_id": season_entry_id, "acquired_at": at},
         )
         return item

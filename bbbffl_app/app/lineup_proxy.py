@@ -43,6 +43,20 @@ carry the same (lack of) audit trail a coach's own draft edits do today --
 a deliberate scope-consistent choice, not an oversight; see this package's
 PR description for the follow-up this leaves open. `submit` is the
 material, attributable, transactionally-audited action.
+
+A consequence, accepted rather than overlooked: `weekly_lineup_draft_slot`
+has no per-position or per-edit authorship of its own (never has, even for
+a coach's own multiple edits across sessions), so if an operator edits a
+draft via `create_or_amend` and a *different* actor -- the coach's own
+ordinary `submit()`, never this module -- later submits that same draft
+as-is, the resulting submission is correctly attributed to whoever
+performed *that* submit action (`source_type="coach"`), not to the
+operator who last touched the draft's content. This module's provenance
+guarantee is action-scoped ("who submitted"), matching issue #55's actual
+requirement ("Proxy actions must capture... actual operator actor
+identity"), not content-scoped ("who typed this position"); the latter
+would need new persisted draft-level authorship state (a schema change)
+and is an explicit candidate follow-up, not something to bolt on here.
 """
 
 from app.audit import ActorContext

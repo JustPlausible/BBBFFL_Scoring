@@ -2,6 +2,9 @@
 
 The authoritative preseason draft boundary and its atomic integration with the
 player ownership ledger are described in [draft-ledger.md](draft-ledger.md).
+The preseason trade/finalisation window that closes the draft out into a
+frozen opening-ownership boundary is described in
+[preseason-trades.md](preseason-trades.md).
 
 This document is the roadmap package 03 (issue #36) deliverable: it names the
 explicit service/repository boundaries the 2027 season model already has,
@@ -52,7 +55,11 @@ cycle anywhere) rather than leaving it as prose that only this file states.
   and squad-capacity enforcement). `app/teams.py` is a distinct, legacy
   concern: the Grand Final/SuperScore vertical's checked-in JSON roster
   config, predating this domain and deliberately left alone (see "What this
-  PR does not touch").
+  PR does not touch"). `app/preseason.py` (`PreseasonRepository`) is the
+  season-scoped preseason trade/finalisation window built on top of
+  `OwnershipRepository`: audited multi-club trades and the frozen opening-
+  ownership snapshot Round 1 relies on (roadmap package 15, issue #54; see
+  [preseason-trades.md](preseason-trades.md)).
 - **Weekly selections** — `app/lineups.py` (`WeeklyLineupRepository`: private
   drafts, immutable versioned submissions) and `app/lockouts.py`
   (`LockoutTriggerRepository`, `LockoutRepository`: the persisted round

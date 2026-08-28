@@ -42,6 +42,59 @@ class SquadConfigurationFrozenError(ValueError):
     pass
 
 
+class PreseasonWindowClosedError(ValueError):
+    """Raised by the ordinary ownership mutation paths below once roadmap
+    package 15 (issue #54)'s preseason window has been explicitly closed for
+    a player/entry's season.
+
+    Defined here, not in `app.preseason`, so `acquire_in_transaction`/
+    `release_in_transaction`/`transfer` can enforce it directly without a
+    circular import (`app.preseason` already imports `OwnershipRepository`
+    from this module) -- this is deliberately the *one* place that decides
+    whether ordinary ownership mutation is still allowed for a season, so a
+    future caller cannot bypass the lifecycle by going around
+    `app.preseason.PreseasonRepository` straight to this repository.
+    """
+
+
+def _assert_ownership_mutation_allowed(conn, database, season_id, *, allow_closed_window=False):
+    """No row for `season_id` means no preseason window has ever opened for
+    it (e.g. a season still mid-draft, or one that predates this package) --
+    that must not block the draft's own ownership acquisitions. Once a
+    window exists and has been closed, only the frozen opening snapshot
+    (`app.preseason`) remains authoritative; ordinary acquire/release/
+    transfer calls -- including any future caller that has not gone through
+    `app.preseason.PreseasonRepository` -- are refused here, not only in a
+    route or UI layer.
+
+    The read is taken under `_for_update_suffix`'s row lock (a no-op on
+    SQLite, which serializes via its single writer lock instead, same as
+    everywhere else in this module) so an ordinary mutation cannot read
+    `closed_at` while still open, race a concurrent `close_window`, and
+    commit its change *after* closure -- which would both defeat the
+    closed-window guarantee and leave the just-frozen opening snapshot
+    silently stale. Locking here serializes with `close_window`'s own
+    `SELECT ... FOR UPDATE` on the same row.
+
+    `allow_closed_window` is a narrow, explicit escape hatch for exactly one
+    caller: `app.preseason.PreseasonRepository.correct_opening_snapshot`'s
+    authorised post-closure correction, which deliberately still needs
+    every other ownership invariant (eligibility, season match, squad
+    capacity, no overlap) enforced. It is not exposed by `acquire`/
+    `release`/`transfer` -- only their `_in_transaction` counterparts -- so
+    an ordinary caller cannot opt into bypassing a closed window."""
+    if allow_closed_window:
+        return
+    window = conn.execute(
+        "SELECT closed_at FROM season_preseason_window WHERE season_id=?" + _for_update_suffix(database),
+        (season_id,),
+    ).fetchone()
+    if window is not None and window["closed_at"] is not None:
+        raise PreseasonWindowClosedError(
+            "preseason window is closed for this season; ownership can no longer be changed directly"
+        )
+
+
 @dataclass(frozen=True)
 class SeasonPlayer:
     season_player_id: str
@@ -351,8 +404,11 @@ class OwnershipRepository:
         actor=ActorContext.anonymous_operator("admin"),
         reason=None,
         correlation_id=None,
+        allow_closed_window=False,
     ):
-        """Acquire using an existing transaction (for compound domain commands)."""
+        """Acquire using an existing transaction (for compound domain commands).
+        `allow_closed_window` -- see `_assert_ownership_mutation_allowed` --
+        must only be set by an explicitly authorised correction call site."""
         at = effective_at or _now()
         correlation_id = correlation_id or new_correlation_id()
         if self.database.engine.dialect.name == "sqlite":
@@ -373,6 +429,9 @@ class OwnershipRepository:
             raise KeyError(season_player_id if not player else season_entry_id)
         if entry["season_id"] != player["season_id"]:
             raise ValueError("player and entry must belong to the same season")
+        _assert_ownership_mutation_allowed(
+            conn, self.database, player["season_id"], allow_closed_window=allow_closed_window
+        )
         if not player["eligible"]:
             raise PlayerUnavailableError("player is not selectable")
         overlap = conn.execute(
@@ -436,10 +495,13 @@ class OwnershipRepository:
         actor=ActorContext.anonymous_operator("admin"),
         reason=None,
         correlation_id=None,
+        allow_closed_window=False,
     ):
         """Release using an existing transaction (for compound domain commands,
         e.g. app.draft's correction workflow releasing an erroneous pick's
-        acquisition in the same transaction as reopening the pick)."""
+        acquisition in the same transaction as reopening the pick).
+        `allow_closed_window` -- see `_assert_ownership_mutation_allowed` --
+        must only be set by an explicitly authorised correction call site."""
         at = effective_at or _now()
         correlation_id = correlation_id or new_correlation_id()
         if self.database.engine.dialect.name == "sqlite":
@@ -458,6 +520,9 @@ class OwnershipRepository:
         ).fetchone()
         if not current:
             raise PlayerUnavailableError("player is not currently owned")
+        _assert_ownership_mutation_allowed(
+            conn, self.database, current["season_id"], allow_closed_window=allow_closed_window
+        )
         if at <= current["acquired_at"]:
             raise ValueError("release must be after acquisition")
         conn.execute(
@@ -523,6 +588,7 @@ class OwnershipRepository:
                 raise PlayerUnavailableError("player, current owner, or destination is unavailable")
             if entry["season_id"] != player["season_id"]:
                 raise ValueError("player and entry must belong to the same season")
+            _assert_ownership_mutation_allowed(conn, self.database, player["season_id"])
             if not player["eligible"]:
                 raise PlayerUnavailableError("player is not selectable")
             if at <= current["acquired_at"]:

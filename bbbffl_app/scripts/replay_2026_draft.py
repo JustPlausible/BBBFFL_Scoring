@@ -110,7 +110,16 @@ def synthetic_player_name(index: int) -> str:
     return f"{first} {last} (2026 Replay #{index + 1})"
 
 
-def seed_replay_draft(database_url: str, *, entries: int, squad_limit: int) -> tuple[str, str]:
+def seed_replay_draft(
+    database_url: str, *, entries: int, squad_limit: int, auto_complete: bool = False
+) -> tuple[str, str]:
+    """Seed an isolated draft. With `auto_complete`, also run every pick to
+    completion and finalize the draft entirely in software (round-robin over
+    the synthetic pool in draft order) -- roadmap package 15 (issue #54)'s
+    preseason window can only open once a draft is finalized, and the 2026
+    replay path (`docs/preseason-trades.md`) needs a finalized draft to
+    hand off to `scripts/replay_2026_preseason.py` without requiring the
+    admin board's manual picks."""
     migrate(database_url)
     database = connect(database_url)
     try:
@@ -129,17 +138,30 @@ def seed_replay_draft(database_url: str, *, entries: int, squad_limit: int) -> t
 
         pool = PlayerPoolRepository(database)
         player_count = entries * squad_limit + max(10, entries)
-        for index in range(player_count):
+        players = [
             pool.refresh_player(
                 season.season_id,
                 SYNTHETIC_CANONICAL_ID_BASE + index,
                 synthetic_player_name(index),
                 source_provider="bbbffl-2026-replay-simulation",
             )
+            for index in range(player_count)
+        ]
 
-        draft_id = DraftRepository(database).accept_order(
-            season.season_id, [entry.season_entry_id for entry in season_entries]
-        )
+        draft = DraftRepository(database)
+        draft_id = draft.accept_order(season.season_id, [entry.season_entry_id for entry in season_entries])
+
+        if auto_complete:
+            for _ in range(entries * squad_limit):
+                pick = draft.next_pick(season.season_id)
+                draft.execute_pick(
+                    season.season_id,
+                    pick.current_season_entry_id,
+                    players[pick.overall_number - 1].season_player_id,
+                    reason="2026 replay auto-complete (SIMULATION)",
+                )
+            draft.finalize(season.season_id, note="2026 replay auto-complete (SIMULATION)")
+
         return season.season_id, draft_id
     finally:
         database.close()
@@ -154,6 +176,12 @@ def main() -> int:
         default=os.getenv("BBBFFL_REPLAY_DATABASE_URL", f"sqlite:///{DEFAULT_DATABASE_PATH}"),
         help=f"defaults to an isolated SQLite file at {DEFAULT_DATABASE_PATH}, never the app's normal database",
     )
+    parser.add_argument(
+        "--auto-complete",
+        action="store_true",
+        help="run every pick and finalize the draft in software instead of leaving it for the admin board "
+        "(needed before scripts/replay_2026_preseason.py can open the preseason window)",
+    )
     args = parser.parse_args()
 
     if (os.getenv("BBBFFL_ENVIRONMENT") or "").strip().lower() == "production":
@@ -164,17 +192,25 @@ def main() -> int:
         return 1
 
     Path(DEFAULT_DATABASE_PATH).parent.mkdir(parents=True, exist_ok=True)
-    season_id, draft_id = seed_replay_draft(args.database_url, entries=args.entries, squad_limit=args.squad_limit)
+    season_id, draft_id = seed_replay_draft(
+        args.database_url, entries=args.entries, squad_limit=args.squad_limit, auto_complete=args.auto_complete
+    )
 
     print("Seeded an isolated 2026 draft replay season (software simulation only).")
     print(f"  database_url: {args.database_url}")
     print(f"  season_id:    {season_id}")
     print(f"  draft_id:     {draft_id}")
     print(f"  entries:      {args.entries}, squad_limit: {args.squad_limit}")
-    print()
-    print("Start the app against this same database, then open the draft board:")
-    print(f"  BBBFFL_DATABASE_URL={args.database_url} uvicorn app.main:app --reload")
-    print(f"  http://localhost:8000/admin/draft/{season_id}")
+    if args.auto_complete:
+        print("  draft:        auto-completed and finalized")
+        print()
+        print("Continue into the preseason window (roadmap package 15, issue #54):")
+        print(f"  python -m scripts.replay_2026_preseason --database-url {args.database_url} --season-id {season_id}")
+    else:
+        print()
+        print("Start the app against this same database, then open the draft board:")
+        print(f"  BBBFFL_DATABASE_URL={args.database_url} uvicorn app.main:app --reload")
+        print(f"  http://localhost:8000/admin/draft/{season_id}")
     return 0
 
 

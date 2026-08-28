@@ -55,9 +55,7 @@ def test_unassigned_interchange_does_not_affect_team_score(
     assert all(p.effective_score == 0 for p in team_a.positions)
 
 
-def test_assigned_interchange_contributes_exactly_once(
-    partial_teams, decisions, single_match, players_on_one_match
-):
+def test_assigned_interchange_contributes_exactly_once(partial_teams, decisions, single_match, players_on_one_match):
     decisions.set_interchange_assignment("team_a", "Forward1")
     stats = {100: {9: stat_line(9, goals=2, behinds=1)}}
     client = FakeAflClient([single_match], players_on_one_match, stats)
@@ -120,9 +118,7 @@ def test_partial_interchange_stats_only_withhold_affected_potential_formulas(
     assert potential.tackler == 24
 
 
-def test_potential_scores_update_from_fresh_stat_line(
-    partial_teams, decisions, single_match, players_on_one_match
-):
+def test_potential_scores_update_from_fresh_stat_line(partial_teams, decisions, single_match, players_on_one_match):
     client = FakeAflClient([single_match], players_on_one_match, {100: {9: stat_line(9, goals=1)}})
     first = _team(build_matchup_state(client, partial_teams, decisions), "team_a")
 
@@ -159,17 +155,13 @@ def test_potential_scores_do_not_affect_effective_or_team_scores(
 # -- 3. Lifecycle relevance --------------------------------------------------
 
 
-def test_live_named_interchange_keeps_matchup_live(
-    partial_teams, decisions, single_match, players_on_one_match
-):
+def test_live_named_interchange_keeps_matchup_live(partial_teams, decisions, single_match, players_on_one_match):
     client = FakeAflClient([single_match], players_on_one_match, {})  # single_match status=LIVE
     result = build_matchup_state(client, partial_teams, decisions)
     assert result.status == "LIVE"
 
 
-def test_yet_to_play_named_interchange_prevents_premature_signoff(
-    partial_teams, decisions, players_on_one_match
-):
+def test_yet_to_play_named_interchange_prevents_premature_signoff(partial_teams, decisions, players_on_one_match):
     scheduled_match = Match(match_id=100, home_team=CATS, away_team=PIES, status="UPCOMING")
     client = FakeAflClient([scheduled_match], players_on_one_match, {})
 
@@ -191,9 +183,7 @@ def test_completed_named_interchange_allows_signoff_when_everything_else_is_comp
     assert _team(result, "team_a").interchange.match_state == "completed"
 
 
-def test_postgame_named_interchange_prevents_premature_signoff(
-    partial_teams, decisions, players_on_one_match
-):
+def test_postgame_named_interchange_prevents_premature_signoff(partial_teams, decisions, players_on_one_match):
     """Mirrors the yet_to_play/completed cases above: an Interchange whose
     match is POSTGAME (finished, stats not yet final) must keep the matchup
     at LIVE, same as yet_to_play -- it must not be treated as though its
@@ -207,9 +197,7 @@ def test_postgame_named_interchange_prevents_premature_signoff(
     assert _team(result, "team_a").interchange.match_state == "postgame"
 
 
-def test_dnp_named_interchange_does_not_block_signoff(
-    decisions, single_match, players_on_one_match
-):
+def test_dnp_named_interchange_does_not_block_signoff(decisions, single_match, players_on_one_match):
     """DNP semantics are unchanged: once a player is scorer-marked DNP we
     stop waiting on their match, whether they're a starter or Interchange.
     Isolated from `partial_teams` here -- team_b there is fully named and

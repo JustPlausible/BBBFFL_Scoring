@@ -155,9 +155,7 @@ def test_matches_distinguish_all_four_lifecycle_states_within_one_round(client):
 
 def test_match_scores_are_null_before_available_not_fabricated_zero(client):
     matches = {m.match_id: m for m in client.get_matches(1412)}
-    upcoming_raw = next(
-        m for m in _load("matches_round_1412_lifecycle.json")["matches"] if m["match_id"] == 8501
-    )
+    upcoming_raw = next(m for m in _load("matches_round_1412_lifecycle.json")["matches"] if m["match_id"] == 8501)
     assert upcoming_raw["score_home"] is None
     assert upcoming_raw["score_away"] is None
     assert matches[8501].state == "yet_to_play"
@@ -282,9 +280,7 @@ def test_rosters_contract_selections_are_not_participation_evidence():
     # A context record (e.g. an "out") is a separate collection, never merged
     # into `selections`.
     assert len(home["context"]["outs"]) == 1
-    assert home["context"]["outs"][0]["player"]["display_name"] not in {
-        s["player"]["display_name"] for s in selections
-    }
+    assert home["context"]["outs"][0]["player"]["display_name"] not in {s["player"]["display_name"] for s in selections}
 
 
 # --- Error shapes: structured application errors vs. auth-layer errors --

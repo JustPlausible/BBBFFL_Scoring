@@ -1,0 +1,84 @@
+# Dependency/security exception policy (issue #39 / roadmap package 07).
+#
+# Every entry here is a *time-boxed, reviewed* suppression of one pip-audit
+# finding -- never a blanket exception for a package. See
+# ../docs/ci-quality-gates.md for the full policy this file implements:
+# by default any known vulnerability fails required CI; an entry here is the
+# only way to make a specific, already-triaged finding non-blocking, and it
+# stops working automatically once `review_by` passes (scripts/dependency_audit.py
+# treats an expired entry as if it were not suppressed at all, so an
+# unmaintained "temporary" exception cannot become permanent silently).
+#
+# Required fields per entry:
+#   id        -- the advisory identifier pip-audit reports (e.g. a PYSEC id).
+#   reason    -- why this finding is not actionable *right now* and what
+#                would resolve it.
+#   owner     -- who is responsible for re-reviewing this by `review_by`.
+#   review_by -- ISO date (YYYY-MM-DD); the entry stops suppressing the
+#                finding once this date has passed.
+
+[[suppressions]]
+id = "PYSEC-2026-161"
+reason = """
+Transitive via fastapi==0.115.0, which pins starlette<0.39.0,>=0.37.2.
+No starlette release inside that range fixes this advisory (fix ships in
+1.0.1); the resolving upgrade path is a FastAPI major-version bump, which
+is a materially larger, separate change than issue #39's CI-tooling scope.
+Tracked as a follow-up dependency upgrade rather than expanded here.
+"""
+owner = "JustPlausible"
+review_by = "2026-11-30"
+
+[[suppressions]]
+id = "PYSEC-2026-248"
+reason = """
+Same root cause and remediation path as PYSEC-2026-161: fixed in
+starlette 1.3.0, outside fastapi==0.115.0's pinned <0.39.0 range.
+"""
+owner = "JustPlausible"
+review_by = "2026-11-30"
+
+[[suppressions]]
+id = "PYSEC-2026-249"
+reason = """
+Same root cause and remediation path as PYSEC-2026-161: fixed in
+starlette 1.3.1, outside fastapi==0.115.0's pinned <0.39.0 range.
+"""
+owner = "JustPlausible"
+review_by = "2026-11-30"
+
+[[suppressions]]
+id = "PYSEC-2026-1943"
+reason = """
+Same root cause and remediation path as PYSEC-2026-161: fixed in
+starlette 0.40.0, outside fastapi==0.115.0's pinned <0.39.0 range.
+"""
+owner = "JustPlausible"
+review_by = "2026-11-30"
+
+[[suppressions]]
+id = "PYSEC-2026-1941"
+reason = """
+Same root cause and remediation path as PYSEC-2026-161: fixed in
+starlette 0.47.2, outside fastapi==0.115.0's pinned <0.39.0 range.
+"""
+owner = "JustPlausible"
+review_by = "2026-11-30"
+
+[[suppressions]]
+id = "PYSEC-2026-2281"
+reason = """
+Same root cause and remediation path as PYSEC-2026-161: fixed in
+starlette 1.1.0, outside fastapi==0.115.0's pinned <0.39.0 range.
+"""
+owner = "JustPlausible"
+review_by = "2026-11-30"
+
+[[suppressions]]
+id = "PYSEC-2026-2280"
+reason = """
+Same root cause and remediation path as PYSEC-2026-161: fixed in
+starlette 1.1.0, outside fastapi==0.115.0's pinned <0.39.0 range.
+"""
+owner = "JustPlausible"
+review_by = "2026-11-30"

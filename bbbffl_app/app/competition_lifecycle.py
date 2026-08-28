@@ -88,17 +88,14 @@ class CompetitionLifecycleRepository:
             if not logical:
                 raise KeyError(bbbffl_round_id)
             if logical["stream_type"] != "ordinary":
-                raise ValueError(
-                    "persisted ordinary lifecycle requires an ordinary competition stream"
-                )
+                raise ValueError("persisted ordinary lifecycle requires an ordinary competition stream")
             if conn.execute(
                 "SELECT 1 FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?",
                 (bbbffl_round_id,),
             ).fetchone():
                 raise ValueError("round lifecycle already exists")
             draw = conn.execute(
-                "SELECT * FROM season_fixture_draw WHERE season_id=?"
-                + _for_update_suffix(self.database),
+                "SELECT * FROM season_fixture_draw WHERE season_id=?" + _for_update_suffix(self.database),
                 (logical["season_id"],),
             ).fetchone()
             if not draw or draw["state"] != "frozen":
@@ -121,9 +118,7 @@ class CompetitionLifecycleRepository:
                 or len(set(entries)) != 10
                 or [p["matchup_order"] for p in pairs] != list(range(1, 6))
             ):
-                raise ValueError(
-                    "ordinary round requires five non-overlapping fixture matchups"
-                )
+                raise ValueError("ordinary round requires five non-overlapping fixture matchups")
             mapping = conn.execute(
                 "SELECT m.mapping_id, m.current_revision, r.* FROM round_afl_mapping m "
                 "JOIN round_afl_mapping_revision r ON r.mapping_id=m.mapping_id AND r.revision=m.current_revision "
@@ -157,11 +152,7 @@ class CompetitionLifecycleRepository:
                 ),
             )
             for pair in pairs:
-                matchup_id = str(
-                    uuid5(
-                        UUID(bbbffl_round_id), f"fixture:{pair['fixture_matchup_id']}"
-                    )
-                )
+                matchup_id = str(uuid5(UUID(bbbffl_round_id), f"fixture:{pair['fixture_matchup_id']}"))
                 conn.execute(
                     "INSERT INTO bbbffl_matchup VALUES (?, ?, ?, ?, ?, ?, NULL)",
                     (
@@ -201,9 +192,7 @@ class CompetitionLifecycleRepository:
         with transaction(self.database) as conn:
             row = self._locked_round(conn, round_id)
             if target not in LEGAL_TRANSITIONS[row["state"]]:
-                raise ValueError(
-                    f"illegal lifecycle transition: {row['state']} -> {target}"
-                )
+                raise ValueError(f"illegal lifecycle transition: {row['state']} -> {target}")
             if row["state"] == "upcoming":
                 self._validate_frozen_context(conn, row)
             now, version = _now(), row["version"] + 1
@@ -398,11 +387,7 @@ class CompetitionLifecycleRepository:
                     str(uuid4()),
                     round_id,
                     provider_status,
-                    (
-                        json.dumps(payload, sort_keys=True)
-                        if payload is not None
-                        else None
-                    ),
+                    (json.dumps(payload, sort_keys=True) if payload is not None else None),
                     _now(),
                 ),
             )
@@ -436,8 +421,7 @@ class CompetitionLifecycleRepository:
 
     def _locked_round(self, conn, round_id):
         row = conn.execute(
-            "SELECT * FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?"
-            + _for_update_suffix(self.database),
+            "SELECT * FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?" + _for_update_suffix(self.database),
             (round_id,),
         ).fetchone()
         if not row:
@@ -458,9 +442,7 @@ class CompetitionLifecycleRepository:
     def _validate_result_set(matchups, results):
         expected = {row["matchup_id"] for row in matchups}
         if set(results) != expected:
-            raise ValueError(
-                "official publication requires results for exactly all five matchups"
-            )
+            raise ValueError("official publication requires results for exactly all five matchups")
         for scores in results.values():
             if not isinstance(scores, (tuple, list)) or len(scores) != 2:
                 raise ValueError("each result requires home and away scores")
@@ -471,17 +453,10 @@ class CompetitionLifecycleRepository:
             (row["fixture_draw_id"],),
         ).fetchone()
         mapping = conn.execute(
-            "SELECT current_revision FROM round_afl_mapping WHERE mapping_id=?"
-            + _for_update_suffix(self.database),
+            "SELECT current_revision FROM round_afl_mapping WHERE mapping_id=?" + _for_update_suffix(self.database),
             (row["mapping_id"],),
         ).fetchone()
-        if (
-            not draw
-            or draw["state"] != "frozen"
-            or draw["version"] != row["fixture_draw_version"]
-        ):
+        if not draw or draw["state"] != "frozen" or draw["version"] != row["fixture_draw_version"]:
             raise ValueError("frozen fixture context changed; round remains closed")
         if not mapping or mapping["current_revision"] != row["mapping_revision"]:
-            raise ValueError(
-                "accepted mapping changed; round remains closed pending explicit resolution"
-            )
+            raise ValueError("accepted mapping changed; round remains closed pending explicit resolution")

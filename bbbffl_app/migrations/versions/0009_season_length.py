@@ -1,7 +1,7 @@
 """Season-scoped BBBFFL regular-season length."""
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "0009_season_length"
 down_revision = "0008_round_map"
@@ -14,11 +14,13 @@ def _sqlite_matchup_triggers():
         op.execute(f"DROP TRIGGER IF EXISTS season_fixture_matchup_frozen_{operation}")
         old_check = (
             "(SELECT state FROM season_fixture_draw WHERE fixture_draw_id=OLD.fixture_draw_id)='frozen'"
-            if operation != "insert" else "0"
+            if operation != "insert"
+            else "0"
         )
         new_check = (
             "(SELECT state FROM season_fixture_draw WHERE fixture_draw_id=NEW.fixture_draw_id)='frozen'"
-            if operation != "delete" else "0"
+            if operation != "delete"
+            else "0"
         )
         op.execute(f"""
         CREATE TRIGGER season_fixture_matchup_frozen_{operation}
@@ -57,13 +59,9 @@ def upgrade():
             "bbbffl_season",
             sa.Column("regular_season_round_count", sa.Integer(), nullable=False, server_default="20"),
         )
-        op.create_check_constraint(
-            "ck_season_regular_round_count", "bbbffl_season", "regular_season_round_count >= 1"
-        )
+        op.create_check_constraint("ck_season_regular_round_count", "bbbffl_season", "regular_season_round_count >= 1")
         op.drop_constraint("ck_fixture_round_range", "season_fixture_matchup", type_="check")
-        op.create_check_constraint(
-            "ck_fixture_round_positive", "season_fixture_matchup", "bbbffl_round_number >= 1"
-        )
+        op.create_check_constraint("ck_fixture_round_positive", "season_fixture_matchup", "bbbffl_round_number >= 1")
         op.execute("""
         CREATE FUNCTION enforce_frozen_fixture_season_length() RETURNS trigger AS $$
         BEGIN
@@ -88,15 +86,10 @@ def upgrade():
 def downgrade():
     bind = op.get_bind()
     non_default_lengths = bind.execute(
-        sa.text(
-            "SELECT COUNT(*) FROM bbbffl_season "
-            "WHERE regular_season_round_count <> 20"
-        )
+        sa.text("SELECT COUNT(*) FROM bbbffl_season WHERE regular_season_round_count <> 20")
     ).scalar_one()
     if non_default_lengths:
-        raise RuntimeError(
-            "0009 downgrade refused: non-default season length configuration cannot be discarded"
-        )
+        raise RuntimeError("0009 downgrade refused: non-default season length configuration cannot be discarded")
     too_long = bind.execute(
         sa.text("SELECT COUNT(*) FROM season_fixture_matchup WHERE bbbffl_round_number > 20")
     ).scalar_one()

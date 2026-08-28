@@ -10,7 +10,8 @@ from app.audit import AuditEventRepository
 from app.config import get_settings
 from app.db import DecisionsRepository, connect
 from app.migrations import migrate
-from app.routes import admin, health, public, superscore as superscore_routes
+from app.routes import admin, health, public
+from app.routes import superscore as superscore_routes
 from app.scorer_decisions import (
     CompetitionFinalizedError,
     InvalidPositionError,

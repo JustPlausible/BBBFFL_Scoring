@@ -1,4 +1,5 @@
 """Regression coverage for the real Alembic history and legacy bootstrap."""
+
 import json
 import sqlite3
 
@@ -72,7 +73,9 @@ def _legacy_database(path):
     conn.execute("INSERT INTO interchange_assignment VALUES ('team_a', 'Ruck', 't')")
     conn.execute("INSERT INTO score_override VALUES ('team_a', 'Ruck', 42.0, 'legacy correction', 't')")
     snapshot = json.dumps({"status": "FINAL", "teams": [{"team_key": "team_a", "total_score": 99}]})
-    conn.execute("INSERT INTO matchup_state VALUES (1, 1, '2026-01-01T00:00:00+00:00', 'legacy signoff', ?)", (snapshot,))
+    conn.execute(
+        "INSERT INTO matchup_state VALUES (1, 1, '2026-01-01T00:00:00+00:00', 'legacy signoff', ?)", (snapshot,)
+    )
     conn.commit()
     # Prove this fixture is genuinely unversioned and meaningful before migration.
     assert conn.execute("SELECT dnp FROM slot_dnp").fetchone()[0] == 1
@@ -88,7 +91,11 @@ def test_empty_database_migrates_to_head_and_repository_works(tmp_path):
     with engine.connect() as conn:
         assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == HEAD
         # Composite primary keys create backing indexes on SQLite.
-        assert inspect(conn).get_pk_constraint("slot_dnp")["constrained_columns"] == ["competition_key", "team_key", "slot"]
+        assert inspect(conn).get_pk_constraint("slot_dnp")["constrained_columns"] == [
+            "competition_key",
+            "team_key",
+            "slot",
+        ]
     repo_conn = connect(url)
     repo = DecisionsRepository(repo_conn)
     repo.set_dnp("team_a", "Forward1", True)
@@ -158,7 +165,9 @@ def test_upgrade_from_player_head_adds_fixture_schema(tmp_path):
     url = _url(tmp_path / "fixture-upgrade.db")
     migrate(url, "0006_players")
     migrate(url)
-    assert {"season_fixture_draw", "season_fixture_number", "season_fixture_matchup"} <= set(inspect(create_engine(url)).get_table_names())
+    assert {"season_fixture_draw", "season_fixture_number", "season_fixture_matchup"} <= set(
+        inspect(create_engine(url)).get_table_names()
+    )
 
 
 def test_upgrade_from_0007_preserves_legacy_round_mapping(tmp_path):
@@ -168,9 +177,7 @@ def test_upgrade_from_0007_preserves_legacy_round_mapping(tmp_path):
     seasons = SeasonRepository(connection)
     season = seasons.create_season(2026, "2026 Replay")
     rules = seasons.create_rules_version(season.season_id, "canonical", 1, "2026")
-    competition = seasons.create_competition(
-        season.season_id, rules.rules_version_id, "ordinary", "BBBFFL", "ordinary"
-    )
+    competition = seasons.create_competition(season.season_id, rules.rules_version_id, "ordinary", "BBBFFL", "ordinary")
     round_ = seasons.create_round(competition.competition_id, "r1", "Round 1", 1)
     legacy_id = "legacy-mapping-id"
     with connection.engine.begin() as raw:
@@ -211,14 +218,10 @@ def test_season_length_upgrade_defaults_without_rewriting_frozen_fixture(tmp_pat
     for number in range(1, 11):
         coach = identities.create_coach(f"Migration Coach {number}")
         entries.append(
-            identities.create_entry(
-                season.season_id, f"migration-{number}", coach.coach_id, f"Team {number}"
-            )
+            identities.create_entry(season.season_id, f"migration-{number}", coach.coach_id, f"Team {number}")
         )
     fixtures = FixtureRepository(connection)
-    draw = fixtures.save_draft(
-        season.season_id, [entry.season_entry_id for entry in entries]
-    )
+    draw = fixtures.save_draft(season.season_id, [entry.season_entry_id for entry in entries])
     fixtures.freeze(season.season_id)
     before = [tuple(matchup.__dict__.values()) for matchup in fixtures.list_matchups(season.season_id)]
     connection.close()
@@ -227,8 +230,7 @@ def test_season_length_upgrade_defaults_without_rewriting_frozen_fixture(tmp_pat
     upgraded = connect(url)
     assert SeasonRepository(upgraded).get_season(season.season_id).regular_season_round_count == 20
     after = [
-        tuple(matchup.__dict__.values())
-        for matchup in FixtureRepository(upgraded).list_matchups(season.season_id)
+        tuple(matchup.__dict__.values()) for matchup in FixtureRepository(upgraded).list_matchups(season.season_id)
     ]
     assert after == before
     assert FixtureRepository(upgraded).get_draw(season.season_id).fixture_draw_id == draw.fixture_draw_id
@@ -281,8 +283,12 @@ def test_lock_evidence_table_is_immutable(tmp_path):
     OwnershipRepository(connection).acquire(player.season_player_id, entries[0].season_entry_id)
     lineups = WeeklyLineupRepository(connection)
     draft = lineups.save_draft(
-        scope["season_id"], scope["competition_id"], round_.bbbffl_round_id, entries[0].season_entry_id,
-        {"F1": player.season_player_id}, expected_revision=0,
+        scope["season_id"],
+        scope["competition_id"],
+        round_.bbbffl_round_id,
+        entries[0].season_entry_id,
+        {"F1": player.season_player_id},
+        expected_revision=0,
     )
     lineups.submit(draft.lineup_id, expected_draft_revision=1, expected_submission_version=0)
 
@@ -329,7 +335,9 @@ def test_upgrade_from_lock_evidence_head_adds_lockout_trigger_tables(tmp_path):
         "bbbffl_round_lockout_trigger_match",
         "bbbffl_round_lockout_trigger_activation",
     } <= tables
-    assert inspect(engine).get_pk_constraint("bbbffl_round_lockout_trigger_activation")["constrained_columns"] == ["trigger_id"]
+    assert inspect(engine).get_pk_constraint("bbbffl_round_lockout_trigger_activation")["constrained_columns"] == [
+        "trigger_id"
+    ]
 
 
 def test_lockout_trigger_activation_table_is_immutable(tmp_path):
@@ -340,7 +348,9 @@ def test_lockout_trigger_activation_table_is_immutable(tmp_path):
     migrate(url)
     connection = connect(url)
     _, round_, _entries = operational(connection, 2026, 2)
-    trigger = LockoutTriggerRepository(connection).create(round_.bbbffl_round_id, "main", "main", 1, [1], reason="fixture")
+    trigger = LockoutTriggerRepository(connection).create(
+        round_.bbbffl_round_id, "main", "main", 1, [1], reason="fixture"
+    )
 
     engine = create_engine(url)
     with engine.begin() as conn:
@@ -373,9 +383,7 @@ def test_season_length_downgrade_refuses_non_default_configuration(tmp_path):
     url = _url(tmp_path / "season-length-downgrade.db")
     migrate(url)
     connection = connect(url)
-    SeasonRepository(connection).create_season(
-        2027, "2027", regular_season_round_count=23
-    )
+    SeasonRepository(connection).create_season(2027, "2027", regular_season_round_count=23)
     connection.close()
 
     # No fixture rows exist, so refusal must be based on season configuration
@@ -397,10 +405,13 @@ def test_season_length_downgrade_preserves_default_season(tmp_path):
         column["name"] for column in inspect(engine).get_columns("bbbffl_season")
     }
     with engine.connect() as raw:
-        assert raw.execute(
-            text("SELECT label FROM bbbffl_season WHERE season_id=:season_id"),
-            {"season_id": season.season_id},
-        ).scalar_one() == "2026 Replay"
+        assert (
+            raw.execute(
+                text("SELECT label FROM bbbffl_season WHERE season_id=:season_id"),
+                {"season_id": season.season_id},
+            ).scalar_one()
+            == "2026 Replay"
+        )
 
 
 def test_unrecognized_unversioned_schema_is_refused(tmp_path):

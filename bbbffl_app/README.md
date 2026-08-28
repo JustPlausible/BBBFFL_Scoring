@@ -274,6 +274,30 @@ override / finalisation behaviour both at the orchestration layer
 (`test_service.py`, using a fake afl-api client -- no network) and through
 the HTTP API (`test_api.py`).
 
+## CI quality gates
+
+Every required CI check (tests, lint/formatting, the incremental type-check
+gate, migration integrity, dependency/security audit, and the container
+build) is hermetic and reproducible from a clean checkout with no live
+`afl-api`, credentials, or local state. Run them all locally with:
+
+```bash
+cd bbbffl_app
+.venv/bin/pip install -r requirements-dev.txt   # once, or after requirements change
+.venv/bin/pytest                                # tests + migration integrity (SQLite)
+.venv/bin/ruff format --check .                 # formatting
+.venv/bin/ruff check .                          # lint
+.venv/bin/mypy                                  # incremental type check (see docs/ci-quality-gates.md for scope)
+.venv/bin/python -m scripts.dependency_audit    # dependency/security audit
+docker build -t bbbffl-prototype .              # container build
+```
+
+See [`../docs/ci-quality-gates.md`](../docs/ci-quality-gates.md) (issue #39 /
+roadmap package 07) for what each gate checks, the incremental type-check
+scope and how to expand it, the dependency/security severity and exception
+policy, and how hermetic required checks stay separate from the manual,
+credentialed `afl-api` integration diagnostic below.
+
 ## afl-api contract status
 
 `app/afl_client.py`'s module docstring documents the **confirmed** live
@@ -297,7 +321,11 @@ proven by `tests/test_afl_contract_v1.py`, run hermetically with every
 `pytest` invocation. An opt-in, network-using, credential-free-output
 diagnostic that validates a real deployment is in
 `scripts/afl_contract_diagnostic.py` — see the contract report for how to
-run it; it is never part of CI or plain `pytest`.
+run it; it is never part of CI or plain `pytest`. It is also available as
+the manual-only, credentialed `.github/workflows/integration-diagnostics.yml`
+GitHub Actions workflow (`workflow_dispatch` trigger only, so it can never
+run on a PR or become a required merge gate) — see
+[`../docs/ci-quality-gates.md`](../docs/ci-quality-gates.md).
 
 ## afl-api resilience, cache and diagnostics
 

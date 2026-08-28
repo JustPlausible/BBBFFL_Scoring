@@ -61,9 +61,7 @@ def load_superscore_config(path: str) -> SuperScoreConfig:
 
     competition_type = raw.get("competition_type")
     if competition_type != "SUPERSCORE":
-        raise TeamConfigError(
-            f"SuperScore config must declare competition_type 'SUPERSCORE', got {competition_type!r}"
-        )
+        raise TeamConfigError(f"SuperScore config must declare competition_type 'SUPERSCORE', got {competition_type!r}")
 
     season = raw.get("season")
     afl_round = raw.get("afl_round")

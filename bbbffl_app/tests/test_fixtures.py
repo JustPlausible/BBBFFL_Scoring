@@ -17,14 +17,14 @@ def _season_with_entries(database, year, prefix="Team"):
     entries = []
     for number in range(1, 11):
         coach = identities.create_coach(f"Coach {year}-{number}")
-        entries.append(identities.create_entry(season.season_id, f"licence-{number}", coach.coach_id, f"{prefix} {number}"))
+        entries.append(
+            identities.create_entry(season.season_id, f"licence-{number}", coach.coach_id, f"{prefix} {number}")
+        )
     return season, entries
 
 
 def _configured_season_with_entries(database, year, round_count):
-    season = SeasonRepository(database).create_season(
-        year, str(year), regular_season_round_count=round_count
-    )
+    season = SeasonRepository(database).create_season(year, str(year), regular_season_round_count=round_count)
     identities = IdentityRepository(database)
     entries = []
     for number in range(1, 11):
@@ -75,9 +75,7 @@ def test_documented_2026_fixture_number_golden_and_invariants():
 def test_rotation_continues_beyond_twenty_and_can_end_mid_cycle():
     rotation_23 = fixture_number_rotation(23)
     assert rotation_23[:9] == BASE_ROTATION
-    assert rotation_23[9:18] == tuple(
-        tuple((away, home) for home, away in round_) for round_ in BASE_ROTATION
-    )
+    assert rotation_23[9:18] == tuple(tuple((away, home) for home, away in round_) for round_ in BASE_ROTATION)
     assert rotation_23[18:] == BASE_ROTATION[:5]
     assert fixture_number_rotation(14) == rotation_23[:14]
     for round_ in rotation_23:
@@ -97,12 +95,9 @@ def test_season_lengths_are_independent_and_drive_persisted_draws():
     assert len(repository.list_matchups(long.season_id)) == 23 * 5
     long_round_23 = repository.list_matchups(long.season_id, 23)
     expected = BASE_ROTATION[4]
-    number_by_entry = {
-        entry.season_entry_id: number for number, entry in enumerate(long_entries, 1)
-    }
+    number_by_entry = {entry.season_entry_id: number for number, entry in enumerate(long_entries, 1)}
     assert [
-        (number_by_entry[m.home_season_entry_id], number_by_entry[m.away_season_entry_id])
-        for m in long_round_23
+        (number_by_entry[m.home_season_entry_id], number_by_entry[m.away_season_entry_id]) for m in long_round_23
     ] == list(expected)
 
 
@@ -127,9 +122,7 @@ def test_configuration_change_cannot_regenerate_a_frozen_fixture():
 
 def test_freeze_requires_each_configured_round_exactly_once(fixture_tree):
     database, season, entries, repository = fixture_tree
-    draw = repository.save_draft(
-        season.season_id, [entry.season_entry_id for entry in entries]
-    )
+    draw = repository.save_draft(season.season_id, [entry.season_entry_id for entry in entries])
     # Preserve the total of 100 rows while replacing configured round 20 with
     # an out-of-range round. A total-count-only validation would accept this.
     with transaction(database) as conn:
@@ -165,7 +158,9 @@ def test_seasons_have_independent_draws_without_leakage():
     second_draw = repository.save_draft(second.season_id, [e.season_entry_id for e in reversed(second_entries)])
     assert first_draw.fixture_draw_id != second_draw.fixture_draw_id
     assert {m.season_id for m in repository.list_matchups(first.season_id)} == {first.season_id}
-    assert set(repository.fixture_numbers(first.season_id).values()).isdisjoint(repository.fixture_numbers(second.season_id).values())
+    assert set(repository.fixture_numbers(first.season_id).values()).isdisjoint(
+        repository.fixture_numbers(second.season_id).values()
+    )
 
 
 def test_duplicate_fixture_assignment_and_cross_season_entry_are_rejected(fixture_tree):
@@ -175,7 +170,15 @@ def test_duplicate_fixture_assignment_and_cross_season_entry_are_rejected(fixtur
     repository.save_draft(season.season_id, [e.season_entry_id for e in entries])
     with pytest.raises(IntegrityError):
         with transaction(database) as conn:
-            conn.execute("INSERT INTO season_fixture_number VALUES (?, ?, ?, ?)", (repository.get_draw(season.season_id).fixture_draw_id, season.season_id, 10, entries[0].season_entry_id))
+            conn.execute(
+                "INSERT INTO season_fixture_number VALUES (?, ?, ?, ?)",
+                (
+                    repository.get_draw(season.season_id).fixture_draw_id,
+                    season.season_id,
+                    10,
+                    entries[0].season_entry_id,
+                ),
+            )
 
 
 def test_draft_correction_is_atomic_audited_and_freeze_is_immutable(fixture_tree):
@@ -183,7 +186,12 @@ def test_draft_correction_is_atomic_audited_and_freeze_is_immutable(fixture_tree
     ordered = [e.season_entry_id for e in entries]
     draft = repository.save_draft(season.season_id, ordered)
     corrected_order = ordered[1::-1] + ordered[2:]
-    corrected = repository.save_draft(season.season_id, corrected_order, actor=ActorContext.anonymous_operator("scorer"), reason="draw transcription correction")
+    corrected = repository.save_draft(
+        season.season_id,
+        corrected_order,
+        actor=ActorContext.anonymous_operator("scorer"),
+        reason="draw transcription correction",
+    )
     assert corrected.fixture_draw_id == draft.fixture_draw_id
     assert corrected.version == 2
     assert repository.list_matchups(season.season_id, 1)[0].home_season_entry_id == corrected_order[0]
@@ -195,7 +203,11 @@ def test_draft_correction_is_atomic_audited_and_freeze_is_immutable(fixture_tree
         with transaction(database) as conn:
             conn.execute("DELETE FROM season_fixture_matchup WHERE fixture_draw_id=?", (draft.fixture_draw_id,))
     events = AuditEventRepository(database).list_events(entity_type="fixture_draw", entity_id=draft.fixture_draw_id)
-    assert [event.action for event in events] == ["fixture.draw.created", "fixture.draw.corrected", "fixture.draw.frozen"]
+    assert [event.action for event in events] == [
+        "fixture.draw.created",
+        "fixture.draw.corrected",
+        "fixture.draw.frozen",
+    ]
     assert events[1].reason == "draw transcription correction"
 
 
@@ -213,19 +225,14 @@ def test_child_update_cannot_move_out_of_or_into_frozen_draw(table):
     frozen_season, frozen_entries = _season_with_entries(database, 2026)
     draft_season, draft_entries = _season_with_entries(database, 2027)
     repository = FixtureRepository(database)
-    frozen = repository.save_draft(
-        frozen_season.season_id, [entry.season_entry_id for entry in frozen_entries]
-    )
-    draft = repository.save_draft(
-        draft_season.season_id, [entry.season_entry_id for entry in draft_entries]
-    )
+    frozen = repository.save_draft(frozen_season.season_id, [entry.season_entry_id for entry in frozen_entries])
+    draft = repository.save_draft(draft_season.season_id, [entry.season_entry_id for entry in draft_entries])
     repository.freeze(frozen_season.season_id)
 
     if table == "season_fixture_number":
         where = "fixture_draw_id=? AND fixture_number=1"
         move_to_draft = (
-            "UPDATE season_fixture_number SET fixture_draw_id=?, season_id=?, "
-            "season_entry_id=? WHERE " + where,
+            "UPDATE season_fixture_number SET fixture_draw_id=?, season_id=?, season_entry_id=? WHERE " + where,
             (
                 draft.fixture_draw_id,
                 draft_season.season_id,
@@ -234,8 +241,7 @@ def test_child_update_cannot_move_out_of_or_into_frozen_draw(table):
             ),
         )
         move_to_frozen = (
-            "UPDATE season_fixture_number SET fixture_draw_id=?, season_id=?, "
-            "season_entry_id=? WHERE " + where,
+            "UPDATE season_fixture_number SET fixture_draw_id=?, season_id=?, season_entry_id=? WHERE " + where,
             (
                 frozen.fixture_draw_id,
                 frozen_season.season_id,
@@ -244,8 +250,7 @@ def test_child_update_cannot_move_out_of_or_into_frozen_draw(table):
             ),
         )
         same_frozen = (
-            "UPDATE season_fixture_number SET fixture_number=fixture_number WHERE "
-            + where,
+            "UPDATE season_fixture_number SET fixture_number=fixture_number WHERE " + where,
             (frozen.fixture_draw_id,),
         )
     else:
@@ -273,8 +278,7 @@ def test_child_update_cannot_move_out_of_or_into_frozen_draw(table):
             ),
         )
         same_frozen = (
-            "UPDATE season_fixture_matchup SET matchup_order=matchup_order WHERE "
-            + where,
+            "UPDATE season_fixture_matchup SET matchup_order=matchup_order WHERE " + where,
             (frozen.fixture_draw_id,),
         )
 
@@ -288,9 +292,7 @@ def test_child_update_cannot_move_out_of_or_into_frozen_draw(table):
 
     # Restore the draft so the inverse and in-place cases both target real
     # rows. Their trigger message proves immutability runs before uniqueness.
-    repository.save_draft(
-        draft_season.season_id, [entry.season_entry_id for entry in draft_entries]
-    )
+    repository.save_draft(draft_season.season_id, [entry.season_entry_id for entry in draft_entries])
     for statement, parameters in (move_to_frozen, same_frozen):
         with pytest.raises(IntegrityError, match="frozen fixture draw is immutable"):
             with transaction(database) as conn:

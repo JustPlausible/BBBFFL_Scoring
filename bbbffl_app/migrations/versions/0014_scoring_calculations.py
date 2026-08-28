@@ -1,7 +1,7 @@
 """Bind season rules and durable calculation provenance to the scoring core."""
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "0014_scoring"
 down_revision = "0013_lockout_triggers"
@@ -32,6 +32,20 @@ def upgrade():
 def downgrade():
     if op.get_bind().execute(sa.text("SELECT COUNT(*) FROM bbbffl_matchup_calculation")).scalar_one():
         raise RuntimeError("0014 downgrade refused: scoring calculation provenance would be lost")
-    for name in ("engine_version", "upstream_observed_at", "upstream_revision", "away_lineup_version", "away_lineup_id", "home_lineup_version", "home_lineup_id", "away_season_entry_id", "home_season_entry_id", "bbbffl_round_id", "rules_version_id", "season_id", "input_fingerprint"):
+    for name in (
+        "engine_version",
+        "upstream_observed_at",
+        "upstream_revision",
+        "away_lineup_version",
+        "away_lineup_id",
+        "home_lineup_version",
+        "home_lineup_id",
+        "away_season_entry_id",
+        "home_season_entry_id",
+        "bbbffl_round_id",
+        "rules_version_id",
+        "season_id",
+        "input_fingerprint",
+    ):
         op.drop_column("bbbffl_matchup_calculation", name)
     op.drop_column("season_rules_version", "scoring_rules")

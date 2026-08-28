@@ -13,10 +13,7 @@ def _lineup(base: int) -> dict:
 
 def _write_config(tmp_path, entries=None, **overrides):
     if entries is None:
-        entries = [
-            {"team_key": f"team_{n}", "coach": f"Coach {n}", "lineup": _lineup(n * 1000)}
-            for n in range(1, 11)
-        ]
+        entries = [{"team_key": f"team_{n}", "coach": f"Coach {n}", "lineup": _lineup(n * 1000)} for n in range(1, 11)]
     config = {
         "season": 2026,
         "afl_round": 20,

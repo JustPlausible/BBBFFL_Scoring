@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 import app.db as db_module
-from app.audit import ActorContext, AuditEventRepository, DNP_CHANGED, OVERRIDE_CHANGED, append_event
+from app.audit import DNP_CHANGED, OVERRIDE_CHANGED, ActorContext, AuditEventRepository, append_event
 from app.db import transaction
 from tests.db_helpers import migrated_connection
 
@@ -96,9 +96,7 @@ def test_repeated_override_changes_append_rather_than_update(decisions, audit_ev
     assert events[2].before_state == {"override_score": 55.0, "reason": "revised correction"}
 
 
-def test_clearing_an_override_records_a_null_after_state_even_with_an_explanatory_reason(
-    decisions, audit_events
-):
+def test_clearing_an_override_records_a_null_after_state_even_with_an_explanatory_reason(decisions, audit_events):
     """override_score=None deletes the score_override row -- get_overrides()
     reports nothing for it afterwards -- so after_state must say the same
     (None/None), never a residual reason string that would disagree with
@@ -205,9 +203,7 @@ def test_database_rejects_update_to_existing_audit_event(decisions, audit_events
     event = audit_events.list_events()[0]
 
     with pytest.raises(IntegrityError, match="append-only"):
-        decisions.conn.execute(
-            "UPDATE audit_event SET reason = 'tampered' WHERE event_id = ?", (event.event_id,)
-        )
+        decisions.conn.execute("UPDATE audit_event SET reason = 'tampered' WHERE event_id = ?", (event.event_id,))
 
 
 def test_database_rejects_delete_of_existing_audit_event(decisions, audit_events):

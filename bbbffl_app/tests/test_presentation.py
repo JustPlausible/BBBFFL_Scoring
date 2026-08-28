@@ -6,7 +6,6 @@ scoreboard presentation brief.
 
 from app.presentation import football_score_for_position, format_football_line
 
-
 # -- format_football_line ----------------------------------------------------
 
 

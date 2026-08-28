@@ -7,8 +7,9 @@ app/audit.py) never issues those statements; the trigger exists in case
 something outside this codebase (an ad-hoc script, a future ORM misuse) ever
 tries to.
 """
-from alembic import op
+
 import sqlalchemy as sa
+from alembic import op
 
 revision = "0003_audit"
 down_revision = "0002_competition"

@@ -1,7 +1,5 @@
 import dataclasses
 
-import pytest
-
 from app.afl_client import AflApiError, Match
 from app.service import build_matchup_state, get_matchup_view
 from tests.conftest import CATS, PIES, FakeAflClient, stat_line
@@ -29,9 +27,7 @@ def test_partial_stat_line_keeps_required_null_unscored_without_crashing(
     teams, decisions, single_match, players_on_one_match
 ):
     stats = {100: {1: stat_line(1, goals=3, behinds=None, hitouts=None)}}
-    result = build_matchup_state(
-        FakeAflClient([single_match], players_on_one_match, stats), teams, decisions
-    )
+    result = build_matchup_state(FakeAflClient([single_match], players_on_one_match, stats), teams, decisions)
 
     team_a = next(t for t in result.teams if t.team_key == "team_a")
     forward = _positions_by_name(team_a)["Forward1"]
@@ -57,9 +53,7 @@ def test_dnp_starter_leaves_position_vacant_and_recommends_interchange(
     assert fwd1.recommended_interchange is True
 
 
-def test_interchange_assignment_scores_as_replaced_position(
-    teams, decisions, single_match, players_on_one_match
-):
+def test_interchange_assignment_scores_as_replaced_position(teams, decisions, single_match, players_on_one_match):
     decisions.set_dnp("team_a", "Forward1", True)
     decisions.set_interchange_assignment("team_a", "Forward1")
     stats = {100: {9: stat_line(9, goals=2, behinds=1)}}  # team_a's Interchange player
@@ -92,9 +86,7 @@ def test_interchange_can_replace_a_position_even_without_starter_dnp(
     assert mid1.calculated_score == 25  # the original starter's 5 disposals are ignored
 
 
-def test_interchange_player_dnp_scores_zero_when_assigned(
-    teams, decisions, single_match, players_on_one_match
-):
+def test_interchange_player_dnp_scores_zero_when_assigned(teams, decisions, single_match, players_on_one_match):
     decisions.set_dnp("team_a", "Forward1", True)
     decisions.set_interchange_assignment("team_a", "Forward1")
     decisions.set_dnp("team_a", "Interchange", True)
@@ -129,9 +121,7 @@ def test_dnp_named_starter_retains_player_name_in_presentation_state(
     assert fwd1.starting_dnp is True
 
 
-def test_dnp_named_starter_contributes_zero_without_interchange(
-    teams, decisions, single_match, players_on_one_match
-):
+def test_dnp_named_starter_contributes_zero_without_interchange(teams, decisions, single_match, players_on_one_match):
     decisions.set_dnp("team_a", "Forward1", True)
     client = FakeAflClient([single_match], players_on_one_match, {})
 
@@ -201,9 +191,7 @@ def test_two_dnp_positions_only_the_assigned_interchange_target_scores(
     assert team_a.total_score == 13
 
 
-def test_unnamed_slot_has_no_starting_player_identity(
-    partial_teams, decisions, single_match, players_on_one_match
-):
+def test_unnamed_slot_has_no_starting_player_identity(partial_teams, decisions, single_match, players_on_one_match):
     """An unnamed/loophole slot must never invent a coach selection --
     distinct from a named-then-DNP slot, which retains its identity."""
     client = FakeAflClient([single_match], players_on_one_match, {})
@@ -257,9 +245,7 @@ def test_score_override_changes_effective_but_not_calculated_score(
     assert team_a.total_score == sum(p.effective_score for p in team_a.positions)
 
 
-def test_clearing_override_reverts_to_calculated_score(
-    teams, decisions, single_match, players_on_one_match
-):
+def test_clearing_override_reverts_to_calculated_score(teams, decisions, single_match, players_on_one_match):
     stats = {100: {7: stat_line(7, marks=2, hitouts=10)}}
     client = FakeAflClient([single_match], players_on_one_match, stats)
     decisions.set_override("team_a", "Ruck", 100.0, "temporary")
@@ -273,17 +259,13 @@ def test_clearing_override_reverts_to_calculated_score(
     assert ruck.effective_score == 12
 
 
-def test_matchup_stays_live_while_a_relevant_match_is_in_progress(
-    teams, decisions, single_match, players_on_one_match
-):
+def test_matchup_stays_live_while_a_relevant_match_is_in_progress(teams, decisions, single_match, players_on_one_match):
     client = FakeAflClient([single_match], players_on_one_match, {})
     result = build_matchup_state(client, teams, decisions)
     assert result.status == "LIVE"
 
 
-def test_matchup_awaits_signoff_once_all_relevant_matches_are_final(
-    teams, decisions, players_on_one_match
-):
+def test_matchup_awaits_signoff_once_all_relevant_matches_are_final(teams, decisions, players_on_one_match):
     final_match = Match(match_id=100, home_team=CATS, away_team=PIES, status="CONCLUDED")
     client = FakeAflClient([final_match], players_on_one_match, {})
 
@@ -303,9 +285,7 @@ def test_explicit_finalisation_moves_matchup_to_final(teams, decisions, players_
     assert result.finalized_note == "Grand Final result confirmed by scorer"
 
 
-def test_postgame_match_shows_postgame_not_live_or_final(
-    teams, decisions, players_on_one_match
-):
+def test_postgame_match_shows_postgame_not_live_or_final(teams, decisions, players_on_one_match):
     """A match that has finished play but whose stats afl-api has not yet
     declared final (POSTGAME) must present as its own distinct state -- not
     silently reinterpreted as still "live" nor prematurely shown as
@@ -337,9 +317,7 @@ def test_postgame_counted_separately_from_live_and_final(teams, decisions, playe
     assert result.counts["completed"] == 0
 
 
-def test_matchup_stays_live_not_awaiting_signoff_while_postgame(
-    teams, decisions, players_on_one_match
-):
+def test_matchup_stays_live_not_awaiting_signoff_while_postgame(teams, decisions, players_on_one_match):
     """POSTGAME must not be treated as final for lifecycle purposes -- AFL
     stats can still be corrected before afl-api reports CONCLUDED, so a
     scorer must not be prompted to sign off yet."""
@@ -351,9 +329,7 @@ def test_matchup_stays_live_not_awaiting_signoff_while_postgame(
     assert result.status == "LIVE"
 
 
-def test_postgame_scores_display_normally_without_implying_finality(
-    teams, decisions, players_on_one_match
-):
+def test_postgame_scores_display_normally_without_implying_finality(teams, decisions, players_on_one_match):
     """POSTGAME is a presentation/finality state, not a different scoring
     calculation -- the player's currently reported G.B and points must keep
     displaying normally while postgame."""
@@ -403,9 +379,7 @@ def test_postgame_to_concluded_transition_moves_state_and_count_without_disturbi
     assert after.status == "AWAITING_SCORER_SIGNOFF"
 
 
-def test_stats_fetched_once_per_unique_match_not_per_player(
-    teams, decisions, single_match, players_on_one_match
-):
+def test_stats_fetched_once_per_unique_match_not_per_player(teams, decisions, single_match, players_on_one_match):
     client = FakeAflClient([single_match], players_on_one_match, {})
     build_matchup_state(client, teams, decisions)
     assert client.stats_fetch_calls == [100]
@@ -466,9 +440,7 @@ def test_named_players_alongside_unnamed_positions_resolve_and_score_normally(
     assert all(pos.slot_source == "starting" for pos in team_b.positions)
 
 
-def test_unnamed_is_distinct_from_scorer_marked_dnp(
-    partial_teams, decisions, single_match, players_on_one_match
-):
+def test_unnamed_is_distinct_from_scorer_marked_dnp(partial_teams, decisions, single_match, players_on_one_match):
     # A *named* team_b position marked DNP by the scorer, for comparison.
     decisions.set_dnp("team_b", "Forward1", True)
     client = FakeAflClient([single_match], players_on_one_match, {})
@@ -546,9 +518,7 @@ def test_get_matchup_view_serves_frozen_snapshot_after_finalize_without_calling_
     assert fwd1["effective_score"] == 19
 
 
-def test_get_matchup_view_stays_live_before_finalize(
-    teams, decisions, single_match, players_on_one_match
-):
+def test_get_matchup_view_stays_live_before_finalize(teams, decisions, single_match, players_on_one_match):
     client = FakeAflClient([single_match], players_on_one_match, {})
     view = get_matchup_view(client, teams, decisions)
     assert view["status"] == "LIVE"
@@ -740,9 +710,7 @@ def test_forward_override_that_still_matches_actual_stats_is_not_flagged(
     assert fwd1.display_adjusted_by_override is False
 
 
-def test_non_forward_positions_convert_points_to_football_style(
-    teams, decisions, single_match, players_on_one_match
-):
+def test_non_forward_positions_convert_points_to_football_style(teams, decisions, single_match, players_on_one_match):
     stats = {
         100: {
             4: stat_line(4, disposals=29),

@@ -82,8 +82,10 @@ to each `append_event` call it makes within that command.
 
 import json
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any, Protocol
 
 AUDIT_PAYLOAD_VERSION = 1
 
@@ -125,6 +127,18 @@ def new_correlation_id() -> str:
     `append_event` calls to share one command should generate one of these
     once and pass it to every call in that command."""
     return str(uuid.uuid4())
+
+
+class ConnectionLike(Protocol):
+    """Structural type for anything `append_event` can run SQL against --
+    either a full `app.db.DatabaseConnection` or the short-lived
+    `_TransactionConnection` yielded inside `app.db.transaction()`. Defined
+    here, rather than imported from `app.db`, so every domain repository
+    that calls `append_event` inside its own `transaction()` block can share
+    one annotation without depending on `app.db`'s private connection
+    classes."""
+
+    def execute(self, statement: str, parameters: Any = ()) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -178,7 +192,7 @@ class AuditEvent:
     payload_version: int
 
 
-def _row_to_event(row) -> AuditEvent:
+def _row_to_event(row: Mapping[str, Any]) -> AuditEvent:
     return AuditEvent(
         event_id=row["event_id"],
         sequence=row["sequence"],
@@ -200,7 +214,7 @@ def _row_to_event(row) -> AuditEvent:
 
 
 def append_event(
-    conn,
+    conn: ConnectionLike,
     *,
     actor: ActorContext,
     action: str,
@@ -294,7 +308,7 @@ class AuditEventRepository:
     `sequence` ascending, so history reconstruction is deterministic.
     """
 
-    def __init__(self, conn):
+    def __init__(self, conn: ConnectionLike):
         self.conn = conn
 
     def list_events(
@@ -337,7 +351,5 @@ class AuditEventRepository:
         return [_row_to_event(row) for row in rows]
 
     def get_event(self, event_id: str) -> AuditEvent | None:
-        row = self.conn.execute(
-            "SELECT * FROM audit_event WHERE event_id = ?", (event_id,)
-        ).fetchone()
+        row = self.conn.execute("SELECT * FROM audit_event WHERE event_id = ?", (event_id,)).fetchone()
         return _row_to_event(row) if row is not None else None

@@ -50,9 +50,7 @@ class ScoringRules:
         return cls(**(value or {}))
 
 
-def score_position(
-    position: str, stats: PlayerStats, rules: ScoringRules | None = None
-) -> float | None:
+def score_position(position: str, stats: PlayerStats, rules: ScoringRules | None = None) -> float | None:
     """Compute the BBBFFL score for a starting position given a player's stats.
 
     `position` must be one of SCORABLE_POSITIONS. "Interchange" is deliberately
@@ -76,6 +74,5 @@ def score_position(
             return None
         return rules.tackler_tackle * stats.tackles
     raise ValueError(
-        f"'{position}' cannot be scored directly. Interchange must be scored "
-        "as the starting position it replaces."
+        f"'{position}' cannot be scored directly. Interchange must be scored as the starting position it replaces."
     )

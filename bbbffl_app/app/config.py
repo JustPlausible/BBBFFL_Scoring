@@ -229,8 +229,7 @@ def get_settings() -> Settings:
         )
     elif database_url and is_production and not database_url.split("://", 1)[0].startswith("postgresql"):
         errors.append(
-            "BBBFFL_DATABASE_URL: must be a PostgreSQL URL in production "
-            "(SQLite is development/test/replay only)"
+            "BBBFFL_DATABASE_URL: must be a PostgreSQL URL in production (SQLite is development/test/replay only)"
         )
 
     raw_public_base_url = (os.getenv("BBBFFL_PUBLIC_BASE_URL") or "").strip() or None
@@ -284,8 +283,7 @@ def get_settings() -> Settings:
     admin_token = os.getenv("BBBFFL_ADMIN_TOKEN") or None
     if is_production and not admin_token:
         errors.append(
-            "BBBFFL_ADMIN_TOKEN: required in production "
-            "(refusing to start with the admin interface open to any caller)"
+            "BBBFFL_ADMIN_TOKEN: required in production (refusing to start with the admin interface open to any caller)"
         )
 
     if errors:
@@ -306,9 +304,7 @@ def get_settings() -> Settings:
         afl_replay_evidence_path=afl_replay_evidence_path,
         database_path=database_path,
         database_url=database_url,
-        teams_config_path=os.getenv(
-            "BBBFFL_TEAMS_CONFIG_PATH", str(BASE_DIR / "data" / "grand_final_teams.json")
-        ),
+        teams_config_path=os.getenv("BBBFFL_TEAMS_CONFIG_PATH", str(BASE_DIR / "data" / "grand_final_teams.json")),
         admin_token=admin_token,
         public_base_url=public_base_url,
         poll_interval_seconds=int(os.getenv("BBBFFL_POLL_INTERVAL_SECONDS", "25")),

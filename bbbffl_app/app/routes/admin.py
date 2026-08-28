@@ -25,11 +25,11 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from app.config import BASE_DIR
-from app.scoring import SCORABLE_POSITIONS
 from app.scorer_decisions import finalize as finalize_result
 from app.scorer_decisions import set_dnp as apply_dnp_decision
 from app.scorer_decisions import set_interchange as apply_interchange_decision
 from app.scorer_decisions import set_override as apply_override_decision
+from app.scoring import SCORABLE_POSITIONS
 from app.service import build_matchup_state, get_matchup_view
 from app.superscore import superscore_round_label
 
@@ -82,9 +82,7 @@ def admin_state(request: Request):
 
 @router.post("/dnp", dependencies=[Depends(require_admin)])
 def set_dnp(payload: DnpRequest, request: Request):
-    apply_dnp_decision(
-        request.app.state.decisions, _team_keys(request), payload.team_key, payload.slot, payload.dnp
-    )
+    apply_dnp_decision(request.app.state.decisions, _team_keys(request), payload.team_key, payload.slot, payload.dnp)
     return _current_state(request)
 
 

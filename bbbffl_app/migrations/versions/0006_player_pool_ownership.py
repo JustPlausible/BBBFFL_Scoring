@@ -1,7 +1,7 @@
 """Season player cache and history-preserving ownership ledger."""
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "0006_players"
 down_revision = "0005_identity"
@@ -29,23 +29,13 @@ def upgrade():
         sa.Column("source_updated_at", sa.Text()),
         sa.Column("created_at", sa.Text(), nullable=False),
         sa.Column("updated_at", sa.Text(), nullable=False),
-        sa.UniqueConstraint(
-            "season_id", "canonical_player_id", name="uq_pool_season_canonical_player"
-        ),
+        sa.UniqueConstraint("season_id", "canonical_player_id", name="uq_pool_season_canonical_player"),
         sa.UniqueConstraint("season_player_id", "season_id", name="uq_pool_id_season"),
-        sa.CheckConstraint(
-            "canonical_player_id > 0", name="ck_pool_canonical_player_positive"
-        ),
-        sa.CheckConstraint(
-            "length(trim(display_name)) > 0", name="ck_pool_display_name_nonempty"
-        ),
-        sa.CheckConstraint(
-            "length(trim(source_provider)) > 0", name="ck_pool_provider_nonempty"
-        ),
+        sa.CheckConstraint("canonical_player_id > 0", name="ck_pool_canonical_player_positive"),
+        sa.CheckConstraint("length(trim(display_name)) > 0", name="ck_pool_display_name_nonempty"),
+        sa.CheckConstraint("length(trim(source_provider)) > 0", name="ck_pool_provider_nonempty"),
     )
-    op.create_index(
-        "ix_pool_season_selectable", "season_player_pool", ["season_id", "eligible"]
-    )
+    op.create_index("ix_pool_season_selectable", "season_player_pool", ["season_id", "eligible"])
     op.create_table(
         "season_squad_configuration",
         sa.Column(
@@ -84,9 +74,7 @@ def upgrade():
             "released_at IS NULL OR released_at > acquired_at",
             name="ck_ownership_interval",
         ),
-        sa.UniqueConstraint(
-            "season_player_id", "acquired_at", name="uq_ownership_player_start"
-        ),
+        sa.UniqueConstraint("season_player_id", "acquired_at", name="uq_ownership_player_start"),
     )
     op.create_index(
         "ix_ownership_entry_history",

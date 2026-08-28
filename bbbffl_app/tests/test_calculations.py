@@ -7,8 +7,8 @@ from app.calculations import MatchupCalculationService
 from app.db import transaction
 from app.lineups import POSITIONS
 from app.season import _now
-from tests.test_competition_lifecycle import operational
 from tests.db_helpers import migrated_connection
+from tests.test_competition_lifecycle import operational
 
 
 class Facts:
@@ -27,7 +27,10 @@ def setup_round(db=None, *, year=2027):
     db = db or migrated_connection()
     lifecycle, round_, entries = operational(db, year, 77)
     lifecycle.transition(round_.bbbffl_round_id, "open")
-    scope = db.execute("SELECT c.season_id,c.competition_id FROM bbbffl_round r JOIN competition_stream c ON c.competition_id=r.competition_id WHERE r.bbbffl_round_id=?", (round_.bbbffl_round_id,)).fetchone()
+    scope = db.execute(
+        "SELECT c.season_id,c.competition_id FROM bbbffl_round r JOIN competition_stream c ON c.competition_id=r.competition_id WHERE r.bbbffl_round_id=?",
+        (round_.bbbffl_round_id,),
+    ).fetchone()
     stats = {}
     now = _now()
     with db.engine.begin() as conn:
@@ -116,8 +119,12 @@ def setup_round(db=None, *, year=2027):
 def test_persisted_round_calculates_five_idempotent_matchups_with_slot_evidence():
     db, lifecycle, round_, stats = setup_round()
     service = MatchupCalculationService(db, Facts(stats))
-    first = service.calculate_round(round_.bbbffl_round_id, upstream_revision="stats-1", observed_at="2027-03-01T00:00:00Z")
-    repeated = service.calculate_round(round_.bbbffl_round_id, upstream_revision="stats-1", observed_at="2027-03-01T00:01:00Z")
+    first = service.calculate_round(
+        round_.bbbffl_round_id, upstream_revision="stats-1", observed_at="2027-03-01T00:00:00Z"
+    )
+    repeated = service.calculate_round(
+        round_.bbbffl_round_id, upstream_revision="stats-1", observed_at="2027-03-01T00:01:00Z"
+    )
     assert len(first) == len(repeated) == 5
     assert [item.input_fingerprint for item in first] == [item.input_fingerprint for item in repeated]
     assert [item.revision for item in repeated] == [1] * 5
@@ -153,9 +160,7 @@ def test_partial_upstream_stat_is_retained_and_slot_score_remains_unresolved():
     player_id = next(player_id for player_id in stats if player_id % 2 == 0)
     stats[player_id] = PlayerStatLine(player_id, goals=2, behinds=None)
 
-    calculations = MatchupCalculationService(db, Facts(stats)).calculate_round(
-        round_.bbbffl_round_id
-    )
+    calculations = MatchupCalculationService(db, Facts(stats)).calculate_round(round_.bbbffl_round_id)
     evidence = [
         slot
         for calculation in calculations

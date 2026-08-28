@@ -51,6 +51,7 @@ SEASON_MODEL = {
     "app.season",
     "app.identity",
     "app.player_pool",
+    "app.draft",
     "app.fixtures",
     "app.round_mapping",
     "app.competition_lifecycle",

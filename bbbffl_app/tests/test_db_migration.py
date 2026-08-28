@@ -59,6 +59,10 @@ EXPECTED_TABLES = {
     "bbbffl_round_lockout_trigger_revision",
     "bbbffl_round_lockout_trigger_match",
     "bbbffl_round_lockout_trigger_activation",
+    "season_draft",
+    "draft_order_position",
+    "draft_pick",
+    "draft_pick_transfer",
 }
 
 

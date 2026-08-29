@@ -673,6 +673,71 @@ def test_mixed_source_lineup_uses_canonical_scoring_for_both_sources():
     assert m2["score"] == 20
 
 
+def test_calculation_flags_a_slot_whose_submitted_player_no_longer_matches_its_nomination():
+    """A nomination names a position and a player; if the *actually
+    submitted* player in that position ever diverges from the nominated
+    one (e.g. the guard was bypassed, or the nomination was later
+    corrected), `_entry()` must never silently score the wrong player from
+    Opening Round facts, nor silently fall back to treating them as an
+    ordinary selection -- it must flag the slot for scorer review."""
+    db = migrated_connection()
+    lifecycle, round_, entries, scope = setup_scope(db, 2024, 956)
+    home, away = entries[0], entries[1]
+    rule, deferred_player, nomination = nominate_bl_2024(
+        db, scope["season_id"], round_.bbbffl_round_id, home, position="M1"
+    )
+    other_player = own_player(db, scope["season_id"], home, 910310, "Not The Nominated Player", afl_team_id=2)
+
+    lineups = WeeklyLineupRepository(db)
+    # Bypass OpeningRoundSelectionGuard entirely (system_derived, no
+    # lock_guard) to construct the divergence directly.
+    home_positions = complete_lineup(db, scope, home, overrides={"M1": other_player.season_player_id})
+    draft = lineups.save_draft(
+        scope["season_id"],
+        scope["competition_id"],
+        round_.bbbffl_round_id,
+        home.season_entry_id,
+        home_positions,
+        expected_revision=0,
+    )
+    lineups.submit(draft.lineup_id, expected_draft_revision=draft.revision, expected_submission_version=0)
+    away_draft = lineups.save_draft(
+        scope["season_id"],
+        scope["competition_id"],
+        round_.bbbffl_round_id,
+        away.season_entry_id,
+        complete_lineup(db, scope, away),
+        expected_revision=0,
+    )
+    lineups.submit(away_draft.lineup_id, expected_draft_revision=away_draft.revision, expected_submission_version=0)
+
+    matchup = next(
+        m
+        for m in lifecycle.list_matchups(round_.bbbffl_round_id)
+        if home.season_entry_id in (m.home_season_entry_id, m.away_season_entry_id)
+    )
+    client = MultiRoundMatchClient(
+        {
+            956: [Match(7001, Team(2, "BL"), Team(101, "Away"), "CONCLUDED")],
+            954: [Match(8001, Team(2, "BL"), Team(5, "CARL"), "CONCLUDED")],
+        },
+        stats_by_match={7001: {910310: PlayerStatLine(910310, disposals=99)}},
+    )
+    service = MatchupCalculationService(db, client)
+    calculated = service.calculate_matchup(matchup.matchup_id)
+    home_side = (
+        calculated.snapshot["home"]
+        if calculated.snapshot["home"]["season_entry_id"] == home.season_entry_id
+        else calculated.snapshot["away"]
+    )
+    m1 = next(slot for slot in home_side["slots"] if slot["position"] == "M1")
+    assert m1["scoring_source"] == "opening_round_nomination_mismatch"
+    assert m1["score"] == 0
+    assert m1["participation"]["state"] == "unknown"
+    assert m1["participation"]["dnp_recommendation"] == "review_required"
+    assert "different player" in m1["participation"]["reason"]
+
+
 # -- 20: ordinary bye/DNP unaffected for non-deferred players --------------
 
 
@@ -835,6 +900,63 @@ def test_correction_requires_a_reason_and_an_operator_actor():
         nominations.correct(nomination.nomination_id, position="Ruck", actor=ADMIN, reason="")
     with pytest.raises(UnauthorizedNominationActorError):
         nominations.correct(nomination.nomination_id, position="Ruck", actor=COACH, reason="not an operator")
+
+
+def test_correction_revalidates_an_unowned_wrong_club_or_wrong_season_replacement_player():
+    db = migrated_connection()
+    _, round_, entries, scope = setup_scope(db, 2024, 956)
+    rule, player, nomination = nominate_bl_2024(db, scope["season_id"], round_.bbbffl_round_id, entries[0])
+    nominations = OpeningRoundNominationRepository(db)
+
+    unowned = PlayerPoolRepository(db).refresh_player(scope["season_id"], 910800, "Unowned BL Player", afl_team_id=2)
+    with pytest.raises(IneligiblePlayerError):
+        nominations.correct(
+            nomination.nomination_id,
+            season_player_id=unowned.season_player_id,
+            actor=ADMIN,
+            reason="swap in an unowned player",
+        )
+
+    wrong_club = own_player(db, scope["season_id"], entries[0], 910801, "Carlton Player", afl_team_id=5)
+    with pytest.raises(IneligiblePlayerError):
+        nominations.correct(
+            nomination.nomination_id,
+            season_player_id=wrong_club.season_player_id,
+            actor=ADMIN,
+            reason="swap in a wrong-club player",
+        )
+
+    # A legitimate replacement (same club, owned by the same entry) still succeeds.
+    other_bl_player = own_player(db, scope["season_id"], entries[0], 910802, "Second BL Player", afl_team_id=2)
+    corrected = nominations.correct(
+        nomination.nomination_id,
+        season_player_id=other_bl_player.season_player_id,
+        actor=ADMIN,
+        reason="legitimate swap",
+    )
+    assert corrected.season_player_id == other_bl_player.season_player_id
+
+
+def test_rule_correction_is_refused_while_nominations_exist():
+    db = migrated_connection()
+    _, round_, entries, scope = setup_scope(db, 2024, 956)
+    rule, player, nomination = nominate_bl_2024(db, scope["season_id"], round_.bbbffl_round_id, entries[0])
+    ev = evidence.EVIDENCE_2024
+    validator = KnownRounds(
+        (ev.afl_season_id, ev.afl_opening_round_id), (ev.afl_season_id, ev.compensating_bye_round["CARL"])
+    )
+    with pytest.raises(OpeningRoundError):
+        OpeningRoundRuleRepository(db).correct(
+            scope["season_id"],
+            2,
+            ev.afl_season_id,
+            ev.afl_opening_round_id,
+            ev.compensating_bye_round["CARL"],
+            round_.bbbffl_round_id,
+            validator,
+            actor=ADMIN,
+            reason="attempt to move the target round",
+        )
 
 
 def test_evidence_classification_is_inspectable_and_validated():

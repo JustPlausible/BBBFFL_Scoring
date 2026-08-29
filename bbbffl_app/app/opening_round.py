@@ -101,6 +101,13 @@ class UnknownRuleError(OpeningRoundError):
     pass
 
 
+class OpeningRoundRuleHasNominationsError(OpeningRoundError):
+    """An accepted rule cannot be corrected while nominations reference it
+    -- see `OpeningRoundRuleRepository._activate`'s docstring comment for
+    why a rule correction must never silently orphan a nomination's
+    denormalized target round/source match."""
+
+
 class IneligiblePlayerError(OpeningRoundError):
     """The nominated player is not owned by the entry, not the rule's AFL
     club, or the Opening Round evidence does not support their
@@ -366,6 +373,26 @@ class OpeningRoundRuleRepository:
                         "use correction for an accepted rule"
                         if old["state"] == "accepted"
                         else "correction requires an accepted rule"
+                    )
+                if (
+                    correction
+                    and conn.execute("SELECT 1 FROM opening_round_nomination WHERE rule_id=?", (rule_id,)).fetchone()
+                ):
+                    # Every nomination denormalizes this rule's target round
+                    # and resolves its source match against this rule's
+                    # Opening Round at nomination time (see
+                    # `OpeningRoundNominationRepository.nominate`); neither
+                    # is updated by a later rule correction. Rather than
+                    # leave those nominations pointing at a now-superseded
+                    # AFL Opening Round/target round -- a hybrid
+                    # configuration `app.calculations` could silently score
+                    # against the wrong fixture -- refuse outright. An
+                    # operator must correct/reassign the affected
+                    # nominations (see `OpeningRoundNominationRepository.
+                    # correct`) before this rule itself can be corrected.
+                    raise OpeningRoundRuleHasNominationsError(
+                        f"rule {rule_id} has existing nominations; correct or reassign them "
+                        "before correcting the rule itself"
                     )
                 revision = head["current_revision"] + 1
                 conn.execute("UPDATE opening_round_rule SET current_revision=? WHERE rule_id=?", (revision, rule_id))
@@ -646,7 +673,14 @@ class OpeningRoundNominationRepository:
         `before_state` (see this module's docstring on why a correction is
         an audited UPDATE rather than a second revision-history table).
         Never rewrites an already-scored/published round's result -- that
-        remains #58's separate correction workflow."""
+        remains #58's separate correction workflow.
+
+        When `season_player_id` is supplied, the replacement player is
+        revalidated against exactly the same eligibility rules `nominate()`
+        enforces (season, current ownership by this nomination's entry, and
+        the rule's AFL club) -- a correction must never be able to install
+        an unowned, wrong-season or wrong-club player that `nominate()`
+        itself would have refused."""
         _ensure_operator(actor)
         if not reason:
             raise OpeningRoundError("a nomination correction requires a reason")
@@ -661,6 +695,27 @@ class OpeningRoundNominationRepository:
             new_player = season_player_id if season_player_id is not None else existing["season_player_id"]
             if new_position not in POSITIONS:
                 raise OpeningRoundError(f"unknown scoring position: {new_position!r}")
+            if season_player_id is not None and season_player_id != existing["season_player_id"]:
+                rule = self.rules.resolve_by_id(existing["rule_id"])
+                if rule is None:
+                    raise UnknownRuleError(f"rule {existing['rule_id']} no longer exists")
+                player = conn.execute(
+                    "SELECT season_id, afl_team_id FROM season_player_pool WHERE season_player_id=?",
+                    (new_player,),
+                ).fetchone()
+                if not player or player["season_id"] != rule.season_id:
+                    raise IneligiblePlayerError("replacement player must belong to the rule's season")
+                if player["afl_team_id"] != rule.afl_club_id:
+                    raise IneligiblePlayerError(
+                        f"replacement player's AFL club {player['afl_team_id']!r} does not match "
+                        f"rule club {rule.afl_club_id!r}"
+                    )
+                owner = conn.execute(
+                    "SELECT season_entry_id FROM player_ownership_period WHERE season_player_id=? AND released_at IS NULL",
+                    (new_player,),
+                ).fetchone()
+                if not owner or owner["season_entry_id"] != existing["season_entry_id"]:
+                    raise IneligiblePlayerError("replacement player is not currently owned by the nominating entry")
             before = {"position": existing["position"], "season_player_id": existing["season_player_id"]}
             now = _now()
             conn.execute(

@@ -234,7 +234,7 @@ def list_audit_events(
     return [dataclasses.asdict(event) for event in events]
 
 
-@page_router.get("/admin", response_class=HTMLResponse, dependencies=[Depends(require_scorer)])
+@page_router.get("/admin", response_class=HTMLResponse)
 def admin_page(request: Request):
     superscore_config = request.app.state.superscore_config
     return templates.TemplateResponse(

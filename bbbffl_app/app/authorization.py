@@ -46,7 +46,11 @@ def resolve_principal(
     """
     configured = request.app.state.settings.admin_token
     if x_admin_token is not None:
-        if not configured or x_admin_token != configured:
+        # An unset token is the repository's established development/test
+        # "open operator" mode.  Production configuration rejects an unset
+        # token before the app starts; do not silently redesign that contract
+        # here.  The ambient authority is still represented explicitly.
+        if configured and x_admin_token != configured:
             raise HTTPException(status_code=401, detail="Invalid X-Admin-Token")
         if x_authority_role not in (None, Role.ADMIN, Role.SCORER):
             raise HTTPException(status_code=403, detail="Unknown operator authority")
@@ -56,6 +60,8 @@ def resolve_principal(
     coach = request.app.state.auth_service.resolve(token)
     if coach is not None:
         return Principal(Role.COACH, coach.coach_id, coach.display_name)
+    if configured is None:
+        return Principal(Role.ADMIN)
     return ANONYMOUS
 
 

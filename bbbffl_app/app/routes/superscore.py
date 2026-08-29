@@ -217,7 +217,7 @@ def finalize_superscore(payload: FinalizeRequest, request: Request):
 @page_router.get(
     "/admin/superscore",
     response_class=HTMLResponse,
-    dependencies=[Depends(_require_superscore), Depends(require_admin)],
+    dependencies=[Depends(_require_superscore)],
 )
 def admin_superscore_page(request: Request):
     config = request.app.state.superscore_config

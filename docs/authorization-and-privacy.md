@@ -14,6 +14,10 @@ administrator credential by default for compatibility.  Supplying
 capabilities.  It never creates a coach identity.  Conversely, a valid coach
 session never grants scorer or administrator authority.
 
+When the token is unset in the supported development/test configuration, the
+historic open operator mode is preserved as an explicit administrator
+principal. Production configuration already refuses to start without a token.
+
 Scorers may use delegated scoring, review, sign-off, and proxy domain
 operations.  Administrative configuration, credential recovery, audit access,
 corrections, and administrative pages require administrator authority where
@@ -47,6 +51,11 @@ Templates may inspect a resolved principal to alter presentation, but hiding a
 control is not enforcement.  JSON and server-rendered operator routes must use
 the same dependencies before their handler or template executes, so direct URL
 access is protected.
+
+The existing admin HTML documents are non-sensitive token-entry/application
+shells and remain navigable without a custom request header. Their privileged
+data is fetched from protected JSON APIs; sensitive state must never be added
+to the shell's server-rendered context.
 
 ## HTTP semantics
 

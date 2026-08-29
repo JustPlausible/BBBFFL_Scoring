@@ -25,7 +25,7 @@ from app.draft import (
     DraftTurnError,
 )
 from app.identity import IdentityRepository
-from app.lineups import WeeklyLineupRepository
+from app.lineups import LineupConflictError, WeeklyLineupRepository
 from app.migrations import migrate
 from app.player_pool import PlayerPoolRepository, PlayerUnavailableError, SquadCapacityError
 from app.preseason import (
@@ -229,6 +229,12 @@ async def afl_api_error_handler(request: Request, exc: AflApiError) -> JSONRespo
         status_code=502,
         content={"detail": "afl-api is currently unavailable. Scores will resume once it recovers."},
     )
+
+
+@app.exception_handler(LineupConflictError)
+async def lineup_conflict_handler(request: Request, exc: LineupConflictError) -> JSONResponse:
+    """An expected optimistic-concurrency loss, never an internal error."""
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 
 # app.scorer_decisions raises plain domain exceptions rather than

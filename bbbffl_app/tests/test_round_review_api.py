@@ -82,10 +82,19 @@ def test_round_review_workflow_end_to_end_via_the_admin_api(review_client):
             "calculated_score": 20.0,
             "reason": "adjudicated correction",
             "expected_review_version": updated_matchup["review_version"],
-            "actor_role": "scorer",
+            # Client input cannot elevate the authenticated scorer in audit
+            # provenance; the route accepts this legacy field but ignores it.
+            "actor_role": "admin",
         },
+        headers={"X-Admin-Token": "open-mode", "X-Authority-Role": "scorer"},
     )
     assert override_resp.status_code == 200, override_resp.text
+    provenance = client.app.state.database.execute(
+        "SELECT decided_by_role FROM bbbffl_matchup_override "
+        "WHERE matchup_id=? AND season_entry_id=? AND position='F3'",
+        (matchup["matchup_id"], home_entry),
+    ).fetchone()
+    assert provenance["decided_by_role"] == "scorer"
 
     unauthorised = client.post(
         f"{api}/override",

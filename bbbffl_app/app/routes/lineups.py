@@ -15,7 +15,7 @@ class DraftRequest(BaseModel):
     round_id: str
     season_entry_id: str
     expected_revision: int
-    positions: dict[str, str]
+    positions: dict[str, str | None]
 
 
 def _private_view(draft) -> dict:

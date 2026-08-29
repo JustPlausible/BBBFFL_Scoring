@@ -235,6 +235,16 @@ class IdentityRepository:
         ).fetchone()
         return PublicTeam(**dict(row)) if row else None
 
+    def coach_owns_entry(self, coach_id: str | None, entry_id: str) -> bool:
+        """Whether the persistent coach currently represents this season entry."""
+        if coach_id is None:
+            return False
+        row = self.database.execute(
+            "SELECT 1 FROM season_entry_coach_history WHERE season_entry_id=? AND coach_id=? AND ended_at IS NULL",
+            (entry_id, coach_id),
+        ).fetchone()
+        return row is not None
+
     def list_assignments(self, entry_id: str) -> list[CoachAssignment]:
         rows = self.database.execute(
             "SELECT * FROM season_entry_coach_history WHERE season_entry_id=? ORDER BY started_at", (entry_id,)

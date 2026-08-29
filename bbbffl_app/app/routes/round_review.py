@@ -20,18 +20,25 @@ propagate to the handlers `app.main` registers for them.
 import dataclasses
 from contextlib import nullcontext
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from app.audit import ActorContext
+from app.authorization import Principal
 from app.round_review import attempt_correction, attempt_signoff, build_round_review
-from app.routes.admin import require_admin
+from app.routes.admin import require_admin, require_scorer
 
 router = APIRouter(prefix="/api/admin/round-review")
 
 
-def _actor(scorer_name: str | None, actor_role: str = "scorer") -> ActorContext:
-    return ActorContext(actor_type="anonymous_operator", actor_id=scorer_name, actor_role=actor_role)
+def _actor(principal: Principal, operator_name: str | None) -> ActorContext:
+    """Provenance authority comes only from the resolved credential.
+
+    ``operator_name`` remains the existing human-readable label because the
+    prototype token is shared and has no persistent operator identity.  It can
+    never elevate or otherwise select the audited role.
+    """
+    return ActorContext(actor_type="anonymous_operator", actor_id=operator_name, actor_role=principal.role.value)
 
 
 class DnpRulingRequest(BaseModel):
@@ -61,7 +68,7 @@ class OverrideRequest(BaseModel):
     calculated_score: float | None = None
     reason: str | None = None
     expected_review_version: int
-    actor_role: str = "scorer"
+    actor_role: str | None = None  # legacy input accepted but deliberately ignored
     scorer_name: str | None = None
 
 
@@ -83,42 +90,50 @@ def _round_review_view(request: Request, round_id: str, *, evidence_fresh: bool 
     return dataclasses.asdict(review)
 
 
-@router.get("/{round_id}", dependencies=[Depends(require_admin)])
+@router.get("/{round_id}", dependencies=[Depends(require_scorer)])
 def get_round_review(round_id: str, request: Request):
     return _round_review_view(request, round_id)
 
 
-@router.post("/{round_id}/dnp", dependencies=[Depends(require_admin)])
-def record_dnp_ruling(round_id: str, payload: DnpRulingRequest, request: Request):
+@router.post("/{round_id}/dnp")
+def record_dnp_ruling(
+    round_id: str, payload: DnpRulingRequest, request: Request, principal: Principal = Depends(require_scorer)
+):
     request.app.state.round_review.record_dnp_ruling(
         payload.matchup_id,
         payload.season_entry_id,
         payload.slot,
         payload.dnp,
         expected_review_version=payload.expected_review_version,
-        actor=_actor(payload.scorer_name),
+        actor=_actor(principal, payload.scorer_name),
         reason=payload.reason,
         round_id=round_id,
     )
     return _round_review_view(request, round_id)
 
 
-@router.post("/{round_id}/interchange", dependencies=[Depends(require_admin)])
-def record_interchange_ruling(round_id: str, payload: InterchangeRulingRequest, request: Request):
+@router.post("/{round_id}/interchange")
+def record_interchange_ruling(
+    round_id: str, payload: InterchangeRulingRequest, request: Request, principal: Principal = Depends(require_scorer)
+):
     request.app.state.round_review.record_interchange_ruling(
         payload.matchup_id,
         payload.season_entry_id,
         payload.target_position,
         expected_review_version=payload.expected_review_version,
-        actor=_actor(payload.scorer_name),
+        actor=_actor(principal, payload.scorer_name),
         reason=payload.reason,
         round_id=round_id,
     )
     return _round_review_view(request, round_id)
 
 
-@router.post("/{round_id}/override", dependencies=[Depends(require_admin)])
-def record_override(round_id: str, payload: OverrideRequest, request: Request):
+@router.post("/{round_id}/override")
+def record_override(
+    round_id: str, payload: OverrideRequest, request: Request, principal: Principal = Depends(require_scorer)
+):
+    if payload.actor_role not in (None, "scorer", "admin"):
+        raise HTTPException(status_code=403, detail="actor_role cannot grant authority")
     request.app.state.round_review.record_override(
         payload.matchup_id,
         payload.season_entry_id,
@@ -127,14 +142,14 @@ def record_override(round_id: str, payload: OverrideRequest, request: Request):
         payload.calculated_score,
         payload.reason,
         expected_review_version=payload.expected_review_version,
-        actor=_actor(payload.scorer_name, payload.actor_role),
+        actor=_actor(principal, payload.scorer_name),
         round_id=round_id,
     )
     return _round_review_view(request, round_id)
 
 
-@router.post("/{round_id}/signoff", dependencies=[Depends(require_admin)])
-def signoff(round_id: str, payload: SignoffRequest, request: Request):
+@router.post("/{round_id}/signoff")
+def signoff(round_id: str, payload: SignoffRequest, request: Request, principal: Principal = Depends(require_scorer)):
     state = request.app.state
     afl_client = state.afl_client
     # Recompute every matchup's calculated snapshot immediately before
@@ -154,7 +169,7 @@ def signoff(round_id: str, payload: SignoffRequest, request: Request):
             state.round_review,
             state.identities,
             round_id,
-            actor=_actor(payload.scorer_name),
+            actor=_actor(principal, payload.scorer_name),
             reason=payload.reason,
             evidence_fresh=evidence_fresh,
         )
@@ -167,8 +182,10 @@ def matchup_history(matchup_id: str, request: Request):
     return [dataclasses.asdict(result) for result in history]
 
 
-@router.post("/matchup/{matchup_id}/correct", dependencies=[Depends(require_admin)])
-def correct_matchup(matchup_id: str, payload: CorrectionRequest, request: Request):
+@router.post("/matchup/{matchup_id}/correct")
+def correct_matchup(
+    matchup_id: str, payload: CorrectionRequest, request: Request, principal: Principal = Depends(require_admin)
+):
     state = request.app.state
     afl_client = state.afl_client
     # Same fresh-evidence discipline as /signoff above: a correction must
@@ -186,7 +203,7 @@ def correct_matchup(matchup_id: str, payload: CorrectionRequest, request: Reques
             state.round_review,
             state.identities,
             matchup_id,
-            actor=_actor(payload.scorer_name, "admin"),
+            actor=_actor(principal, payload.scorer_name),
             reason=payload.reason,
             evidence_fresh=evidence_fresh,
         )

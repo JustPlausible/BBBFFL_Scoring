@@ -29,12 +29,18 @@ authentication mechanism avoids (see app/auth.py's module docstring).
 import dataclasses
 from contextlib import nullcontext
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from app.audit import ActorContext
+from app.authorization import (
+    Principal,
+    require_admin_principal,
+    require_scorer_or_admin,
+    resolve_principal,
+)
 from app.config import BASE_DIR
 from app.scorer_decisions import finalize as finalize_result
 from app.scorer_decisions import set_dnp as apply_dnp_decision
@@ -80,10 +86,13 @@ class SetCoachCredentialRequest(BaseModel):
     reason: str | None = None
 
 
-def require_admin(request: Request, x_admin_token: str | None = Header(default=None)) -> None:
-    settings = request.app.state.settings
-    if settings.admin_token and x_admin_token != settings.admin_token:
-        raise HTTPException(status_code=401, detail="Invalid or missing X-Admin-Token")
+def require_admin(principal: Principal = Depends(resolve_principal)) -> Principal:
+    """Backward-compatible route dependency backed by the shared policy."""
+    return require_admin_principal(principal)
+
+
+def require_scorer(principal: Principal = Depends(resolve_principal)) -> Principal:
+    return require_scorer_or_admin(principal)
 
 
 def _team_keys(request: Request) -> set[str]:
@@ -95,12 +104,12 @@ def _current_state(request: Request) -> dict:
     return get_matchup_view(state.afl_client, state.teams, state.decisions, state.identity_cache)
 
 
-@router.get("/state", dependencies=[Depends(require_admin)])
+@router.get("/state", dependencies=[Depends(require_scorer)])
 def admin_state(request: Request):
     return _current_state(request)
 
 
-@router.post("/dnp", dependencies=[Depends(require_admin)])
+@router.post("/dnp", dependencies=[Depends(require_scorer)])
 def set_dnp(payload: DnpRequest, request: Request):
     apply_dnp_decision(
         request.app.state.decisions,
@@ -113,7 +122,7 @@ def set_dnp(payload: DnpRequest, request: Request):
     return _current_state(request)
 
 
-@router.post("/interchange", dependencies=[Depends(require_admin)])
+@router.post("/interchange", dependencies=[Depends(require_scorer)])
 def set_interchange(payload: InterchangeRequest, request: Request):
     apply_interchange_decision(
         request.app.state.decisions,
@@ -125,7 +134,7 @@ def set_interchange(payload: InterchangeRequest, request: Request):
     return _current_state(request)
 
 
-@router.post("/override", dependencies=[Depends(require_admin)])
+@router.post("/override", dependencies=[Depends(require_scorer)])
 def set_override(payload: OverrideRequest, request: Request):
     apply_override_decision(
         request.app.state.decisions,
@@ -138,7 +147,7 @@ def set_override(payload: OverrideRequest, request: Request):
     return _current_state(request)
 
 
-@router.post("/finalize", dependencies=[Depends(require_admin)])
+@router.post("/finalize", dependencies=[Depends(require_scorer)])
 def finalize(payload: FinalizeRequest, request: Request):
     state = request.app.state
     afl_client = state.afl_client

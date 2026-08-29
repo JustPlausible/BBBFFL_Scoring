@@ -25,6 +25,7 @@ from app.draft import (
     DraftTurnError,
 )
 from app.identity import IdentityRepository
+from app.lineups import LineupConflictError, WeeklyLineupRepository
 from app.migrations import migrate
 from app.player_pool import PlayerPoolRepository, PlayerUnavailableError, SquadCapacityError
 from app.preseason import (
@@ -52,6 +53,7 @@ from app.round_review import (
 from app.routes import admin, health, public
 from app.routes import auth as auth_routes
 from app.routes import draft as draft_routes
+from app.routes import lineups as lineup_routes
 from app.routes import preseason as preseason_routes
 from app.routes import round_review as round_review_routes
 from app.routes import superscore as superscore_routes
@@ -128,6 +130,7 @@ async def lifespan(app: FastAPI):
     # is an operator surface over these authoritative repositories -- see
     # docs/draft-ledger.md and docs/scorer-draft-workflow.md.
     app.state.identities = IdentityRepository(database)
+    app.state.lineups = WeeklyLineupRepository(database)
     # Roadmap package 19's coach authentication/session boundary (issue
     # #74, app/routes/auth.py) resolves logins directly to `identities`
     # above rather than a second coach/user model -- see app/auth.py's
@@ -208,6 +211,7 @@ app = FastAPI(title="BBBFFL Grand Final Live Scoring", lifespan=lifespan)
 app.include_router(health.router)
 app.include_router(public.router)
 app.include_router(auth_routes.router)
+app.include_router(lineup_routes.router)
 app.include_router(admin.router)
 app.include_router(admin.page_router)
 app.include_router(superscore_routes.router)
@@ -225,6 +229,12 @@ async def afl_api_error_handler(request: Request, exc: AflApiError) -> JSONRespo
         status_code=502,
         content={"detail": "afl-api is currently unavailable. Scores will resume once it recovers."},
     )
+
+
+@app.exception_handler(LineupConflictError)
+async def lineup_conflict_handler(request: Request, exc: LineupConflictError) -> JSONResponse:
+    """An expected optimistic-concurrency loss, never an internal error."""
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 
 # app.scorer_decisions raises plain domain exceptions rather than

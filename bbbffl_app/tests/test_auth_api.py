@@ -378,7 +378,9 @@ def test_admin_routes_are_unaffected_by_coach_authentication(client):
 
     # A coach session alone grants no admin access.
     unauthorized = client.get("/api/admin/state", cookies={"bbbffl_session": session_cookie})
-    assert unauthorized.status_code == 401
+    # Issue #75 makes the distinction deliberate: this is a valid coach
+    # principal lacking operator capability, not a missing credential.
+    assert unauthorized.status_code == 403
 
     # The admin token alone still works, with no coach session at all.
     authorized = client.get("/api/admin/state", headers=ADMIN_HEADERS)

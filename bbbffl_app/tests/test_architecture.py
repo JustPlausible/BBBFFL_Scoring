@@ -144,7 +144,7 @@ OPENING_ROUND = {"app.opening_round"}
 # Final vertical and must never depend on routes or the composition root,
 # and no lower layer (season model, lockouts, weekly-submission-sources)
 # may depend back on it.
-AUTH = {"app.auth"}
+AUTH = {"app.auth", "app.authorization"}
 
 # AFL participation-evidence classification (roadmap package 26, issue #57):
 # a pure function of public afl-api facts (a match, a bye list, a stat line)
@@ -176,6 +176,7 @@ ROUTES = {
     "app.routes.preseason",
     "app.routes.round_review",
     "app.routes.auth",
+    "app.routes.lineups",
 }
 
 COMPOSITION_ROOT = {"app.main"}

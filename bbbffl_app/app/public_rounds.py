@@ -7,6 +7,7 @@ ladder rules and never serializes their internal/audit objects wholesale.
 
 from decimal import Decimal
 
+from app.lineups import POSITIONS
 from app.round_review import build_round_review
 
 
@@ -28,52 +29,94 @@ def _player_names(database, season_player_ids):
     return {row["season_player_id"]: row["display_name"] for row in rows}
 
 
-def _slot(slot, names, interchange):
-    replaced_by_interchange = bool(slot.dnp_ruling and interchange.target_position == slot.slot)
-    deferred = slot.scoring_source == "opening_round_deferred"
-    if replaced_by_interchange:
-        outcome = "replaced_by_interchange"
-    elif slot.dnp_ruling:
-        outcome = "confirmed_dnp_zero"
-    else:
-        outcome = "scored" if slot.season_player_id else "vacant_zero"
+def _deferred_source(scoring_source, source_afl_round_id):
+    if scoring_source != "opening_round_deferred":
+        return None
     return {
-        "position": slot.slot,
-        "player_name": names.get(slot.season_player_id),
-        "participation": "deferred_source" if deferred else slot.participation_state,
-        "effective_score": slot.effective_score,
-        "outcome": outcome,
-        "confirmed_dnp": slot.dnp_ruling is True,
-        "deferred_source": (
-            {
-                "kind": "opening_round_deferred",
-                "label": "Score carried from the deferred Opening Round match",
-                "afl_round_id": slot.source_afl_round_id,
-            }
-            if deferred
-            else None
-        ),
+        "kind": "opening_round_deferred",
+        "label": "Score carried from the deferred Opening Round match",
+        "afl_round_id": source_afl_round_id,
     }
 
 
-def _side(side, names, official_score):
+def _slot(selection, calculated, names, interchange):
+    if calculated is None:
+        return {
+            "position": selection["position"],
+            "player_name": names.get(selection["season_player_id"]),
+            "participation": None,
+            "effective_score": None,
+            "outcome": "awaiting_score" if selection["season_player_id"] else "vacant",
+            "confirmed_dnp": False,
+            "deferred_source": None,
+        }
+    if calculated.interchange_applied:
+        outcome = "replaced_by_interchange"
+    elif calculated.dnp_ruling:
+        outcome = "confirmed_dnp_zero"
+    else:
+        outcome = "scored" if calculated.season_player_id else "vacant_zero"
+    effective_deferred = (
+        _deferred_source(interchange.scoring_source, interchange.source_afl_round_id)
+        if calculated.interchange_applied
+        else _deferred_source(calculated.scoring_source, calculated.source_afl_round_id)
+    )
+    return {
+        "position": calculated.slot,
+        "player_name": names.get(calculated.season_player_id),
+        "participation": "deferred_source" if effective_deferred else calculated.participation_state,
+        "effective_score": calculated.effective_score,
+        "outcome": outcome,
+        "confirmed_dnp": calculated.dnp_ruling is True,
+        "deferred_source": effective_deferred,
+    }
+
+
+def _side(side, submitted, names, official_score, has_calculation):
     interchange = side.interchange
+    calculated_by_position = {slot.slot: slot for slot in side.slots}
+    interchange_selection = next((slot for slot in submitted or [] if slot["position"] == "Interchange"), None)
     return {
         "team": {"name": side.team_name or "Team"},
         "lineup": {
-            "submission_version": side.lineup_version,
-            "players": [_slot(slot, names, interchange) for slot in side.slots],
+            "submission_version": submitted[0]["version"],
+            "players": [
+                _slot(slot, calculated_by_position.get(slot["position"]), names, interchange)
+                for slot in submitted
+                if slot["position"] != "Interchange"
+            ],
             "interchange": {
-                "player_name": names.get(interchange.season_player_id),
+                "player_name": names.get(interchange_selection["season_player_id"] if interchange_selection else None),
                 "confirmed_dnp": interchange.dnp_ruling is True,
                 "replaces_position": interchange.target_position,
+                "deferred_source": _deferred_source(interchange.scoring_source, interchange.source_afl_round_id),
             },
         }
-        if side.lineup_version is not None
+        if submitted
         else None,
-        "calculated_score": side.effective_score if side.lineup_version is not None else None,
+        "calculated_score": side.effective_score if has_calculation else None,
         "official_score": _number(official_score) if official_score is not None else None,
     }
+
+
+def _effective_submissions(database, round_):
+    """Effective immutable submission slots only; draft rows are never read."""
+    rows = database.execute(
+        "SELECT w.season_entry_id, w.effective_submission_version AS version, "
+        "s.position, s.season_player_id "
+        "FROM weekly_lineup w JOIN weekly_lineup_submission_slot s "
+        "ON s.lineup_id=w.lineup_id AND s.version=w.effective_submission_version "
+        "WHERE w.season_id=? AND w.competition_id=? AND w.bbbffl_round_id=? "
+        "ORDER BY w.season_entry_id, s.position",
+        (round_.season_id, round_.competition_id, round_.bbbffl_round_id),
+    ).fetchall()
+    order = {position: index for index, position in enumerate(POSITIONS)}
+    result = {}
+    for row in rows:
+        result.setdefault(row["season_entry_id"], []).append(dict(row))
+    for slots in result.values():
+        slots.sort(key=lambda slot: order[slot["position"]])
+    return result
 
 
 def build_public_round(database, lifecycle, review_repo, identities, round_id):
@@ -82,11 +125,8 @@ def build_public_round(database, lifecycle, review_repo, identities, round_id):
     if round_ is None:
         raise KeyError(round_id)
     review = build_round_review(lifecycle, review_repo, identities, round_id)
-    player_ids = []
-    for matchup in review.matchups:
-        for side in (matchup.home, matchup.away):
-            player_ids.extend(slot.season_player_id for slot in side.slots)
-            player_ids.append(side.interchange.season_player_id)
+    submissions = _effective_submissions(database, round_)
+    player_ids = [slot["season_player_id"] for slots in submissions.values() for slot in slots]
     names = _player_names(database, player_ids)
 
     matchups = []
@@ -111,8 +151,20 @@ def build_public_round(database, lifecycle, review_repo, identities, round_id):
                     "official": "Official final",
                     "corrected_official": "Corrected official final",
                 }[score_state],
-                "home": _side(matchup.home, names, official.home_score if official else None),
-                "away": _side(matchup.away, names, official.away_score if official else None),
+                "home": _side(
+                    matchup.home,
+                    submissions.get(matchup.home.season_entry_id),
+                    names,
+                    official.home_score if official else None,
+                    matchup.calculation_revision is not None,
+                ),
+                "away": _side(
+                    matchup.away,
+                    submissions.get(matchup.away.season_entry_id),
+                    names,
+                    official.away_score if official else None,
+                    matchup.calculation_revision is not None,
+                ),
             }
         )
     return {

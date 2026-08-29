@@ -46,11 +46,51 @@ def _seed(client, year):
     return round_, lifecycle, entries, canon
 
 
+def _seed_with_vacancy(client, year, position="F2"):
+    database = client.app.state.database
+    _, lifecycle, round_, entries, stats, canon = full_round(database, year=year)
+    matchup = lifecycle.list_matchups(round_.bbbffl_round_id)[0]
+    entry_id = matchup.home_season_entry_id
+    lineup = database.execute(
+        "SELECT lineup_id, effective_submission_version FROM weekly_lineup "
+        "WHERE bbbffl_round_id=? AND season_entry_id=?",
+        (round_.bbbffl_round_id, entry_id),
+    ).fetchone()
+    with transaction(database) as connection:
+        connection.execute(
+            "UPDATE weekly_lineup_submission_slot SET season_player_id=NULL "
+            "WHERE lineup_id=? AND version=? AND position=?",
+            (lineup["lineup_id"], lineup["effective_submission_version"], position),
+        )
+    progress_to_review(lifecycle, round_.bbbffl_round_id)
+    fake = Facts(stats)
+    calculations = MatchupCalculationService(database, fake)
+    calculations.calculate_round(round_.bbbffl_round_id)
+    client.app.state.calculations = calculations
+    client.app.state.afl_client = fake
+    return round_, lifecycle, matchup, entry_id
+
+
+def _public_api(client, lifecycle, round_id):
+    season_id = lifecycle.get_round(round_id).season_id
+    return f"/api/public/seasons/{season_id}/rounds/{round_id}"
+
+
+def _reviewed_matchup(client, round_id, matchup_id):
+    review = client.get(f"/api/admin/round-review/{round_id}").json()
+    return next(matchup for matchup in review["matchups"] if matchup["matchup_id"] == matchup_id)
+
+
+def _public_home(client, api, order=1):
+    matchup = next(matchup for matchup in client.get(api).json()["matchups"] if matchup["order"] == order)
+    return matchup["home"]
+
+
 def test_anonymous_public_round_centre_is_allow_listed_and_uses_official_lifecycle(review_client):
     client = review_client
     round_, _, _, _ = _seed(client, 8799)
-    season_id = round_.season_id
     round_id = round_.bbbffl_round_id
+    season_id = client.app.state.lifecycle.get_round(round_id).season_id
     api = f"/api/public/seasons/{season_id}/rounds/{round_id}"
 
     live = client.get(api)
@@ -94,6 +134,153 @@ def test_anonymous_public_round_centre_is_allow_listed_and_uses_official_lifecyc
     assert page.status_code == 200
     assert 'name="viewport"' in page.text
     assert "Round Centre" in page.text and "Ladder" in page.text
+
+
+def test_public_submitted_lineups_are_visible_before_first_calculation(review_client):
+    client = review_client
+    (
+        _,
+        lifecycle,
+        round_,
+        _,
+        _,
+        _,
+    ) = full_round(client.app.state.database, year=8798)
+    persisted_round = lifecycle.get_round(round_.bbbffl_round_id)
+    api = f"/api/public/seasons/{persisted_round.season_id}/rounds/{round_.bbbffl_round_id}"
+
+    response = client.get(api)
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["matchups"]) == 5
+    assert {matchup["status"] for matchup in body["matchups"]} == {"upcoming"}
+    for matchup in body["matchups"]:
+        for side in (matchup["home"], matchup["away"]):
+            assert side["lineup"]["submission_version"] == 1
+            assert len(side["lineup"]["players"]) == 8
+            assert all(player["player_name"] for player in side["lineup"]["players"])
+            assert all(player["effective_score"] is None for player in side["lineup"]["players"])
+            assert side["calculated_score"] is None
+            assert side["official_score"] is None
+    encoded = json.dumps(body).lower()
+    assert "draft_revision" not in encoded and "lineup_id" not in encoded
+
+
+def test_public_vacant_slot_reports_actual_valid_interchange_replacement(review_client):
+    client = review_client
+    round_, lifecycle, matchup, entry_id = _seed_with_vacancy(client, 8797)
+    reviewed = _reviewed_matchup(client, round_.bbbffl_round_id, matchup.matchup_id)
+    response = client.post(
+        f"/api/admin/round-review/{round_.bbbffl_round_id}/interchange",
+        json={
+            "matchup_id": matchup.matchup_id,
+            "season_entry_id": entry_id,
+            "target_position": "F2",
+            "expected_review_version": reviewed["review_version"],
+        },
+    )
+    assert response.status_code == 200
+    f2 = next(
+        slot
+        for slot in _public_home(client, _public_api(client, lifecycle, round_.bbbffl_round_id))["lineup"]["players"]
+        if slot["position"] == "F2"
+    )
+    assert f2["outcome"] == "replaced_by_interchange"
+    assert f2["effective_score"] > 0
+
+
+def test_public_dnp_slot_distinguishes_usable_and_unusable_interchange(review_client):
+    client = review_client
+    round_, lifecycle, _, _ = _seed(client, 8796)
+    round_id = round_.bbbffl_round_id
+    matchup = lifecycle.list_matchups(round_id)[0]
+    reviewed = _reviewed_matchup(client, round_id, matchup.matchup_id)
+    entry_id = matchup.home_season_entry_id
+    dnp = client.post(
+        f"/api/admin/round-review/{round_id}/dnp",
+        json={
+            "matchup_id": matchup.matchup_id,
+            "season_entry_id": entry_id,
+            "slot": "F2",
+            "dnp": True,
+            "expected_review_version": reviewed["review_version"],
+        },
+    ).json()
+    reviewed = next(item for item in dnp["matchups"] if item["matchup_id"] == matchup.matchup_id)
+    assigned = client.post(
+        f"/api/admin/round-review/{round_id}/interchange",
+        json={
+            "matchup_id": matchup.matchup_id,
+            "season_entry_id": entry_id,
+            "target_position": "F2",
+            "expected_review_version": reviewed["review_version"],
+        },
+    ).json()
+    f2 = next(
+        slot
+        for slot in _public_home(client, _public_api(client, lifecycle, round_id))["lineup"]["players"]
+        if slot["position"] == "F2"
+    )
+    assert f2["confirmed_dnp"] is True
+    assert f2["outcome"] == "replaced_by_interchange" and f2["effective_score"] > 0
+
+    reviewed = next(item for item in assigned["matchups"] if item["matchup_id"] == matchup.matchup_id)
+    response = client.post(
+        f"/api/admin/round-review/{round_id}/dnp",
+        json={
+            "matchup_id": matchup.matchup_id,
+            "season_entry_id": entry_id,
+            "slot": "Interchange",
+            "dnp": True,
+            "expected_review_version": reviewed["review_version"],
+        },
+    )
+    assert response.status_code == 200
+    f2 = next(
+        slot
+        for slot in _public_home(client, _public_api(client, lifecycle, round_id))["lineup"]["players"]
+        if slot["position"] == "F2"
+    )
+    assert f2["outcome"] == "confirmed_dnp_zero"
+    assert f2["effective_score"] == 0
+
+
+def test_public_interchange_replacement_preserves_deferred_opening_round_source(review_client):
+    client = review_client
+    round_, lifecycle, matchup, entry_id = _seed_with_vacancy(client, 8795)
+    row = client.app.state.database.execute(
+        "SELECT snapshot FROM bbbffl_matchup_calculation WHERE matchup_id=?", (matchup.matchup_id,)
+    ).fetchone()
+    snapshot = json.loads(row["snapshot"])
+    interchange = next(slot for slot in snapshot["home"]["slots"] if slot["position"] == "Interchange")
+    interchange.update(scoring_source="opening_round_deferred", source_afl_round_id=88, afl_match_id=88001)
+    with transaction(client.app.state.database) as connection:
+        connection.execute(
+            "UPDATE bbbffl_matchup_calculation SET snapshot=? WHERE matchup_id=?",
+            (json.dumps(snapshot), matchup.matchup_id),
+        )
+    reviewed = _reviewed_matchup(client, round_.bbbffl_round_id, matchup.matchup_id)
+    assert (
+        client.post(
+            f"/api/admin/round-review/{round_.bbbffl_round_id}/interchange",
+            json={
+                "matchup_id": matchup.matchup_id,
+                "season_entry_id": entry_id,
+                "target_position": "F2",
+                "expected_review_version": reviewed["review_version"],
+            },
+        ).status_code
+        == 200
+    )
+    home = _public_home(client, _public_api(client, lifecycle, round_.bbbffl_round_id))
+    f2 = next(slot for slot in home["lineup"]["players"] if slot["position"] == "F2")
+    assert f2["effective_score"] > 0
+    assert f2["deferred_source"] == {
+        "kind": "opening_round_deferred",
+        "label": "Score carried from the deferred Opening Round match",
+        "afl_round_id": 88,
+    }
+    assert home["lineup"]["interchange"]["deferred_source"] == f2["deferred_source"]
 
 
 def test_round_review_workflow_end_to_end_via_the_admin_api(review_client):

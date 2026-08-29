@@ -479,6 +479,11 @@ class SlotReview:
     override_score: float | None
     override_reason: str | None
     effective_score: float
+    # Derived at the same point as ``effective_score`` so downstream public
+    # readers never have to approximate whether an interchange was actually
+    # usable/applied from the ruling alone.
+    effective_source: str
+    interchange_applied: bool
 
 
 @dataclass(frozen=True)
@@ -585,8 +590,14 @@ def _side_review(entry_id, side_snapshot, dnp_rulings, interchange_rulings, over
                 f"{entry_id} {position}: interchange ruling targets an occupied, non-DNP position -- resolve before sign-off"
             )
 
+        interchange_usable = bool(
+            using_interchange
+            and not interchange_dnp_ruling
+            and interchange_slot is not None
+            and interchange_slot["season_player_id"] is not None
+        )
         if using_interchange:
-            if interchange_dnp_ruling or interchange_slot is None or interchange_slot["season_player_id"] is None:
+            if not interchange_usable:
                 base = 0.0
             else:
                 base = potentials.get(position) or 0.0
@@ -596,6 +607,15 @@ def _side_review(entry_id, side_snapshot, dnp_rulings, interchange_rulings, over
             base = slot_dict["score"] or 0.0
 
         effective = override.override_score if override is not None else base
+        effective_source = (
+            "override"
+            if override is not None
+            else "interchange"
+            if interchange_usable
+            else "zero"
+            if vacant
+            else "starter"
+        )
         total_effective += effective
         slot_reviews.append(
             SlotReview(
@@ -614,6 +634,8 @@ def _side_review(entry_id, side_snapshot, dnp_rulings, interchange_rulings, over
                 override_score=(override.override_score if override else None),
                 override_reason=(override.reason if override else None),
                 effective_score=effective,
+                effective_source=effective_source,
+                interchange_applied=interchange_usable,
             )
         )
 

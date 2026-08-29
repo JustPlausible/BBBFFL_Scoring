@@ -161,12 +161,13 @@ def test_default_actor_is_a_well_defined_pre_authentication_identity(decisions, 
     assert event.actor_type == "anonymous_operator"
 
 
-@pytest.mark.parametrize("actor_type", ["coach", "scorer", "admin", "authenticated_user", ""])
-def test_unauthenticated_actions_cannot_masquerade_as_authenticated_identities(decisions, actor_type):
-    """Package 19/20 introduces real authentication. Until then, nothing in
-    this codebase may claim one of its actor types -- append_event refuses
-    any actor_type outside the pre-auth allowlist (system/legacy/
-    anonymous_operator)."""
+@pytest.mark.parametrize("actor_type", ["scorer", "admin", "authenticated_user", ""])
+def test_unrecognised_actor_types_cannot_masquerade_as_a_known_identity(decisions, actor_type):
+    """`append_event` refuses any actor_type outside the closed allowlist
+    (system/legacy/anonymous_operator/coach/unauthenticated) -- a plausible-
+    looking but unregistered value (e.g. "scorer"/"admin" used as an
+    *identity* rather than anonymous_operator's `actor_role`) must never be
+    accepted opportunistically."""
     bogus_actor = ActorContext(actor_type=actor_type)
     with pytest.raises(ValueError, match="Unknown actor_type"):
         decisions.set_dnp("team_a", "Forward1", True, actor=bogus_actor)
@@ -179,6 +180,21 @@ def test_system_and_legacy_actors_are_accepted_and_distinguishable(decisions, au
     events = {e.entity_id: e for e in audit_events.list_events()}
     assert events["grand_final:team_a:Forward1"].actor_type == "system"
     assert events["grand_final:team_b:Forward1"].actor_type == "legacy"
+
+
+def test_coach_and_unauthenticated_actors_are_accepted_and_distinguishable(decisions, audit_events):
+    """Roadmap package 19 (issue #74) deliberately extends the allowlist
+    with `coach` (a real, authenticated coach identity) and
+    `unauthenticated` (a login attempt with no verified identity) -- see
+    app/audit.py's module docstring, "Actor convention"."""
+    decisions.set_dnp("team_a", "Forward1", True, actor=ActorContext.coach("coach-123"))
+    decisions.set_dnp("team_b", "Forward1", True, actor=ActorContext.unauthenticated())
+
+    events = {e.entity_id: e for e in audit_events.list_events()}
+    coach_event = events["grand_final:team_a:Forward1"]
+    assert coach_event.actor_type == "coach"
+    assert coach_event.actor_id == "coach-123"
+    assert events["grand_final:team_b:Forward1"].actor_type == "unauthenticated"
 
 
 # -- Payload/schema version ------------------------------------------------

@@ -204,6 +204,22 @@ class IdentityRepository:
             )
         return item
 
+    def get_coach(self, coach_id: str) -> Coach | None:
+        row = self.database.execute("SELECT * FROM coach WHERE coach_id = ?", (coach_id,)).fetchone()
+        return Coach(**dict(row)) if row else None
+
+    def get_coach_by_email(self, email: str) -> Coach | None:
+        """Case-insensitive lookup by the coach's own private email --
+        used by `app.auth` to resolve a login identifier to the existing
+        persistent coach identity (roadmap package 19, issue #74). Never
+        used as a durable foreign key elsewhere: `coach_id` remains the
+        stable identity (see this module's docstring and #20's "do not
+        make email address ... the primary identity" design constraint)."""
+        row = self.database.execute(
+            "SELECT * FROM coach WHERE email IS NOT NULL AND lower(email) = lower(?)", (email,)
+        ).fetchone()
+        return Coach(**dict(row)) if row else None
+
     def get_current_coach(self, entry_id: str) -> Coach | None:
         row = self.database.execute(
             "SELECT c.* FROM season_entry_coach_history h JOIN coach c ON c.coach_id = h.coach_id "

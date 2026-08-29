@@ -8,12 +8,22 @@ inspection.
 
 If BBBFFL_ADMIN_TOKEN is set, every endpoint here requires a matching
 `X-Admin-Token` header. This is a lightweight gate suitable for a single
-trusted scorer on a home-server prototype, not general-purpose auth.
+trusted scorer on a home-server prototype, not general-purpose auth -- and,
+per roadmap package 19 (issue #74), it stays a distinct authority context
+from coach authentication: this token never becomes a coach login, and a
+coach's own session grants no access to anything in this router.
 
 Every mutation below also records an immutable audit event in the same
 transaction as its domain write (see app/audit.py and
 docs/audit-events.md). GET /audit-events is a tiny read-only diagnostic
 surface over that trail -- not an audit UI.
+
+POST /coach-credential is roadmap package 19's admin-assisted coach
+password recovery/re-entry path (see docs/coach-authentication.md): an
+admin who already holds BBBFFL_ADMIN_TOKEN can set or reset a coach's
+password. Deliberately not self-service (no emailed reset link) -- that
+would need the same email-sending infrastructure this package's chosen
+authentication mechanism avoids (see app/auth.py's module docstring).
 """
 
 import dataclasses
@@ -24,6 +34,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
+from app.audit import ActorContext
 from app.config import BASE_DIR
 from app.scorer_decisions import finalize as finalize_result
 from app.scorer_decisions import set_dnp as apply_dnp_decision
@@ -60,6 +71,13 @@ class OverrideRequest(BaseModel):
 
 class FinalizeRequest(BaseModel):
     note: str | None = None
+
+
+class SetCoachCredentialRequest(BaseModel):
+    coach_id: str | None = None
+    email: str | None = None
+    password: str
+    reason: str | None = None
 
 
 def require_admin(request: Request, x_admin_token: str | None = Header(default=None)) -> None:
@@ -156,6 +174,33 @@ def afl_diagnostics(request: Request):
     afl_client = request.app.state.afl_client
     evidence_report = getattr(afl_client, "evidence_report", None)
     return evidence_report() if callable(evidence_report) else {"dependency": "afl-api", "endpoints": {}}
+
+
+@router.post("/coach-credential", dependencies=[Depends(require_admin)])
+def set_coach_credential(payload: SetCoachCredentialRequest, request: Request):
+    """Admin-assisted coach password set/reset -- see module docstring.
+    Accepts either `coach_id` or `email` to identify the coach (never both
+    required); the caller never learns whether an *email* alone would have
+    matched anything beyond what this already-authenticated admin
+    explicitly asked to change. `AuthenticationService.reset_password`
+    validates `coach_id` (raising the same not-found response an unknown
+    email gets, rather than an uncaught FK violation from the credential
+    insert) and revokes the coach's existing sessions, so a session issued
+    before this reset cannot keep authenticating past it."""
+    identities = request.app.state.identities
+    coach_id = payload.coach_id
+    if not coach_id and payload.email:
+        coach = identities.get_coach_by_email(payload.email)
+        if coach is None:
+            raise HTTPException(status_code=404, detail="no coach found for that email")
+        coach_id = coach.coach_id
+    if not coach_id:
+        raise HTTPException(status_code=400, detail="coach_id or email is required")
+
+    request.app.state.auth_service.reset_password(
+        coach_id, payload.password, actor=ActorContext.anonymous_operator("admin"), reason=payload.reason
+    )
+    return {"coach_id": coach_id, "status": "password_set"}
 
 
 @router.get("/audit-events", dependencies=[Depends(require_admin)])

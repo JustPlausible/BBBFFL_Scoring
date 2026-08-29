@@ -109,6 +109,18 @@ cycle anywhere) rather than leaving it as prose that only this file states.
   surface, never on the wrapper's concrete type, so it remains a drop-in
   replacement rather than a new required dependency. See
   `docs/afl-client-resilience.md` for the full design.
+- **Coach authentication and sessions** (roadmap package 19, issue #74) --
+  `app/auth.py` (`CredentialRepository`, `SessionRepository`,
+  `AuthenticationService`): password credentials and server-authoritative
+  sessions resolved directly to `app/identity.py`'s existing persistent
+  coach identity, never a second user model. Like `app/round_review.py`,
+  it sits above the season model (it depends on `app.identity` to resolve
+  a login) but *is* imported directly by its route module
+  (`app/routes/auth.py`) rather than only reached via `request.app.state`.
+  `app/password_hashing.py`, `app/csrf.py` and `app/auth_rate_limit.py` are
+  dependency-free FOUNDATION leaves it builds on. See
+  [`coach-authentication.md`](coach-authentication.md) and
+  `tests/test_architecture.py`'s `AUTH` group.
 - **Scorer round review, sign-off and correction** (roadmap package 28,
   issue #58) — `app/round_review.py` (`RoundReviewRepository`: ordinary-
   round DNP/interchange rulings and manual overrides, keyed by

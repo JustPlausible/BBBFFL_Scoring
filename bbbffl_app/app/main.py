@@ -7,6 +7,8 @@ from fastapi.responses import JSONResponse
 from app.afl_client import AflApiClient, AflApiError
 from app.afl_resilience import ResilientAflClient, RetryPolicy
 from app.audit import AuditEventRepository
+from app.auth import AuthenticationService, CredentialRepository, SessionRepository
+from app.auth_rate_limit import LoginRateLimiter
 from app.calculations import MatchupCalculationService
 from app.competition_lifecycle import CompetitionLifecycleRepository, StaleRoundVersionError
 from app.config import get_settings
@@ -48,6 +50,7 @@ from app.round_review import (
     UnknownRoundError,
 )
 from app.routes import admin, health, public
+from app.routes import auth as auth_routes
 from app.routes import draft as draft_routes
 from app.routes import preseason as preseason_routes
 from app.routes import round_review as round_review_routes
@@ -125,6 +128,18 @@ async def lifespan(app: FastAPI):
     # is an operator surface over these authoritative repositories -- see
     # docs/draft-ledger.md and docs/scorer-draft-workflow.md.
     app.state.identities = IdentityRepository(database)
+    # Roadmap package 19's coach authentication/session boundary (issue
+    # #74, app/routes/auth.py) resolves logins directly to `identities`
+    # above rather than a second coach/user model -- see app/auth.py's
+    # module docstring and docs/coach-authentication.md. The rate limiter
+    # is process-local (see app/auth_rate_limit.py) and lives for the
+    # process's lifetime on app.state, like every other repository here.
+    app.state.credentials = CredentialRepository(database)
+    app.state.sessions = SessionRepository(database, session_lifetime_seconds=settings.session_lifetime_seconds)
+    app.state.login_rate_limiter = LoginRateLimiter()
+    app.state.auth_service = AuthenticationService(
+        app.state.identities, app.state.credentials, app.state.sessions, app.state.login_rate_limiter
+    )
     app.state.player_pool = PlayerPoolRepository(database)
     app.state.draft = DraftRepository(database)
     # Roadmap package 15's preseason trade/finalisation window (issue #54,
@@ -192,6 +207,7 @@ app = FastAPI(title="BBBFFL Grand Final Live Scoring", lifespan=lifespan)
 
 app.include_router(health.router)
 app.include_router(public.router)
+app.include_router(auth_routes.router)
 app.include_router(admin.router)
 app.include_router(admin.page_router)
 app.include_router(superscore_routes.router)

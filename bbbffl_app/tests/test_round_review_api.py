@@ -17,6 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.calculations import MatchupCalculationService
+from app.db import transaction
 from tests.round_review_helpers import Facts, full_round, progress_to_review
 
 
@@ -355,10 +356,17 @@ def test_round_centre_exposes_actual_mixed_slot_source_not_only_round_mapping(re
         source_afl_round_id=88,
         afl_match_id=88001,
     )
-    client.app.state.database.execute(
-        "UPDATE bbbffl_matchup_calculation SET snapshot=? WHERE matchup_id=?",
-        (json.dumps(snapshot), matchup.matchup_id),
-    )
+    # DatabaseConnection.execute() is intentionally a read-oriented,
+    # short-lived connection and does not commit DML. Persist this synthetic
+    # mixed-source snapshot through the normal explicit transaction boundary,
+    # just as the calculation service does in production.
+    with transaction(client.app.state.database) as connection:
+        connection.execute(
+            "UPDATE bbbffl_matchup_calculation SET snapshot=? WHERE matchup_id=?",
+            (json.dumps(snapshot), matchup.matchup_id),
+        )
+    stored = lifecycle.get_calculation(matchup.matchup_id)
+    assert stored.snapshot["home"]["slots"][0]["scoring_source"] == "opening_round_deferred"
 
     review = client.get(f"/api/admin/round-review/{round_id}").json()
     displayed = review["matchups"][0]["home"]["slots"][0]

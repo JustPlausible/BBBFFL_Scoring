@@ -555,6 +555,18 @@ class CompetitionLifecycleRepository:
         ).fetchone()
         return CompetitionRound(**dict(row)) if row else None
 
+    def list_ordinary_rounds(self):
+        """Return persisted ordinary rounds for scorer presentation layers."""
+        rows = self.database.execute(
+            """
+            SELECT l.* FROM bbbffl_round_lifecycle l
+            JOIN competition_stream c ON c.competition_id=l.competition_id
+            WHERE c.stream_type='ordinary'
+            ORDER BY l.afl_season_id DESC, l.fixture_round_number DESC
+            """
+        ).fetchall()
+        return [CompetitionRound(**dict(row)) for row in rows]
+
     def list_matchups(self, round_id):
         rows = self.database.execute(
             "SELECT * FROM bbbffl_matchup WHERE bbbffl_round_id=? ORDER BY matchup_order",

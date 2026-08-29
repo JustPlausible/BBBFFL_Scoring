@@ -471,6 +471,7 @@ class SlotReview:
     calculated_score: float | None
     participation_state: str | None
     dnp_recommendation: str | None
+    participation_reason: str | None
     dnp_ruling: bool | None
     override_score: float | None
     override_reason: str | None
@@ -596,6 +597,7 @@ def _side_review(entry_id, side_snapshot, dnp_rulings, interchange_rulings, over
                 calculated_score=slot_dict["score"],
                 participation_state=participation.get("state"),
                 dnp_recommendation=participation.get("dnp_recommendation"),
+                participation_reason=participation.get("reason"),
                 dnp_ruling=ruling,
                 override_score=(override.override_score if override else None),
                 override_reason=(override.reason if override else None),

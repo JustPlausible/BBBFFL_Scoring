@@ -244,3 +244,54 @@ def test_ruling_for_a_matchup_from_a_different_round_is_rejected(review_client):
     from app.round_review import RoundReviewRepository
 
     assert RoundReviewRepository(client.app.state.database).get_slot_rulings(other_round_matchup.matchup_id) == {}
+
+
+def test_regular_season_round_centre_browser_shell_and_authoritative_context(review_client):
+    """Smoke the browser entry point and the authoritative model it renders."""
+    client = review_client
+    round_, _, _, _ = _seed(client, 8810)
+    round_id = round_.bbbffl_round_id
+
+    page = client.get(f"/scorer/round-centre/{round_id}")
+    assert page.status_code == 200
+    assert "Regular-season Round Centre" in page.text
+    assert "Legacy Grand Final admin" in page.text
+    assert "expected_review_version" in page.text
+    assert "Conflict — this page was stale" in page.text
+
+    available = client.get("/api/admin/round-review").json()
+    assert [item["bbbffl_round_id"] for item in available] == [round_id]
+    review = client.get(f"/api/admin/round-review/{round_id}").json()
+    assert len(review["matchups"]) == 5
+    assert review["identity"]["fixture_round_number"] == 1
+    assert review["replay"]["classification"] == "live evidence"
+    assert all("official_history" in matchup for matchup in review["matchups"])
+
+    signed = client.post(f"/api/admin/round-review/{round_id}/signoff", json={"reason": "browser smoke"})
+    assert signed.status_code == 200, signed.text
+    published = client.get(f"/api/admin/round-review/{round_id}").json()
+    assert published["state"] == "final"
+    assert all(matchup["official_result"]["version"] == 1 for matchup in published["matchups"])
+    assert published["ladder"]["through_round"] == 1
+    assert len(published["ladder"]["rows"]) == 10
+
+
+def test_round_centre_api_rejects_stale_browser_ruling_and_returns_current_state(review_client):
+    client = review_client
+    round_, _, _, _ = _seed(client, 8811)
+    api = f"/api/admin/round-review/{round_.bbbffl_round_id}"
+    matchup = client.get(api).json()["matchups"][0]
+    payload = {
+        "matchup_id": matchup["matchup_id"],
+        "season_entry_id": matchup["home"]["season_entry_id"],
+        "slot": "F1",
+        "dnp": False,
+        "expected_review_version": matchup["review_version"],
+        "reason": "browser ruling",
+    }
+    assert client.post(f"{api}/dnp", json=payload).status_code == 200
+    conflict = client.post(f"{api}/dnp", json=payload)
+    assert conflict.status_code == 409
+    assert "not the expected" in conflict.json()["detail"]
+    current = client.get(api).json()["matchups"][0]
+    assert current["review_version"] == matchup["review_version"] + 1

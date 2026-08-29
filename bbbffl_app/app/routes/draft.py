@@ -193,6 +193,6 @@ def reopen(season_id: str, payload: ReopenRequest, request: Request):
     return _board(request, season_id)
 
 
-@page_router.get("/admin/draft/{season_id}", response_class=HTMLResponse)
+@page_router.get("/admin/draft/{season_id}", response_class=HTMLResponse, dependencies=[Depends(require_admin)])
 def draft_page(season_id: str, request: Request):
     return templates.TemplateResponse(request, "draft.html", {"season_id": season_id})

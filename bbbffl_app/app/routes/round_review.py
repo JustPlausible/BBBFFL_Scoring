@@ -25,7 +25,7 @@ from pydantic import BaseModel
 
 from app.audit import ActorContext
 from app.round_review import attempt_correction, attempt_signoff, build_round_review
-from app.routes.admin import require_admin
+from app.routes.admin import require_admin, require_scorer
 
 router = APIRouter(prefix="/api/admin/round-review")
 
@@ -83,12 +83,12 @@ def _round_review_view(request: Request, round_id: str, *, evidence_fresh: bool 
     return dataclasses.asdict(review)
 
 
-@router.get("/{round_id}", dependencies=[Depends(require_admin)])
+@router.get("/{round_id}", dependencies=[Depends(require_scorer)])
 def get_round_review(round_id: str, request: Request):
     return _round_review_view(request, round_id)
 
 
-@router.post("/{round_id}/dnp", dependencies=[Depends(require_admin)])
+@router.post("/{round_id}/dnp", dependencies=[Depends(require_scorer)])
 def record_dnp_ruling(round_id: str, payload: DnpRulingRequest, request: Request):
     request.app.state.round_review.record_dnp_ruling(
         payload.matchup_id,
@@ -103,7 +103,7 @@ def record_dnp_ruling(round_id: str, payload: DnpRulingRequest, request: Request
     return _round_review_view(request, round_id)
 
 
-@router.post("/{round_id}/interchange", dependencies=[Depends(require_admin)])
+@router.post("/{round_id}/interchange", dependencies=[Depends(require_scorer)])
 def record_interchange_ruling(round_id: str, payload: InterchangeRulingRequest, request: Request):
     request.app.state.round_review.record_interchange_ruling(
         payload.matchup_id,
@@ -117,7 +117,7 @@ def record_interchange_ruling(round_id: str, payload: InterchangeRulingRequest, 
     return _round_review_view(request, round_id)
 
 
-@router.post("/{round_id}/override", dependencies=[Depends(require_admin)])
+@router.post("/{round_id}/override", dependencies=[Depends(require_scorer)])
 def record_override(round_id: str, payload: OverrideRequest, request: Request):
     request.app.state.round_review.record_override(
         payload.matchup_id,
@@ -133,7 +133,7 @@ def record_override(round_id: str, payload: OverrideRequest, request: Request):
     return _round_review_view(request, round_id)
 
 
-@router.post("/{round_id}/signoff", dependencies=[Depends(require_admin)])
+@router.post("/{round_id}/signoff", dependencies=[Depends(require_scorer)])
 def signoff(round_id: str, payload: SignoffRequest, request: Request):
     state = request.app.state
     afl_client = state.afl_client

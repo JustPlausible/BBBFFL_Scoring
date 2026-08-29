@@ -738,6 +738,77 @@ def test_calculation_flags_a_slot_whose_submitted_player_no_longer_matches_its_n
     assert "different player" in m1["participation"]["reason"]
 
 
+def test_calculation_flags_drift_between_persisted_source_match_and_current_opening_round_evidence():
+    """`nominate()` freezes `source_afl_match_id` at nomination time. If the
+    live/replay Opening Round evidence later resolves this player's club to
+    a *different* match (or none at all) -- e.g. a corrected upstream
+    fixture -- the scoring path must never silently substitute that
+    different match's statistics for the ones actually recorded with the
+    nomination; it must fail explicit, scorer-review evidence instead."""
+    db = migrated_connection()
+    lifecycle, round_, entries, scope = setup_scope(db, 2024, 956)
+    home, away = entries[0], entries[1]
+    rule, deferred_player, nomination = nominate_bl_2024(
+        db, scope["season_id"], round_.bbbffl_round_id, home, position="M1"
+    )
+    assert nomination.source_afl_match_id == 8001  # frozen at nomination time, per nominate_bl_2024
+
+    lineups = WeeklyLineupRepository(db)
+    nominations = OpeningRoundNominationRepository(db)
+    nominations.preload_target_lineup(
+        lineups, scope["season_id"], scope["competition_id"], round_.bbbffl_round_id, home.season_entry_id
+    )
+    draft = lineups.get_draft(scope["season_id"], scope["competition_id"], round_.bbbffl_round_id, home.season_entry_id)
+    home_positions = complete_lineup(db, scope, home, overrides=draft.positions)
+    draft = lineups.save_draft(
+        scope["season_id"],
+        scope["competition_id"],
+        round_.bbbffl_round_id,
+        home.season_entry_id,
+        home_positions,
+        expected_revision=draft.revision,
+    )
+    lineups.submit(draft.lineup_id, expected_draft_revision=draft.revision, expected_submission_version=0)
+    away_draft = lineups.save_draft(
+        scope["season_id"],
+        scope["competition_id"],
+        round_.bbbffl_round_id,
+        away.season_entry_id,
+        complete_lineup(db, scope, away),
+        expected_revision=0,
+    )
+    lineups.submit(away_draft.lineup_id, expected_draft_revision=away_draft.revision, expected_submission_version=0)
+
+    matchup = next(
+        m
+        for m in lifecycle.list_matchups(round_.bbbffl_round_id)
+        if home.season_entry_id in (m.home_season_entry_id, m.away_season_entry_id)
+    )
+    # A "corrected upstream fixture": at scoring time, BL's Opening Round
+    # match now resolves to a *different* match ID (9999) than the 8001
+    # frozen with the nomination -- e.g. afl-api republished the round with
+    # renumbered match IDs. A score attached to 9999 must never be trusted
+    # as the nomination's recorded source.
+    client = MultiRoundMatchClient(
+        {954: [Match(9999, Team(2, "BL"), Team(5, "CARL"), "CONCLUDED")]},
+        stats_by_match={9999: {910001: PlayerStatLine(910001, disposals=50)}},
+    )
+    service = MatchupCalculationService(db, client)
+    calculated = service.calculate_matchup(matchup.matchup_id)
+    home_side = (
+        calculated.snapshot["home"]
+        if calculated.snapshot["home"]["season_entry_id"] == home.season_entry_id
+        else calculated.snapshot["away"]
+    )
+    m1 = next(slot for slot in home_side["slots"] if slot["position"] == "M1")
+    assert m1["scoring_source"] == "opening_round_source_drift"
+    assert m1["afl_match_id"] is None
+    assert m1["score"] == 0
+    assert m1["participation"]["state"] == "unknown"
+    assert m1["participation"]["dnp_recommendation"] == "review_required"
+    assert "8001" in m1["participation"]["reason"]
+
+
 # -- 20: ordinary bye/DNP unaffected for non-deferred players --------------
 
 

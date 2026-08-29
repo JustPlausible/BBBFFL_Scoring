@@ -225,6 +225,21 @@ class MatchupCalculationService:
             match = next(
                 (m for m in matches if slot["afl_team_id"] is not None and m.involves_team(slot["afl_team_id"])), None
             )
+            source_drift = False
+            if deferred and nomination["source_afl_match_id"] is not None:
+                # The nomination froze its source match at nomination time
+                # (`OpeningRoundNominationRepository.nominate`'s
+                # `_resolve_source_match`); re-resolving the player's club
+                # against *current* Opening Round evidence must agree with
+                # that persisted fact deterministically, not merely happen
+                # to agree today. A later/corrected upstream fixture that
+                # resolves this club to a different match (or none at all)
+                # must never silently substitute a different match's
+                # statistics for the ones the nomination actually recorded
+                # -- see docs/opening-round-deferred-selection.md.
+                if match is None or match.match_id != nomination["source_afl_match_id"]:
+                    source_drift = True
+                    match = None
             stat = (
                 round_facts.stats_for(match.match_id).get(slot["canonical_player_id"])
                 if match and slot["canonical_player_id"]
@@ -265,6 +280,20 @@ class MatchupCalculationService:
                         f"({slot['season_player_id']}); scorer review required before scoring."
                     ),
                 )
+            elif source_drift:
+                # The team-based resolution disagrees with the nomination's
+                # persisted `source_afl_match_id` (see above) -- never
+                # silently substitute a different match's evidence; require
+                # scorer review instead.
+                participation = dataclasses.replace(
+                    participation,
+                    source="opening-round-deferred-source-drift",
+                    reason=(
+                        "Opening Round deferred nomination recorded source AFL match "
+                        f"{nomination['source_afl_match_id']}, but current Opening Round evidence no longer "
+                        "resolves this player's club to that match; scorer review required before scoring."
+                    ),
+                )
             elif deferred:
                 # Tag provenance (`source`) and, when the Opening Round
                 # evidence itself could not resolve a match/stat line for
@@ -292,7 +321,9 @@ class MatchupCalculationService:
                     "score": score,
                     "interchange_available": slot["position"] == "Interchange",
                     "scoring_source": (
-                        "opening_round_deferred"
+                        "opening_round_source_drift"
+                        if source_drift
+                        else "opening_round_deferred"
                         if deferred
                         else "opening_round_nomination_mismatch"
                         if mismatch

@@ -46,6 +46,56 @@ def _seed(client, year):
     return round_, lifecycle, entries, canon
 
 
+def test_anonymous_public_round_centre_is_allow_listed_and_uses_official_lifecycle(review_client):
+    client = review_client
+    round_, _, _, _ = _seed(client, 8799)
+    season_id = round_.season_id
+    round_id = round_.bbbffl_round_id
+    api = f"/api/public/seasons/{season_id}/rounds/{round_id}"
+
+    live = client.get(api)
+    assert live.status_code == 200
+    body = live.json()
+    assert len(body["matchups"]) == 5
+    assert {matchup["status"] for matchup in body["matchups"]} == {"under_review"}
+    assert all(matchup["home"]["lineup"]["submission_version"] == 1 for matchup in body["matchups"])
+    assert all(matchup["home"]["official_score"] is None for matchup in body["matchups"])
+
+    # The public contract is constructed by inclusion: private draft/history,
+    # scorer evidence and privileged persistence identifiers never appear.
+    encoded = json.dumps(body).lower()
+    for forbidden in (
+        "email",
+        "phone",
+        "draft_revision",
+        "lineup_id",
+        "season_entry_id",
+        "canonical_player_id",
+        "participation_reason",
+        "override_reason",
+        "audit",
+        "api_key",
+        "token",
+    ):
+        assert forbidden not in encoded
+
+    # Concluded AFL evidence did not make the result official.  Only normal
+    # persisted sign-off changes both public status and the #59 ladder.
+    signed = client.post(f"/api/admin/round-review/{round_id}/signoff", json={"reason": "public test"})
+    assert signed.status_code == 200
+    final = client.get(api).json()
+    assert {matchup["status"] for matchup in final["matchups"]} == {"official"}
+    assert all(matchup["home"]["official_score"] is not None for matchup in final["matchups"])
+    ladder = client.get(f"{api}/ladder").json()
+    assert len(ladder["rows"]) == 10
+    assert all(row["played"] == 1 for row in ladder["rows"])
+
+    page = client.get(f"/seasons/{season_id}/rounds/{round_id}")
+    assert page.status_code == 200
+    assert 'name="viewport"' in page.text
+    assert "Round Centre" in page.text and "Ladder" in page.text
+
+
 def test_round_review_workflow_end_to_end_via_the_admin_api(review_client):
     client = review_client
     round_, lifecycle, entries, canon = _seed(client, 8801)

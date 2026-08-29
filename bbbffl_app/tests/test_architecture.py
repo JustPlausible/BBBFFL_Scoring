@@ -121,6 +121,11 @@ GRAND_FINAL_VERTICAL = {
 # reached only via an already-constructed instance on `request.app.state`.
 ROUND_REVIEW = {"app.round_review"}
 
+# Anonymous ordinary-season presentation/read service (issue #78).  It is an
+# allow-listed DTO layer above the persisted review and ladder boundaries;
+# routes may import it, while it never depends on HTTP or the composition root.
+PUBLIC_READ_MODEL = {"app.public_rounds"}
+
 # Opening Round deferred-selection configuration/nomination/locking (issue
 # #69): sits above *both* the season model and lockouts -- it reuses
 # app.lockouts.resolve_match/MatchResolutionError for AFL match resolution
@@ -179,6 +184,7 @@ ROUTES = {
     "app.routes.auth",
     "app.routes.lineups",
     "app.routes.coach_lineup",
+    "app.routes.public_rounds",
 }
 
 COMPOSITION_ROOT = {"app.main"}
@@ -193,6 +199,7 @@ ALL_GROUPS = (
     | AFL_EVIDENCE
     | REPLAY
     | ROUND_REVIEW
+    | PUBLIC_READ_MODEL
     | OPENING_ROUND
     | AUTH
     | COACH_LINEUP

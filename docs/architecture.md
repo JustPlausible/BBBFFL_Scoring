@@ -98,6 +98,20 @@ cycle anywhere) rather than leaving it as prose that only this file states.
   surface, never on the wrapper's concrete type, so it remains a drop-in
   replacement rather than a new required dependency. See
   `docs/afl-client-resilience.md` for the full design.
+- **Scorer round review, sign-off and correction** (roadmap package 28,
+  issue #58) — `app/round_review.py` (`RoundReviewRepository`: ordinary-
+  round DNP/interchange rulings and manual overrides, keyed by
+  `matchup_id`/`season_entry_id`; `build_round_review`/`build_matchup_
+  review`: the read model; `attempt_signoff`/`attempt_correction`: the
+  validated write path onto `CompetitionLifecycleRepository`'s existing
+  atomic publish/correct methods). Unlike every other season-model
+  module above, this one *is* imported directly by its route module
+  (`app/routes/round_review.py`) — the same shape as `app/scorer_
+  decisions.py` below, not the "only ever reached via `request.app.
+  state`" shape the rest of the season model uses — because it is
+  meant to be the one application-service layer routes call for this
+  domain. See `docs/scorer-round-review.md` and `tests/test_
+  architecture.py`'s `ROUND_REVIEW` group.
 
 ## What this PR adds: `app/scorer_decisions.py`
 

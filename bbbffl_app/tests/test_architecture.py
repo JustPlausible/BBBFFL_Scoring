@@ -91,10 +91,33 @@ GRAND_FINAL_VERTICAL = {
     "app.teams",
     "app.superscore",
     "app.presentation",
-    "app.participation",
     "app.service",
     "app.scorer_decisions",
 }
+
+# Scorer round-review application service (roadmap package 28, issue #58):
+# the ordinary-round counterpart to app.scorer_decisions/GRAND_FINAL_VERTICAL
+# -- but unlike that vertical, it sits directly *on top of* the persisted
+# season model (app.competition_lifecycle for the round/matchup/official-
+# result transaction and its StaleRoundVersionError, app.lineups for the
+# roster-slot vocabulary) rather than being a sibling of it, because it is
+# meant to be imported directly by routes exactly the way
+# app.scorer_decisions is (see routes/admin.py) -- every other SEASON_MODEL
+# module is deliberately *not* importable from a route file (see
+# test_routes_never_import_persistence_or_season_model_directly) and is
+# reached only via an already-constructed instance on `request.app.state`.
+ROUND_REVIEW = {"app.round_review"}
+
+# AFL participation-evidence classification (roadmap package 26, issue #57):
+# a pure function of public afl-api facts (a match, a bye list, a stat line)
+# with no state and no dependency beyond the foundation `app.afl_client`
+# dataclasses it classifies. Originally only the Grand Final vertical's
+# `app.service` consumed it; roadmap package 28 (issue #58)'s
+# `app.calculations`/`app.round_review` reuse the same classification for
+# the persisted season model, so this sits as its own small sibling group
+# rather than inside GRAND_FINAL_VERTICAL -- neither domain depends on the
+# other through it.
+AFL_EVIDENCE = {"app.participation"}
 
 ROUTES = {
     "app.routes",
@@ -104,6 +127,7 @@ ROUTES = {
     "app.routes.health",
     "app.routes.draft",
     "app.routes.preseason",
+    "app.routes.round_review",
 }
 
 COMPOSITION_ROOT = {"app.main"}
@@ -115,6 +139,8 @@ ALL_GROUPS = (
     | LOCKOUTS
     | WEEKLY_SUBMISSION_SOURCES
     | AFL_RESILIENCE
+    | AFL_EVIDENCE
+    | ROUND_REVIEW
     | GRAND_FINAL_VERTICAL
     | ROUTES
     | COMPOSITION_ROOT
@@ -322,6 +348,18 @@ def test_afl_resilience_depends_only_on_foundation(graph):
         assert not offending, f"{module} must not depend on {sorted(offending)}"
 
 
+def test_afl_evidence_depends_only_on_foundation(graph):
+    """`app.participation` (roadmap package 26, issue #57) must stay a pure
+    classification leaf over `app.afl_client` facts -- both the season
+    model (`app.calculations`, roadmap package 28) and the Grand Final
+    vertical (`app.service`) depend on it, so it must never depend back on
+    either, nor on lockouts, routes, or the composition root."""
+    forbidden = SEASON_MODEL | LOCKOUTS | GRAND_FINAL_VERTICAL | ROUTES | COMPOSITION_ROOT
+    for module in sorted(AFL_EVIDENCE):
+        offending = graph[module] & forbidden
+        assert not offending, f"{module} must not depend on {sorted(offending)}"
+
+
 def test_lineups_and_lockouts_stay_decoupled(graph):
     """app/lineups.py's module docstring documents a deliberate decoupling:
     lockouts depends on lineups (for the POSITIONS vocabulary and as a
@@ -337,6 +375,18 @@ def test_grand_final_vertical_does_not_depend_on_season_model_or_routes(graph):
     every non-route module) must not import route modules."""
     forbidden = SEASON_MODEL | LOCKOUTS | ROUTES | COMPOSITION_ROOT
     for module in sorted(GRAND_FINAL_VERTICAL):
+        offending = graph[module] & forbidden
+        assert not offending, f"{module} must not depend on {sorted(offending)}"
+
+
+def test_round_review_does_not_depend_on_routes_grand_final_or_composition_root(graph):
+    """`app.round_review` (roadmap package 28, issue #58) sits directly on
+    the season model (unlike `app.scorer_decisions`), but must stay a
+    sibling of -- never a dependency of -- the Grand Final vertical, and
+    must never depend on routes or the composition root, exactly like
+    every other application-service module."""
+    forbidden = GRAND_FINAL_VERTICAL | LOCKOUTS | ROUTES | COMPOSITION_ROOT
+    for module in sorted(ROUND_REVIEW):
         offending = graph[module] & forbidden
         assert not offending, f"{module} must not depend on {sorted(offending)}"
 

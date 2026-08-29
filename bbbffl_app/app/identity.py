@@ -204,6 +204,14 @@ class IdentityRepository:
             )
         return item
 
+    def get_current_coach(self, entry_id: str) -> Coach | None:
+        row = self.database.execute(
+            "SELECT c.* FROM season_entry_coach_history h JOIN coach c ON c.coach_id = h.coach_id "
+            "WHERE h.season_entry_id = ? AND h.ended_at IS NULL",
+            (entry_id,),
+        ).fetchone()
+        return Coach(**dict(row)) if row else None
+
     def get_public_team(self, entry_id: str) -> PublicTeam | None:
         row = self.database.execute(
             "SELECT e.season_entry_id, e.season_id, e.licence_key, n.team_name FROM season_entry e JOIN season_entry_team_name_history n ON n.season_entry_id=e.season_entry_id AND n.ended_at IS NULL WHERE e.season_entry_id=?",

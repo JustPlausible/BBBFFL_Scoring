@@ -58,6 +58,7 @@ REQUIRED_SCENARIO_SECTIONS = (
     "expected_vs_actual",
     "ladder_effect",
     "discrepancies",
+    "outcome",
 )
 
 
@@ -168,6 +169,11 @@ def _validate_scenario(scenario: dict[str, Any]) -> None:
         raise CheckpointReportError(
             f"scenario {scenario['scenario_id']!r} has unresolved questions but outcome "
             f"{scenario['outcome']!r} != UNRESOLVED -- an unknown must never read as PASS"
+        )
+    if scenario["discrepancies"] and scenario["outcome"] == ScenarioOutcome.PASS.value:
+        raise CheckpointReportError(
+            f"scenario {scenario['scenario_id']!r} has recorded discrepancies but outcome PASS -- "
+            "an explicit outcome override must never hide a discrepancy"
         )
 
 

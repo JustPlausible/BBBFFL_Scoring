@@ -32,6 +32,7 @@ from app.audit import ActorContext
 from app.calculations import MatchupCalculationService
 from app.carry_forward import CarryForwardService, NoCarryForwardSourceError
 from app.identity import IdentityRepository
+from app.ladder import LadderRepository
 from app.lineup_proxy import LineupProxyService
 from app.lineup_validation import LineupValidationService
 from app.lineups import POSITIONS, WeeklyLineupRepository
@@ -476,6 +477,34 @@ def _bye_availability_scenario():
     f1_calculated = next(s for s in calculated_side["slots"] if s["position"] == "F1")
     ruck_calculated = next(s for s in calculated_side["slots"] if s["position"] == "Ruck")
 
+    # Every entry was fully lineup'd and the whole round was calculated
+    # (not just the focus matchup), so the ladder snapshot immediately
+    # after finalisation is genuinely meaningful here -- not left empty.
+    round_context = db.execute(
+        "SELECT l.fixture_round_number FROM bbbffl_round_lifecycle l WHERE l.bbbffl_round_id=?",
+        (round_.bbbffl_round_id,),
+    ).fetchone()
+    team_by_entry = {e.season_entry_id: identities.get_public_team(e.season_entry_id).team_name for e in entries}
+    ladder = LadderRepository(db).snapshot(scope["competition_id"], round_context["fixture_round_number"])
+    ladder_effect = sorted(
+        (
+            {
+                "rank": row.rank,
+                "team": team_by_entry[row.season_entry_id],
+                "played": row.played,
+                "wins": row.wins,
+                "draws": row.draws,
+                "losses": row.losses,
+                "points": row.competition_points,
+                "percentage": str(row.percentage),
+                "points_for": str(row.points_for),
+                "tie_group": sorted(team_by_entry[entry_id] for entry_id in row.tie_group),
+            }
+            for row in ladder.rows
+        ),
+        key=lambda item: (item["rank"], item["team"]),
+    )
+
     return build_checkpoint_scenario(
         "bye_availability",
         "An ordinary BBBFFL round where one selected player's AFL club has a normal scheduled bye (F1) and a "
@@ -524,6 +553,7 @@ def _bye_availability_scenario():
                 "round_state": published.state,
             },
         },
+        ladder_effect=ladder_effect,
         discrepancies=[],
     ), unresolved_before_ruling
 
@@ -539,6 +569,13 @@ def test_checkpoint_bye_availability_scenario():
     # The exceptional case genuinely blocked sign-off before the explicit
     # scorer ruling was recorded -- never silently resolved.
     assert len(unresolved_before_ruling) == 1
+    # The ladder snapshot immediately after finalisation is populated (all
+    # ten entries played) and internally consistent, not left empty.
+    assert len(scenario["ladder_effect"]) == 10
+    assert {row["played"] for row in scenario["ladder_effect"]} == {1}
+    assert [row["rank"] for row in scenario["ladder_effect"]] == sorted(
+        row["rank"] for row in scenario["ladder_effect"]
+    )
 
 
 def test_checkpoint_bye_availability_scenario_is_deterministic_on_rerun():

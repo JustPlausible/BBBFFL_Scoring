@@ -57,6 +57,7 @@ from app.routes import coach_lineup as coach_lineup_routes
 from app.routes import draft as draft_routes
 from app.routes import lineups as lineup_routes
 from app.routes import preseason as preseason_routes
+from app.routes import public_rounds as public_round_routes
 from app.routes import round_review as round_review_routes
 from app.routes import superscore as superscore_routes
 from app.scorer_decisions import (
@@ -213,6 +214,7 @@ app = FastAPI(title="BBBFFL Grand Final Live Scoring", lifespan=lifespan)
 
 app.include_router(health.router)
 app.include_router(public.router)
+app.include_router(public_round_routes.router)
 app.include_router(auth_routes.router)
 app.include_router(coach_lineup_routes.router)
 app.include_router(lineup_routes.router)

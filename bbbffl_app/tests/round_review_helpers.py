@@ -35,12 +35,16 @@ class Facts:
         return []
 
 
-def full_round(db=None, *, year=2200, afl_round=100, stat_line=None):
+def full_round(db=None, *, year=2200, afl_round=100, stat_line=None, vacant_slots=None):
     """Ten entries, five matchups, every one of the nine roster slots
-    named with a distinct player. `stat_line(canonical_player_id)` returns
+    named with a distinct player by default. ``vacant_slots`` identifies
+    ``(entry_index, position)`` pairs whose draft and immutable submitted
+    version are born vacant; submitted rows are never mutated after creation.
+    `stat_line(canonical_player_id)` returns
     the `PlayerStatLine` for each player (default: modest non-zero stats
     for every position's formula, so nothing reads as DNP-ambiguous)."""
     db = db or migrated_connection()
+    vacant_slots = set(vacant_slots or ())
     lifecycle, round_, entries = operational(db, year, afl_round)
     lifecycle.transition(round_.bbbffl_round_id, "open")
     scope = db.execute(
@@ -110,13 +114,14 @@ def full_round(db=None, *, year=2200, afl_round=100, stat_line=None):
                     },
                 )
                 stats[canonical] = stat_line(canonical)
+                selected_player_id = None if (index, position) in vacant_slots else player_id
                 conn.execute(
                     text(
                         "INSERT INTO weekly_lineup_draft_slot "
                         "(lineup_id, position, season_player_id) "
                         "VALUES (:lineup_id, :position, :player_id)"
                     ),
-                    {"lineup_id": lineup_id, "position": position, "player_id": player_id},
+                    {"lineup_id": lineup_id, "position": position, "player_id": selected_player_id},
                 )
                 conn.execute(
                     text(
@@ -124,7 +129,7 @@ def full_round(db=None, *, year=2200, afl_round=100, stat_line=None):
                         "(lineup_id, version, position, season_player_id) "
                         "VALUES (:lineup_id, 1, :position, :player_id)"
                     ),
-                    {"lineup_id": lineup_id, "position": position, "player_id": player_id},
+                    {"lineup_id": lineup_id, "position": position, "player_id": selected_player_id},
                 )
     return db, lifecycle, round_, entries, stats, canonical_by_slot
 

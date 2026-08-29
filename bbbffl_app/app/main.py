@@ -103,13 +103,17 @@ async def lifespan(app: FastAPI):
     # diagnostics around afl_transport without changing what any consumer
     # (app/service.py, app/lockouts.py, app/calculations.py) calls or gets
     # back. See app/afl_resilience.py and docs/afl-client-resilience.md.
-    afl_client = afl_transport if settings.afl_mode == "replay" else ResilientAflClient(
-        afl_transport,
-        retry_policy=RetryPolicy(
-            max_attempts=settings.afl_api_retry_max_attempts,
-            base_delay_seconds=settings.afl_api_retry_base_delay_seconds,
-            max_delay_seconds=settings.afl_api_retry_max_delay_seconds,
-        ),
+    afl_client = (
+        afl_transport
+        if settings.afl_mode == "replay"
+        else ResilientAflClient(
+            afl_transport,
+            retry_policy=RetryPolicy(
+                max_attempts=settings.afl_api_retry_max_attempts,
+                base_delay_seconds=settings.afl_api_retry_base_delay_seconds,
+                max_delay_seconds=settings.afl_api_retry_max_delay_seconds,
+            ),
+        )
     )
     teams = get_teams(settings.teams_config_path)
 

@@ -14,7 +14,12 @@ def test_controlled_evidence_loads_and_retains_manifest_provenance():
     assert source.manifest["evidence_class"] == EvidenceClass.SYNTHETIC_SCENARIO.value
     assert source.get_round(2026, 1).round_id == 1344
     assert source.get_matches(1344)[0].start_time_utc == "2026-03-19T08:30:00Z"
-    assert source.get_match_player_stats(2601)[66001].disposals == 20
+    assert source.get_match_player_stats(2601)[66001].disposals == 16
+    assert {record["evidence_class"] for record in source.evidence_records()} >= {
+        EvidenceClass.KNOWN_FACT.value,
+        EvidenceClass.RECONSTRUCTABLE_BEHAVIOUR.value,
+        EvidenceClass.SYNTHETIC_SCENARIO.value,
+    }
 
 
 def test_missing_malformed_and_incomplete_evidence_fail_closed(tmp_path):
@@ -30,6 +35,23 @@ def test_missing_malformed_and_incomplete_evidence_fail_closed(tmp_path):
     incomplete.write_text(json.dumps(payload))
     with pytest.raises(ReplayEvidenceError, match="player_stats"):
         ReplayAflDataSource(incomplete)
+    payload = json.loads(FIXTURE.read_text())
+    del payload["players"][0]["provenance"]
+    unclassified = tmp_path / "unclassified.json"
+    unclassified.write_text(json.dumps(payload))
+    with pytest.raises(ReplayEvidenceError, match="provenance.source"):
+        ReplayAflDataSource(unclassified)
+
+
+def test_match_lifecycle_is_selected_by_replay_clock_from_same_evidence():
+    before = ReplayAflDataSource(FIXTURE, clock=ReplayClock.from_iso("2026-03-19T08:29:00Z"))
+    during = ReplayAflDataSource(FIXTURE, clock=ReplayClock.from_iso("2026-03-19T08:31:00Z"))
+    final = ReplayAflDataSource(FIXTURE, clock=ReplayClock.from_iso("2026-03-19T12:01:00Z"))
+    assert [source.get_matches(1344)[0].status for source in (before, during, final)] == [
+        "UPCOMING",
+        "LIVE",
+        "CONCLUDED",
+    ]
 
 
 def test_replay_clock_is_explicit_timezone_aware_and_stable():
@@ -43,8 +65,14 @@ def test_replay_clock_is_explicit_timezone_aware_and_stable():
 def test_reports_require_all_domain_sections_and_are_deterministic(tmp_path):
     report = {
         "run": {"run_id": "r1", "season": 2026, "round": 1, "evidence_manifest": "m", "evidence_version": "1"},
-        "mapping": {}, "lineups": [], "lockout": {}, "scoring": [], "scorer_workflow": {},
-        "official_results": [], "ladder": [], "discrepancies": [],
+        "mapping": {},
+        "lineups": [],
+        "lockout": {},
+        "scoring": [],
+        "scorer_workflow": {},
+        "official_results": [],
+        "ladder": [],
+        "discrepancies": [],
     }
     first, second, summary = tmp_path / "a.json", tmp_path / "b.json", tmp_path / "summary.txt"
     write_replay_report(report, first, summary)

@@ -1,100 +1,194 @@
-"""One-round vertical replay through the production competition services."""
+"""One round: controlled evidence/time through every production domain."""
 
-from datetime import datetime, timezone
+import json
+from pathlib import Path
 
 from sqlalchemy import text
 
-from app.afl_client import Match, Team
 from app.audit import ActorContext
 from app.calculations import MatchupCalculationService
 from app.identity import IdentityRepository
-from app.ladder import LadderRepository
 from app.lineup_validation import LineupValidationService
-from app.lockouts import LockoutRepository
+from app.lockouts import LockoutRepository, RoundMatchFactsProvider
+from app.replay import (
+    ReplayAflDataSource,
+    ReplayClock,
+    build_completed_round_report,
+    write_replay_report,
+)
+from app.round_mapping import RoundMappingRepository
 from app.round_review import RoundReviewRepository, attempt_signoff, build_round_review
-from tests.round_review_helpers import Facts, full_round, progress_to_review
+from tests.round_review_helpers import full_round, progress_to_review
 
+FIXTURE = Path(__file__).parent / "fixtures" / "replay_round_2026" / "evidence.json"
 OPERATOR = ActorContext.anonymous_operator(role="scorer")
 
 
-class MatchFacts:
-    def __init__(self, match):
-        self.match = match
+def _semantic_run(output: Path):
+    before = ReplayClock.from_iso("2026-03-19T08:29:00Z")
+    after = ReplayClock.from_iso("2026-03-19T08:31:00Z")
+    final = ReplayClock.from_iso("2026-03-19T12:01:00Z")
+    before_source = ReplayAflDataSource(FIXTURE, clock=before)
+    after_source = ReplayAflDataSource(FIXTURE, clock=after)
+    final_source = ReplayAflDataSource(FIXTURE, clock=final)
 
-    def matches_for(self, round_id):
-        return [self.match]
-
-
-def _semantic_run():
-    db, lifecycle, round_, entries, stats, _ = full_round(year=2026, afl_round=1344)
+    # full_round is only the clean relational initialiser. Its AFL facts are
+    # deliberately discarded: every identity, match and stat consumed below
+    # is replaced by and resolved from the checked-in replay manifest.
+    db, lifecycle, round_, _, _, _ = full_round(year=2026, afl_round=1344)
     scope = db.execute(
         "SELECT c.season_id,c.competition_id FROM bbbffl_round r JOIN competition_stream c "
-        "ON c.competition_id=r.competition_id WHERE r.bbbffl_round_id=?", (round_.bbbffl_round_id,)
+        "ON c.competition_id=r.competition_id WHERE r.bbbffl_round_id=?",
+        (round_.bbbffl_round_id,),
     ).fetchone()
-    # Initial replay seeding is the sole direct fixture-load boundary. It
-    # supplies ownership and honestly labels the historical proxy action;
-    # every subsequent transition uses production services.
     with db.engine.begin() as conn:
-        lineups = conn.execute(text("SELECT lineup_id,season_entry_id FROM weekly_lineup")).mappings().all()
+        lineups = (
+            conn.execute(
+                text(
+                    "SELECT l.lineup_id,l.season_entry_id,n.team_name FROM weekly_lineup l "
+                    "JOIN season_entry_team_name_history n ON n.season_entry_id=l.season_entry_id "
+                    "AND n.ended_at IS NULL ORDER BY n.team_name"
+                )
+            )
+            .mappings()
+            .all()
+        )
         for lineup in lineups:
-            conn.execute(text("UPDATE weekly_lineup_submission SET actor_type='anonymous_operator', actor_role='scorer', source_type='scorer_proxy', source_detail='2026 replay manifest', reason='historical lineup reconstructed by replay operator' WHERE lineup_id=:id"), {"id": lineup["lineup_id"]})
-            players = conn.execute(text("SELECT season_player_id FROM weekly_lineup_submission_slot WHERE lineup_id=:id"), {"id": lineup["lineup_id"]}).scalars()
-            for player in players:
+            manifest_lineup = next(
+                item for item in final_source.lineup_inputs if item["historical_entry"] == lineup["team_name"]
+            )
+            conn.execute(
+                text(
+                    "UPDATE weekly_lineup_submission SET actor_type='anonymous_operator', actor_role='scorer', "
+                    "source_type='scorer_proxy', source_detail='2026-round-1-representative@2.0.0', "
+                    "reason='historical lineup reconstructed by replay operator' WHERE lineup_id=:id"
+                ),
+                {"id": lineup["lineup_id"]},
+            )
+            slots = conn.execute(
+                text("SELECT s.position,s.season_player_id FROM weekly_lineup_submission_slot s WHERE s.lineup_id=:id"),
+                {"id": lineup["lineup_id"]},
+            ).mappings()
+            for slot in slots:
+                canonical = manifest_lineup["positions"][slot["position"]]
+                player = final_source.get_player(canonical)
+                conn.execute(
+                    text(
+                        "UPDATE season_player_pool SET canonical_player_id=:canonical,display_name=:name,"
+                        "afl_team_id=:team_id,afl_team_name=:team_name WHERE season_player_id=:player_id"
+                    ),
+                    {
+                        "canonical": canonical,
+                        "name": player.name,
+                        "team_id": player.current_team.team_id,
+                        "team_name": player.current_team.name,
+                        "player_id": slot["season_player_id"],
+                    },
+                )
                 conn.execute(
                     text(
                         "INSERT INTO player_ownership_period "
                         "(ownership_period_id,season_player_id,season_id,season_entry_id,acquired_at,reason,created_at) "
-                        "VALUES (:id,:p,:s,:e,'2026-01-01T00:00:00+00:00','replay initial draft',"
-                        "'2026-01-01T00:00:00+00:00')"
+                        "VALUES (:id,:player,:season,:entry,'2026-01-01T00:00:00+00:00',"
+                        "'replay initial draft','2026-01-01T00:00:00+00:00')"
                     ),
-                    {"id": f"own-{player}", "p": player, "s": scope["season_id"], "e": lineup["season_entry_id"]},
+                    {
+                        "id": f"own-{slot['season_player_id']}",
+                        "player": slot["season_player_id"],
+                        "season": scope["season_id"],
+                        "entry": lineup["season_entry_id"],
+                    },
                 )
 
     lifecycle.transition(round_.bbbffl_round_id, "open")
-    validation = LineupValidationService(db)
-    validation_results = []
-    before = datetime(2026, 3, 19, 8, 29, tzinfo=timezone.utc)
-    after = datetime(2026, 3, 19, 8, 31, tzinfo=timezone.utc)
-    match = Match(2601, Team(1, "Alpha"), Team(2, "Beta"), "UPCOMING", "2026-03-19T08:30:00Z")
+    mapping = RoundMappingRepository(db)
+    validation_service = LineupValidationService(db, before_source)
     lockouts = LockoutRepository(db)
-    lock_evidence = []
+    validation, lockout_evidence = [], []
     for lineup in lineups:
-        positions = {r["position"]: r["season_player_id"] for r in db.execute("SELECT position,season_player_id FROM weekly_lineup_submission_slot WHERE lineup_id=?", (lineup["lineup_id"],)).fetchall()}
-        result = validation.validate_submission(lineup["lineup_id"], positions)
-        assert result.valid
-        validation_results.append(result.to_dict())
-        pre = lockouts.lock_state(lineup["lineup_id"], round_.bbbffl_round_id, lineup["season_entry_id"], positions, match_facts=MatchFacts(match), evaluation_at=before)
-        post = lockouts.lock_state(lineup["lineup_id"], round_.bbbffl_round_id, lineup["season_entry_id"], positions, match_facts=MatchFacts(match), evaluation_at=after)
-        lock_evidence.append({"entry": lineup["season_entry_id"], "before": {k: v.state.value for k, v in pre.positions.items()}, "after": {k: v.state.value for k, v in post.positions.items()}})
+        positions = {
+            row["position"]: row["season_player_id"]
+            for row in db.execute(
+                "SELECT position,season_player_id FROM weekly_lineup_submission_slot WHERE lineup_id=?",
+                (lineup["lineup_id"],),
+            ).fetchall()
+        }
+        checked = validation_service.validate_submission(lineup["lineup_id"], positions)
+        assert checked.valid
+        validation.append({"historical_entry": lineup["team_name"], **checked.to_dict()})
+        views = {}
+        for label, clock, source in (("before", before, before_source), ("after", after, after_source)):
+            view = lockouts.lock_state(
+                lineup["lineup_id"],
+                round_.bbbffl_round_id,
+                lineup["season_entry_id"],
+                positions,
+                match_facts=RoundMatchFactsProvider(mapping, source),
+                evaluation_at=clock.now(),
+            )
+            views[label] = {
+                "effective_at": view.evaluated_at,
+                "positions": {
+                    position: {"state": state.state.value, "reason": state.reason, "afl_match_id": state.afl_match_id}
+                    for position, state in view.positions.items()
+                },
+            }
+        lockout_evidence.append({"historical_entry": lineup["team_name"], **views})
 
     progress_to_review(lifecycle, round_.bbbffl_round_id)
-    MatchupCalculationService(db, Facts(stats)).calculate_round(round_.bbbffl_round_id, observed_at="2026-03-23T12:00:00+00:00")
+    MatchupCalculationService(db, final_source).calculate_round(
+        round_.bbbffl_round_id,
+        upstream_revision=final_source.manifest["version"],
+        observed_at=final.now().isoformat(),
+    )
     review_repo = RoundReviewRepository(db)
     identities = IdentityRepository(db)
     review = build_round_review(lifecycle, review_repo, identities, round_.bbbffl_round_id)
     assert review.ready_for_signoff
-    attempt_signoff(lifecycle, review_repo, identities, round_.bbbffl_round_id, actor=OPERATOR, reason="representative 2026 replay sign-off")
-    matchups = lifecycle.list_matchups(round_.bbbffl_round_id)
-    ladder = LadderRepository(db).snapshot(scope["competition_id"], 1)
-    official = [lifecycle.effective_result(m.matchup_id) for m in matchups]
-    scoring_sources = [slot["scoring_source"] for result in official for side in ("home", "away") for slot in result.input_snapshot[side]["slots"]]
-    return {
-        "validation_count": len(validation_results), "lockout": lock_evidence,
-        "matchups": [(str(x.home_score), str(x.away_score), x.version) for x in official],
-        "scoring_sources": scoring_sources,
-        "ladder": [(r.rank, r.played, r.wins, r.draws, r.losses, str(r.points_for)) for r in ladder.rows],
-        "proxy": [tuple(row) for row in db.execute("SELECT source_type,actor_type,actor_role FROM weekly_lineup_submission ORDER BY lineup_id")],
-    }
+    attempt_signoff(
+        lifecycle,
+        review_repo,
+        identities,
+        round_.bbbffl_round_id,
+        actor=OPERATOR,
+        reason="representative 2026 replay sign-off",
+    )
+    report = build_completed_round_report(
+        db,
+        lifecycle,
+        round_.bbbffl_round_id,
+        final_source,
+        clocks={"before_lockout": before, "after_lockout": after, "finalisation": final},
+        lockout=lockout_evidence,
+        validation=validation,
+    )
+    write_replay_report(report, output, output.with_suffix(".txt"))
+    return report
 
 
-def test_one_round_replay_composes_and_is_semantically_deterministic():
-    first = _semantic_run()
-    second = _semantic_run()
+def test_one_round_replay_composes_and_real_report_is_semantically_deterministic(tmp_path):
+    first = _semantic_run(tmp_path / "first.json")
+    second = _semantic_run(tmp_path / "second.json")
     assert first == second
-    assert first["validation_count"] == 10
-    assert len(first["matchups"]) == 5 and all(version == 1 for _, _, version in first["matchups"])
-    assert all(row[1] == 1 for row in first["ladder"])
-    assert set(first["scoring_sources"]) == {"ordinary"}
-    assert all(row == ("scorer_proxy", "anonymous_operator", "scorer") for row in first["proxy"])
-    assert all(set(item["before"].values()) == {"unlocked"} for item in first["lockout"])
-    assert all(set(item["after"].values()) == {"locked"} for item in first["lockout"])
+    assert json.loads((tmp_path / "first.json").read_text()) == first
+    assert len(first["lineups"]) == 10
+    assert len(first["scoring"]) == len(first["official_results"]) == 5
+    assert all(result["version"] == 1 and result["effective"] for result in first["official_results"])
+    assert all(row["played"] == 1 for row in first["ladder"])
+    assert {
+        slot["scoring_source"]
+        for matchup in first["scoring"]
+        for side in ("home", "away")
+        for slot in matchup[side]["slots"]
+    } == {"ordinary"}
+    assert all(lineup["source_type"] == "scorer_proxy" for lineup in first["lineups"])
+    assert all(
+        {position["state"] for position in item["before"]["positions"].values()} == {"editable"}
+        and {position["state"] for position in item["after"]["positions"].values()} == {"locked"}
+        for item in first["lockout"]
+    )
+    assert {record["evidence_class"] for record in first["evidence"]} >= {
+        "known_fact",
+        "reconstructable_behaviour",
+        "synthetic_scenario",
+    }

@@ -34,18 +34,24 @@ fixture-load boundary is the only direct seed operation.
 
 The root schema is `bbbffl.replay-evidence/v1`. It contains a versioned
 `manifest`, AFL `seasons`, `rounds`, `matches`, canonical `players`, and
-`player_stats` keyed by match. `manifest.evidence_class` is one of the stable
-identifiers `known_fact`, `reconstructable_behaviour`, `synthetic_scenario`,
-or `unresolved_scorer_input`. Round 1's compact fixture is explicitly
-synthetic; it must not be presented as a historical coach selection.
+`player_stats` keyed by match. Every season, round, match, player, stat line,
+and historical lineup has its own required `provenance` object containing a
+source and one of the stable identifiers `known_fact`,
+`reconstructable_behaviour`, `synthetic_scenario`, or
+`unresolved_scorer_input`. A single run can therefore mix classifications.
+Round 1's AFL mapping, reconstructed lineups, and synthetic player/stat facts
+remain distinct; synthetic inputs must not be presented as historical coach
+selections.
 
 Lineup submissions retain the represented `season_entry_id` while actor
 columns record `anonymous_operator`/`scorer` and `source_type=scorer_proxy`.
 Thus the replay operator is never impersonated as the historical coach.
 
-`ReplayClock` requires an explicit timezone-aware instant. The same instant
-is passed to existing lockout `evaluation_at` seams; neither captured AFL
-facts nor global/wall time are changed.
+`ReplayClock` requires an explicit timezone-aware instant. The manifest's
+match-status timeline is evaluated at that instant and the same instant is
+passed to existing lockout `evaluation_at` seams. The acceptance path uses
+the one file-backed source before lockout, during play, and after conclusion;
+neither captured AFL evidence nor global/wall time is changed.
 
 ## Scoring sources and #69
 
@@ -59,9 +65,13 @@ than becoming a bye, DNP, or replay-supplied score.
 
 ## Reports and discrepancies
 
-`write_replay_report` emits deterministic sorted JSON and a text summary. A
-report must include run/configuration, mapping, lineups, lockout, scoring,
-scorer workflow, official results, ladder, and discrepancy sections.
+`build_completed_round_report` reads the final production round, calculation
+snapshots, official result versions, and ladder, after which
+`write_replay_report` emits deterministic sorted JSON and a text summary. The
+acceptance test generates this real report twice from two clean databases. A
+report includes run/configuration, mapping, lineups, validation, lockout,
+scoring, scorer workflow, official results, ladder, evidence, and discrepancy
+sections.
 Expected/actual mismatches belong in `discrepancies` with their evidence
 class and category; fixture evidence must never be rewritten to hide one.
 

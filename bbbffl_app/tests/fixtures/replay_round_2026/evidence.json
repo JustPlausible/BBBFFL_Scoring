@@ -2,18 +2,22 @@
   "schema": "bbbffl.replay-evidence/v1",
   "manifest": {
     "id": "2026-round-1-representative",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "evidence_class": "synthetic_scenario",
     "bbbffl_season": 2026,
     "bbbffl_round": 1,
-    "description": "Representative ordinary round; synthetic because historical lineup evidence is unavailable."
+    "description": "Representative ordinary round; AFL mapping is known while lineups and statistics are explicitly reconstructed/synthetic."
   },
   "seasons": [
     {
       "season_id": 2026,
       "year": 2026,
       "is_current": true,
-      "current_round_number": 1
+      "current_round_number": 1,
+      "provenance": {
+        "evidence_class": "known_fact",
+        "source": "2026 season model and issue #69 AFL evidence"
+      }
     }
   ],
   "rounds": [
@@ -21,7 +25,11 @@
       "round_id": 1344,
       "season_id": 2026,
       "round_number": 1,
-      "byes": []
+      "byes": [],
+      "provenance": {
+        "evidence_class": "known_fact",
+        "source": "2026 AFL round mapping evidence"
+      }
     }
   ],
   "matches": [
@@ -37,15 +45,1107 @@
       "away_team": {
         "team_id": 2,
         "name": "Beta"
+      },
+      "status_timeline": [
+        {
+          "effective_at": "2026-03-01T00:00:00Z",
+          "status": "UPCOMING"
+        },
+        {
+          "effective_at": "2026-03-19T08:30:00Z",
+          "status": "LIVE"
+        },
+        {
+          "effective_at": "2026-03-19T12:00:00Z",
+          "status": "CONCLUDED"
+        }
+      ],
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "controlled match used to exercise effective-time lifecycle"
       }
     }
   ],
   "players": [
     {
       "canonical_player_id": 66001,
-      "display_name": "Synthetic Player",
+      "display_name": "Replay Player 66001",
       "team_id": 1,
-      "team_name": "Alpha"
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 0",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66002,
+      "display_name": "Replay Player 66002",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 0",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66003,
+      "display_name": "Replay Player 66003",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 0",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66004,
+      "display_name": "Replay Player 66004",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 0",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66005,
+      "display_name": "Replay Player 66005",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 0",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66006,
+      "display_name": "Replay Player 66006",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 0",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66007,
+      "display_name": "Replay Player 66007",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 0",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66008,
+      "display_name": "Replay Player 66008",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 0",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66009,
+      "display_name": "Replay Player 66009",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 0",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66010,
+      "display_name": "Replay Player 66010",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 1",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66011,
+      "display_name": "Replay Player 66011",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 1",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66012,
+      "display_name": "Replay Player 66012",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 1",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66013,
+      "display_name": "Replay Player 66013",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 1",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66014,
+      "display_name": "Replay Player 66014",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 1",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66015,
+      "display_name": "Replay Player 66015",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 1",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66016,
+      "display_name": "Replay Player 66016",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 1",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66017,
+      "display_name": "Replay Player 66017",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 1",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66018,
+      "display_name": "Replay Player 66018",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 1",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66019,
+      "display_name": "Replay Player 66019",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 2",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66020,
+      "display_name": "Replay Player 66020",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 2",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66021,
+      "display_name": "Replay Player 66021",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 2",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66022,
+      "display_name": "Replay Player 66022",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 2",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66023,
+      "display_name": "Replay Player 66023",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 2",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66024,
+      "display_name": "Replay Player 66024",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 2",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66025,
+      "display_name": "Replay Player 66025",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 2",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66026,
+      "display_name": "Replay Player 66026",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 2",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66027,
+      "display_name": "Replay Player 66027",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 2",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66028,
+      "display_name": "Replay Player 66028",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 3",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66029,
+      "display_name": "Replay Player 66029",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 3",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66030,
+      "display_name": "Replay Player 66030",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 3",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66031,
+      "display_name": "Replay Player 66031",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 3",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66032,
+      "display_name": "Replay Player 66032",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 3",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66033,
+      "display_name": "Replay Player 66033",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 3",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66034,
+      "display_name": "Replay Player 66034",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 3",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66035,
+      "display_name": "Replay Player 66035",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 3",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66036,
+      "display_name": "Replay Player 66036",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 3",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66037,
+      "display_name": "Replay Player 66037",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 4",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66038,
+      "display_name": "Replay Player 66038",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 4",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66039,
+      "display_name": "Replay Player 66039",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 4",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66040,
+      "display_name": "Replay Player 66040",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 4",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66041,
+      "display_name": "Replay Player 66041",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 4",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66042,
+      "display_name": "Replay Player 66042",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 4",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66043,
+      "display_name": "Replay Player 66043",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 4",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66044,
+      "display_name": "Replay Player 66044",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 4",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66045,
+      "display_name": "Replay Player 66045",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 4",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66046,
+      "display_name": "Replay Player 66046",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 5",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66047,
+      "display_name": "Replay Player 66047",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 5",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66048,
+      "display_name": "Replay Player 66048",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 5",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66049,
+      "display_name": "Replay Player 66049",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 5",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66050,
+      "display_name": "Replay Player 66050",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 5",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66051,
+      "display_name": "Replay Player 66051",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 5",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66052,
+      "display_name": "Replay Player 66052",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 5",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66053,
+      "display_name": "Replay Player 66053",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 5",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66054,
+      "display_name": "Replay Player 66054",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 5",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66055,
+      "display_name": "Replay Player 66055",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 6",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66056,
+      "display_name": "Replay Player 66056",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 6",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66057,
+      "display_name": "Replay Player 66057",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 6",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66058,
+      "display_name": "Replay Player 66058",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 6",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66059,
+      "display_name": "Replay Player 66059",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 6",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66060,
+      "display_name": "Replay Player 66060",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 6",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66061,
+      "display_name": "Replay Player 66061",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 6",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66062,
+      "display_name": "Replay Player 66062",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 6",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66063,
+      "display_name": "Replay Player 66063",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 6",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66064,
+      "display_name": "Replay Player 66064",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 7",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66065,
+      "display_name": "Replay Player 66065",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 7",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66066,
+      "display_name": "Replay Player 66066",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 7",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66067,
+      "display_name": "Replay Player 66067",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 7",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66068,
+      "display_name": "Replay Player 66068",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 7",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66069,
+      "display_name": "Replay Player 66069",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 7",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66070,
+      "display_name": "Replay Player 66070",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 7",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66071,
+      "display_name": "Replay Player 66071",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 7",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66072,
+      "display_name": "Replay Player 66072",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 7",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66073,
+      "display_name": "Replay Player 66073",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 8",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66074,
+      "display_name": "Replay Player 66074",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 8",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66075,
+      "display_name": "Replay Player 66075",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 8",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66076,
+      "display_name": "Replay Player 66076",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 8",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66077,
+      "display_name": "Replay Player 66077",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 8",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66078,
+      "display_name": "Replay Player 66078",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 8",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66079,
+      "display_name": "Replay Player 66079",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 8",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66080,
+      "display_name": "Replay Player 66080",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 8",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66081,
+      "display_name": "Replay Player 66081",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 8",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66082,
+      "display_name": "Replay Player 66082",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 9",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66083,
+      "display_name": "Replay Player 66083",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 9",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66084,
+      "display_name": "Replay Player 66084",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 9",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66085,
+      "display_name": "Replay Player 66085",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 9",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66086,
+      "display_name": "Replay Player 66086",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 9",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66087,
+      "display_name": "Replay Player 66087",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 9",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66088,
+      "display_name": "Replay Player 66088",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 9",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66089,
+      "display_name": "Replay Player 66089",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 9",
+        "entered_by_replay_operator": true
+      }
+    },
+    {
+      "canonical_player_id": 66090,
+      "display_name": "Replay Player 66090",
+      "team_id": 1,
+      "team_name": "Alpha",
+      "provenance": {
+        "evidence_class": "synthetic_scenario",
+        "source": "issue-66 representative fixture generator",
+        "historical_entry": "Team 9",
+        "entered_by_replay_operator": true
+      }
     }
   ],
   "player_stats": {
@@ -54,11 +1154,1664 @@
         "canonical_player_id": 66001,
         "goals": 2,
         "behinds": 1,
+        "disposals": 16,
+        "marks": 4,
+        "hitouts": 5,
+        "tackles": 3,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66002,
+        "goals": 3,
+        "behinds": 0,
+        "disposals": 17,
+        "marks": 5,
+        "hitouts": 6,
+        "tackles": 4,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66003,
+        "goals": 1,
+        "behinds": 1,
+        "disposals": 18,
+        "marks": 6,
+        "hitouts": 0,
+        "tackles": 5,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66004,
+        "goals": 2,
+        "behinds": 0,
+        "disposals": 19,
+        "marks": 7,
+        "hitouts": 1,
+        "tackles": 6,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66005,
+        "goals": 3,
+        "behinds": 1,
         "disposals": 20,
+        "marks": 3,
+        "hitouts": 2,
+        "tackles": 7,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66006,
+        "goals": 1,
+        "behinds": 0,
+        "disposals": 21,
+        "marks": 4,
+        "hitouts": 3,
+        "tackles": 2,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66007,
+        "goals": 2,
+        "behinds": 1,
+        "disposals": 22,
+        "marks": 5,
+        "hitouts": 4,
+        "tackles": 3,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66008,
+        "goals": 3,
+        "behinds": 0,
+        "disposals": 23,
+        "marks": 6,
+        "hitouts": 5,
+        "tackles": 4,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66009,
+        "goals": 1,
+        "behinds": 1,
+        "disposals": 24,
+        "marks": 7,
+        "hitouts": 6,
+        "tackles": 5,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66010,
+        "goals": 2,
+        "behinds": 0,
+        "disposals": 15,
+        "marks": 3,
+        "hitouts": 0,
+        "tackles": 6,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66011,
+        "goals": 3,
+        "behinds": 1,
+        "disposals": 16,
+        "marks": 4,
+        "hitouts": 1,
+        "tackles": 7,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66012,
+        "goals": 1,
+        "behinds": 0,
+        "disposals": 17,
+        "marks": 5,
+        "hitouts": 2,
+        "tackles": 2,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66013,
+        "goals": 2,
+        "behinds": 1,
+        "disposals": 18,
+        "marks": 6,
+        "hitouts": 3,
+        "tackles": 3,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66014,
+        "goals": 3,
+        "behinds": 0,
+        "disposals": 19,
+        "marks": 7,
+        "hitouts": 4,
+        "tackles": 4,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66015,
+        "goals": 1,
+        "behinds": 1,
+        "disposals": 20,
+        "marks": 3,
+        "hitouts": 5,
+        "tackles": 5,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66016,
+        "goals": 2,
+        "behinds": 0,
+        "disposals": 21,
+        "marks": 4,
+        "hitouts": 6,
+        "tackles": 6,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66017,
+        "goals": 3,
+        "behinds": 1,
+        "disposals": 22,
         "marks": 5,
         "hitouts": 0,
-        "tackles": 4
+        "tackles": 7,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66018,
+        "goals": 1,
+        "behinds": 0,
+        "disposals": 23,
+        "marks": 6,
+        "hitouts": 1,
+        "tackles": 2,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66019,
+        "goals": 2,
+        "behinds": 1,
+        "disposals": 24,
+        "marks": 7,
+        "hitouts": 2,
+        "tackles": 3,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66020,
+        "goals": 3,
+        "behinds": 0,
+        "disposals": 15,
+        "marks": 3,
+        "hitouts": 3,
+        "tackles": 4,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66021,
+        "goals": 1,
+        "behinds": 1,
+        "disposals": 16,
+        "marks": 4,
+        "hitouts": 4,
+        "tackles": 5,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66022,
+        "goals": 2,
+        "behinds": 0,
+        "disposals": 17,
+        "marks": 5,
+        "hitouts": 5,
+        "tackles": 6,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66023,
+        "goals": 3,
+        "behinds": 1,
+        "disposals": 18,
+        "marks": 6,
+        "hitouts": 6,
+        "tackles": 7,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66024,
+        "goals": 1,
+        "behinds": 0,
+        "disposals": 19,
+        "marks": 7,
+        "hitouts": 0,
+        "tackles": 2,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66025,
+        "goals": 2,
+        "behinds": 1,
+        "disposals": 20,
+        "marks": 3,
+        "hitouts": 1,
+        "tackles": 3,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66026,
+        "goals": 3,
+        "behinds": 0,
+        "disposals": 21,
+        "marks": 4,
+        "hitouts": 2,
+        "tackles": 4,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66027,
+        "goals": 1,
+        "behinds": 1,
+        "disposals": 22,
+        "marks": 5,
+        "hitouts": 3,
+        "tackles": 5,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66028,
+        "goals": 2,
+        "behinds": 0,
+        "disposals": 23,
+        "marks": 6,
+        "hitouts": 4,
+        "tackles": 6,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66029,
+        "goals": 3,
+        "behinds": 1,
+        "disposals": 24,
+        "marks": 7,
+        "hitouts": 5,
+        "tackles": 7,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66030,
+        "goals": 1,
+        "behinds": 0,
+        "disposals": 15,
+        "marks": 3,
+        "hitouts": 6,
+        "tackles": 2,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66031,
+        "goals": 2,
+        "behinds": 1,
+        "disposals": 16,
+        "marks": 4,
+        "hitouts": 0,
+        "tackles": 3,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66032,
+        "goals": 3,
+        "behinds": 0,
+        "disposals": 17,
+        "marks": 5,
+        "hitouts": 1,
+        "tackles": 4,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66033,
+        "goals": 1,
+        "behinds": 1,
+        "disposals": 18,
+        "marks": 6,
+        "hitouts": 2,
+        "tackles": 5,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66034,
+        "goals": 2,
+        "behinds": 0,
+        "disposals": 19,
+        "marks": 7,
+        "hitouts": 3,
+        "tackles": 6,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66035,
+        "goals": 3,
+        "behinds": 1,
+        "disposals": 20,
+        "marks": 3,
+        "hitouts": 4,
+        "tackles": 7,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66036,
+        "goals": 1,
+        "behinds": 0,
+        "disposals": 21,
+        "marks": 4,
+        "hitouts": 5,
+        "tackles": 2,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66037,
+        "goals": 2,
+        "behinds": 1,
+        "disposals": 22,
+        "marks": 5,
+        "hitouts": 6,
+        "tackles": 3,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66038,
+        "goals": 3,
+        "behinds": 0,
+        "disposals": 23,
+        "marks": 6,
+        "hitouts": 0,
+        "tackles": 4,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66039,
+        "goals": 1,
+        "behinds": 1,
+        "disposals": 24,
+        "marks": 7,
+        "hitouts": 1,
+        "tackles": 5,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66040,
+        "goals": 2,
+        "behinds": 0,
+        "disposals": 15,
+        "marks": 3,
+        "hitouts": 2,
+        "tackles": 6,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66041,
+        "goals": 3,
+        "behinds": 1,
+        "disposals": 16,
+        "marks": 4,
+        "hitouts": 3,
+        "tackles": 7,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66042,
+        "goals": 1,
+        "behinds": 0,
+        "disposals": 17,
+        "marks": 5,
+        "hitouts": 4,
+        "tackles": 2,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66043,
+        "goals": 2,
+        "behinds": 1,
+        "disposals": 18,
+        "marks": 6,
+        "hitouts": 5,
+        "tackles": 3,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66044,
+        "goals": 3,
+        "behinds": 0,
+        "disposals": 19,
+        "marks": 7,
+        "hitouts": 6,
+        "tackles": 4,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66045,
+        "goals": 1,
+        "behinds": 1,
+        "disposals": 20,
+        "marks": 3,
+        "hitouts": 0,
+        "tackles": 5,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66046,
+        "goals": 2,
+        "behinds": 0,
+        "disposals": 21,
+        "marks": 4,
+        "hitouts": 1,
+        "tackles": 6,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66047,
+        "goals": 3,
+        "behinds": 1,
+        "disposals": 22,
+        "marks": 5,
+        "hitouts": 2,
+        "tackles": 7,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66048,
+        "goals": 1,
+        "behinds": 0,
+        "disposals": 23,
+        "marks": 6,
+        "hitouts": 3,
+        "tackles": 2,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66049,
+        "goals": 2,
+        "behinds": 1,
+        "disposals": 24,
+        "marks": 7,
+        "hitouts": 4,
+        "tackles": 3,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66050,
+        "goals": 3,
+        "behinds": 0,
+        "disposals": 15,
+        "marks": 3,
+        "hitouts": 5,
+        "tackles": 4,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66051,
+        "goals": 1,
+        "behinds": 1,
+        "disposals": 16,
+        "marks": 4,
+        "hitouts": 6,
+        "tackles": 5,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66052,
+        "goals": 2,
+        "behinds": 0,
+        "disposals": 17,
+        "marks": 5,
+        "hitouts": 0,
+        "tackles": 6,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66053,
+        "goals": 3,
+        "behinds": 1,
+        "disposals": 18,
+        "marks": 6,
+        "hitouts": 1,
+        "tackles": 7,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66054,
+        "goals": 1,
+        "behinds": 0,
+        "disposals": 19,
+        "marks": 7,
+        "hitouts": 2,
+        "tackles": 2,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66055,
+        "goals": 2,
+        "behinds": 1,
+        "disposals": 20,
+        "marks": 3,
+        "hitouts": 3,
+        "tackles": 3,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66056,
+        "goals": 3,
+        "behinds": 0,
+        "disposals": 21,
+        "marks": 4,
+        "hitouts": 4,
+        "tackles": 4,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66057,
+        "goals": 1,
+        "behinds": 1,
+        "disposals": 22,
+        "marks": 5,
+        "hitouts": 5,
+        "tackles": 5,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66058,
+        "goals": 2,
+        "behinds": 0,
+        "disposals": 23,
+        "marks": 6,
+        "hitouts": 6,
+        "tackles": 6,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66059,
+        "goals": 3,
+        "behinds": 1,
+        "disposals": 24,
+        "marks": 7,
+        "hitouts": 0,
+        "tackles": 7,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66060,
+        "goals": 1,
+        "behinds": 0,
+        "disposals": 15,
+        "marks": 3,
+        "hitouts": 1,
+        "tackles": 2,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66061,
+        "goals": 2,
+        "behinds": 1,
+        "disposals": 16,
+        "marks": 4,
+        "hitouts": 2,
+        "tackles": 3,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66062,
+        "goals": 3,
+        "behinds": 0,
+        "disposals": 17,
+        "marks": 5,
+        "hitouts": 3,
+        "tackles": 4,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66063,
+        "goals": 1,
+        "behinds": 1,
+        "disposals": 18,
+        "marks": 6,
+        "hitouts": 4,
+        "tackles": 5,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66064,
+        "goals": 2,
+        "behinds": 0,
+        "disposals": 19,
+        "marks": 7,
+        "hitouts": 5,
+        "tackles": 6,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66065,
+        "goals": 3,
+        "behinds": 1,
+        "disposals": 20,
+        "marks": 3,
+        "hitouts": 6,
+        "tackles": 7,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66066,
+        "goals": 1,
+        "behinds": 0,
+        "disposals": 21,
+        "marks": 4,
+        "hitouts": 0,
+        "tackles": 2,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66067,
+        "goals": 2,
+        "behinds": 1,
+        "disposals": 22,
+        "marks": 5,
+        "hitouts": 1,
+        "tackles": 3,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66068,
+        "goals": 3,
+        "behinds": 0,
+        "disposals": 23,
+        "marks": 6,
+        "hitouts": 2,
+        "tackles": 4,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66069,
+        "goals": 1,
+        "behinds": 1,
+        "disposals": 24,
+        "marks": 7,
+        "hitouts": 3,
+        "tackles": 5,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66070,
+        "goals": 2,
+        "behinds": 0,
+        "disposals": 15,
+        "marks": 3,
+        "hitouts": 4,
+        "tackles": 6,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66071,
+        "goals": 3,
+        "behinds": 1,
+        "disposals": 16,
+        "marks": 4,
+        "hitouts": 5,
+        "tackles": 7,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66072,
+        "goals": 1,
+        "behinds": 0,
+        "disposals": 17,
+        "marks": 5,
+        "hitouts": 6,
+        "tackles": 2,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66073,
+        "goals": 2,
+        "behinds": 1,
+        "disposals": 18,
+        "marks": 6,
+        "hitouts": 0,
+        "tackles": 3,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66074,
+        "goals": 3,
+        "behinds": 0,
+        "disposals": 19,
+        "marks": 7,
+        "hitouts": 1,
+        "tackles": 4,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66075,
+        "goals": 1,
+        "behinds": 1,
+        "disposals": 20,
+        "marks": 3,
+        "hitouts": 2,
+        "tackles": 5,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66076,
+        "goals": 2,
+        "behinds": 0,
+        "disposals": 21,
+        "marks": 4,
+        "hitouts": 3,
+        "tackles": 6,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66077,
+        "goals": 3,
+        "behinds": 1,
+        "disposals": 22,
+        "marks": 5,
+        "hitouts": 4,
+        "tackles": 7,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66078,
+        "goals": 1,
+        "behinds": 0,
+        "disposals": 23,
+        "marks": 6,
+        "hitouts": 5,
+        "tackles": 2,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66079,
+        "goals": 2,
+        "behinds": 1,
+        "disposals": 24,
+        "marks": 7,
+        "hitouts": 6,
+        "tackles": 3,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66080,
+        "goals": 3,
+        "behinds": 0,
+        "disposals": 15,
+        "marks": 3,
+        "hitouts": 0,
+        "tackles": 4,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66081,
+        "goals": 1,
+        "behinds": 1,
+        "disposals": 16,
+        "marks": 4,
+        "hitouts": 1,
+        "tackles": 5,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66082,
+        "goals": 2,
+        "behinds": 0,
+        "disposals": 17,
+        "marks": 5,
+        "hitouts": 2,
+        "tackles": 6,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66083,
+        "goals": 3,
+        "behinds": 1,
+        "disposals": 18,
+        "marks": 6,
+        "hitouts": 3,
+        "tackles": 7,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66084,
+        "goals": 1,
+        "behinds": 0,
+        "disposals": 19,
+        "marks": 7,
+        "hitouts": 4,
+        "tackles": 2,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66085,
+        "goals": 2,
+        "behinds": 1,
+        "disposals": 20,
+        "marks": 3,
+        "hitouts": 5,
+        "tackles": 3,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66086,
+        "goals": 3,
+        "behinds": 0,
+        "disposals": 21,
+        "marks": 4,
+        "hitouts": 6,
+        "tackles": 4,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66087,
+        "goals": 1,
+        "behinds": 1,
+        "disposals": 22,
+        "marks": 5,
+        "hitouts": 0,
+        "tackles": 5,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66088,
+        "goals": 2,
+        "behinds": 0,
+        "disposals": 23,
+        "marks": 6,
+        "hitouts": 1,
+        "tackles": 6,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66089,
+        "goals": 3,
+        "behinds": 1,
+        "disposals": 24,
+        "marks": 7,
+        "hitouts": 2,
+        "tackles": 7,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
+      },
+      {
+        "canonical_player_id": 66090,
+        "goals": 1,
+        "behinds": 0,
+        "disposals": 15,
+        "marks": 3,
+        "hitouts": 3,
+        "tackles": 2,
+        "provenance": {
+          "evidence_class": "synthetic_scenario",
+          "source": "issue-66 controlled stat scenario",
+          "scoring_source": "ordinary",
+          "source_afl_round_id": 1344,
+          "scorer_decision_required": false
+        }
       }
     ]
-  }
+  },
+  "lineups": [
+    {
+      "historical_entry": "Team 0",
+      "historical_coach": "Coach 2026-0",
+      "positions": {
+        "F1": 66001,
+        "F2": 66002,
+        "F3": 66003,
+        "M1": 66004,
+        "M2": 66005,
+        "M3": 66006,
+        "Ruck": 66007,
+        "Tackler": 66008,
+        "Interchange": 66009
+      },
+      "provenance": {
+        "evidence_class": "reconstructable_behaviour",
+        "source": "deterministic representative lineup construction",
+        "historical_entry": "Team 0",
+        "entered_by_replay_operator": true,
+        "scorer_decision_required": false
+      }
+    },
+    {
+      "historical_entry": "Team 1",
+      "historical_coach": "Coach 2026-1",
+      "positions": {
+        "F1": 66010,
+        "F2": 66011,
+        "F3": 66012,
+        "M1": 66013,
+        "M2": 66014,
+        "M3": 66015,
+        "Ruck": 66016,
+        "Tackler": 66017,
+        "Interchange": 66018
+      },
+      "provenance": {
+        "evidence_class": "reconstructable_behaviour",
+        "source": "deterministic representative lineup construction",
+        "historical_entry": "Team 1",
+        "entered_by_replay_operator": true,
+        "scorer_decision_required": false
+      }
+    },
+    {
+      "historical_entry": "Team 2",
+      "historical_coach": "Coach 2026-2",
+      "positions": {
+        "F1": 66019,
+        "F2": 66020,
+        "F3": 66021,
+        "M1": 66022,
+        "M2": 66023,
+        "M3": 66024,
+        "Ruck": 66025,
+        "Tackler": 66026,
+        "Interchange": 66027
+      },
+      "provenance": {
+        "evidence_class": "reconstructable_behaviour",
+        "source": "deterministic representative lineup construction",
+        "historical_entry": "Team 2",
+        "entered_by_replay_operator": true,
+        "scorer_decision_required": false
+      }
+    },
+    {
+      "historical_entry": "Team 3",
+      "historical_coach": "Coach 2026-3",
+      "positions": {
+        "F1": 66028,
+        "F2": 66029,
+        "F3": 66030,
+        "M1": 66031,
+        "M2": 66032,
+        "M3": 66033,
+        "Ruck": 66034,
+        "Tackler": 66035,
+        "Interchange": 66036
+      },
+      "provenance": {
+        "evidence_class": "reconstructable_behaviour",
+        "source": "deterministic representative lineup construction",
+        "historical_entry": "Team 3",
+        "entered_by_replay_operator": true,
+        "scorer_decision_required": false
+      }
+    },
+    {
+      "historical_entry": "Team 4",
+      "historical_coach": "Coach 2026-4",
+      "positions": {
+        "F1": 66037,
+        "F2": 66038,
+        "F3": 66039,
+        "M1": 66040,
+        "M2": 66041,
+        "M3": 66042,
+        "Ruck": 66043,
+        "Tackler": 66044,
+        "Interchange": 66045
+      },
+      "provenance": {
+        "evidence_class": "reconstructable_behaviour",
+        "source": "deterministic representative lineup construction",
+        "historical_entry": "Team 4",
+        "entered_by_replay_operator": true,
+        "scorer_decision_required": false
+      }
+    },
+    {
+      "historical_entry": "Team 5",
+      "historical_coach": "Coach 2026-5",
+      "positions": {
+        "F1": 66046,
+        "F2": 66047,
+        "F3": 66048,
+        "M1": 66049,
+        "M2": 66050,
+        "M3": 66051,
+        "Ruck": 66052,
+        "Tackler": 66053,
+        "Interchange": 66054
+      },
+      "provenance": {
+        "evidence_class": "reconstructable_behaviour",
+        "source": "deterministic representative lineup construction",
+        "historical_entry": "Team 5",
+        "entered_by_replay_operator": true,
+        "scorer_decision_required": false
+      }
+    },
+    {
+      "historical_entry": "Team 6",
+      "historical_coach": "Coach 2026-6",
+      "positions": {
+        "F1": 66055,
+        "F2": 66056,
+        "F3": 66057,
+        "M1": 66058,
+        "M2": 66059,
+        "M3": 66060,
+        "Ruck": 66061,
+        "Tackler": 66062,
+        "Interchange": 66063
+      },
+      "provenance": {
+        "evidence_class": "reconstructable_behaviour",
+        "source": "deterministic representative lineup construction",
+        "historical_entry": "Team 6",
+        "entered_by_replay_operator": true,
+        "scorer_decision_required": false
+      }
+    },
+    {
+      "historical_entry": "Team 7",
+      "historical_coach": "Coach 2026-7",
+      "positions": {
+        "F1": 66064,
+        "F2": 66065,
+        "F3": 66066,
+        "M1": 66067,
+        "M2": 66068,
+        "M3": 66069,
+        "Ruck": 66070,
+        "Tackler": 66071,
+        "Interchange": 66072
+      },
+      "provenance": {
+        "evidence_class": "reconstructable_behaviour",
+        "source": "deterministic representative lineup construction",
+        "historical_entry": "Team 7",
+        "entered_by_replay_operator": true,
+        "scorer_decision_required": false
+      }
+    },
+    {
+      "historical_entry": "Team 8",
+      "historical_coach": "Coach 2026-8",
+      "positions": {
+        "F1": 66073,
+        "F2": 66074,
+        "F3": 66075,
+        "M1": 66076,
+        "M2": 66077,
+        "M3": 66078,
+        "Ruck": 66079,
+        "Tackler": 66080,
+        "Interchange": 66081
+      },
+      "provenance": {
+        "evidence_class": "reconstructable_behaviour",
+        "source": "deterministic representative lineup construction",
+        "historical_entry": "Team 8",
+        "entered_by_replay_operator": true,
+        "scorer_decision_required": false
+      }
+    },
+    {
+      "historical_entry": "Team 9",
+      "historical_coach": "Coach 2026-9",
+      "positions": {
+        "F1": 66082,
+        "F2": 66083,
+        "F3": 66084,
+        "M1": 66085,
+        "M2": 66086,
+        "M3": 66087,
+        "Ruck": 66088,
+        "Tackler": 66089,
+        "Interchange": 66090
+      },
+      "provenance": {
+        "evidence_class": "reconstructable_behaviour",
+        "source": "deterministic representative lineup construction",
+        "historical_entry": "Team 9",
+        "entered_by_replay_operator": true,
+        "scorer_decision_required": false
+      }
+    }
+  ]
 }

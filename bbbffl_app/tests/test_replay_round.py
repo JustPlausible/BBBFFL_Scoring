@@ -9,7 +9,7 @@ from app.audit import ActorContext
 from app.calculations import MatchupCalculationService
 from app.identity import IdentityRepository
 from app.lineup_validation import LineupValidationService
-from app.lockouts import LockoutRepository, RoundMatchFactsProvider
+from app.lockouts import LockoutRepository, LockoutTriggerRepository, RoundMatchFactsProvider
 from app.replay import (
     ReplayAflDataSource,
     ReplayClock,
@@ -101,6 +101,15 @@ def _semantic_run(output: Path):
                 )
 
     lifecycle.transition(round_.bbbffl_round_id, "open")
+    LockoutTriggerRepository(db).create(
+        round_.bbbffl_round_id,
+        "main",
+        "main",
+        1,
+        [2601],
+        actor=OPERATOR,
+        reason="representative replay main lockout",
+    )
     mapping = RoundMappingRepository(db)
     validation_service = LineupValidationService(db, before_source)
     lockouts = LockoutRepository(db)

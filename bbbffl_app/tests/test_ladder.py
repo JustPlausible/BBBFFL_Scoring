@@ -184,6 +184,7 @@ def test_repository_isolates_two_ordinary_competition_streams_in_one_season():
     RoundMappingRepository(db).accept(round_b.bbbffl_round_id, 2028, 962, KnownRound(2028, 962))
     lifecycle_b = CompetitionLifecycleRepository(db)
     lifecycle_b.create_ordinary_round(round_b.bbbffl_round_id)
+    lifecycle_b.transition(round_b.bbbffl_round_id, "open")
 
     for repository, round_id in (
         (lifecycle, round_a.bbbffl_round_id),

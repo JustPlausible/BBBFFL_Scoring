@@ -15,6 +15,7 @@ from typing import Literal, Protocol
 
 from app.afl_client import Match, MatchState, Player, PlayerStatLine, Team
 from app.db import DecisionsRepository
+from app.participation import ParticipationEvidence, assess_participation
 from app.presentation import Number, football_score_for_position, format_football_line
 from app.scoring import FORWARD_POSITIONS, SCORABLE_POSITIONS, PlayerStats, score_position
 from app.teams import TeamConfig
@@ -108,6 +109,9 @@ class PositionResult:
     # vacant/DNP/yet_to_play) also has display_is_actual_afl=False, but
     # that's not an override artifact and must not be flagged as one.
     display_adjusted_by_override: bool
+    participation_evidence: ParticipationEvidence
+    # None means the scorer has not ruled; False is an explicit rejection.
+    dnp_ruling: bool | None
 
 
 @dataclass(frozen=True)
@@ -138,6 +142,23 @@ class InterchangeInfo:
     # yet (e.g. their match hasn't started) -- a neutral "no data" state
     # rather than an invented all-zero line.
     potential_scores: InterchangePotentialScores | None
+    participation_evidence: ParticipationEvidence
+
+
+@dataclass(frozen=True)
+class InterchangeCandidate:
+    target_position: str
+    vacancy_kind: Literal["confirmed_dnp", "intentional_vacancy"]
+    replacement_score: float | None
+    team_outcome: float | None
+
+
+@dataclass(frozen=True)
+class InterchangeRecommendation:
+    state: Literal["clear_best", "equal_best", "no_eligible_replacement", "awaiting_evidence"]
+    candidates: list[InterchangeCandidate]
+    recommended_targets: list[str]
+    advisory_only: bool = True
 
 
 @dataclass(frozen=True)
@@ -155,6 +176,7 @@ class TeamResult:
     display_goals: Number
     display_behinds: Number
     football_line: str
+    interchange_recommendation: InterchangeRecommendation
 
 
 @dataclass(frozen=True)
@@ -264,6 +286,7 @@ def build_matchup_state(
         matches_by_team_id[match.away_team.team_id] = match
 
     dnp_map = decisions.get_dnp_map()
+    dnp_rulings = decisions.get_dnp_rulings()
     interchange_assignments = decisions.get_interchange_assignments()
     overrides = decisions.get_overrides()
 
@@ -283,6 +306,15 @@ def build_matchup_state(
             name_by_player[player_id] = player.name
 
     needed_match_ids: set[int] = set()
+    # Participation evidence is advisory and remains available even after a
+    # scorer confirms DNP. Fetch each named player's (deduplicated) match so
+    # a persisted ruling never causes its supporting/contradicting AFL facts
+    # to disappear from the review model.
+    for team in teams:
+        for player_id in team.roster.values():
+            match = _match_for_player(team_by_player, matches_by_team_id, player_id)
+            if match:
+                needed_match_ids.add(match.match_id)
     for team in teams:
         assignment = interchange_assignments.get(team.team_key)
         interchange_dnp = dnp_map.get((team.team_key, "Interchange"), False)
@@ -317,6 +349,7 @@ def build_matchup_state(
     stats_by_match: dict[int, dict[int, PlayerStatLine]] = {
         match_id: afl_client.get_match_player_stats(match_id) for match_id in needed_match_ids
     }
+    bye_team_ids = None if getattr(round_, "byes", None) is None else frozenset(team.team_id for team in round_.byes)
 
     team_results: list[TeamResult] = []
     counts: dict[PositionState, int] = {
@@ -337,6 +370,13 @@ def build_matchup_state(
 
         interchange_match_state, interchange_stat_line = _resolve_underlying_match(
             team_by_player, matches_by_team_id, stats_by_match, interchange_id
+        )
+        interchange_match = _match_for_player(team_by_player, matches_by_team_id, interchange_id)
+        interchange_evidence = assess_participation(
+            afl_team_id=(team_by_player[interchange_id].team_id if interchange_id in team_by_player else None),
+            bye_team_ids=bye_team_ids,
+            match=interchange_match,
+            stat_line=interchange_stat_line,
         )
         interchange_potential_scores = None
         if interchange_stat_line is not None:
@@ -454,8 +494,73 @@ def build_matchup_state(
                     display_is_actual_afl=football.is_actual_afl,
                     football_line=football.line,
                     display_adjusted_by_override=adjusted_by_override,
+                    participation_evidence=assess_participation(
+                        afl_team_id=(
+                            team_by_player[starting_player_id].team_id if starting_player_id in team_by_player else None
+                        ),
+                        bye_team_ids=bye_team_ids,
+                        match=_match_for_player(team_by_player, matches_by_team_id, starting_player_id),
+                        stat_line=(
+                            stats_by_match.get(
+                                _match_for_player(team_by_player, matches_by_team_id, starting_player_id).match_id, {}
+                            ).get(starting_player_id)
+                            if _match_for_player(team_by_player, matches_by_team_id, starting_player_id)
+                            else None
+                        ),
+                    ),
+                    dnp_ruling=dnp_rulings.get((team.team_key, position)),
                 )
             )
+
+        eligible = [
+            (p, "confirmed_dnp" if p.starting_dnp else "intentional_vacancy")
+            for p in position_results
+            if p.starting_dnp or p.starting_player_id is None
+        ]
+        candidates: list[InterchangeCandidate] = []
+        baseline_total = sum(
+            (p.override_score if p.override_score is not None else 0.0)
+            if (p.starting_dnp or p.starting_player_id is None)
+            else (p.effective_score or 0.0)
+            for p in position_results
+        )
+        if interchange_id is not None and not interchange_dnp:
+            for position_result, vacancy_kind in eligible:
+                replacement = (
+                    position_result.override_score
+                    if position_result.override_score is not None
+                    else (
+                        score_position(position_result.position, _stats_to_player_stats(interchange_stat_line))
+                        if interchange_stat_line is not None
+                        else None
+                    )
+                )
+                candidates.append(
+                    InterchangeCandidate(
+                        target_position=position_result.position,
+                        vacancy_kind=vacancy_kind,
+                        replacement_score=replacement,
+                        team_outcome=(baseline_total + replacement if replacement is not None else None),
+                    )
+                )
+        scored_candidates = [candidate for candidate in candidates if candidate.team_outcome is not None]
+        if not candidates:
+            recommendation_state = "no_eligible_replacement"
+            recommended_targets = []
+        elif not scored_candidates:
+            recommendation_state = "awaiting_evidence"
+            recommended_targets = []
+        else:
+            best = max(candidate.team_outcome for candidate in scored_candidates)
+            recommended_targets = [
+                candidate.target_position for candidate in scored_candidates if candidate.team_outcome == best
+            ]
+            recommendation_state = "clear_best" if len(recommended_targets) == 1 else "equal_best"
+        interchange_recommendation = InterchangeRecommendation(
+            state=recommendation_state,
+            candidates=candidates,
+            recommended_targets=recommended_targets,
+        )
 
         interchange_info = InterchangeInfo(
             canonical_player_id=interchange_id,
@@ -465,6 +570,7 @@ def build_matchup_state(
             dnp=interchange_dnp,
             target_position=interchange_target,
             potential_scores=interchange_potential_scores,
+            participation_evidence=interchange_evidence,
         )
 
         team_results.append(
@@ -477,6 +583,7 @@ def build_matchup_state(
                 display_goals=team_display_goals,
                 display_behinds=team_display_behinds,
                 football_line=format_football_line(team_display_goals, team_display_behinds),
+                interchange_recommendation=interchange_recommendation,
             )
         )
 

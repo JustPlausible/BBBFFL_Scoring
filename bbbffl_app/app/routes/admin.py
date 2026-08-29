@@ -42,11 +42,13 @@ class DnpRequest(BaseModel):
     team_key: str
     slot: str
     dnp: bool
+    reason: str | None = None
 
 
 class InterchangeRequest(BaseModel):
     team_key: str
     target_position: str | None = None
+    reason: str | None = None
 
 
 class OverrideRequest(BaseModel):
@@ -82,14 +84,25 @@ def admin_state(request: Request):
 
 @router.post("/dnp", dependencies=[Depends(require_admin)])
 def set_dnp(payload: DnpRequest, request: Request):
-    apply_dnp_decision(request.app.state.decisions, _team_keys(request), payload.team_key, payload.slot, payload.dnp)
+    apply_dnp_decision(
+        request.app.state.decisions,
+        _team_keys(request),
+        payload.team_key,
+        payload.slot,
+        payload.dnp,
+        reason=payload.reason,
+    )
     return _current_state(request)
 
 
 @router.post("/interchange", dependencies=[Depends(require_admin)])
 def set_interchange(payload: InterchangeRequest, request: Request):
     apply_interchange_decision(
-        request.app.state.decisions, _team_keys(request), payload.team_key, payload.target_position
+        request.app.state.decisions,
+        _team_keys(request),
+        payload.team_key,
+        payload.target_position,
+        reason=payload.reason,
     )
     return _current_state(request)
 

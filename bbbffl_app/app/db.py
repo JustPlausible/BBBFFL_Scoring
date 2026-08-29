@@ -279,6 +279,10 @@ class DecisionsRepository:
         ).fetchall()
         return {(row["team_key"], row["slot"]): bool(row["dnp"]) for row in rows}
 
+    def get_dnp_rulings(self) -> dict[tuple[str, str], bool]:
+        """Return explicit scorer rulings, retaining False as a rejection."""
+        return self.get_dnp_map()
+
     # -- Interchange -----------------------------------------------------
     def set_interchange_assignment(
         self,

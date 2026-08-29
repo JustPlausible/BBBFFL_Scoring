@@ -1,0 +1,93 @@
+{
+  "schema": "bbbffl.replay-evidence/v1",
+  "manifest": {
+    "id": "2026-checkpoint-early-lockout",
+    "version": "1.0.0",
+    "evidence_class": "synthetic_scenario",
+    "bbbffl_season": 2026,
+    "bbbffl_round": 3,
+    "description": "Issue #67 checkpoint: a staged/early BBBFFL round with a Thursday-night selective lockout stage before the Saturday main lockout stage. The AFL round identity is a known 2026 fact; the two-match staged schedule and every player/lineup below are an explicitly synthetic scenario built to exercise multi-stage lockout, never a claimed historical 2026 fact."
+  },
+  "seasons": [
+    {
+      "season_id": 2026,
+      "is_current": true,
+      "current_round_number": 3,
+      "year": 2026,
+      "provenance": {"evidence_class": "known_fact", "source": "2026 AFL season identity"}
+    }
+  ],
+  "rounds": [
+    {
+      "round_id": 1346,
+      "season_id": 2026,
+      "round_number": 3,
+      "byes": [],
+      "provenance": {"evidence_class": "known_fact", "source": "2026 AFL round mapping evidence (docs/opening-round-deferred-selection.md R3=1346)"}
+    }
+  ],
+  "matches": [
+    {
+      "match_id": 2701,
+      "round_id": 1346,
+      "status": "UPCOMING",
+      "start_time_utc": "2026-04-02T09:00:00Z",
+      "home_team": {"team_id": 501, "name": "Thursday Home"},
+      "away_team": {"team_id": 502, "name": "Thursday Away"},
+      "status_timeline": [
+        {"effective_at": "2026-03-26T00:00:00Z", "status": "UPCOMING"},
+        {"effective_at": "2026-04-02T09:00:00Z", "status": "LIVE"},
+        {"effective_at": "2026-04-02T12:00:00Z", "status": "CONCLUDED"}
+      ],
+      "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled early/selective-stage match"}
+    },
+    {
+      "match_id": 2702,
+      "round_id": 1346,
+      "status": "UPCOMING",
+      "start_time_utc": "2026-04-04T09:00:00Z",
+      "home_team": {"team_id": 503, "name": "Saturday Home"},
+      "away_team": {"team_id": 504, "name": "Saturday Away"},
+      "status_timeline": [
+        {"effective_at": "2026-03-26T00:00:00Z", "status": "UPCOMING"},
+        {"effective_at": "2026-04-04T09:00:00Z", "status": "LIVE"},
+        {"effective_at": "2026-04-04T12:00:00Z", "status": "CONCLUDED"}
+      ],
+      "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled main-stage match"}
+    }
+  ],
+  "players": [
+    {"canonical_player_id": 5001, "display_name": "Early F1 Player", "team_id": 501, "team_name": "Thursday Home", "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint player"}},
+    {"canonical_player_id": 5002, "display_name": "Main F2 Player", "team_id": 503, "team_name": "Saturday Home", "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint player"}},
+    {"canonical_player_id": 5003, "display_name": "Main F3 Player", "team_id": 503, "team_name": "Saturday Home", "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint player"}},
+    {"canonical_player_id": 5004, "display_name": "Main M1 Player", "team_id": 503, "team_name": "Saturday Home", "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint player"}},
+    {"canonical_player_id": 5005, "display_name": "Main M2 Player", "team_id": 503, "team_name": "Saturday Home", "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint player"}},
+    {"canonical_player_id": 5006, "display_name": "Main M3 Player", "team_id": 503, "team_name": "Saturday Home", "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint player"}},
+    {"canonical_player_id": 5007, "display_name": "Main Ruck Player", "team_id": 503, "team_name": "Saturday Home", "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint player"}},
+    {"canonical_player_id": 5008, "display_name": "Main Tackler Player", "team_id": 503, "team_name": "Saturday Home", "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint player"}},
+    {"canonical_player_id": 5009, "display_name": "Main Interchange Player", "team_id": 503, "team_name": "Saturday Home", "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint player"}},
+    {"canonical_player_id": 5010, "display_name": "Early Bypass Attempt Player", "team_id": 501, "team_name": "Thursday Home", "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint player used only to attempt a prohibited Interchange bypass"}},
+    {"canonical_player_id": 5011, "display_name": "Main Permitted Edit Player", "team_id": 503, "team_name": "Saturday Home", "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint player used only for the permitted still-editable resubmission"}}
+  ],
+  "player_stats": {
+    "2701": [],
+    "2702": []
+  },
+  "lineups": [
+    {
+      "historical_entry": "Team 0",
+      "positions": {
+        "F1": 5001,
+        "F2": 5002,
+        "F3": 5003,
+        "M1": 5004,
+        "M2": 5005,
+        "M3": 5006,
+        "Ruck": 5007,
+        "Tackler": 5008,
+        "Interchange": 5009
+      },
+      "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint starting lineup: F1 resolves to the early-stage match, every other slot to the main-stage match"}
+    }
+  ]
+}

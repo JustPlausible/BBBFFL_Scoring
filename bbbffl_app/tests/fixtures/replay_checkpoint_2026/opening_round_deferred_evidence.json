@@ -1,0 +1,69 @@
+{
+  "schema": "bbbffl.replay-evidence/v1",
+  "manifest": {
+    "id": "2026-checkpoint-opening-round-deferred",
+    "version": "1.0.0",
+    "evidence_class": "synthetic_scenario",
+    "bbbffl_season": 2026,
+    "bbbffl_round": 2,
+    "description": "Issue #67 checkpoint: a mixed-source BBBFFL round combining an ordinary current-round AFL match with a previously-nominated Opening Round deferred/compensating-bye slot (issue #69). The AFL Opening Round identity (round 1343) and Brisbane Lions' (club 2) compensating bye landing in 2026 AFL round 1345 (R2) are known 2026 facts per docs/opening-round-deferred-selection.md; the specific match/player/nomination/statistic content used to exercise the mechanism is an explicitly synthetic scenario -- this repository holds no historical BBBFFL nomination record for any real 2026 coach (see that document's 'Unresolved historical BBBFFL mappings' section)."
+  },
+  "seasons": [
+    {
+      "season_id": 2026,
+      "is_current": true,
+      "current_round_number": 2,
+      "year": 2026,
+      "provenance": {"evidence_class": "known_fact", "source": "2026 AFL season identity"}
+    }
+  ],
+  "rounds": [
+    {
+      "round_id": 1343,
+      "season_id": 2026,
+      "round_number": 0,
+      "byes": [],
+      "provenance": {"evidence_class": "known_fact", "source": "2026 AFL Opening Round identity (docs/opening-round-deferred-selection.md 2026 evidence table)"}
+    },
+    {
+      "round_id": 1345,
+      "season_id": 2026,
+      "round_number": 2,
+      "byes": [{"team_id": 999, "name": "Filler Bye Club"}],
+      "provenance": {"evidence_class": "synthetic_scenario", "source": "2026 AFL round 1345 (R2) identity, and Brisbane Lions' (club 2) compensating bye landing here, are known facts per docs/opening-round-deferred-selection.md; the 'Filler Bye Club' byes entry is a synthetic addition used only to give this checkpoint's filler lineups an uncontested, non-blocking participation classification -- it is not genuine 2026 bye evidence"}
+    }
+  ],
+  "matches": [
+    {
+      "match_id": 9001,
+      "round_id": 1343,
+      "status": "CONCLUDED",
+      "start_time_utc": "2026-03-05T09:00:00Z",
+      "home_team": {"team_id": 2, "name": "Brisbane Lions"},
+      "away_team": {"team_id": 5, "name": "Carlton"},
+      "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled Opening Round match; BL's participation is a known fact, this specific match content is a synthetic reconstruction for checkpoint purposes"}
+    },
+    {
+      "match_id": 9002,
+      "round_id": 1345,
+      "status": "CONCLUDED",
+      "start_time_utc": "2026-04-04T09:00:00Z",
+      "home_team": {"team_id": 100, "name": "Ordinary Home"},
+      "away_team": {"team_id": 101, "name": "Ordinary Away"},
+      "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled ordinary current-round match, deliberately not involving Brisbane Lions (club 2), which is on its compensating bye this round"}
+    }
+  ],
+  "players": [
+    {"canonical_player_id": 7001, "display_name": "Deferred Opening Round Player", "team_id": 2, "team_name": "Brisbane Lions", "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint player nominated from Opening Round into a future BBBFFL slot"}},
+    {"canonical_player_id": 7002, "display_name": "Ordinary Current-Round Player", "team_id": 100, "team_name": "Ordinary Home", "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint player scoring from the current mapped AFL round"}}
+  ],
+  "player_stats": {
+    "9001": [
+      {"canonical_player_id": 7001, "disposals": 25, "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint Opening Round stat line"}}
+    ],
+    "9002": [
+      {"canonical_player_id": 7002, "disposals": 18, "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint ordinary current-round stat line"}}
+    ]
+  },
+  "lineups": []
+}

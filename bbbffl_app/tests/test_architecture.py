@@ -58,6 +58,7 @@ SEASON_MODEL = {
     "app.competition_lifecycle",
     "app.lineups",
     "app.calculations",
+    "app.ladder",
 }
 
 # Lockouts sits one layer above the season model (it depends on

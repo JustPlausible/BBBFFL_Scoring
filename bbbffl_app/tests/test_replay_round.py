@@ -3,13 +3,13 @@
 import json
 from pathlib import Path
 
-from sqlalchemy import text
-
 from app.audit import ActorContext
 from app.calculations import MatchupCalculationService
 from app.identity import IdentityRepository
+from app.lineup_proxy import LineupProxyService
 from app.lineup_validation import LineupValidationService
 from app.lockouts import LockoutRepository, LockoutTriggerRepository, RoundMatchFactsProvider
+from app.player_pool import OwnershipRepository, PlayerPoolRepository
 from app.replay import (
     ReplayAflDataSource,
     ReplayClock,
@@ -18,7 +18,9 @@ from app.replay import (
 )
 from app.round_mapping import RoundMappingRepository
 from app.round_review import RoundReviewRepository, attempt_signoff, build_round_review
-from tests.round_review_helpers import full_round, progress_to_review
+from tests.db_helpers import migrated_connection
+from tests.round_review_helpers import progress_to_review
+from tests.test_competition_lifecycle import operational
 
 FIXTURE = Path(__file__).parent / "fixtures" / "replay_round_2026" / "evidence.json"
 OPERATOR = ActorContext.anonymous_operator(role="scorer")
@@ -32,75 +34,65 @@ def _semantic_run(output: Path):
     after_source = ReplayAflDataSource(FIXTURE, clock=after)
     final_source = ReplayAflDataSource(FIXTURE, clock=final)
 
-    # full_round is only the clean relational initialiser. Its AFL facts are
-    # deliberately discarded: every identity, match and stat consumed below
-    # is replaced by and resolved from the checked-in replay manifest.
-    db, lifecycle, round_, _, _, _ = full_round(year=2026, afl_round=1344)
+    db = migrated_connection()
+    lifecycle, round_, entries = operational(db, year=2026, afl_round=1344)
     scope = db.execute(
         "SELECT c.season_id,c.competition_id FROM bbbffl_round r JOIN competition_stream c "
         "ON c.competition_id=r.competition_id WHERE r.bbbffl_round_id=?",
         (round_.bbbffl_round_id,),
     ).fetchone()
-    with db.engine.begin() as conn:
-        lineups = (
-            conn.execute(
-                text(
-                    "SELECT l.lineup_id,l.season_entry_id,n.team_name FROM weekly_lineup l "
-                    "JOIN season_entry_team_name_history n ON n.season_entry_id=l.season_entry_id "
-                    "AND n.ended_at IS NULL ORDER BY n.team_name"
-                )
-            )
-            .mappings()
-            .all()
-        )
-        for lineup in lineups:
-            manifest_lineup = next(
-                item for item in final_source.lineup_inputs if item["historical_entry"] == lineup["team_name"]
-            )
-            conn.execute(
-                text(
-                    "UPDATE weekly_lineup_submission SET actor_type='anonymous_operator', actor_role='scorer', "
-                    "source_type='scorer_proxy', source_detail='2026-round-1-representative@2.0.0', "
-                    "reason='historical lineup reconstructed by replay operator' WHERE lineup_id=:id"
-                ),
-                {"id": lineup["lineup_id"]},
-            )
-            slots = conn.execute(
-                text("SELECT s.position,s.season_player_id FROM weekly_lineup_submission_slot s WHERE s.lineup_id=:id"),
-                {"id": lineup["lineup_id"]},
-            ).mappings()
-            for slot in slots:
-                canonical = manifest_lineup["positions"][slot["position"]]
-                player = final_source.get_player(canonical)
-                conn.execute(
-                    text(
-                        "UPDATE season_player_pool SET canonical_player_id=:canonical,display_name=:name,"
-                        "afl_team_id=:team_id,afl_team_name=:team_name WHERE season_player_id=:player_id"
-                    ),
-                    {
-                        "canonical": canonical,
-                        "name": player.name,
-                        "team_id": player.current_team.team_id,
-                        "team_name": player.current_team.name,
-                        "player_id": slot["season_player_id"],
-                    },
-                )
-                conn.execute(
-                    text(
-                        "INSERT INTO player_ownership_period "
-                        "(ownership_period_id,season_player_id,season_id,season_entry_id,acquired_at,reason,created_at) "
-                        "VALUES (:id,:player,:season,:entry,'2026-01-01T00:00:00+00:00',"
-                        "'replay initial draft','2026-01-01T00:00:00+00:00')"
-                    ),
-                    {
-                        "id": f"own-{slot['season_player_id']}",
-                        "player": slot["season_player_id"],
-                        "season": scope["season_id"],
-                        "entry": lineup["season_entry_id"],
-                    },
-                )
-
     lifecycle.transition(round_.bbbffl_round_id, "open")
+    pool = PlayerPoolRepository(db)
+    ownership = OwnershipRepository(db)
+    ownership.configure_squad_limit(
+        scope["season_id"], 9, actor=OPERATOR, reason="representative replay squad configuration"
+    )
+    proxy = LineupProxyService(db, before_source)
+    identity_repository = IdentityRepository(db)
+    entries_by_team = {identity_repository.get_public_team(entry.season_entry_id).team_name: entry for entry in entries}
+    for manifest_lineup in final_source.lineup_inputs:
+        entry = entries_by_team[manifest_lineup["historical_entry"]]
+        positions = {}
+        for position, canonical in manifest_lineup["positions"].items():
+            evidence_player = final_source.get_player(canonical)
+            season_player = pool.refresh_player(
+                scope["season_id"],
+                canonical,
+                evidence_player.name,
+                afl_team_id=evidence_player.current_team.team_id,
+                afl_team_name=evidence_player.current_team.name,
+                source_provider="replay:2026-round-1-representative@2.0.0",
+                source_fetched_at="2026-03-19T08:29:00+00:00",
+            )
+            ownership.acquire(
+                season_player.season_player_id,
+                entry.season_entry_id,
+                effective_at="2026-01-01T00:00:00+00:00",
+                actor=OPERATOR,
+                reason="representative replay initial squad",
+            )
+            positions[position] = season_player.season_player_id
+        draft = proxy.create_or_amend(
+            scope["season_id"],
+            scope["competition_id"],
+            round_.bbbffl_round_id,
+            entry.season_entry_id,
+            positions,
+            expected_revision=0,
+            actor=OPERATOR,
+        )
+        proxy.submit(
+            draft.lineup_id,
+            expected_draft_revision=draft.revision,
+            expected_submission_version=0,
+            actor=OPERATOR,
+            reason="historical lineup reconstructed from replay evidence 2026-round-1-representative@2.0.0",
+        )
+    lineups = db.execute(
+        "SELECT l.lineup_id,l.season_entry_id,n.team_name FROM weekly_lineup l "
+        "JOIN season_entry_team_name_history n ON n.season_entry_id=l.season_entry_id "
+        "AND n.ended_at IS NULL ORDER BY n.team_name"
+    ).fetchall()
     LockoutTriggerRepository(db).create(
         round_.bbbffl_round_id,
         "main",

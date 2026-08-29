@@ -131,6 +131,12 @@ OPENING_ROUND = {"app.opening_round"}
 # other through it.
 AFL_EVIDENCE = {"app.participation"}
 
+# Deterministic replay evidence/time and completed-round diagnostics (issue
+# #66): an application service above the AFL dataclasses and persisted season
+# model. It may read ladder/result state for reporting, but must never reach
+# into HTTP routes, the Grand Final sibling vertical, or the composition root.
+REPLAY = {"app.replay"}
+
 ROUTES = {
     "app.routes",
     "app.routes.admin",
@@ -152,6 +158,7 @@ ALL_GROUPS = (
     | WEEKLY_SUBMISSION_SOURCES
     | AFL_RESILIENCE
     | AFL_EVIDENCE
+    | REPLAY
     | ROUND_REVIEW
     | OPENING_ROUND
     | GRAND_FINAL_VERTICAL
@@ -371,6 +378,20 @@ def test_afl_evidence_depends_only_on_foundation(graph):
     for module in sorted(AFL_EVIDENCE):
         offending = graph[module] & forbidden
         assert not offending, f"{module} must not depend on {sorted(offending)}"
+
+
+def test_replay_does_not_depend_on_routes_grand_final_or_composition_root(graph):
+    forbidden = GRAND_FINAL_VERTICAL | LOCKOUTS | ROUTES | COMPOSITION_ROOT
+    for module in sorted(REPLAY):
+        offending = graph[module] & forbidden
+        assert not offending, f"{module} must not depend on {sorted(offending)}"
+
+
+def test_domain_layers_do_not_depend_on_replay(graph):
+    """Replay orchestrates production domains; it is never domain policy."""
+    lower_layers = SEASON_MODEL | LOCKOUTS | WEEKLY_SUBMISSION_SOURCES | AFL_EVIDENCE | ROUND_REVIEW
+    for module in sorted(lower_layers):
+        assert not graph[module] & REPLAY, f"{module} must not depend on replay orchestration"
 
 
 def test_lineups_and_lockouts_stay_decoupled(graph):

@@ -659,3 +659,17 @@ class OwnershipRepository:
             (season_entry_id, effective_at, effective_at),
         ).fetchall()
         return [OwnershipPeriod(**dict(row)) for row in rows]
+
+    def current_squad(self, season_entry_id):
+        """Return the entry's authoritative current ownership periods.
+
+        Unlike ``squad_at``, this is intentionally not a historical view. It
+        shares submission validation's authority: an ownership period is
+        current exactly while it has no release timestamp.
+        """
+        rows = self.database.execute(
+            "SELECT * FROM player_ownership_period "
+            "WHERE season_entry_id=? AND released_at IS NULL ORDER BY acquired_at",
+            (season_entry_id,),
+        ).fetchall()
+        return [OwnershipPeriod(**dict(row)) for row in rows]

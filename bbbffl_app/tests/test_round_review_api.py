@@ -179,3 +179,59 @@ def test_incomplete_round_signoff_returns_409_with_blockers(review_client):
     assert resp.status_code == 409
     body = resp.json()
     assert matchup.matchup_id in body["blockers"]
+
+
+def test_correction_recomputes_and_checks_evidence_freshness_before_publishing(review_client):
+    """Regression: the /correct endpoint used to freeze a new official
+    version straight from whatever was last calculated, without the
+    /signoff endpoint's recompute-and-check-freshness step -- so a stale
+    afl-api fact could be corrected into official history unnoticed."""
+    client = review_client
+    round_, lifecycle, entries, canon = _seed(client, 8803)
+    round_id = round_.bbbffl_round_id
+    api = f"/api/admin/round-review/{round_id}"
+
+    signoff_resp = client.post(f"{api}/signoff", json={"reason": "round complete"})
+    assert signoff_resp.status_code == 200, signoff_resp.text
+    matchup_id = lifecycle.list_matchups(round_id)[0].matchup_id
+
+    # afl-api evidence is now stale for any further calculation.
+    client.app.state.afl_client.is_evidence_fresh = lambda: False
+
+    resp = client.post(
+        f"/api/admin/round-review/matchup/{matchup_id}/correct",
+        json={"reason": "attempted correction on stale evidence"},
+    )
+    assert resp.status_code == 409
+    assert "evidence" in resp.json()["blockers"][matchup_id][0]
+    # Nothing was published: version 1 remains the only, effective version.
+    history = client.get(f"/api/admin/round-review/matchup/{matchup_id}/history").json()
+    assert [h["version"] for h in history] == [1]
+
+
+def test_ruling_for_a_matchup_from_a_different_round_is_rejected(review_client):
+    """Regression: the URL's round_id used to be decorative -- a payload
+    naming a matchup that belongs to a *different* round would still be
+    mutated, and the response (rebuilt from the URL's round_id) would not
+    even show it."""
+    client = review_client
+    round_a, lifecycle, entries, canon = _seed(client, 8804)
+    round_b, _, _, _ = _seed(client, 8805)
+    other_round_matchup = lifecycle.list_matchups(round_b.bbbffl_round_id)[0]
+
+    resp = client.post(
+        f"/api/admin/round-review/{round_a.bbbffl_round_id}/dnp",
+        json={
+            "matchup_id": other_round_matchup.matchup_id,
+            "season_entry_id": other_round_matchup.home_season_entry_id,
+            "slot": "F1",
+            "dnp": True,
+            "expected_review_version": 1,
+            "reason": "should be rejected",
+        },
+    )
+    assert resp.status_code == 404
+    # The mutation must not have committed against the other round's matchup.
+    from app.round_review import RoundReviewRepository
+
+    assert RoundReviewRepository(client.app.state.database).get_slot_rulings(other_round_matchup.matchup_id) == {}

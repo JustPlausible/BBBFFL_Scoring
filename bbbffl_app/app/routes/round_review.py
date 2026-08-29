@@ -98,6 +98,7 @@ def record_dnp_ruling(round_id: str, payload: DnpRulingRequest, request: Request
         expected_review_version=payload.expected_review_version,
         actor=_actor(payload.scorer_name),
         reason=payload.reason,
+        round_id=round_id,
     )
     return _round_review_view(request, round_id)
 
@@ -111,6 +112,7 @@ def record_interchange_ruling(round_id: str, payload: InterchangeRulingRequest, 
         expected_review_version=payload.expected_review_version,
         actor=_actor(payload.scorer_name),
         reason=payload.reason,
+        round_id=round_id,
     )
     return _round_review_view(request, round_id)
 
@@ -126,6 +128,7 @@ def record_override(round_id: str, payload: OverrideRequest, request: Request):
         payload.reason,
         expected_review_version=payload.expected_review_version,
         actor=_actor(payload.scorer_name, payload.actor_role),
+        round_id=round_id,
     )
     return _round_review_view(request, round_id)
 
@@ -167,12 +170,24 @@ def matchup_history(matchup_id: str, request: Request):
 @router.post("/matchup/{matchup_id}/correct", dependencies=[Depends(require_admin)])
 def correct_matchup(matchup_id: str, payload: CorrectionRequest, request: Request):
     state = request.app.state
-    result = attempt_correction(
-        state.lifecycle,
-        state.round_review,
-        state.identities,
-        matchup_id,
-        actor=_actor(payload.scorer_name, "admin"),
-        reason=payload.reason,
-    )
+    afl_client = state.afl_client
+    # Same fresh-evidence discipline as /signoff above: a correction must
+    # not freeze a new official version from a calculation that predates
+    # AFL facts which have since changed. Recomputing just this matchup
+    # (not the whole round) keeps a single-matchup correction cheap.
+    evidence_batch = getattr(afl_client, "evidence_batch", None)
+    scope = evidence_batch() if callable(evidence_batch) else nullcontext(afl_client)
+    with scope as evidence:
+        state.calculations.calculate_matchup(matchup_id)
+        is_evidence_fresh = getattr(evidence, "is_evidence_fresh", None)
+        evidence_fresh = is_evidence_fresh() if callable(is_evidence_fresh) else True
+        result = attempt_correction(
+            state.lifecycle,
+            state.round_review,
+            state.identities,
+            matchup_id,
+            actor=_actor(payload.scorer_name, "admin"),
+            reason=payload.reason,
+            evidence_fresh=evidence_fresh,
+        )
     return dataclasses.asdict(result)

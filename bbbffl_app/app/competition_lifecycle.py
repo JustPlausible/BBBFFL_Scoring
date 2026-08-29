@@ -381,7 +381,8 @@ class CompetitionLifecycleRepository:
                     ),
                 )
                 conn.execute(
-                    "UPDATE bbbffl_matchup SET effective_official_version=? WHERE matchup_id=?",
+                    "UPDATE bbbffl_matchup SET effective_official_version=?, review_version=review_version+1 "
+                    "WHERE matchup_id=?",
                     (version, matchup["matchup_id"]),
                 )
                 append_event(
@@ -469,7 +470,8 @@ class CompetitionLifecycleRepository:
                 (matchup_id, version, home_score, away_score, now, actor.actor_id, reason, snapshot),
             )
             conn.execute(
-                "UPDATE bbbffl_matchup SET effective_official_version=? WHERE matchup_id=?",
+                "UPDATE bbbffl_matchup SET effective_official_version=?, review_version=review_version+1 "
+                "WHERE matchup_id=?",
                 (version, matchup_id),
             )
             append_event(

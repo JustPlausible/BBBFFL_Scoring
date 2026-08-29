@@ -163,7 +163,7 @@ class RoundReviewRepository:
     def __init__(self, database):
         self.database = database
 
-    def _locked_matchup(self, conn, matchup_id, expected_review_version):
+    def _locked_matchup(self, conn, matchup_id, expected_review_version, *, expected_round_id=None):
         row = conn.execute(
             "SELECT matchup_id, bbbffl_round_id, home_season_entry_id, away_season_entry_id, review_version "
             "FROM bbbffl_matchup WHERE matchup_id=?" + _for_update_suffix(self.database),
@@ -171,6 +171,14 @@ class RoundReviewRepository:
         ).fetchone()
         if not row:
             raise UnknownMatchupError(matchup_id)
+        if expected_round_id is not None and row["bbbffl_round_id"] != expected_round_id:
+            # A caller that scopes its request by round (e.g. the
+            # `/{round_id}/...` API routes) must never let a `matchup_id`
+            # naming a *different* round's matchup mutate that other
+            # round through this one's URL -- see
+            # tests/test_round_review.py::
+            # test_ruling_rejects_a_matchup_from_a_different_round.
+            raise UnknownMatchupError(f"matchup {matchup_id} does not belong to round {expected_round_id}")
         if expected_review_version is not None and row["review_version"] != expected_review_version:
             raise StaleRoundVersionError(
                 f"matchup {matchup_id} review is at version {row['review_version']}, "
@@ -193,11 +201,12 @@ class RoundReviewRepository:
         expected_review_version,
         actor: ActorContext,
         reason: str | None = None,
+        round_id: str | None = None,
     ) -> int:
         if slot not in SLOTS:
             raise InvalidSlotError(f"Unknown slot: {slot}")
         with transaction(self.database) as conn:
-            matchup = self._locked_matchup(conn, matchup_id, expected_review_version)
+            matchup = self._locked_matchup(conn, matchup_id, expected_review_version, expected_round_id=round_id)
             self._ensure_entry(matchup, season_entry_id)
             existing = conn.execute(
                 "SELECT dnp FROM bbbffl_matchup_slot_ruling WHERE matchup_id=? AND season_entry_id=? AND slot=?",
@@ -251,11 +260,12 @@ class RoundReviewRepository:
         expected_review_version,
         actor: ActorContext,
         reason: str | None = None,
+        round_id: str | None = None,
     ) -> int:
         if target_position is not None and target_position not in OVERRIDE_POSITIONS:
             raise InvalidSlotError(f"Invalid target_position: {target_position}")
         with transaction(self.database) as conn:
-            matchup = self._locked_matchup(conn, matchup_id, expected_review_version)
+            matchup = self._locked_matchup(conn, matchup_id, expected_review_version, expected_round_id=round_id)
             self._ensure_entry(matchup, season_entry_id)
             existing = conn.execute(
                 "SELECT target_position FROM bbbffl_matchup_interchange_ruling "
@@ -312,6 +322,7 @@ class RoundReviewRepository:
         *,
         expected_review_version,
         actor: ActorContext,
+        round_id: str | None = None,
     ) -> int:
         """Set (`override_score` not None) or clear (`override_score`
         None) a manual score override. Setting one always requires an
@@ -329,7 +340,7 @@ class RoundReviewRepository:
             if not reason:
                 raise MissingOverrideReasonError("a manual override requires an explicit reason")
         with transaction(self.database) as conn:
-            matchup = self._locked_matchup(conn, matchup_id, expected_review_version)
+            matchup = self._locked_matchup(conn, matchup_id, expected_review_version, expected_round_id=round_id)
             self._ensure_entry(matchup, season_entry_id)
             existing = conn.execute(
                 "SELECT override_score, reason FROM bbbffl_matchup_override "

@@ -14,6 +14,7 @@ from app.round_review import (
     SignoffValidationError,
     UnauthorisedActorError,
     UnknownEntryError,
+    UnknownMatchupError,
     attempt_correction,
     attempt_signoff,
     build_round_review,
@@ -207,6 +208,26 @@ def test_ruling_for_unknown_entry_is_rejected():
         review_repo.record_dnp_ruling(
             matchup.matchup_id, other_entry, "F1", True, expected_review_version=1, actor=SCORER
         )
+
+
+def test_ruling_rejects_a_matchup_from_a_different_round():
+    """Regression: a caller scoping a ruling by round_id must never be
+    able to mutate a matchup that actually belongs to a different round --
+    see app/routes/round_review.py's URL-scoped endpoints."""
+    db, lifecycle, round_a, entries_a, stats_a, canon_a, review_repo, identities = _setup(3105)
+    _, lifecycle_b, round_b, entries_b, stats_b, canon_b = full_round(db, year=3106)
+    other_round_matchup = lifecycle_b.list_matchups(round_b.bbbffl_round_id)[0]
+    with pytest.raises(UnknownMatchupError):
+        review_repo.record_dnp_ruling(
+            other_round_matchup.matchup_id,
+            other_round_matchup.home_season_entry_id,
+            "F1",
+            True,
+            expected_review_version=1,
+            actor=SCORER,
+            round_id=round_a.bbbffl_round_id,
+        )
+    assert review_repo.get_slot_rulings(other_round_matchup.matchup_id) == {}
 
 
 # -- Overrides ----------------------------------------------------------
@@ -483,3 +504,37 @@ def test_stale_correction_attempt_fails_safely():
             matchup.matchup_id, 10, 10, reason="stale", actor=ADMIN, expected_review_version=999
         )
     assert lifecycle.effective_result(matchup.matchup_id).version == 1
+
+
+def test_a_second_correction_at_the_same_review_version_is_rejected_as_stale():
+    """Regression: correcting a matchup did not itself advance
+    `review_version`, so two corrections built from the same
+    `expected_review_version` (neither having touched a ruling/override in
+    between) could both pass the CAS check -- the second one silently
+    superseding the first's freshly-published version rather than being
+    rejected as stale."""
+    db, lifecycle, round_, entries, stats, canon, review_repo, identities = _setup(3404)
+    attempt_signoff(lifecycle, review_repo, identities, round_.bbbffl_round_id, actor=SCORER, reason="initial")
+    matchup = lifecycle.list_matchups(round_.bbbffl_round_id)[0]
+    review_version = lifecycle.get_matchup(matchup.matchup_id).review_version
+
+    lifecycle.correct_matchup_result(
+        matchup.matchup_id, 111, 111, reason="first correction", actor=ADMIN, expected_review_version=review_version
+    )
+    assert lifecycle.effective_result(matchup.matchup_id).version == 2
+    assert lifecycle.get_matchup(matchup.matchup_id).review_version == review_version + 1
+
+    with pytest.raises(StaleRoundVersionError):
+        lifecycle.correct_matchup_result(
+            matchup.matchup_id,
+            222,
+            222,
+            reason="second correction, same stale revision",
+            actor=ADMIN,
+            expected_review_version=review_version,
+        )
+    # Only the first correction's version 2 exists; no duplicate version 3.
+    history = lifecycle.result_history(matchup.matchup_id)
+    assert [h.version for h in history] == [1, 2]
+    assert lifecycle.effective_result(matchup.matchup_id).version == 2
+    assert lifecycle.effective_result(matchup.matchup_id).home_score == 111

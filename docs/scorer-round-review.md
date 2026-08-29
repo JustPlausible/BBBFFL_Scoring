@@ -66,7 +66,12 @@ trip to explain a ruling.
 (rulings/overrides), `POST /{round_id}/signoff`, `GET
 /matchup/{matchup_id}/history`, `POST /matchup/{matchup_id}/correct`.
 Like every other route module, it never imports the season model
-directly — see `tests/test_architecture.py`'s `ROUND_REVIEW` group.
+directly — see `tests/test_architecture.py`'s `ROUND_REVIEW` group. The
+`/{round_id}/dnp|interchange|override` endpoints pass that URL `round_id`
+through to `RoundReviewRepository` as `expected_round_id`, so a request
+naming a `matchup_id` that actually belongs to a different round is
+rejected (`UnknownMatchupError`) rather than mutating that other round
+through this one's URL.
 
 A manual override requires `actor_role` in `{"scorer", "admin"}`
 (`AUTHORISED_OVERRIDE_ROLES`) and a non-empty reason; every other role
@@ -112,6 +117,19 @@ corrects exactly one matchup: it appends version N+1, repoints
 lifecycle needs to change for one matchup's official history to grow a
 new version. Version 1 (and every prior version) is preserved exactly,
 byte-for-byte, forever.
+
+Committing a correction also advances `review_version` (the same counter
+rulings/overrides bump), not just `effective_official_version` — a
+correction is itself a change to "the reviewed state a matchup's official
+record was produced from", so a second correction attempt built from the
+same pre-correction revision must fail as stale too, exactly like a
+ruling/override would; otherwise two concurrent corrections starting from
+an unchanged review could both pass their CAS check and append two
+official versions instead of one being rejected. `/matchup/{id}/correct`
+also recomputes that one matchup's calculation and re-checks evidence
+freshness before publishing, the same discipline `/signoff` already
+applies, so a correction can never freeze a new official version behind
+AFL facts that have since changed.
 
 A consumer can determine everything roadmap package 28 promises
 downstream systems without adopting "latest calculated score": read

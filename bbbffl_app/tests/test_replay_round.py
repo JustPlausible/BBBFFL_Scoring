@@ -113,7 +113,7 @@ def _semantic_run(output: Path):
     mapping = RoundMappingRepository(db)
     validation_service = LineupValidationService(db, before_source)
     lockouts = LockoutRepository(db)
-    validation, lockout_evidence = [], []
+    validation, lockout_by_entry = [], {}
     for lineup in lineups:
         positions = {
             row["position"]: row["season_player_id"]
@@ -125,8 +125,15 @@ def _semantic_run(output: Path):
         checked = validation_service.validate_submission(lineup["lineup_id"], positions)
         assert checked.valid
         validation.append({"historical_entry": lineup["team_name"], **checked.to_dict()})
-        views = {}
-        for label, clock, source in (("before", before, before_source), ("after", after, after_source)):
+        lockout_by_entry[lineup["team_name"]] = {"positions_input": positions}
+
+    # Replay advances monotonically. Evaluate every lineup at the pre-lock
+    # checkpoint before advancing any lineup to the post-lock checkpoint:
+    # trigger activation is intentionally durable production state and must
+    # never be "time-travelled" backwards for the next entry.
+    for label, clock, source in (("before", before, before_source), ("after", after, after_source)):
+        for lineup in lineups:
+            positions = lockout_by_entry[lineup["team_name"]]["positions_input"]
             view = lockouts.lock_state(
                 lineup["lineup_id"],
                 round_.bbbffl_round_id,
@@ -135,14 +142,21 @@ def _semantic_run(output: Path):
                 match_facts=RoundMatchFactsProvider(mapping, source),
                 evaluation_at=clock.now(),
             )
-            views[label] = {
+            lockout_by_entry[lineup["team_name"]][label] = {
                 "effective_at": view.evaluated_at,
                 "positions": {
                     position: {"state": state.state.value, "reason": state.reason, "afl_match_id": state.afl_match_id}
                     for position, state in view.positions.items()
                 },
             }
-        lockout_evidence.append({"historical_entry": lineup["team_name"], **views})
+    lockout_evidence = [
+        {
+            "historical_entry": lineup["team_name"],
+            "before": lockout_by_entry[lineup["team_name"]]["before"],
+            "after": lockout_by_entry[lineup["team_name"]]["after"],
+        }
+        for lineup in lineups
+    ]
 
     progress_to_review(lifecycle, round_.bbbffl_round_id)
     MatchupCalculationService(db, final_source).calculate_round(

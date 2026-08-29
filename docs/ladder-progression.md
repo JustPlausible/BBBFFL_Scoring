@@ -1,7 +1,7 @@
 # Deterministic ladder progression
 
 The BBBFFL ladder is a derived read model. `app.ladder.LadderRepository`
-rebuilds a requested season's table through an inclusive round boundary; no
+rebuilds a requested competition stream's table through an inclusive round boundary; no
 ladder counter or editable ladder table is source of truth.
 
 ## Sporting rules
@@ -35,9 +35,12 @@ A scorer-approved correction appends an official version and moves the existing
 effective pointer, so the next rebuild changes naturally while the old version
 remains in official-result history.
 
-Every request is season-scoped and includes only ordinary results whose fixture
-round is at or before the requested boundary. A `LadderSnapshot` contains the
-boundary, rows, and compact `(matchup_id, official_version)` references for
+Every request names an explicit ordinary `competition_id`; the repository derives
+its season and constrains every source result by both identifiers. This avoids
+combining independent ordinary streams in the same season. It includes only
+results whose fixture round is at or before the requested boundary. A
+`LadderSnapshot` contains the season, competition, boundary, rows, and compact
+`(matchup_id, official_version)` references for
 every contributing result. Repeating a build with the same effective inputs
 therefore returns an identical snapshot, and later rounds cannot leak backwards.
 

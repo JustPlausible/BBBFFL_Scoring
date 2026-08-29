@@ -46,6 +46,7 @@ class LadderRow:
 @dataclass(frozen=True)
 class LadderSnapshot:
     season_id: str
+    competition_id: str
     through_round: int
     rows: tuple[LadderRow, ...]
     result_references: tuple[ResultReference, ...]
@@ -62,6 +63,7 @@ def _ratio(numerator: Decimal, denominator: Decimal, multiplier: Decimal = Decim
 
 def calculate_ladder(
     season_id: str,
+    competition_id: str,
     through_round: int,
     entry_ids: list[str] | tuple[str, ...],
     results: list[OfficialMatchupInput] | tuple[OfficialMatchupInput, ...],
@@ -124,13 +126,24 @@ def calculate_ladder(
         group = groups[key]
         rows.append(
             LadderRow(
-                entry_id, value["p"], value["w"], value["d"], value["l"], value["pf"], value["pa"],
-                _ratio(value["pf"], Decimal(value["p"])), percentage, value["cp"], rank, len(group) > 1, group
+                entry_id,
+                value["p"],
+                value["w"],
+                value["d"],
+                value["l"],
+                value["pf"],
+                value["pa"],
+                _ratio(value["pf"], Decimal(value["p"])),
+                percentage,
+                value["cp"],
+                rank,
+                len(group) > 1,
+                group,
             )
         )
         prior_key = key
     references = tuple(ResultReference(result.matchup_id, result.official_version) for result in selected)
-    return LadderSnapshot(season_id, through_round, tuple(rows), references)
+    return LadderSnapshot(season_id, competition_id, through_round, tuple(rows), references)
 
 
 class LadderRepository:
@@ -139,7 +152,14 @@ class LadderRepository:
     def __init__(self, database):
         self.database = database
 
-    def snapshot(self, season_id: str, through_round: int) -> LadderSnapshot:
+    def snapshot(self, competition_id: str, through_round: int) -> LadderSnapshot:
+        competition = self.database.execute(
+            "SELECT season_id, stream_type FROM competition_stream WHERE competition_id=?",
+            (competition_id,),
+        ).fetchone()
+        if competition is None or competition["stream_type"] != "ordinary":
+            raise KeyError(competition_id)
+        season_id = competition["season_id"]
         entries = self.database.execute(
             "SELECT season_entry_id FROM season_entry WHERE season_id=? ORDER BY season_entry_id", (season_id,)
         ).fetchall()
@@ -150,21 +170,31 @@ class LadderRepository:
             SELECT l.fixture_round_number, m.matchup_id, m.effective_official_version,
                    m.home_season_entry_id, m.away_season_entry_id, r.home_score, r.away_score
             FROM bbbffl_round_lifecycle l
-            JOIN competition_stream c ON c.competition_id=l.competition_id AND c.stream_type='ordinary'
             JOIN bbbffl_matchup m ON m.bbbffl_round_id=l.bbbffl_round_id
             JOIN bbbffl_official_result r ON r.matchup_id=m.matchup_id
                  AND r.version=m.effective_official_version
-            WHERE l.season_id=? AND l.state='final' AND l.fixture_round_number<=?
+            WHERE l.season_id=? AND l.competition_id=? AND l.state='final'
+                  AND l.fixture_round_number<=?
             ORDER BY l.fixture_round_number, m.matchup_id
             """,
-            (season_id, through_round),
+            (season_id, competition_id, through_round),
         ).fetchall()
         results = [
             OfficialMatchupInput(
-                row["fixture_round_number"], row["matchup_id"], row["effective_official_version"],
-                row["home_season_entry_id"], row["away_season_entry_id"],
-                Decimal(str(row["home_score"])), Decimal(str(row["away_score"])),
+                row["fixture_round_number"],
+                row["matchup_id"],
+                row["effective_official_version"],
+                row["home_season_entry_id"],
+                row["away_season_entry_id"],
+                Decimal(str(row["home_score"])),
+                Decimal(str(row["away_score"])),
             )
             for row in rows
         ]
-        return calculate_ladder(season_id, through_round, [row["season_entry_id"] for row in entries], results)
+        return calculate_ladder(
+            season_id,
+            competition_id,
+            through_round,
+            [row["season_entry_id"] for row in entries],
+            results,
+        )

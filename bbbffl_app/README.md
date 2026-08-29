@@ -1,29 +1,50 @@
-# BBBFFL Grand Final live scoring (2027 prototype)
+# BBBFFL application (2027 rebuild)
 
-A small FastAPI service implementing the narrow vertical slice from
-`docs/plans/2027-grand-final-prototype-brief.md`:
+A FastAPI service that has grown from the narrow live-scoring vertical slice
+in `docs/plans/2027-grand-final-prototype-brief.md` into two distinct,
+coexisting surfaces:
 
-> two manually configured BBBFFL Grand Final teams -> live `afl-api` v1 data
-> -> canonical BBBFFL scoring -> individual player/running team scores ->
-> scorer-controlled interchange/DNP handling -> final scorer sign-off.
+- **the regular season** -- the season-aware application: persisted
+  competitions/seasons/teams/coaches, full fixtures, coach authentication
+  and weekly lineup submission, staged lockouts, scorer round review/sign-
+  off, official results, and the ladder. This is the primary, actively
+  developed target for the 2027 rebuild. See "Browser surfaces" below for
+  the concrete routes, and `docs/architecture.md` for how the underlying
+  modules fit together.
+- **the legacy/prototype Grand Final** (and its opt-in SuperScore trial)
+  -- the original narrow vertical slice this repository started as:
+  > two manually configured BBBFFL Grand Final teams -> live `afl-api` v1
+  > data -> canonical BBBFFL scoring -> individual player/running team
+  > scores -> scorer-controlled interchange/DNP handling -> final scorer
+  > sign-off.
 
-This is the active, core application source and the primary implementation
-target for the 2027 rebuild. The archived Google Apps Script projects in
-`legacy/gas/` remain historical, migration, and 2026 replay references; they
-are not an alternative target for new features.
+  This remains a small, working, retained prototype (its own admin token,
+  its own decision store, no coach authentication, no fixtures/ladder of
+  its own) -- kept running for the Grand Final/SuperScore use case it was
+  built for, not the season-long target for new season-model features.
 
-## What this is not
+Both surfaces share the same canonical scoring engine (`app/scoring.py`) and
+the same afl-api boundary, but are otherwise independent: the season model
+never depends on the Grand Final vertical, and vice versa (see
+`tests/test_architecture.py`'s import-boundary tests). The archived Google
+Apps Script projects in `legacy/gas/` remain historical, migration, and
+2026 replay references; they are not an alternative target for new
+features.
 
-Per the brief, this prototype deliberately excludes: Google Forms/Sheets
-integration, coach authentication, full-season fixtures, the ladder,
-squad-ownership validation of SuperScore/Grand Final selections, historical
-migration, projections, and AI commentary. AFL data collection and identity
-resolution live entirely in `afl-api`; this service only consumes
-`/api/v1`.
+## What the legacy Grand Final prototype still does not do
 
-SuperScore (see below) is an **experimental, opt-in** extension being
-trialled alongside the Grand Final during the same live round -- when not
-configured, the application behaves exactly as before.
+Per the original brief, the Grand Final/SuperScore surface deliberately
+still excludes: Google Forms/Sheets integration, coach authentication of
+its own (it never authenticates a coach -- see "Coach authentication and
+sessions" below, which is a regular-season-only mechanism), a fixture draw
+or ladder of its own, squad-ownership validation of Grand Final/SuperScore
+selections, historical migration, projections, and AI commentary. AFL data
+collection and identity resolution live entirely in `afl-api`; this
+surface only consumes `/api/v1`.
+
+SuperScore is an **experimental, opt-in** extension of the legacy Grand
+Final prototype, trialled alongside it during the same live round -- when
+not configured, the application behaves exactly as before.
 
 ## Architecture
 
@@ -76,14 +97,33 @@ AFL stats -> calculated BBBFFL score -> optional scorer override -> effective BB
 coach selection + AFL facts + scorer decisions -> official BBBFFL score
 ```
 
-This directory also holds the season-aware 2027 domain modules not yet wired
-to any route (`season.py`, `identity.py`, `player_pool.py`, `fixtures.py`,
+This directory also holds the season-aware 2027 domain modules
+(`season.py`, `identity.py`, `player_pool.py`, `fixtures.py`,
 `round_mapping.py`, `competition_lifecycle.py`, `lineups.py`, `lockouts.py`,
-`calculations.py`) -- each documented in its own file under `../docs/`. See
-[`../docs/architecture.md`](../docs/architecture.md) for how all of the
-modules above (routed and not-yet-routed) fit together: the intended
-dependency direction, the service/repository boundary each one implements,
-and where transaction ownership sits for a multi-write operation.
+`calculations.py`, `round_review.py`, `ladder.py`, `auth.py`,
+`coach_lineup.py`, `public_rounds.py`, and more) -- each documented in its
+own file under `../docs/`. These are wired to real browser/API routes (see
+"Browser surfaces" below), not merely test-only domain logic. See
+[`../docs/architecture.md`](../docs/architecture.md) for how all of these
+modules fit together: the intended dependency direction, the service/
+repository boundary each one implements, and where transaction ownership
+sits for a multi-write operation.
+
+## Browser surfaces
+
+| Surface | Routes | Notes |
+|---|---|---|
+| Coach login/session | `GET`/`POST /login`, `POST /logout`, `GET /account` | Regular season. Managed-password auth resolving to the persistent `coach` identity -- see "Coach authentication and sessions" below. |
+| Coach weekly lineup | `GET`/`POST /coach/seasons/{season_id}/rounds/{round_id}/lineup` | Regular season. Save a private draft or submit an immutable version, from the coach's own current owned squad; `/account` links straight to each round the signed-in coach has. |
+| Scorer Round Centre | `GET /scorer/round-centre`, `GET /scorer/round-centre/{round_id}`, `POST /api/admin/round-review/...` | Regular season. Browser shell over `app/routes/round_review.py`'s API: discovers persisted ordinary rounds, advances the round lifecycle (`.../transition`), calculates (`.../calculate`), records DNP/interchange rulings and overrides, and signs off (`.../signoff`). Gated the same way as the legacy admin surface (`X-Admin-Token`, optionally narrowed to `scorer` via `X-Authority-Role`). |
+| Public regular-season Round Centre | `GET /seasons/{season_id}`, `GET /seasons/{season_id}/rounds/{round_id}`, `GET /api/public/seasons/{season_id}/rounds/{round_id}`, `.../ladder` | Regular season. Anonymous, allow-listed read model over the same authoritative round/official-result/ladder state -- never scoring/ladder logic of its own (`app/public_rounds.py`). |
+| Public ladder | `GET /api/public/seasons/{season_id}/rounds/{round_id}/ladder` | Regular season. The authoritative `app/ladder.py` snapshot through the given round, allow-listed for public display. |
+| Legacy Grand Final (prototype) | `GET /`, `GET /admin`, `POST /api/admin/*` | Retained prototype -- see "What the legacy Grand Final prototype still does not do" above. No coach authentication, no fixtures/ladder; gated by the shared `X-Admin-Token`. |
+| SuperScore (opt-in) | `GET /superscore`, `GET /admin/superscore`, `POST /api/*/superscore/*` | Retained prototype extension of the Grand Final surface (see "SuperScore" below) -- 404s entirely unless `BBBFFL_SUPERSCORE_CONFIG_PATH` is set. |
+
+A concrete, reproducible walkthrough of the coach/scorer/public regular-
+season surfaces above -- from a clean database to a signed-off Round 1 and
+its public ladder -- is the "Round 1 rehearsal quick start" below.
 
 ## Scoring rules
 
@@ -277,6 +317,166 @@ When using the default local SQLite URL, the `data/` volume makes scorer decisio
 survive a container restart. Production uses `BBBFFL_DATABASE_URL` with PostgreSQL. Schema upgrades are described in [`docs/database-migrations.md`](docs/database-migrations.md). Put this alongside the existing `afl-api`
 container and expose it later through your reverse proxy of choice; no
 changes to `afl-api` are required.
+
+## Round 1 rehearsal quick start
+
+A concise, reproducible operator walkthrough (issue #85) that exercises the
+regular-season browser surfaces end-to-end against a normal, persistent
+database:
+
+    clean DB -> migrations -> Round 1 bootstrap -> coach login/submission ->
+    scorer Round Centre -> sign-off -> public Round Centre -> ladder
+
+This is an **interactive rehearsal checkpoint**, distinct from both the
+hermetic automated replay tests and the later historical Rounds 1-9 replay
+-- see [`docs/replay-harness.md`](../docs/replay-harness.md) for how the
+three relate. Do not skip straight to `pytest` fixtures to figure out how
+to populate the application; the commands below are the supported path.
+
+1. **Prepare the development environment** (once):
+
+   ```bash
+   cd bbbffl_app
+   python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+   ```
+
+2. **Create the persistent rehearsal database and run migrations.** The
+   bootstrap command below runs migrations itself (`app.migrations.migrate`,
+   the same idempotent call `app/main.py`'s startup makes), so a plain SQLite
+   file with no prior history is enough -- nothing to do here beyond
+   choosing a dedicated path, never your normal development database
+   (`data/scorer_decisions.db`) or a database already hosting a real
+   season:
+
+   ```bash
+   export BBBFFL_REHEARSAL_DATABASE_URL=sqlite:///$(pwd)/data/round1-2026-rehearsal.db
+   ```
+
+3. **Run the persistent Round 1 bootstrap**
+   (`scripts/bootstrap_round1_2026.py`). This seeds the 2026 season, all ten
+   teams/coaches/entries, Round 1 and its five fixture matchups, the AFL
+   round mapping, player pool/squad ownership, a lockout trigger, and a
+   freshly generated replay evidence file -- and submits nine of the ten
+   Round 1 lineups as scorer-proxy reconstructions, deliberately leaving
+   Coach A's lineup for you to submit through the browser in step 6. It is
+   **refusal-based, not idempotent**: running it a second time against the
+   same database refuses cleanly (see "Reset/recreate the rehearsal
+   database" below) rather than duplicating anything.
+
+   ```bash
+   .venv/bin/python -m scripts.bootstrap_round1_2026 \
+     --database-url "$BBBFFL_REHEARSAL_DATABASE_URL" \
+     --evidence-path "$(pwd)/data/round1-2026-rehearsal-evidence.json"
+   ```
+
+   The command prints Coach A's email/password, the `season_id`/
+   `bbbffl_round_id` it created, and the exact evidence path -- copy the
+   printed `BBBFFL_AFL_REPLAY_EVIDENCE_PATH` value for step 4. (A test
+   credential for Coach A is already set at this point -- see "Establish a
+   coach test password" below for how to reset it later if needed.)
+
+4. **Configure replay mode and point it at the Round 1 rehearsal
+   evidence** -- the exact file the previous step just generated (**not**
+   `tests/fixtures/replay_round_2026/evidence.json`, the hermetic test
+   fixture: that file's AFL match is already `CONCLUDED`, which would lock
+   every selection immediately in a real, wall-clock-driven browser
+   session -- see the bootstrap script's module docstring, "Evidence"):
+
+   ```bash
+   export BBBFFL_AFL_MODE=replay
+   export BBBFFL_AFL_REPLAY_EVIDENCE_PATH="$(pwd)/data/round1-2026-rehearsal-evidence.json"
+   export BBBFFL_DATABASE_URL="$BBBFFL_REHEARSAL_DATABASE_URL"
+   ```
+
+5. **Start the web app** against that same database/evidence:
+
+   ```bash
+   .venv/bin/uvicorn app.main:app --reload
+   ```
+
+6. **Visit the coach, scorer and public URLs** (default
+   `http://localhost:8000`):
+
+   1. `/login` -- sign in as Coach A with the email/password the bootstrap
+      printed.
+   2. `/account` -- confirms the authenticated coach and links straight to
+      the Round 1 lineup (no manually entered database IDs).
+   3. `/coach/seasons/{season_id}/rounds/{round_id}/lineup` -- select each
+      of Coach A's nine owned players into the nine slots (any arrangement
+      is legal), **Save private draft**, then **Submit lineup**.
+   4. `/scorer/round-centre` -- discovers Round 1 automatically. Click
+      **Advance round to 'live'**, then **Advance round to 'review'**, then
+      **Calculate / refresh scores** to see all five matchups' calculated
+      scores and DNP evidence, then **Publish all five results** once
+      "Ready for atomic sign-off" is shown.
+   5. `/seasons/{season_id}` and `/seasons/{season_id}/rounds/{round_id}`
+      -- the public regular-season Round Centre, now showing Round 1's
+      official results and ladder.
+
+7. **Reset/recreate the rehearsal safely.** Re-running the bootstrap
+   against the same database refuses with an actionable message rather
+   than duplicating state. To genuinely start over:
+
+   ```bash
+   rm "$(pwd)/data/round1-2026-rehearsal.db" "$(pwd)/data/round1-2026-rehearsal-evidence.json"
+   .venv/bin/python -m app.migrations upgrade --database-url "$BBBFFL_REHEARSAL_DATABASE_URL"
+   ```
+
+   then re-run step 3. (For a PostgreSQL rehearsal database, drop and
+   recreate the database instead of deleting a file, then run the same
+   migration command.)
+
+### Establish a coach test password
+
+The bootstrap already sets a rehearsal password for Coach A (printed to the
+console) using the same managed-password mechanism "Coach authentication
+and sessions" describes below -- there is no separate replay/rehearsal
+login path. To set a different password, or to reset it later, either pass
+`--coach-a-password` to the bootstrap before it runs, or use the existing
+admin-assisted reset endpoint against a running app:
+
+```bash
+curl -X POST http://localhost:8000/api/admin/coach-credential \
+  -H 'Content-Type: application/json' \
+  -d '{"email": "coach.a@rehearsal.bbbffl.local", "password": "a new rehearsal password"}'
+```
+
+(`X-Admin-Token` is only required if `BBBFFL_ADMIN_TOKEN` is set; development
+defaults leave it unset.)
+
+### Docker
+
+Where Docker is the normal home-server workflow (see "Running with Docker"
+above), run the bootstrap once against the same mounted `data/` volume
+before starting the container, then start the container with the same
+`BBBFFL_DATABASE_URL`/`BBBFFL_AFL_MODE`/`BBBFFL_AFL_REPLAY_EVIDENCE_PATH`
+environment (e.g. via `--env-file`):
+
+```bash
+cd bbbffl_app
+.venv/bin/python -m scripts.bootstrap_round1_2026 \
+  --database-url sqlite:///$(pwd)/data/round1-2026-rehearsal.db \
+  --evidence-path $(pwd)/data/round1-2026-rehearsal-evidence.json
+docker build -t bbbffl-rehearsal .
+docker run -d \
+  --name bbbffl-rehearsal \
+  -p 8000:8000 \
+  -v $(pwd)/data:/app/data \
+  -e BBBFFL_DATABASE_URL=sqlite:////app/data/round1-2026-rehearsal.db \
+  -e BBBFFL_AFL_MODE=replay \
+  -e BBBFFL_AFL_REPLAY_EVIDENCE_PATH=/app/data/round1-2026-rehearsal-evidence.json \
+  bbbffl-rehearsal
+```
+
+### What this does not prove
+
+Signing off Round 1 through this rehearsal proves the coach/scorer/public
+browser vertical is wired end-to-end against real persisted state -- it
+does **not** prove the full 2026 season is replay-validated. See
+[`docs/replay-harness.md`](../docs/replay-harness.md) and
+[`docs/replay-checkpoint-2026.md`](../docs/replay-checkpoint-2026.md) for
+the later, sequential Rounds 1-9 historical replay this rehearsal is a
+prerequisite checkpoint for, not a substitute for.
 
 ## Tests
 

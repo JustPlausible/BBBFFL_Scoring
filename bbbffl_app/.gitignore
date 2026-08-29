@@ -5,3 +5,4 @@ __pycache__/
 .env
 data/*.db
 data/scorer_decisions.db
+data/round1-2026-rehearsal-evidence.json

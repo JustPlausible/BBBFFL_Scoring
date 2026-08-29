@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ lineup.round.label }} selection · BBBFFL</title>
+<style>
+:root { color-scheme: light dark; --bg:#0d1117; --card:#161b22; --line:#30363d; --text:#f0f3f6; --muted:#9da7b3; --blue:#2f81f7; --green:#238636; --amber:#d29922; --red:#f85149; }
+* { box-sizing:border-box } body { margin:0; background:var(--bg); color:var(--text); font:16px/1.45 system-ui,sans-serif; }
+main { width:min(720px,100%); margin:auto; padding:16px 12px 120px; } a { color:#79c0ff } h1 { font-size:1.45rem; margin:.3rem 0 } h2 { font-size:1.05rem; margin:0 }
+.eyebrow,.muted { color:var(--muted); font-size:.85rem }.context,.slot,.message,.actions { background:var(--card); border:1px solid var(--line); border-radius:12px; }
+.context { padding:14px; margin:12px 0 }.context-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:10px }.context-grid span { display:block }
+.state { display:inline-block; padding:3px 9px; border-radius:99px; background:#1f6f3d; font-size:.8rem; font-weight:700 }.state.private { background:#6e5318 }.state.changed { background:#7d4e13 }
+.messages { display:grid; gap:8px; margin:12px 0 }.message { padding:12px }.message.error { border-left:5px solid var(--red) }.message.warning { border-left:5px solid var(--amber) }.message.success { border-left:5px solid var(--green) }
+.slots { display:grid; gap:10px; margin-top:10px }.slot { padding:14px }.slot-head { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px }.position { font-size:1.05rem; font-weight:800 }.badge { font-size:.75rem; padding:3px 8px; border:1px solid var(--line); border-radius:99px }.locked { border-color:var(--amber); color:#f2cc60 }
+select { width:100%; min-height:48px; border:1px solid #59636e; border-radius:9px; background:var(--bg); color:var(--text); padding:8px; font-size:1rem }.player-info,.lock-info { margin-top:7px; font-size:.82rem; color:var(--muted) }.lock-info { color:#f2cc60 }
+.actions { position:fixed; left:0; right:0; bottom:0; padding:10px max(12px,calc((100vw - 720px)/2 + 12px)); display:grid; grid-template-columns:1fr 1fr; gap:10px; box-shadow:0 -6px 20px #0008 }.actions button { min-height:52px; border-radius:10px; font-size:1rem; font-weight:800; cursor:pointer }.save { color:var(--text); background:#21262d; border:2px solid #8b949e }.submit { color:white; background:var(--green); border:2px solid #3fb950 }
+@media(min-width:600px) { .slots { grid-template-columns:1fr 1fr } main { padding-top:26px }.actions { position:static; margin-top:16px } }
+</style>
+</head>
+<body><main>
+<nav class="eyebrow"><a href="/account">Account</a> / Weekly selection</nav>
+<section class="context">
+  <div class="eyebrow">{{ lineup.season.label }} · {{ lineup.round.label }}</div>
+  <h1>{{ lineup.entry.team_name }}</h1>
+  <div>{{ coach.display_name }}{% if lineup.opponent %} · vs {{ lineup.opponent }}{% endif %}</div>
+  <div class="context-grid">
+    <div><span class="muted">Lineup state</span>
+      {% if lineup.submission and lineup.draft.revision > lineup.submission.based_on_draft_revision %}<strong class="state changed">Submitted + private changes</strong>
+      {% elif lineup.submission %}<strong class="state">Submitted</strong>
+      {% else %}<strong class="state private">Saved private draft</strong>{% endif %}
+    </div>
+    <div><span class="muted">Submitted history</span>{% if lineup.submission %}Version {{ lineup.submission.version }}<br><span class="muted">{{ lineup.submission.submitted_at }}</span>{% else %}Not submitted{% endif %}</div>
+  </div>
+</section>
+<div class="messages" aria-live="polite">
+{% if notice == 'draft-saved' %}<div class="message success"><strong>Private draft saved.</strong> It has not been published or submitted.</div>{% endif %}
+{% if notice == 'submitted' %}<div class="message success"><strong>Lineup submitted.</strong> A new immutable submitted version was created.</div>{% endif %}
+{% for error in errors %}<div class="message error"><strong>Cannot complete that action</strong><br>{{ error }}</div>{% endfor %}
+{% if lineup.validation %}{% for warning in lineup.validation.warnings %}<div class="message warning"><strong>Advisory{% if warning.position %} · {{ warning.position }}{% endif %}</strong><br>{% if warning.code == 'afl_club_bye' %}{{ warning.details.afl_team_name }} has an AFL bye. This is a warning only; the player is not marked DNP.{% elif warning.code == 'deferred_selection_active' %}Opening Round deferred selection is active and scoring in this slot.{% else %}{{ warning.code|replace('_',' ')|capitalize }}{% endif %}</div>{% endfor %}{% endif %}
+  <div id="unsaved" class="message warning" hidden><strong>Unsaved changes</strong><br>Save Draft keeps work private; Submit publishes a new version.</div>
+</div>
+<form method="post" id="lineup-form">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<input type="hidden" name="draft_revision" value="{{ lineup.draft.revision }}">
+<input type="hidden" name="submission_version" value="{{ lineup.submission.version if lineup.submission else 0 }}">
+<h2>Nine positions</h2><div class="muted">Players come from your current authoritative owned squad.</div>
+<div class="slots">
+{% for position in positions %}{% set selected = lineup.draft.positions[position] %}{% set lock = lineup.locks.get(position) %}{% set deferred = lineup.deferred.get(position) %}
+<article class="slot">
+ <div class="slot-head"><span class="position">{{ position }}</span>{% if deferred %}<span class="badge locked">Opening Round · locked</span>{% elif lock and lock.state.value != 'editable' %}<span class="badge locked">{{ lock.state.value|capitalize }}</span>{% else %}<span class="badge">Editable</span>{% endif %}</div>
+ {% if deferred or (lock and lock.state.value != 'editable') %}
+   <input type="hidden" name="position_{{ position }}" value="{{ selected or '' }}">
+   <select disabled aria-label="{{ position }} locked selection"><option>{% for player in lineup.players %}{% if player.season_player_id == selected %}{{ player.display_name }} — {{ player.afl_team_name or 'Club unknown' }}{% endif %}{% endfor %}{% if not selected %}Empty{% endif %}</option></select>
+ {% else %}
+   <select name="position_{{ position }}" aria-label="Select player for {{ position }}"><option value="">Empty — choose later</option>{% for player in lineup.players %}<option value="{{ player.season_player_id }}" {% if player.season_player_id == selected %}selected{% endif %}>{{ player.display_name }} — {{ player.afl_team_name or 'Club unknown' }}</option>{% endfor %}</select>
+ {% endif %}
+ {% if deferred %}<div class="lock-info">Preloaded by the Opening Round deferred-selection mechanism. Source AFL match {{ deferred.source_afl_match_id or 'not recorded' }}; nomination {{ deferred.nomination_id }}.</div>
+ {% elif lock and lock.state.value != 'editable' %}<div class="lock-info">{{ lock.reason|replace('_',' ') }}{% if lock.afl_match_id %} · AFL match {{ lock.afl_match_id }}{% endif %}{% if lock.effective_lock_at %} · {{ lock.effective_lock_at }}{% endif %}</div>{% endif %}
+</article>{% endfor %}
+</div>
+<div class="actions"><button class="save" name="action" value="save">Save private draft</button><button class="submit" name="action" value="submit">Submit lineup</button></div>
+</form>
+<script>const f=document.querySelector('#lineup-form'),u=document.querySelector('#unsaved'); f.addEventListener('change',()=>u.hidden=false);</script>
+</main></body></html>

@@ -145,6 +145,7 @@ OPENING_ROUND = {"app.opening_round"}
 # and no lower layer (season model, lockouts, weekly-submission-sources)
 # may depend back on it.
 AUTH = {"app.auth", "app.authorization"}
+COACH_LINEUP = {"app.coach_lineup"}
 
 # AFL participation-evidence classification (roadmap package 26, issue #57):
 # a pure function of public afl-api facts (a match, a bye list, a stat line)
@@ -177,6 +178,7 @@ ROUTES = {
     "app.routes.round_review",
     "app.routes.auth",
     "app.routes.lineups",
+    "app.routes.coach_lineup",
 }
 
 COMPOSITION_ROOT = {"app.main"}
@@ -193,6 +195,7 @@ ALL_GROUPS = (
     | ROUND_REVIEW
     | OPENING_ROUND
     | AUTH
+    | COACH_LINEUP
     | GRAND_FINAL_VERTICAL
     | ROUTES
     | COMPOSITION_ROOT

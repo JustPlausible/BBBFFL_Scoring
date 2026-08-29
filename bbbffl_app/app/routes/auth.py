@@ -21,6 +21,7 @@ from fastapi.templating import Jinja2Templates
 
 from app.auth import InvalidCredentialsError
 from app.auth_rate_limit import RateLimitedError
+from app.coach_lineup import CoachLineupService
 from app.config import BASE_DIR
 from app.csrf import issue_token, verify_token
 
@@ -146,7 +147,12 @@ def account_page(request: Request):
     if coach is None:
         return RedirectResponse("/login", status_code=303)
     token = _issue_csrf_token(request)
-    response = templates.TemplateResponse(request, "account.html", {"coach": coach, "csrf_token": token})
+    lineup_rounds = CoachLineupService(request.app.state.database, request.app.state.afl_client).list_rounds(
+        coach.coach_id
+    )
+    response = templates.TemplateResponse(
+        request, "account.html", {"coach": coach, "csrf_token": token, "lineup_rounds": lineup_rounds}
+    )
     _attach_csrf_cookie(request, response, token)
     return response
 

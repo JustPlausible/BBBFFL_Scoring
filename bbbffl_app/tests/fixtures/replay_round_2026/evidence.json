@@ -1,0 +1,64 @@
+{
+  "schema": "bbbffl.replay-evidence/v1",
+  "manifest": {
+    "id": "2026-round-1-representative",
+    "version": "1.0.0",
+    "evidence_class": "synthetic_scenario",
+    "bbbffl_season": 2026,
+    "bbbffl_round": 1,
+    "description": "Representative ordinary round; synthetic because historical lineup evidence is unavailable."
+  },
+  "seasons": [
+    {
+      "season_id": 2026,
+      "year": 2026,
+      "is_current": true,
+      "current_round_number": 1
+    }
+  ],
+  "rounds": [
+    {
+      "round_id": 1344,
+      "season_id": 2026,
+      "round_number": 1,
+      "byes": []
+    }
+  ],
+  "matches": [
+    {
+      "match_id": 2601,
+      "round_id": 1344,
+      "status": "CONCLUDED",
+      "start_time_utc": "2026-03-19T08:30:00Z",
+      "home_team": {
+        "team_id": 1,
+        "name": "Alpha"
+      },
+      "away_team": {
+        "team_id": 2,
+        "name": "Beta"
+      }
+    }
+  ],
+  "players": [
+    {
+      "canonical_player_id": 66001,
+      "display_name": "Synthetic Player",
+      "team_id": 1,
+      "team_name": "Alpha"
+    }
+  ],
+  "player_stats": {
+    "2601": [
+      {
+        "canonical_player_id": 66001,
+        "goals": 2,
+        "behinds": 1,
+        "disposals": 20,
+        "marks": 5,
+        "hitouts": 0,
+        "tackles": 4
+      }
+    ]
+  }
+}

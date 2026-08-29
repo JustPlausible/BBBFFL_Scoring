@@ -35,6 +35,7 @@ from app.preseason import (
     PreseasonWindowClosedError,
     PreseasonWindowExistsError,
 )
+from app.replay import ReplayAflDataSource
 from app.round_review import InvalidOverridePositionError as RoundReviewInvalidPositionError
 from app.round_review import InvalidSlotError as RoundReviewInvalidSlotError
 from app.round_review import (
@@ -67,18 +68,6 @@ from app.teams import TeamConfigError, get_teams
 logger = logging.getLogger("bbbffl.startup")
 
 
-class ReplayModeNotWiredError(RuntimeError):
-    """Raised at startup when `BBBFFL_AFL_MODE=replay` is declared but this
-    build has no replay-backed `AflDataSource` to satisfy it yet (roadmap
-    package 32 -- see `app/config.py`'s "AFL access mode" docs). Refusing
-    to start here, before migrations run or `AflApiClient` is constructed
-    below, is what keeps a declared replay/deterministic run from ever
-    silently falling back to live afl-api access -- issue #38's explicit
-    requirement. Settings validation alone (`get_settings()`) accepts a
-    well-formed `replay` declaration; it is this application build, not
-    the configuration, that cannot yet fulfill it."""
-
-
 def configure_logging(level: str) -> None:
     logging.basicConfig(
         level=level,
@@ -91,34 +80,30 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_logging(settings.log_level)
 
-    if settings.afl_mode == "replay":
-        raise ReplayModeNotWiredError(
-            "BBBFFL_AFL_MODE=replay is declared but not yet implemented: this build has no "
-            "replay-backed AFL data source (roadmap package 32). Refusing to start rather than "
-            "silently falling back to live afl-api access. Set BBBFFL_AFL_MODE=live (or leave "
-            "it unset) until the replay harness lands."
-        )
-
     # Migrations are the sole schema authority. Running them at startup is a
     # deployment convenience and is idempotent; production may run the same
     # command as a separate release step before starting the application.
     migrate(settings.database_url)
     database = connect(settings.database_url)
 
-    afl_transport = AflApiClient(
-        base_url=settings.afl_api_base_url,
-        api_key=settings.afl_api_key,
-        timeout=settings.afl_api_timeout_seconds,
-        connect_timeout=settings.afl_api_connect_timeout_seconds,
-        read_timeout=settings.afl_api_read_timeout_seconds,
-        contract_version=settings.afl_api_contract_version,
+    afl_transport = (
+        ReplayAflDataSource(settings.afl_replay_evidence_path)
+        if settings.afl_mode == "replay"
+        else AflApiClient(
+            base_url=settings.afl_api_base_url,
+            api_key=settings.afl_api_key,
+            timeout=settings.afl_api_timeout_seconds,
+            connect_timeout=settings.afl_api_connect_timeout_seconds,
+            read_timeout=settings.afl_api_read_timeout_seconds,
+            contract_version=settings.afl_api_contract_version,
+        )
     )
     # ResilientAflClient is a drop-in AflDataSource: it adds bounded
     # transient retry/backoff, per-endpoint stale-cache fallback, and
     # diagnostics around afl_transport without changing what any consumer
     # (app/service.py, app/lockouts.py, app/calculations.py) calls or gets
     # back. See app/afl_resilience.py and docs/afl-client-resilience.md.
-    afl_client = ResilientAflClient(
+    afl_client = afl_transport if settings.afl_mode == "replay" else ResilientAflClient(
         afl_transport,
         retry_policy=RetryPolicy(
             max_attempts=settings.afl_api_retry_max_attempts,

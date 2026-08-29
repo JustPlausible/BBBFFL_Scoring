@@ -1,0 +1,882 @@
+{
+  "meta": {
+    "code": 200,
+    "pagination": {
+      "page": 0,
+      "numPages": 1,
+      "pageSize": 29,
+      "numEntries": 29
+    }
+  },
+  "rounds": [
+    {
+      "id": 1146,
+      "providerId": "CD_R202501400",
+      "abbreviation": "OR",
+      "name": "Opening Round",
+      "roundNumber": 0,
+      "byes": [
+        {
+          "id": 1,
+          "providerId": "CD_T10",
+          "name": "Adelaide Crows",
+          "abbreviation": "ADEL",
+          "nickname": "Crows",
+          "club": {
+            "id": 3,
+            "providerId": "CD_O1",
+            "name": "Adelaide Crows",
+            "abbreviation": "Crows",
+            "nickname": "Crows"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 2,
+          "providerId": "CD_T20",
+          "name": "Brisbane Lions",
+          "abbreviation": "BL",
+          "nickname": "Lions",
+          "club": {
+            "id": 13,
+            "providerId": "CD_O3",
+            "name": "Brisbane Lions",
+            "abbreviation": "Lions",
+            "nickname": "Lions"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 4,
+          "providerId": "CD_T1000",
+          "name": "Gold Coast SUNS",
+          "abbreviation": "GCFC",
+          "nickname": "SUNS",
+          "club": {
+            "id": 9,
+            "providerId": "CD_O14",
+            "name": "Gold Coast SUNS",
+            "abbreviation": "SUNS",
+            "nickname": "SUNS"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 5,
+          "providerId": "CD_T30",
+          "name": "Carlton",
+          "abbreviation": "CARL",
+          "nickname": "Blues",
+          "club": {
+            "id": 1,
+            "providerId": "CD_O5",
+            "name": "Carlton",
+            "abbreviation": "Blues",
+            "nickname": "Blues"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 6,
+          "providerId": "CD_T100",
+          "name": "North Melbourne",
+          "abbreviation": "NMFC",
+          "nickname": "Kangaroos",
+          "club": {
+            "id": 20,
+            "providerId": "CD_O20",
+            "name": "North Melbourne",
+            "abbreviation": "Kangaroos",
+            "nickname": "Kangaroos"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 7,
+          "providerId": "CD_T110",
+          "name": "Port Adelaide",
+          "abbreviation": "PORT",
+          "nickname": "Power",
+          "club": {
+            "id": 19,
+            "providerId": "CD_O24",
+            "name": "Port Adelaide",
+            "abbreviation": "Power",
+            "nickname": "Power"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 8,
+          "providerId": "CD_T140",
+          "name": "Western Bulldogs",
+          "abbreviation": "WB",
+          "nickname": "Bulldogs",
+          "club": {
+            "id": 25,
+            "providerId": "CD_O31",
+            "name": "Western Bulldogs",
+            "abbreviation": "Bulldogs",
+            "nickname": "Bulldogs"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 10,
+          "providerId": "CD_T70",
+          "name": "Geelong Cats",
+          "abbreviation": "GEEL",
+          "nickname": "Cats",
+          "club": {
+            "id": 15,
+            "providerId": "CD_O11",
+            "name": "Geelong Cats",
+            "abbreviation": "Cats",
+            "nickname": "Cats"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 11,
+          "providerId": "CD_T130",
+          "name": "St Kilda",
+          "abbreviation": "STK",
+          "nickname": "Saints",
+          "club": {
+            "id": 21,
+            "providerId": "CD_O27",
+            "name": "St Kilda",
+            "abbreviation": "Saints",
+            "nickname": "Saints"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 12,
+          "providerId": "CD_T50",
+          "name": "Essendon",
+          "abbreviation": "ESS",
+          "nickname": "Bombers",
+          "club": {
+            "id": 10,
+            "providerId": "CD_O9",
+            "name": "Essendon",
+            "abbreviation": "Bombers",
+            "nickname": "Bombers"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 14,
+          "providerId": "CD_T60",
+          "name": "Fremantle",
+          "abbreviation": "FRE",
+          "nickname": "Dockers",
+          "club": {
+            "id": 6,
+            "providerId": "CD_O10",
+            "name": "Fremantle",
+            "abbreviation": "Dockers",
+            "nickname": "Dockers"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 16,
+          "providerId": "CD_T120",
+          "name": "Richmond",
+          "abbreviation": "RICH",
+          "nickname": "Tigers",
+          "club": {
+            "id": 22,
+            "providerId": "CD_O25",
+            "name": "Richmond",
+            "abbreviation": "Tigers",
+            "nickname": "Tigers"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 17,
+          "providerId": "CD_T90",
+          "name": "Melbourne",
+          "abbreviation": "MELB",
+          "nickname": "Demons",
+          "club": {
+            "id": 14,
+            "providerId": "CD_O18",
+            "name": "Melbourne",
+            "abbreviation": "Demons",
+            "nickname": "Demons"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 18,
+          "providerId": "CD_T150",
+          "name": "West Coast Eagles",
+          "abbreviation": "WCE",
+          "nickname": "Eagles",
+          "club": {
+            "id": 23,
+            "providerId": "CD_O30",
+            "name": "West Coast Eagles",
+            "abbreviation": "Eagles",
+            "nickname": "Eagles"
+          },
+          "teamType": "MEN"
+        }
+      ],
+      "utcStartTime": "2025-03-07T08:40:00.000+0000",
+      "utcEndTime": "2025-03-09T04:20:00.000+0000"
+    },
+    {
+      "id": 1147,
+      "providerId": "CD_R202501401",
+      "abbreviation": "Rd 1",
+      "name": "Round 1",
+      "roundNumber": 1,
+      "byes": [],
+      "utcStartTime": "2025-03-13T08:30:00.000+0000",
+      "utcEndTime": "2025-03-16T07:10:00.000+0000"
+    },
+    {
+      "id": 1148,
+      "providerId": "CD_R202501402",
+      "abbreviation": "Rd 2",
+      "name": "Round 2",
+      "roundNumber": 2,
+      "byes": [
+        {
+          "id": 4,
+          "providerId": "CD_T1000",
+          "name": "Gold Coast SUNS",
+          "abbreviation": "GCFC",
+          "nickname": "SUNS",
+          "club": {
+            "id": 9,
+            "providerId": "CD_O14",
+            "name": "Gold Coast SUNS",
+            "abbreviation": "SUNS",
+            "nickname": "SUNS"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 15,
+          "providerId": "CD_T1010",
+          "name": "GWS GIANTS",
+          "abbreviation": "GWS",
+          "nickname": "GIANTS",
+          "club": {
+            "id": 5,
+            "providerId": "CD_O16",
+            "name": "GWS GIANTS",
+            "abbreviation": "GIANTS",
+            "nickname": "GIANTS"
+          },
+          "teamType": "MEN"
+        }
+      ],
+      "utcStartTime": "2025-03-20T08:30:00.000+0000",
+      "utcEndTime": "2025-03-23T07:10:00.000+0000"
+    },
+    {
+      "id": 1149,
+      "providerId": "CD_R202501403",
+      "abbreviation": "Rd 3",
+      "name": "Round 3",
+      "roundNumber": 3,
+      "byes": [
+        {
+          "id": 3,
+          "providerId": "CD_T40",
+          "name": "Collingwood",
+          "abbreviation": "COLL",
+          "nickname": "Magpies",
+          "club": {
+            "id": 12,
+            "providerId": "CD_O6",
+            "name": "Collingwood",
+            "abbreviation": "Magpies",
+            "nickname": "Magpies"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 13,
+          "providerId": "CD_T160",
+          "name": "Sydney Swans",
+          "abbreviation": "SYD",
+          "nickname": "Swans",
+          "club": {
+            "id": 24,
+            "providerId": "CD_O28",
+            "name": "Sydney Swans",
+            "abbreviation": "Swans",
+            "nickname": "Swans"
+          },
+          "teamType": "MEN"
+        }
+      ],
+      "utcStartTime": "2025-03-27T08:30:00.000+0000",
+      "utcEndTime": "2025-03-30T07:10:00.000+0000"
+    },
+    {
+      "id": 1150,
+      "providerId": "CD_R202501404",
+      "abbreviation": "Rd 4",
+      "name": "Round 4",
+      "roundNumber": 4,
+      "byes": [
+        {
+          "id": 9,
+          "providerId": "CD_T80",
+          "name": "Hawthorn",
+          "abbreviation": "HAW",
+          "nickname": "Hawks",
+          "club": {
+            "id": 16,
+            "providerId": "CD_O17",
+            "name": "Hawthorn",
+            "abbreviation": "Hawks",
+            "nickname": "Hawks"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 12,
+          "providerId": "CD_T50",
+          "name": "Essendon",
+          "abbreviation": "ESS",
+          "nickname": "Bombers",
+          "club": {
+            "id": 10,
+            "providerId": "CD_O9",
+            "name": "Essendon",
+            "abbreviation": "Bombers",
+            "nickname": "Bombers"
+          },
+          "teamType": "MEN"
+        }
+      ],
+      "utcStartTime": "2025-04-03T08:30:00.000+0000",
+      "utcEndTime": "2025-04-06T07:10:00.000+0000"
+    },
+    {
+      "id": 1151,
+      "providerId": "CD_R202501405",
+      "abbreviation": "Rd 5",
+      "name": "Round 5",
+      "roundNumber": 5,
+      "byes": [],
+      "utcStartTime": "2025-04-10T09:40:00.000+0000",
+      "utcEndTime": "2025-04-13T09:20:00.000+0000"
+    },
+    {
+      "id": 1152,
+      "providerId": "CD_R202501406",
+      "abbreviation": "Rd 6",
+      "name": "Round 6",
+      "roundNumber": 6,
+      "byes": [],
+      "utcStartTime": "2025-04-17T09:30:00.000+0000",
+      "utcEndTime": "2025-04-21T05:20:00.000+0000"
+    },
+    {
+      "id": 1153,
+      "providerId": "CD_R202501407",
+      "abbreviation": "Rd 7",
+      "name": "Round 7",
+      "roundNumber": 7,
+      "byes": [],
+      "utcStartTime": "2025-04-24T09:30:00.000+0000",
+      "utcEndTime": "2025-04-27T06:45:00.000+0000"
+    },
+    {
+      "id": 1154,
+      "providerId": "CD_R202501408",
+      "abbreviation": "Rd 8",
+      "name": "Round 8",
+      "roundNumber": 8,
+      "byes": [],
+      "utcStartTime": "2025-05-01T09:30:00.000+0000",
+      "utcEndTime": "2025-05-04T09:20:00.000+0000"
+    },
+    {
+      "id": 1155,
+      "providerId": "CD_R202501409",
+      "abbreviation": "Rd 9",
+      "name": "Round 9",
+      "roundNumber": 9,
+      "byes": [],
+      "utcStartTime": "2025-05-08T10:10:00.000+0000",
+      "utcEndTime": "2025-05-11T06:40:00.000+0000"
+    },
+    {
+      "id": 1156,
+      "providerId": "CD_R202501410",
+      "abbreviation": "Rd 10",
+      "name": "Round 10",
+      "roundNumber": 10,
+      "byes": [],
+      "utcStartTime": "2025-05-15T09:30:00.000+0000",
+      "utcEndTime": "2025-05-18T06:40:00.000+0000"
+    },
+    {
+      "id": 1157,
+      "providerId": "CD_R202501411",
+      "abbreviation": "Rd 11",
+      "name": "Round 11",
+      "roundNumber": 11,
+      "byes": [],
+      "utcStartTime": "2025-05-22T09:30:00.000+0000",
+      "utcEndTime": "2025-05-25T06:40:00.000+0000"
+    },
+    {
+      "id": 1158,
+      "providerId": "CD_R202501412",
+      "abbreviation": "Rd 12",
+      "name": "Round 12",
+      "roundNumber": 12,
+      "byes": [
+        {
+          "id": 5,
+          "providerId": "CD_T30",
+          "name": "Carlton",
+          "abbreviation": "CARL",
+          "nickname": "Blues",
+          "club": {
+            "id": 1,
+            "providerId": "CD_O5",
+            "name": "Carlton",
+            "abbreviation": "Blues",
+            "nickname": "Blues"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 6,
+          "providerId": "CD_T100",
+          "name": "North Melbourne",
+          "abbreviation": "NMFC",
+          "nickname": "Kangaroos",
+          "club": {
+            "id": 20,
+            "providerId": "CD_O20",
+            "name": "North Melbourne",
+            "abbreviation": "Kangaroos",
+            "nickname": "Kangaroos"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 7,
+          "providerId": "CD_T110",
+          "name": "Port Adelaide",
+          "abbreviation": "PORT",
+          "nickname": "Power",
+          "club": {
+            "id": 19,
+            "providerId": "CD_O24",
+            "name": "Port Adelaide",
+            "abbreviation": "Power",
+            "nickname": "Power"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 8,
+          "providerId": "CD_T140",
+          "name": "Western Bulldogs",
+          "abbreviation": "WB",
+          "nickname": "Bulldogs",
+          "club": {
+            "id": 25,
+            "providerId": "CD_O31",
+            "name": "Western Bulldogs",
+            "abbreviation": "Bulldogs",
+            "nickname": "Bulldogs"
+          },
+          "teamType": "MEN"
+        }
+      ],
+      "utcStartTime": "2025-05-29T09:30:00.000+0000",
+      "utcEndTime": "2025-06-01T09:20:00.000+0000"
+    },
+    {
+      "id": 1159,
+      "providerId": "CD_R202501413",
+      "abbreviation": "Rd 13",
+      "name": "Round 13",
+      "roundNumber": 13,
+      "byes": [
+        {
+          "id": 11,
+          "providerId": "CD_T130",
+          "name": "St Kilda",
+          "abbreviation": "STK",
+          "nickname": "Saints",
+          "club": {
+            "id": 21,
+            "providerId": "CD_O27",
+            "name": "St Kilda",
+            "abbreviation": "Saints",
+            "nickname": "Saints"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 14,
+          "providerId": "CD_T60",
+          "name": "Fremantle",
+          "abbreviation": "FRE",
+          "nickname": "Dockers",
+          "club": {
+            "id": 6,
+            "providerId": "CD_O10",
+            "name": "Fremantle",
+            "abbreviation": "Dockers",
+            "nickname": "Dockers"
+          },
+          "teamType": "MEN"
+        }
+      ],
+      "utcStartTime": "2025-06-05T09:30:00.000+0000",
+      "utcEndTime": "2025-06-09T05:20:00.000+0000"
+    },
+    {
+      "id": 1160,
+      "providerId": "CD_R202501414",
+      "abbreviation": "Rd 14",
+      "name": "Round 14",
+      "roundNumber": 14,
+      "byes": [
+        {
+          "id": 3,
+          "providerId": "CD_T40",
+          "name": "Collingwood",
+          "abbreviation": "COLL",
+          "nickname": "Magpies",
+          "club": {
+            "id": 12,
+            "providerId": "CD_O6",
+            "name": "Collingwood",
+            "abbreviation": "Magpies",
+            "nickname": "Magpies"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 4,
+          "providerId": "CD_T1000",
+          "name": "Gold Coast SUNS",
+          "abbreviation": "GCFC",
+          "nickname": "SUNS",
+          "club": {
+            "id": 9,
+            "providerId": "CD_O14",
+            "name": "Gold Coast SUNS",
+            "abbreviation": "SUNS",
+            "nickname": "SUNS"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 13,
+          "providerId": "CD_T160",
+          "name": "Sydney Swans",
+          "abbreviation": "SYD",
+          "nickname": "Swans",
+          "club": {
+            "id": 24,
+            "providerId": "CD_O28",
+            "name": "Sydney Swans",
+            "abbreviation": "Swans",
+            "nickname": "Swans"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 16,
+          "providerId": "CD_T120",
+          "name": "Richmond",
+          "abbreviation": "RICH",
+          "nickname": "Tigers",
+          "club": {
+            "id": 22,
+            "providerId": "CD_O25",
+            "name": "Richmond",
+            "abbreviation": "Tigers",
+            "nickname": "Tigers"
+          },
+          "teamType": "MEN"
+        }
+      ],
+      "utcStartTime": "2025-06-12T09:30:00.000+0000",
+      "utcEndTime": "2025-06-15T08:10:00.000+0000"
+    },
+    {
+      "id": 1161,
+      "providerId": "CD_R202501415",
+      "abbreviation": "Rd 15",
+      "name": "Round 15",
+      "roundNumber": 15,
+      "byes": [
+        {
+          "id": 1,
+          "providerId": "CD_T10",
+          "name": "Adelaide Crows",
+          "abbreviation": "ADEL",
+          "nickname": "Crows",
+          "club": {
+            "id": 3,
+            "providerId": "CD_O1",
+            "name": "Adelaide Crows",
+            "abbreviation": "Crows",
+            "nickname": "Crows"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 9,
+          "providerId": "CD_T80",
+          "name": "Hawthorn",
+          "abbreviation": "HAW",
+          "nickname": "Hawks",
+          "club": {
+            "id": 16,
+            "providerId": "CD_O17",
+            "name": "Hawthorn",
+            "abbreviation": "Hawks",
+            "nickname": "Hawks"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 17,
+          "providerId": "CD_T90",
+          "name": "Melbourne",
+          "abbreviation": "MELB",
+          "nickname": "Demons",
+          "club": {
+            "id": 14,
+            "providerId": "CD_O18",
+            "name": "Melbourne",
+            "abbreviation": "Demons",
+            "nickname": "Demons"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 18,
+          "providerId": "CD_T150",
+          "name": "West Coast Eagles",
+          "abbreviation": "WCE",
+          "nickname": "Eagles",
+          "club": {
+            "id": 23,
+            "providerId": "CD_O30",
+            "name": "West Coast Eagles",
+            "abbreviation": "Eagles",
+            "nickname": "Eagles"
+          },
+          "teamType": "MEN"
+        }
+      ],
+      "utcStartTime": "2025-06-19T10:10:00.000+0000",
+      "utcEndTime": "2025-06-22T05:20:00.000+0000"
+    },
+    {
+      "id": 1162,
+      "providerId": "CD_R202501416",
+      "abbreviation": "Rd 16",
+      "name": "Round 16",
+      "roundNumber": 16,
+      "byes": [
+        {
+          "id": 2,
+          "providerId": "CD_T20",
+          "name": "Brisbane Lions",
+          "abbreviation": "BL",
+          "nickname": "Lions",
+          "club": {
+            "id": 13,
+            "providerId": "CD_O3",
+            "name": "Brisbane Lions",
+            "abbreviation": "Lions",
+            "nickname": "Lions"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 10,
+          "providerId": "CD_T70",
+          "name": "Geelong Cats",
+          "abbreviation": "GEEL",
+          "nickname": "Cats",
+          "club": {
+            "id": 15,
+            "providerId": "CD_O11",
+            "name": "Geelong Cats",
+            "abbreviation": "Cats",
+            "nickname": "Cats"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 12,
+          "providerId": "CD_T50",
+          "name": "Essendon",
+          "abbreviation": "ESS",
+          "nickname": "Bombers",
+          "club": {
+            "id": 10,
+            "providerId": "CD_O9",
+            "name": "Essendon",
+            "abbreviation": "Bombers",
+            "nickname": "Bombers"
+          },
+          "teamType": "MEN"
+        },
+        {
+          "id": 15,
+          "providerId": "CD_T1010",
+          "name": "GWS GIANTS",
+          "abbreviation": "GWS",
+          "nickname": "GIANTS",
+          "club": {
+            "id": 5,
+            "providerId": "CD_O16",
+            "name": "GWS GIANTS",
+            "abbreviation": "GIANTS",
+            "nickname": "GIANTS"
+          },
+          "teamType": "MEN"
+        }
+      ],
+      "utcStartTime": "2025-06-26T09:30:00.000+0000",
+      "utcEndTime": "2025-06-29T07:10:00.000+0000"
+    },
+    {
+      "id": 1163,
+      "providerId": "CD_R202501417",
+      "abbreviation": "Rd 17",
+      "name": "Round 17",
+      "roundNumber": 17,
+      "byes": [],
+      "utcStartTime": "2025-07-03T09:30:00.000+0000",
+      "utcEndTime": "2025-07-06T05:15:00.000+0000"
+    },
+    {
+      "id": 1164,
+      "providerId": "CD_R202501418",
+      "abbreviation": "Rd 18",
+      "name": "Round 18",
+      "roundNumber": 18,
+      "byes": [],
+      "utcStartTime": "2025-07-10T09:30:00.000+0000",
+      "utcEndTime": "2025-07-13T06:40:00.000+0000"
+    },
+    {
+      "id": 1165,
+      "providerId": "CD_R202501419",
+      "abbreviation": "Rd 19",
+      "name": "Round 19",
+      "roundNumber": 19,
+      "byes": [],
+      "utcStartTime": "2025-07-17T09:30:00.000+0000",
+      "utcEndTime": "2025-07-20T06:40:00.000+0000"
+    },
+    {
+      "id": 1166,
+      "providerId": "CD_R202501420",
+      "abbreviation": "Rd 20",
+      "name": "Round 20",
+      "roundNumber": 20,
+      "byes": [],
+      "utcStartTime": "2025-07-24T09:30:00.000+0000",
+      "utcEndTime": "2025-07-27T05:15:00.000+0000"
+    },
+    {
+      "id": 1167,
+      "providerId": "CD_R202501421",
+      "abbreviation": "Rd 21",
+      "name": "Round 21",
+      "roundNumber": 21,
+      "byes": [],
+      "utcStartTime": "2025-07-31T09:30:00.000+0000",
+      "utcEndTime": "2025-08-03T07:10:00.000+0000"
+    },
+    {
+      "id": 1168,
+      "providerId": "CD_R202501422",
+      "abbreviation": "Rd 22",
+      "name": "Round 22",
+      "roundNumber": 22,
+      "byes": [],
+      "utcStartTime": "2025-08-07T09:30:00.000+0000",
+      "utcEndTime": "2025-08-10T07:10:00.000+0000"
+    },
+    {
+      "id": 1169,
+      "providerId": "CD_R202501423",
+      "abbreviation": "Rd 23",
+      "name": "Round 23",
+      "roundNumber": 23,
+      "byes": [],
+      "utcStartTime": "2025-08-15T09:20:00.000+0000",
+      "utcEndTime": "2025-08-17T06:40:00.000+0000"
+    },
+    {
+      "id": 1170,
+      "providerId": "CD_R202501424",
+      "abbreviation": "Rd 24",
+      "name": "Round 24",
+      "roundNumber": 24,
+      "byes": [],
+      "utcStartTime": "2025-08-21T09:30:00.000+0000",
+      "utcEndTime": "2025-08-27T09:20:00.000+0000"
+    },
+    {
+      "id": 1321,
+      "providerId": "CD_R202501425",
+      "abbreviation": "FW1",
+      "name": "Finals Week 1",
+      "roundNumber": 25,
+      "byes": [],
+      "utcStartTime": "2025-09-04T09:40:00.000+0000",
+      "utcEndTime": "2025-09-06T09:35:00.000+0000"
+    },
+    {
+      "id": 1329,
+      "providerId": "CD_R202501426",
+      "abbreviation": "SF",
+      "name": "Semi Finals",
+      "roundNumber": 26,
+      "byes": [],
+      "utcStartTime": "2025-09-12T09:40:00.000+0000",
+      "utcEndTime": "2025-09-13T09:35:00.000+0000"
+    },
+    {
+      "id": 1335,
+      "providerId": "CD_R202501427",
+      "abbreviation": "PF",
+      "name": "Preliminary Finals",
+      "roundNumber": 27,
+      "byes": [],
+      "utcStartTime": "2025-09-19T09:40:00.000+0000",
+      "utcEndTime": "2025-09-20T07:15:00.000+0000"
+    },
+    {
+      "id": 1340,
+      "providerId": "CD_R202501428",
+      "abbreviation": "GF",
+      "name": "Grand Final",
+      "roundNumber": 28,
+      "byes": [],
+      "utcStartTime": "2025-09-27T04:30:00.000+0000",
+      "utcEndTime": "2025-09-27T04:30:00.000+0000"
+    }
+  ]
+}

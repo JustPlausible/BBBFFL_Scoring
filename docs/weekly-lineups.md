@@ -44,3 +44,12 @@ mutate an already-locked position. See [`lockouts.md`](lockouts.md) for the
 full lock rule, irreversibility and concurrency design; this module has no
 lockout awareness beyond accepting
 that one optional callable.
+
+The same `lock_guard` parameter is also how an Opening Round deferred
+nomination's locked slot is enforced
+(`app.opening_round.OpeningRoundSelectionGuard`, issue #69) -- rejecting
+any submission, whatever its source, that would place a different player
+into a slot a nomination already owns. It composes with an ordinary
+`app.lockouts.LockGuard` (via its `inner` argument) rather than replacing
+it, so both mechanisms govern the same lineup without either weakening the
+other. See [`opening-round-deferred-selection.md`](opening-round-deferred-selection.md).

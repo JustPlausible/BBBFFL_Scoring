@@ -160,9 +160,36 @@ class LineupValidationService:
             )
             return
         bye_ids = {team.team_id for team in round_.byes}
+        deferred = self._deferred_positions(lineup)
         for slot, player_id in selected:
             player = players.get(player_id)
-            if player is not None and player["afl_team_id"] in bye_ids:
+            if player is None:
+                continue
+            if slot in deferred:
+                # An active Opening Round deferred nomination (app.opening_round)
+                # is not an ordinary bye/unavailable player even though this
+                # club genuinely has its compensating bye in this round --
+                # see docs/opening-round-deferred-selection.md. Surface it
+                # distinctly so a scorer/coach never confuses a valid,
+                # already-scoring deferred slot with the ordinary bye
+                # warning below.
+                out.append(
+                    ValidationMessage(
+                        "warning",
+                        "opening_round",
+                        "deferred_selection_active",
+                        slot,
+                        player_id,
+                        {
+                            "afl_team_id": player["afl_team_id"],
+                            "afl_team_name": player["afl_team_name"],
+                            "nomination_id": deferred[slot]["nomination_id"],
+                            "afl_opening_round_id": deferred[slot]["afl_opening_round_id"],
+                        },
+                    )
+                )
+                continue
+            if player["afl_team_id"] in bye_ids:
                 out.append(
                     ValidationMessage(
                         "warning",
@@ -173,6 +200,21 @@ class LineupValidationService:
                         {"afl_team_id": player["afl_team_id"], "afl_team_name": player["afl_team_name"], "dnp": False},
                     )
                 )
+
+    def _deferred_positions(self, lineup):
+        """`{position: {"nomination_id":..., "afl_opening_round_id":...}}`
+        for every current Opening Round deferred nomination targeting this
+        lineup's round/entry. A season/round with no configured Opening
+        Round rule -- the common case -- always returns `{}`."""
+        rows = self.database.execute(
+            "SELECT n.position, n.nomination_id, rev.afl_opening_round_id "
+            "FROM opening_round_nomination n "
+            "JOIN opening_round_rule r ON r.rule_id=n.rule_id "
+            "JOIN opening_round_rule_revision rev ON rev.rule_id=r.rule_id AND rev.revision=r.current_revision "
+            "WHERE n.bbbffl_round_id=? AND n.season_entry_id=? AND rev.state='accepted'",
+            (lineup["bbbffl_round_id"], lineup["season_entry_id"]),
+        ).fetchall()
+        return {row["position"]: dict(row) for row in rows}
 
 
 @dataclass(frozen=True)

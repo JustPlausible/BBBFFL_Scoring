@@ -3,8 +3,26 @@
 This module derives replaceable calculated state only.  It neither reads nor
 writes ``bbbffl_official_result`` and makes AFL requests solely through the
 public ``AflApiClient`` interface.
+
+## Per-slot scoring-source resolution (issue #69)
+
+Every slot in an ordinary lineup draws its AFL facts from the same round's
+mapped AFL matches (`context["afl_round_id"]`). A slot with an active
+Opening Round deferred nomination (`app.opening_round`) is the one
+exception: `_deferred_positions` looks up that slot's nomination (if any)
+and, when present, resolves its match/stats from the nomination's own AFL
+Opening Round instead -- via `_RoundFacts`, a small per-round match/stat
+cache keyed by AFL round ID so a round with mixed sources fetches each
+distinct AFL round's matches/stats at most once. The *same* `score_position`
+formula is then applied to whichever facts were resolved; there is no
+separate Opening Round scoring engine (see docs/opening-round-deferred-
+selection.md). A deferred slot's participation is deliberately assessed with
+`bye_team_ids=None` -- the player's club is, by construction, on its
+ordinary bye in the *target* round, which must never be misreported as an
+"ordinary bye" now that real Opening Round statistics are available for it.
 """
 
+import dataclasses
 import hashlib
 import json
 from dataclasses import asdict, dataclass
@@ -36,6 +54,32 @@ class CalculatedMatchup:
     snapshot: dict
 
 
+class _RoundFacts:
+    """Per-AFL-round match/stat cache, keyed by AFL round ID. Ordinary slots
+    resolve against `default_afl_round_id`; a slot with an active Opening
+    Round deferred nomination resolves against its own nomination's AFL
+    Opening Round instead (`matches(afl_round_id=...)`). Each distinct AFL
+    round's matches/stats are fetched from `afl_client` at most once,
+    however many slots/matchups in this round need them."""
+
+    def __init__(self, afl_client, default_afl_round_id):
+        self._afl_client = afl_client
+        self.default_afl_round_id = default_afl_round_id
+        self._matches_by_round: dict[int, list] = {}
+        self._stats_by_match: dict[int, dict] = {}
+
+    def matches(self, afl_round_id=None):
+        afl_round_id = self.default_afl_round_id if afl_round_id is None else afl_round_id
+        if afl_round_id not in self._matches_by_round:
+            self._matches_by_round[afl_round_id] = self._afl_client.get_matches(afl_round_id)
+        return self._matches_by_round[afl_round_id]
+
+    def stats_for(self, match_id):
+        if match_id not in self._stats_by_match:
+            self._stats_by_match[match_id] = self._afl_client.get_match_player_stats(match_id)
+        return self._stats_by_match[match_id]
+
+
 class MatchupCalculationService:
     def __init__(self, database, afl_client):
         self.database = database
@@ -43,9 +87,8 @@ class MatchupCalculationService:
 
     def calculate_round(self, round_id, *, upstream_revision=None, observed_at=None):
         context = self._round_context(round_id)
-        matches = self.afl_client.get_matches(context["afl_round_id"])
-        stats_by_match = {match.match_id: self.afl_client.get_match_player_stats(match.match_id) for match in matches}
-        facts = (matches, stats_by_match, self._bye_team_ids(context))
+        round_facts = _RoundFacts(self.afl_client, context["afl_round_id"])
+        facts = (round_facts, self._bye_team_ids(context))
         return [
             self._calculate(row, context, facts, upstream_revision, observed_at) for row in self._matchups(round_id)
         ]
@@ -55,12 +98,8 @@ class MatchupCalculationService:
         if not row:
             raise KeyError(matchup_id)
         context = self._round_context(row["bbbffl_round_id"])
-        matches = self.afl_client.get_matches(context["afl_round_id"])
-        facts = (
-            matches,
-            {match.match_id: self.afl_client.get_match_player_stats(match.match_id) for match in matches},
-            self._bye_team_ids(context),
-        )
+        round_facts = _RoundFacts(self.afl_client, context["afl_round_id"])
+        facts = (round_facts, self._bye_team_ids(context))
         return self._calculate(row, context, facts, upstream_revision, observed_at)
 
     def _bye_team_ids(self, context):
@@ -119,6 +158,23 @@ class MatchupCalculationService:
         revision = self._persist(matchup, context, home, away, snapshot, fingerprint, upstream_revision, observed_at)
         return CalculatedMatchup(matchup["matchup_id"], revision, fingerprint, snapshot)
 
+    def _deferred_positions(self, bbbffl_round_id, season_entry_id):
+        """`{position: {"afl_opening_round_id": ..., "rule_id": ...,
+        "source_afl_match_id": ...}}` for every current Opening Round
+        deferred nomination targeting this round/entry (`app.opening_round`).
+        A round/season that never configured an Opening Round rule -- the
+        overwhelming common case -- has no rows here at all, so this adds
+        one cheap, always-safe query rather than a required dependency."""
+        rows = self.database.execute(
+            "SELECT n.position, n.source_afl_match_id, rev.afl_opening_round_id "
+            "FROM opening_round_nomination n "
+            "JOIN opening_round_rule r ON r.rule_id=n.rule_id "
+            "JOIN opening_round_rule_revision rev ON rev.rule_id=r.rule_id AND rev.revision=r.current_revision "
+            "WHERE n.bbbffl_round_id=? AND n.season_entry_id=? AND rev.state='accepted'",
+            (bbbffl_round_id, season_entry_id),
+        ).fetchall()
+        return {row["position"]: dict(row) for row in rows}
+
     def _entry(self, entry_id, context, facts, rules):
         lineup = self.database.execute(
             "SELECT * FROM weekly_lineup WHERE season_id=? AND competition_id=? AND bbbffl_round_id=? AND season_entry_id=?",
@@ -132,14 +188,26 @@ class MatchupCalculationService:
             (lineup["lineup_id"], version),
         ).fetchall()
         evidence, total = [], 0
-        matches, stats_by_match, bye_team_ids = facts
+        round_facts, bye_team_ids = facts
+        deferred_positions = self._deferred_positions(context["bbbffl_round_id"], entry_id)
         interchange_raw = None
         for slot in slots:
+            deferred = deferred_positions.get(slot["position"])
+            if deferred is not None:
+                # Per-slot source override (issue #69): this slot's stats
+                # come from the player's AFL Opening Round match, never from
+                # the round's ordinarily-mapped AFL round -- see this
+                # module's docstring. Every other slot is unaffected.
+                matches = round_facts.matches(deferred["afl_opening_round_id"])
+                slot_bye_team_ids = None
+            else:
+                matches = round_facts.matches()
+                slot_bye_team_ids = bye_team_ids
             match = next(
                 (m for m in matches if slot["afl_team_id"] is not None and m.involves_team(slot["afl_team_id"])), None
             )
             stat = (
-                stats_by_match.get(match.match_id, {}).get(slot["canonical_player_id"])
+                round_facts.stats_for(match.match_id).get(slot["canonical_player_id"])
                 if match and slot["canonical_player_id"]
                 else None
             )
@@ -160,10 +228,26 @@ class MatchupCalculationService:
                 interchange_raw = raw
             participation = assess_participation(
                 afl_team_id=slot["afl_team_id"],
-                bye_team_ids=bye_team_ids,
+                bye_team_ids=slot_bye_team_ids,
                 match=match,
                 stat_line=stat,
             )
+            if deferred is not None:
+                # Tag provenance (`source`) and, when the Opening Round
+                # evidence itself could not resolve a match/stat line for
+                # this player (`state == "unknown"`), replace the generic
+                # reason with one naming the deferred nomination explicitly
+                # -- issue #69's "missing/invalid/unresolved deferred
+                # evidence requiring scorer review" must read as such, not
+                # as an ordinary ambiguous-availability case.
+                reason = participation.reason
+                if participation.state.value == "unknown":
+                    reason = (
+                        "Opening Round deferred nomination is recorded, but AFL Opening Round evidence "
+                        f"did not resolve a match/stat line for this player (AFL round "
+                        f"{deferred['afl_opening_round_id']}); scorer review required."
+                    )
+                participation = dataclasses.replace(participation, source="opening-round-deferred", reason=reason)
             evidence.append(
                 {
                     "position": slot["position"],
@@ -174,6 +258,10 @@ class MatchupCalculationService:
                     "stats": raw,
                     "score": score,
                     "interchange_available": slot["position"] == "Interchange",
+                    "scoring_source": "opening_round_deferred" if deferred is not None else "ordinary",
+                    "source_afl_round_id": deferred["afl_opening_round_id"]
+                    if deferred is not None
+                    else context["afl_round_id"],
                     "participation": {
                         "state": participation.state.value,
                         "dnp_recommendation": participation.dnp_recommendation.value,

@@ -40,7 +40,9 @@ A player whose AFL club has a scheduled bye is unavailable but is **not DNP**.
 - The web UI should clearly warn/show bye status but should not necessarily prohibit selecting the player.
 - Warning/notification behaviour is desirable.
 
-Opening Round/deferred-stat exceptions remain separate season-specific rules.
+Opening Round/deferred-stat exceptions remain separate season-specific rules
+-- see [`opening-round-deferred-selection.md`](../opening-round-deferred-selection.md)
+(issue #69) for the implemented 2024/2025/2026 capability.
 
 ### Record-book scope
 

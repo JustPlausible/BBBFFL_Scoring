@@ -397,6 +397,12 @@ A BBBFFL scoring period should therefore be capable of mapping flexibly to AFL f
 
 If the AFL returns to a conventional Round 1 in 2027, no Opening Round exception needs to be enabled.
 
+**Implemented (issue #69):** [`opening-round-deferred-selection.md`](../opening-round-deferred-selection.md)
+now documents the 2024/2025/2026 Opening Round structures and the season-
+scoped `app.opening_round` capability this paragraph anticipated. It
+remains inactive unless a season explicitly configures it -- a 2027 season
+with no Opening Round configures nothing and is unaffected.
+
 ## Roles and permissions
 
 ### Coach

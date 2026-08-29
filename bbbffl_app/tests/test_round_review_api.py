@@ -9,6 +9,7 @@ tests/test_preseason_api.py, so it cannot contaminate any other test's
 state.
 """
 
+import json
 import tempfile
 from pathlib import Path
 
@@ -295,3 +296,78 @@ def test_round_centre_api_rejects_stale_browser_ruling_and_returns_current_state
     assert "not the expected" in conflict.json()["detail"]
     current = client.get(api).json()["matchups"][0]
     assert current["review_version"] == matchup["review_version"] + 1
+
+
+def test_round_centre_resolves_ambiguous_interchange_dnp_through_existing_ruling_api(review_client):
+    client = review_client
+    round_, _, entries, canon = _seed(client, 8812)
+    round_id = round_.bbbffl_round_id
+    entry_id = entries[0].season_entry_id
+    interchange_player = canon[(entry_id, "Interchange")]
+    client.app.state.afl_client.stats.pop(interchange_player)
+    client.app.state.calculations.calculate_round(round_id)
+
+    api = f"/api/admin/round-review/{round_id}"
+    blocked = client.get(api).json()
+    matchup = next(
+        m for m in blocked["matchups"] if entry_id in (m["home"]["season_entry_id"], m["away"]["season_entry_id"])
+    )
+    side_key = "home" if matchup["home"]["season_entry_id"] == entry_id else "away"
+    side = matchup[side_key]
+    assert side["interchange"]["dnp_recommendation"] == "review_required"
+    assert side["interchange"]["dnp_ruling"] is None
+    assert any("Interchange: DNP status unresolved" in blocker for blocker in matchup["blockers"])
+    page = client.get(f"/scorer/round-centre/{round_id}")
+    assert 'data-slot="Interchange"' in page.text
+    assert "Confirm Interchange DNP" in page.text
+
+    resolved = client.post(
+        f"{api}/dnp",
+        json={
+            "matchup_id": matchup["matchup_id"],
+            "season_entry_id": entry_id,
+            "slot": "Interchange",
+            "dnp": False,
+            "expected_review_version": matchup["review_version"],
+            "reason": "confirmed as participating by scorer",
+        },
+    )
+    assert resolved.status_code == 200, resolved.text
+    updated = next(m for m in resolved.json()["matchups"] if m["matchup_id"] == matchup["matchup_id"])
+    assert updated[side_key]["interchange"]["dnp_ruling"] is False
+    assert not any("Interchange: DNP status unresolved" in blocker for blocker in updated["blockers"])
+    assert resolved.json()["ready_for_signoff"] is True
+    assert client.post(f"{api}/signoff", json={"reason": "all blockers resolved"}).status_code == 200
+
+
+def test_round_centre_exposes_actual_mixed_slot_source_not_only_round_mapping(review_client):
+    client = review_client
+    round_, lifecycle, _, _ = _seed(client, 8813)
+    round_id = round_.bbbffl_round_id
+    matchup = lifecycle.list_matchups(round_id)[0]
+    row = client.app.state.database.execute(
+        "SELECT snapshot FROM bbbffl_matchup_calculation WHERE matchup_id=?", (matchup.matchup_id,)
+    ).fetchone()
+    snapshot = json.loads(row["snapshot"])
+    deferred = snapshot["home"]["slots"][0]
+    deferred.update(
+        scoring_source="opening_round_deferred",
+        source_afl_round_id=88,
+        afl_match_id=88001,
+    )
+    client.app.state.database.execute(
+        "UPDATE bbbffl_matchup_calculation SET snapshot=? WHERE matchup_id=?",
+        (json.dumps(snapshot), matchup.matchup_id),
+    )
+
+    review = client.get(f"/api/admin/round-review/{round_id}").json()
+    displayed = review["matchups"][0]["home"]["slots"][0]
+    assert review["identity"]["afl_round_id"] == 100
+    assert displayed["scoring_source"] == "opening_round_deferred"
+    assert displayed["source_afl_round_id"] == 88
+    assert displayed["source_afl_match_id"] == 88001
+    assert displayed["source_afl_round_id"] != review["identity"]["afl_round_id"]
+
+    page = client.get(f"/scorer/round-centre/{round_id}")
+    assert "each player card shows its actual evidence source" in page.text
+    assert "source_afl_round_id" in page.text

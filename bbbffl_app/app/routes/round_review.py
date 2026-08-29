@@ -98,9 +98,6 @@ def _round_review_view(request: Request, round_id: str, *, evidence_fresh: bool 
     result["replay"] = {
         "enabled": state.settings.afl_mode == "replay",
         "classification": "replay evidence" if state.settings.afl_mode == "replay" else "live evidence",
-        "source_afl_season_id": round_.afl_season_id,
-        "source_afl_round_id": round_.afl_round_id,
-        "mapping_revision": round_.mapping_revision,
     }
     for matchup in result["matchups"]:
         history = state.lifecycle.result_history(matchup["matchup_id"])

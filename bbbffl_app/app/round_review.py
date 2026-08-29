@@ -472,6 +472,9 @@ class SlotReview:
     participation_state: str | None
     dnp_recommendation: str | None
     participation_reason: str | None
+    scoring_source: str | None
+    source_afl_round_id: int | None
+    source_afl_match_id: int | None
     dnp_ruling: bool | None
     override_score: float | None
     override_reason: str | None
@@ -484,6 +487,12 @@ class InterchangeReview:
     canonical_player_id: int | None
     played: bool
     dnp_ruling: bool | None
+    participation_state: str | None
+    dnp_recommendation: str | None
+    participation_reason: str | None
+    scoring_source: str | None
+    source_afl_round_id: int | None
+    source_afl_match_id: int | None
     target_position: str | None
     potential_scores: dict | None
 
@@ -598,6 +607,9 @@ def _side_review(entry_id, side_snapshot, dnp_rulings, interchange_rulings, over
                 participation_state=participation.get("state"),
                 dnp_recommendation=participation.get("dnp_recommendation"),
                 participation_reason=participation.get("reason"),
+                scoring_source=slot_dict.get("scoring_source"),
+                source_afl_round_id=slot_dict.get("source_afl_round_id"),
+                source_afl_match_id=slot_dict.get("afl_match_id"),
                 dnp_ruling=ruling,
                 override_score=(override.override_score if override else None),
                 override_reason=(override.reason if override else None),
@@ -624,6 +636,16 @@ def _side_review(entry_id, side_snapshot, dnp_rulings, interchange_rulings, over
         canonical_player_id=(interchange_slot["canonical_player_id"] if interchange_slot else None),
         played=bool(interchange_slot["played"]) if interchange_slot else False,
         dnp_ruling=interchange_dnp_ruling,
+        participation_state=((interchange_slot.get("participation") or {}).get("state") if interchange_slot else None),
+        dnp_recommendation=(
+            (interchange_slot.get("participation") or {}).get("dnp_recommendation") if interchange_slot else None
+        ),
+        participation_reason=(
+            (interchange_slot.get("participation") or {}).get("reason") if interchange_slot else None
+        ),
+        scoring_source=(interchange_slot.get("scoring_source") if interchange_slot else None),
+        source_afl_round_id=(interchange_slot.get("source_afl_round_id") if interchange_slot else None),
+        source_afl_match_id=(interchange_slot.get("afl_match_id") if interchange_slot else None),
         target_position=(interchange_ruling.target_position if interchange_ruling else None),
         potential_scores=(potentials or None),
     )
@@ -667,7 +689,7 @@ def build_matchup_review(lifecycle, review_repo, identities, matchup, *, evidenc
             0.0,
             0.0,
             [],
-            InterchangeReview(None, None, False, None, None, None),
+            InterchangeReview(None, None, False, None, None, None, None, None, None, None, None, None),
         )
         away = SideReview(
             matchup.away_season_entry_id,
@@ -678,7 +700,7 @@ def build_matchup_review(lifecycle, review_repo, identities, matchup, *, evidenc
             0.0,
             0.0,
             [],
-            InterchangeReview(None, None, False, None, None, None),
+            InterchangeReview(None, None, False, None, None, None, None, None, None, None, None, None),
         )
         rules_version_id = calculation_revision = calculation_fingerprint = None
     else:

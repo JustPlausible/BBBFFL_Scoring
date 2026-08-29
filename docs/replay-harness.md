@@ -78,3 +78,15 @@ class and category; fixture evidence must never be rewritten to hide one.
 For #67, add another immutable manifest, seed its scenario-specific initial
 facts at the same boundary, supply explicit clock instants, and reuse the
 same production services/report sections. Do not add a replay scoring path.
+
+## Checkpoint suite (issue #67)
+
+Issue #67's staged/early-lockout, bye/availability, missing-submission/
+carry-forward/proxy, and Opening Round deferred/compensating-bye checkpoint
+scenarios, their evidence fixtures, and the Rounds 1-9 operator procedure
+live in [`docs/replay-checkpoint-2026.md`](replay-checkpoint-2026.md) and
+`bbbffl_app/tests/test_replay_checkpoint.py`. They extend this document's
+report/provenance conventions via `app.replay_checkpoint`
+(`build_checkpoint_scenario`/`build_checkpoint_suite`/
+`write_checkpoint_suite_report`) rather than replacing them -- read that
+document first if you are preparing the real Rounds 1-9 replay.

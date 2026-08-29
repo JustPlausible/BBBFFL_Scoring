@@ -1,0 +1,84 @@
+{
+  "schema": "bbbffl.replay-evidence/v1",
+  "manifest": {
+    "id": "2026-checkpoint-bye-availability",
+    "version": "1.0.0",
+    "evidence_class": "synthetic_scenario",
+    "bbbffl_season": 2026,
+    "bbbffl_round": 4,
+    "description": "Issue #67 checkpoint: an ordinary BBBFFL round in which one selected player's AFL club has a normal scheduled bye, and a second selected player's club played but afl-api never returned a stat row for them (a genuinely ambiguous case requiring an explicit scorer ruling). Every round/match/player/lineup element below is an explicitly synthetic scenario built to exercise the bye/DNP boundary and the DNP-review workflow, never a claimed historical 2026 fact."
+  },
+  "seasons": [
+    {
+      "season_id": 2026,
+      "is_current": true,
+      "current_round_number": 4,
+      "year": 2026,
+      "provenance": {"evidence_class": "known_fact", "source": "2026 AFL season identity"}
+    }
+  ],
+  "rounds": [
+    {
+      "round_id": 1400,
+      "season_id": 2026,
+      "round_number": 4,
+      "byes": [{"team_id": 603, "name": "Bye Club"}],
+      "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled round with one club on an ordinary scheduled bye"}
+    }
+  ],
+  "matches": [
+    {
+      "match_id": 2801,
+      "round_id": 1400,
+      "status": "CONCLUDED",
+      "start_time_utc": "2026-04-11T09:00:00Z",
+      "home_team": {"team_id": 601, "name": "Ordinary Home"},
+      "away_team": {"team_id": 602, "name": "Ordinary Away"},
+      "status_timeline": [
+        {"effective_at": "2026-04-05T00:00:00Z", "status": "UPCOMING"},
+        {"effective_at": "2026-04-11T09:00:00Z", "status": "LIVE"},
+        {"effective_at": "2026-04-11T12:00:00Z", "status": "CONCLUDED"}
+      ],
+      "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled ordinary match"}
+    }
+  ],
+  "players": [
+    {"canonical_player_id": 6001, "display_name": "Bye Club Player", "team_id": 603, "team_name": "Bye Club", "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint player, ordinary club bye"}},
+    {"canonical_player_id": 6002, "display_name": "Ordinary F2 Player", "team_id": 601, "team_name": "Ordinary Home", "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint player"}},
+    {"canonical_player_id": 6003, "display_name": "Ordinary F3 Player", "team_id": 601, "team_name": "Ordinary Home", "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint player"}},
+    {"canonical_player_id": 6004, "display_name": "Ordinary M1 Player", "team_id": 601, "team_name": "Ordinary Home", "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint player"}},
+    {"canonical_player_id": 6005, "display_name": "Ordinary M2 Player", "team_id": 601, "team_name": "Ordinary Home", "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint player"}},
+    {"canonical_player_id": 6006, "display_name": "Ordinary M3 Player", "team_id": 601, "team_name": "Ordinary Home", "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint player"}},
+    {"canonical_player_id": 6007, "display_name": "Ambiguous Ruck Player", "team_id": 601, "team_name": "Ordinary Home", "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint player deliberately given no afl-api stat row despite playing, to exercise the review_required exceptional case"}},
+    {"canonical_player_id": 6008, "display_name": "Ordinary Tackler Player", "team_id": 601, "team_name": "Ordinary Home", "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint player"}},
+    {"canonical_player_id": 6009, "display_name": "Ordinary Interchange Player", "team_id": 602, "team_name": "Ordinary Away", "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint player"}}
+  ],
+  "player_stats": {
+    "2801": [
+      {"canonical_player_id": 6002, "disposals": 15, "goals": 1, "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint stat line"}},
+      {"canonical_player_id": 6003, "disposals": 12, "goals": 0, "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint stat line"}},
+      {"canonical_player_id": 6004, "disposals": 20, "goals": 2, "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint stat line"}},
+      {"canonical_player_id": 6005, "disposals": 18, "goals": 1, "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint stat line"}},
+      {"canonical_player_id": 6006, "disposals": 16, "goals": 0, "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint stat line"}},
+      {"canonical_player_id": 6008, "disposals": 14, "tackles": 9, "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint stat line"}},
+      {"canonical_player_id": 6009, "disposals": 10, "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint stat line"}}
+    ]
+  },
+  "lineups": [
+    {
+      "historical_entry": "Team 0",
+      "positions": {
+        "F1": 6001,
+        "F2": 6002,
+        "F3": 6003,
+        "M1": 6004,
+        "M2": 6005,
+        "M3": 6006,
+        "Ruck": 6007,
+        "Tackler": 6008,
+        "Interchange": 6009
+      },
+      "provenance": {"evidence_class": "synthetic_scenario", "source": "controlled checkpoint starting lineup: F1 is the ordinary-bye club, Ruck is deliberately stat-ambiguous, every other slot is ordinarily resolvable"}
+    }
+  ]
+}

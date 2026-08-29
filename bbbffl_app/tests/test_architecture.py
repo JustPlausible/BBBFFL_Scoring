@@ -135,7 +135,10 @@ AFL_EVIDENCE = {"app.participation"}
 # #66): an application service above the AFL dataclasses and persisted season
 # model. It may read ladder/result state for reporting, but must never reach
 # into HTTP routes, the Grand Final sibling vertical, or the composition root.
-REPLAY = {"app.replay"}
+# `app.replay_checkpoint` (issue #67) is its sibling: pure checkpoint-report
+# assembly for the staged-lockout/bye/carry-forward/proxy/Opening-Round
+# scenarios, with no imports of its own beyond the standard library.
+REPLAY = {"app.replay", "app.replay_checkpoint"}
 
 ROUTES = {
     "app.routes",

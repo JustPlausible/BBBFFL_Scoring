@@ -95,6 +95,32 @@ def test_coach_with_no_credential_set_fails_login(auth_service, identities):
         auth_service.login("nopass@example.com", "anything", remote_addr="1.2.3.4")
 
 
+def test_unknown_email_still_runs_the_dummy_password_check(auth_service, credentials, monkeypatch):
+    """Regression for a timing side-channel: `AuthenticationService.login`
+    must call `CredentialRepository.verify_password` unconditionally, even
+    when no coach was resolved at all -- otherwise an unknown email returns
+    near-instantly while a known email with the wrong password pays the
+    full scrypt cost, making valid coach emails distinguishable by
+    response time despite the identical error."""
+    calls = []
+    original = credentials.verify_password
+
+    def spy(coach_id, password):
+        calls.append(coach_id)
+        return original(coach_id, password)
+
+    monkeypatch.setattr(credentials, "verify_password", spy)
+
+    with pytest.raises(InvalidCredentialsError):
+        auth_service.login("nobody@example.com", "whatever", remote_addr="1.2.3.4")
+
+    assert calls == [None]
+
+
+def test_verify_password_with_no_coach_id_runs_the_dummy_check_and_fails(credentials):
+    assert credentials.verify_password(None, "anything") is False
+
+
 def test_set_password_rejects_a_too_short_password(credentials, coach):
     with pytest.raises(WeakCredentialError):
         credentials.set_password(coach.coach_id, "short", actor=ActorContext.anonymous_operator("admin"))
@@ -209,6 +235,50 @@ def test_revoking_an_already_revoked_session_is_a_no_op(sessions, coach):
     issued = sessions.create(coach.coach_id, actor=AC.coach(coach.coach_id))
     assert sessions.revoke(issued.session.session_id, actor=AC.coach(coach.coach_id)) is True
     assert sessions.revoke(issued.session.session_id, actor=AC.coach(coach.coach_id)) is False
+
+
+def test_revoke_all_for_coach_revokes_every_active_session(sessions, coach):
+    first = sessions.create(coach.coach_id, actor=ActorContext.coach(coach.coach_id))
+    second = sessions.create(coach.coach_id, actor=ActorContext.coach(coach.coach_id))
+
+    revoked_count = sessions.revoke_all_for_coach(coach.coach_id, actor=ActorContext.anonymous_operator("admin"))
+
+    assert revoked_count == 2
+    assert sessions.get_valid(first.token) is None
+    assert sessions.get_valid(second.token) is None
+
+
+def test_revoke_all_for_coach_does_not_touch_another_coachs_sessions(identities, credentials, sessions):
+    coach_a = identities.create_coach("Coach A", email="a2@example.com")
+    coach_b = identities.create_coach("Coach B", email="b2@example.com")
+    issued_a = sessions.create(coach_a.coach_id, actor=ActorContext.coach(coach_a.coach_id))
+    issued_b = sessions.create(coach_b.coach_id, actor=ActorContext.coach(coach_b.coach_id))
+
+    sessions.revoke_all_for_coach(coach_a.coach_id, actor=ActorContext.anonymous_operator("admin"))
+
+    assert sessions.get_valid(issued_a.token) is None
+    assert sessions.get_valid(issued_b.token) is not None
+
+
+def test_reset_password_revokes_existing_sessions_and_new_password_works(auth_service, sessions, coach):
+    """Admin-assisted recovery path: resetting a password must invalidate
+    any session issued before the reset, not just change future logins."""
+    first_login = auth_service.login("alex@example.com", PASSWORD, remote_addr="1.2.3.4")
+
+    auth_service.reset_password(
+        coach.coach_id, "brand-new-password-456", actor=ActorContext.anonymous_operator("admin")
+    )
+
+    assert auth_service.resolve(first_login.token) is None
+    second_login = auth_service.login("alex@example.com", "brand-new-password-456", remote_addr="1.2.3.4")
+    assert second_login.coach.coach_id == coach.coach_id
+
+
+def test_reset_password_for_unknown_coach_id_raises_key_error(auth_service):
+    with pytest.raises(KeyError):
+        auth_service.reset_password(
+            "does-not-exist", "brand-new-password-456", actor=ActorContext.anonymous_operator("admin")
+        )
 
 
 # -- 10. rate limiting bounds repeated failed authentication attempts -------

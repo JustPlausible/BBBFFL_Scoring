@@ -459,6 +459,47 @@ def test_admin_credential_reset_for_unknown_email_returns_404(client):
     assert response.status_code == 404
 
 
+def test_admin_credential_reset_for_unknown_coach_id_returns_404_not_500(client):
+    """Regression: a mistyped/deleted coach_id must be rejected before the
+    credential insert hits the coach_id foreign key, not surface as an
+    uncaught IntegrityError/500."""
+    response = client.post(
+        "/api/admin/coach-credential",
+        json={"coach_id": "does-not-exist", "password": "brand-new-password-456"},
+        headers=ADMIN_HEADERS,
+    )
+    assert response.status_code == 404
+
+
+def test_admin_credential_reset_revokes_the_coachs_existing_sessions(client):
+    """Regression: resetting a password (e.g. after a suspected compromise)
+    must invalidate any session token issued before the reset -- otherwise
+    a stolen cookie keeps working for the rest of its lifetime regardless
+    of the reset."""
+    from app.main import app
+
+    coach = _register_coach(app, password="original-password-123")
+    csrf_token, cookies = _get_login_form(client)
+    login = client.post(
+        "/login",
+        data={"email": "coach@example.com", "password": "original-password-123", "csrf_token": csrf_token},
+        cookies=cookies,
+        follow_redirects=False,
+    )
+    session_cookie = login.cookies.get("bbbffl_session")
+    assert "Test Coach" in client.get("/account", cookies={"bbbffl_session": session_cookie}).text
+
+    reset = client.post(
+        "/api/admin/coach-credential",
+        json={"coach_id": coach.coach_id, "password": "brand-new-password-456"},
+        headers=ADMIN_HEADERS,
+    )
+    assert reset.status_code == 200
+
+    after_reset = client.get("/account", cookies={"bbbffl_session": session_cookie}, follow_redirects=False)
+    assert after_reset.status_code == 303  # no longer authenticated -- redirected to /login
+
+
 def test_admin_dnp_action_is_still_attributed_to_the_anonymous_operator_not_a_coach(client):
     """Proves app.audit's actor/provenance boundary is unchanged: an admin
     proxy mutation is still `anonymous_operator`, never `coach`, even

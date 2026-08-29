@@ -179,10 +179,22 @@ class CredentialRepository:
                 after_state={"change": change},
             )
 
-    def verify_password(self, coach_id: str, password: str) -> bool:
-        row = self.database.execute(
-            "SELECT password_hash FROM coach_credential WHERE coach_id = ?", (coach_id,)
-        ).fetchone()
+    def verify_password(self, coach_id: str | None, password: str) -> bool:
+        """`coach_id=None` covers "no coach resolved at all" (an unknown
+        login identifier) as well as "a real coach with no credential row
+        yet" -- both take the same dummy-hash decoy path below, so an
+        unknown email and a known email with the wrong password cost the
+        same amount of time. Callers must never skip this call for the
+        unknown-coach case (see `AuthenticationService.login`) -- doing so
+        would reopen exactly the timing side-channel this decoy exists to
+        close."""
+        row = (
+            self.database.execute(
+                "SELECT password_hash FROM coach_credential WHERE coach_id = ?", (coach_id,)
+            ).fetchone()
+            if coach_id is not None
+            else None
+        )
         if row is None:
             _verify_password_hash(password, _DUMMY_PASSWORD_HASH)  # constant-time-ish decoy, see module docstring
             return False
@@ -316,6 +328,31 @@ class SessionRepository:
             return False
         return self.revoke(session.session_id, actor=actor, action=action, reason=reason)
 
+    def revoke_all_for_coach(self, coach_id: str, *, actor: ActorContext, reason: str | None = None) -> int:
+        """Revoke every currently-valid session for `coach_id` -- used by
+        `AuthenticationService.reset_password` so a session token issued
+        (or stolen) before a credential reset cannot keep authenticating
+        past it. Returns the number of sessions revoked; 0 if none were
+        active, which is not an error."""
+        with transaction(self.database) as conn:
+            rows = conn.execute(
+                "SELECT session_id FROM coach_session WHERE coach_id = ? AND revoked_at IS NULL"
+                + _for_update_suffix(self.database),
+                (coach_id,),
+            ).fetchall()
+            now = _now_iso()
+            for row in rows:
+                conn.execute("UPDATE coach_session SET revoked_at = ? WHERE session_id = ?", (now, row["session_id"]))
+                append_event(
+                    conn,
+                    actor=actor,
+                    action=AUTH_SESSION_REVOKED,
+                    entity_type=ENTITY_TYPE_AUTH_SESSION,
+                    entity_id=row["session_id"],
+                    reason=reason,
+                )
+        return len(rows)
+
 
 @dataclass(frozen=True)
 class LoginResult:
@@ -357,7 +394,12 @@ class AuthenticationService:
         self.rate_limiter.check(ip_key)
 
         coach = self.identities.get_coach_by_email(email)
-        password_ok = self.credentials.verify_password(coach.coach_id, password) if coach else False
+        # Always calls through to verify_password, even for an unknown
+        # email (coach is None) -- CredentialRepository.verify_password's
+        # dummy-hash decoy only closes the timing side-channel between
+        # "unknown email" and "known email, wrong password" if this call
+        # happens unconditionally on both paths.
+        password_ok = self.credentials.verify_password(coach.coach_id if coach else None, password)
         if not coach or not password_ok:
             self.rate_limiter.record_failure(identifier_key)
             self.rate_limiter.record_failure(ip_key)
@@ -391,6 +433,24 @@ class AuthenticationService:
         if session is None:
             return
         self.sessions.revoke(session.session_id, actor=ActorContext.coach(session.coach_id))
+
+    def reset_password(
+        self, coach_id: str, new_password: str, *, actor: ActorContext, reason: str | None = None
+    ) -> Coach:
+        """Admin-assisted password set/reset (see module docstring,
+        "recovery/re-entry"). Raises `KeyError` if `coach_id` does not name
+        a real coach -- callers get the same not-found behaviour as an
+        unknown email lookup, rather than an uncaught foreign-key
+        `IntegrityError` from the credential insert. Also revokes every
+        currently-valid session for this coach: a session token issued
+        before the reset (or one that leaked) must not keep authenticating
+        past it."""
+        coach = self.identities.get_coach(coach_id)
+        if coach is None:
+            raise KeyError(coach_id)
+        self.credentials.set_password(coach_id, new_password, actor=actor, reason=reason)
+        self.sessions.revoke_all_for_coach(coach_id, actor=actor, reason=reason or "credential_reset")
+        return coach
 
     def resolve(self, raw_token: str | None) -> Coach | None:
         """The authenticated coach for a request's session cookie, or None

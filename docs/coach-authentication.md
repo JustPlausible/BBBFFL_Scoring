@@ -172,9 +172,15 @@ consecutive failures locks that key out for 5 minutes) -- never permanent
 -- and a successful login clears the counter immediately, so a coach who
 mistypes a password a few times is never penalised once they get it
 right. An unknown email and a known email with the wrong password produce
-the *same* error and consume the *same* rate-limit bucket shape, so
-repeated attempts cannot be used to enumerate which emails belong to real
-coaches.
+the *same* error, consume the *same* rate-limit bucket shape, and cost the
+*same* amount of time to reject: `AuthenticationService.login` always
+calls `CredentialRepository.verify_password` -- for an unresolved coach it
+still runs the full `scrypt` verification against a fixed dummy hash
+(`app/auth.py`'s `_DUMMY_PASSWORD_HASH`) rather than short-circuiting, so
+the expensive path isn't skipped only when no coach was found. Together
+this means repeated attempts cannot be used to enumerate which emails
+belong to real coaches, whether by response content, rate-limit behaviour,
+or response time.
 
 **Limitation:** because the limiter's state lives only in this process's
 memory, it is not shared across multiple application instances/workers and
@@ -193,6 +199,17 @@ password: contact the league admin, who resets it through this endpoint
 (or a short script/`curl` invocation using it) and relays the new password
 out of band. It requires no email infrastructure and reuses an access
 control surface that already exists.
+
+The route delegates to `AuthenticationService.reset_password`, which does
+two things atomically from the caller's perspective: sets the new password
+hash, then revokes every currently-valid session for that coach
+(`SessionRepository.revoke_all_for_coach`). This matters for the case the
+reset exists to cover -- a suspected compromised credential or device --
+where leaving old sessions alive would let a stolen cookie keep
+authenticating for up to `BBBFFL_SESSION_LIFETIME_SECONDS` regardless of
+the reset. A `coach_id` that does not name a real coach raises `KeyError`
+(mapped to HTTP 404 by `app/main.py`'s existing handler) before any write
+is attempted, rather than surfacing as an uncaught foreign-key violation.
 
 ## Scorer/admin proxy provenance is unchanged
 

@@ -182,7 +182,11 @@ def set_coach_credential(payload: SetCoachCredentialRequest, request: Request):
     Accepts either `coach_id` or `email` to identify the coach (never both
     required); the caller never learns whether an *email* alone would have
     matched anything beyond what this already-authenticated admin
-    explicitly asked to change."""
+    explicitly asked to change. `AuthenticationService.reset_password`
+    validates `coach_id` (raising the same not-found response an unknown
+    email gets, rather than an uncaught FK violation from the credential
+    insert) and revokes the coach's existing sessions, so a session issued
+    before this reset cannot keep authenticating past it."""
     identities = request.app.state.identities
     coach_id = payload.coach_id
     if not coach_id and payload.email:
@@ -193,7 +197,7 @@ def set_coach_credential(payload: SetCoachCredentialRequest, request: Request):
     if not coach_id:
         raise HTTPException(status_code=400, detail="coach_id or email is required")
 
-    request.app.state.credentials.set_password(
+    request.app.state.auth_service.reset_password(
         coach_id, payload.password, actor=ActorContext.anonymous_operator("admin"), reason=payload.reason
     )
     return {"coach_id": coach_id, "status": "password_set"}

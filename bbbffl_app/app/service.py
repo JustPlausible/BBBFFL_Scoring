@@ -10,10 +10,11 @@ a scorer override changes only the resulting BBBFFL point score.
 
 import dataclasses
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from app.afl_client import Match, MatchState, Player, PlayerStatLine, Team
+from app.afl_client import AflApiError, Match, MatchState, Player, PlayerStatLine, Team
 from app.db import DecisionsRepository
 from app.participation import ParticipationEvidence, assess_participation
 from app.presentation import Number, football_score_for_position, format_football_line
@@ -137,6 +138,8 @@ class InterchangeInfo:
     # position (if any) they're currently assigned to cover.
     match_state: InterchangeMatchState
     dnp: bool
+    # None means unresolved; False is an explicit scorer rejection.
+    dnp_ruling: bool | None
     target_position: str | None
     # None when unnamed, or when no AFL stats are available for this player
     # yet (e.g. their match hasn't started) -- a neutral "no data" state
@@ -306,15 +309,6 @@ def build_matchup_state(
             name_by_player[player_id] = player.name
 
     needed_match_ids: set[int] = set()
-    # Participation evidence is advisory and remains available even after a
-    # scorer confirms DNP. Fetch each named player's (deduplicated) match so
-    # a persisted ruling never causes its supporting/contradicting AFL facts
-    # to disappear from the review model.
-    for team in teams:
-        for player_id in team.roster.values():
-            match = _match_for_player(team_by_player, matches_by_team_id, player_id)
-            if match:
-                needed_match_ids.add(match.match_id)
     for team in teams:
         assignment = interchange_assignments.get(team.team_key)
         interchange_dnp = dnp_map.get((team.team_key, "Interchange"), False)
@@ -346,9 +340,33 @@ def build_matchup_state(
         if match:
             needed_match_ids.add(match.match_id)
 
+    # Only these calls are authoritative scoring dependencies. The finalize
+    # route's outer evidence_batch observes them and fails closed if stale.
     stats_by_match: dict[int, dict[int, PlayerStatLine]] = {
         match_id: afl_client.get_match_player_stats(match_id) for match_id in needed_match_ids
     }
+    # Populate evidence for named players excluded above by accepted scorer
+    # decisions. ResilientAflClient batches are intentionally nested: only
+    # the innermost batch observes these advisory calls, leaving a finalize
+    # route's outer authoritative batch unaffected. A cold advisory failure
+    # degrades to missing evidence rather than invalidating the official score.
+    advisory_match_ids = {
+        match.match_id
+        for team in teams
+        for player_id in team.roster.values()
+        if (match := _match_for_player(team_by_player, matches_by_team_id, player_id)) is not None
+    } - needed_match_ids
+    evidence_batch = getattr(afl_client, "evidence_batch", None)
+    advisory_scope = evidence_batch() if callable(evidence_batch) else nullcontext(None)
+    with advisory_scope:
+        for match_id in advisory_match_ids:
+            try:
+                stats_by_match[match_id] = afl_client.get_match_player_stats(match_id)
+            except (AflApiError, KeyError, TypeError, ValueError):
+                # Advisory evidence must never block official scoring or
+                # finalisation. These are the transport/unavailable and
+                # public-contract parsing failures the AFL boundary exposes.
+                logger.warning("advisory afl participation evidence unavailable for match_id=%s", match_id)
     bye_team_ids = None if getattr(round_, "byes", None) is None else frozenset(team.team_id for team in round_.byes)
 
     team_results: list[TeamResult] = []
@@ -524,8 +542,12 @@ def build_matchup_state(
             else (p.effective_score or 0.0)
             for p in position_results
         )
-        if interchange_id is not None and not interchange_dnp:
+        interchange_available = interchange_evidence.state != "club_bye"
+        if interchange_id is not None and not interchange_dnp and interchange_available:
             for position_result, vacancy_kind in eligible:
+                current_target_contribution = (
+                    position_result.override_score if position_result.override_score is not None else 0.0
+                )
                 replacement = (
                     position_result.override_score
                     if position_result.override_score is not None
@@ -540,7 +562,11 @@ def build_matchup_state(
                         target_position=position_result.position,
                         vacancy_kind=vacancy_kind,
                         replacement_score=replacement,
-                        team_outcome=(baseline_total + replacement if replacement is not None else None),
+                        team_outcome=(
+                            baseline_total - current_target_contribution + replacement
+                            if replacement is not None
+                            else None
+                        ),
                     )
                 )
         scored_candidates = [candidate for candidate in candidates if candidate.team_outcome is not None]
@@ -568,6 +594,7 @@ def build_matchup_state(
             afl_club=_team_name(team_by_player, interchange_id) or "",
             match_state=interchange_match_state,
             dnp=interchange_dnp,
+            dnp_ruling=dnp_rulings.get((team.team_key, "Interchange")),
             target_position=interchange_target,
             potential_scores=interchange_potential_scores,
             participation_evidence=interchange_evidence,

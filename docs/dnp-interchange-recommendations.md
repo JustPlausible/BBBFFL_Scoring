@@ -27,6 +27,9 @@ potential upstream `AFL-api` follow-up; BBBFFL must not bypass the contract.
 Evidence and `dnp_recommendation` are recalculated observations. An official
 ruling is a separate persisted `slot_dnp` row: `true` confirms DNP, `false`
 records an explicit rejection, and no row means unresolved scorer input.
+That nullable ruling is exposed consistently for starting and Interchange
+slots; the convenience `dnp` boolean continues to describe only whether the
+current ruling is confirmed.
 Confirmation/rejection accepts a reason and uses the existing actor, immutable
 audit-event, competition-scope, and finalisation-lock boundaries. Later evidence
 does not update or delete any ruling or audit event.
@@ -41,10 +44,23 @@ all equal maxima are returned as `equal_best`; no vacancy is
 `no_eligible_replacement`; and legal vacancies without enough Interchange
 evidence are `awaiting_evidence`.
 
+An Interchange player whose club has an ordinary bye is unavailable, produces
+no candidates, and yields `no_eligible_replacement` rather than
+`awaiting_evidence`. Candidate outcomes replace the target's current
+contribution (`baseline - target + replacement`), so a target override is
+included exactly once while overrides on other positions remain intact.
+
 Candidate generation is advisory only. The official result continues to read
 only the persisted Interchange assignment, and the coach's original selected
 player remains alongside the effective replacement. A scorer must persist a
 target (with audit reason/provenance) before it contributes.
+
+During finalisation, match-stat calls required by the accepted scorer decisions
+remain in the authoritative freshness batch. Extra calls made only to display
+participation evidence for excluded/DNP players run in a nested advisory batch.
+Stale advisory fallback may still be displayed with its diagnostics, while a
+cold failure degrades to unknown evidence; neither can make otherwise-fresh
+official scoring dependencies unfinalisable.
 
 ## Replay coverage
 

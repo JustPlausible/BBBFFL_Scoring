@@ -87,7 +87,14 @@ AFL_RESILIENCE = {"app.afl_resilience", "app.afl_diagnostics"}
 # the scoring orchestration service, and the scorer-decision application
 # service that routes call. A sibling of the season-model domain, not a
 # dependency of it.
-GRAND_FINAL_VERTICAL = {"app.teams", "app.superscore", "app.presentation", "app.service", "app.scorer_decisions"}
+GRAND_FINAL_VERTICAL = {
+    "app.teams",
+    "app.superscore",
+    "app.presentation",
+    "app.participation",
+    "app.service",
+    "app.scorer_decisions",
+}
 
 ROUTES = {
     "app.routes",

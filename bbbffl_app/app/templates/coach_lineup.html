@@ -46,14 +46,14 @@ select { width:100%; min-height:48px; border:1px solid #59636e; border-radius:9p
 <input type="hidden" name="submission_version" value="{{ lineup.submission.version if lineup.submission else 0 }}">
 <h2>Nine positions</h2><div class="muted">Players come from your current authoritative owned squad.</div>
 <div class="slots">
-{% for position in positions %}{% set selected = lineup.draft.positions[position] %}{% set lock = lineup.locks.get(position) %}{% set deferred = lineup.deferred.get(position) %}
+{% for position in positions %}{% set selected = lineup.draft.positions[position] %}{% set selected_player = lineup.selected_players[position] %}{% set lock = lineup.locks.get(position) %}{% set deferred = lineup.deferred.get(position) %}
 <article class="slot">
  <div class="slot-head"><span class="position">{{ position }}</span>{% if deferred %}<span class="badge locked">Opening Round · locked</span>{% elif lock and lock.state.value != 'editable' %}<span class="badge locked">{{ lock.state.value|capitalize }}</span>{% else %}<span class="badge">Editable</span>{% endif %}</div>
  {% if deferred or (lock and lock.state.value != 'editable') %}
    <input type="hidden" name="position_{{ position }}" value="{{ selected or '' }}">
-   <select disabled aria-label="{{ position }} locked selection"><option>{% for player in lineup.players %}{% if player.season_player_id == selected %}{{ player.display_name }} — {{ player.afl_team_name or 'Club unknown' }}{% endif %}{% endfor %}{% if not selected %}Empty{% endif %}</option></select>
+   <select disabled aria-label="{{ position }} locked selection"><option>{% if selected_player %}{{ selected_player.display_name }} — {{ selected_player.afl_team_name or 'Club unknown' }}{% else %}Empty{% endif %}</option></select>
  {% else %}
-   <select name="position_{{ position }}" aria-label="Select player for {{ position }}"><option value="">Empty — choose later</option>{% for player in lineup.players %}<option value="{{ player.season_player_id }}" {% if player.season_player_id == selected %}selected{% endif %}>{{ player.display_name }} — {{ player.afl_team_name or 'Club unknown' }}</option>{% endfor %}</select>
+   <select name="position_{{ position }}" aria-label="Select player for {{ position }}"><option value="">Empty — choose later</option>{% if selected_player and selected_player not in lineup.players %}<option value="{{ selected }}" selected>{{ selected_player.display_name }} — no longer in your owned squad; choose a replacement</option>{% endif %}{% for player in lineup.players %}<option value="{{ player.season_player_id }}" {% if player.season_player_id == selected %}selected{% endif %}>{{ player.display_name }} — {{ player.afl_team_name or 'Club unknown' }}</option>{% endfor %}</select>
  {% endif %}
  {% if deferred %}<div class="lock-info">Preloaded by the Opening Round deferred-selection mechanism. Source AFL match {{ deferred.source_afl_match_id or 'not recorded' }}; nomination {{ deferred.nomination_id }}.</div>
  {% elif lock and lock.state.value != 'editable' %}<div class="lock-info">{{ lock.reason|replace('_',' ') }}{% if lock.afl_match_id %} · AFL match {{ lock.afl_match_id }}{% endif %}{% if lock.effective_lock_at %} · {{ lock.effective_lock_at }}{% endif %}</div>{% endif %}

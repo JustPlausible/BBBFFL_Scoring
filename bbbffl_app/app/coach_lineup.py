@@ -42,6 +42,7 @@ class CoachLineupContext:
     draft: object
     submission: object | None
     players: list
+    selected_players: dict
     locks: dict
     deferred: dict
     validation: object | None
@@ -129,8 +130,16 @@ class CoachLineupService:
         if positions is not None:
             draft = dataclass_replace_positions(draft, positions)
         submission = self.lineups.get_effective_submission(draft.lineup_id)
-        squad = self.ownership.squad_at(entry["season_entry_id"], draft.updated_at)
+        # The selector is a view of current ownership, not ownership when the
+        # private draft was last saved. Draft/submission content remains
+        # untouched and may therefore truthfully show a now-released player
+        # until the coach edits it; submission validation remains authoritative.
+        squad = self.ownership.current_squad(entry["season_entry_id"])
         players = [self.pool.get_by_id(period.season_player_id) for period in squad]
+        selected_players = {
+            position: self.pool.get_by_id(player_id) if player_id else None
+            for position, player_id in draft.positions.items()
+        }
         deferred = {
             position: self.nominations.deferred_context(round_id, entry["season_entry_id"], position)
             for position in POSITIONS
@@ -169,6 +178,7 @@ class CoachLineupService:
             draft,
             submission,
             players,
+            selected_players,
             locks,
             deferred,
             validation,

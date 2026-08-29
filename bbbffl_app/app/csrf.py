@@ -46,7 +46,9 @@ def issue_token(secret: str, *, now: float | None = None) -> str:
     return f"{nonce}.{issued_at}.{signature}"
 
 
-def verify_token(secret: str, cookie_value: str | None, submitted_value: str | None, *, now: float | None = None) -> bool:
+def verify_token(
+    secret: str, cookie_value: str | None, submitted_value: str | None, *, now: float | None = None
+) -> bool:
     """True only if a cookie value and a separately submitted form value
     were both present, identical, well-formed, correctly signed for
     `secret`, and issued within `_MAX_AGE_SECONDS`. Never raises -- any

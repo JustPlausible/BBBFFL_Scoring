@@ -59,5 +59,7 @@ def test_a_token_from_the_future_is_rejected():
 
 
 def test_malformed_token_does_not_raise():
-    assert verify_token(SECRET, cookie_value="not.a.valid.token.shape", submitted_value="not.a.valid.token.shape") is False
+    assert (
+        verify_token(SECRET, cookie_value="not.a.valid.token.shape", submitted_value="not.a.valid.token.shape") is False
+    )
     assert verify_token(SECRET, cookie_value="short", submitted_value="short") is False

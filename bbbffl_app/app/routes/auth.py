@@ -103,7 +103,9 @@ async def login_submit(request: Request):
     csrf_submitted = form.get("csrf_token", "")
 
     if not _verify_csrf(request, csrf_submitted):
-        return _render_login(request, error="Your sign-in form expired. Please try again.", email=email, status_code=403)
+        return _render_login(
+            request, error="Your sign-in form expired. Please try again.", email=email, status_code=403
+        )
 
     if not email or not password:
         return _render_login(request, error="Email and password are required.", email=email, status_code=400)

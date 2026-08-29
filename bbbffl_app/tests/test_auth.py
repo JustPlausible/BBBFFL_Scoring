@@ -153,9 +153,7 @@ def test_login_always_issues_a_brand_new_session(auth_service, coach):
 def test_reauthenticating_with_an_existing_session_revokes_it_and_rotates(auth_service, coach):
     first = auth_service.login("alex@example.com", PASSWORD, remote_addr="1.2.3.4")
 
-    second = auth_service.login(
-        "alex@example.com", PASSWORD, remote_addr="1.2.3.4", existing_token=first.token
-    )
+    second = auth_service.login("alex@example.com", PASSWORD, remote_addr="1.2.3.4", existing_token=first.token)
 
     assert second.session.session_id != first.session.session_id
     assert auth_service.resolve(first.token) is None  # old session cookie no longer works

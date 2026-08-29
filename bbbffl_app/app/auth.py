@@ -277,10 +277,14 @@ class SessionRepository:
         # DatabaseConnection docstring: it never holds a long-lived
         # connection, and SQLAlchemy 2.0 Core does not autocommit).
         with transaction(self.database) as conn:
-            conn.execute("UPDATE coach_session SET last_seen_at = ? WHERE session_id = ?", (_now_iso(), session.session_id))
+            conn.execute(
+                "UPDATE coach_session SET last_seen_at = ? WHERE session_id = ?", (_now_iso(), session.session_id)
+            )
         return session
 
-    def revoke(self, session_id: str, *, actor: ActorContext, action: str = AUTH_LOGOUT, reason: str | None = None) -> bool:
+    def revoke(
+        self, session_id: str, *, actor: ActorContext, action: str = AUTH_LOGOUT, reason: str | None = None
+    ) -> bool:
         """Revoke one session by its (non-secret) `session_id`. Returns
         False, without appending an event, if the session does not exist
         or is already revoked -- idempotent, so logging out twice or

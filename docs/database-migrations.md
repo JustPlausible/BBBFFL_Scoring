@@ -105,6 +105,15 @@ workflow and why the pointer's foreign key is declared `DEFERRABLE
 INITIALLY DEFERRED`. Downgrade refuses once any correction exists or any
 draft is finalised.
 
+Revision `0020_opening_round_deferral` adds `opening_round_rule`/
+`opening_round_rule_revision` (season+club scoped, versioned exactly like
+`round_afl_mapping`) and `opening_round_nomination` (the player-level
+decision, corrected in place via an audited UPDATE rather than a second
+revision-history table). See
+[`opening-round-deferred-selection.md`](opening-round-deferred-selection.md).
+Downgrade refuses once either table holds any row, matching this
+repository's other irreversible-history revisions.
+
 ## Migration authoring and rollback
 
 Every relational change must be a new ordered revision. Do not add startup DDL

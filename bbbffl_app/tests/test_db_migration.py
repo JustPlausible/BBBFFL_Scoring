@@ -75,6 +75,9 @@ EXPECTED_TABLES = {
     "bbbffl_matchup_slot_ruling",
     "bbbffl_matchup_interchange_ruling",
     "bbbffl_matchup_override",
+    "opening_round_rule",
+    "opening_round_rule_revision",
+    "opening_round_nomination",
 }
 
 

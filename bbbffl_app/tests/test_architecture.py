@@ -108,6 +108,17 @@ GRAND_FINAL_VERTICAL = {
 # reached only via an already-constructed instance on `request.app.state`.
 ROUND_REVIEW = {"app.round_review"}
 
+# Opening Round deferred-selection configuration/nomination/locking (issue
+# #69): sits above *both* the season model and lockouts -- it reuses
+# app.lockouts.resolve_match/MatchResolutionError for AFL match resolution
+# (the same team-id-to-match logic lockouts already uses, rather than a
+# second copy) and app.lineups for the roster-slot vocabulary and
+# WeeklyLineupRepository (to preload a nominated slot). Like app.lockouts,
+# it is not HTTP-routed and must never be depended upon by the season model,
+# lockouts, weekly-submission-sources, the Grand Final vertical, routes, or
+# the composition root.
+OPENING_ROUND = {"app.opening_round"}
+
 # AFL participation-evidence classification (roadmap package 26, issue #57):
 # a pure function of public afl-api facts (a match, a bye list, a stat line)
 # with no state and no dependency beyond the foundation `app.afl_client`
@@ -141,6 +152,7 @@ ALL_GROUPS = (
     | AFL_RESILIENCE
     | AFL_EVIDENCE
     | ROUND_REVIEW
+    | OPENING_ROUND
     | GRAND_FINAL_VERTICAL
     | ROUTES
     | COMPOSITION_ROOT
@@ -389,6 +401,28 @@ def test_round_review_does_not_depend_on_routes_grand_final_or_composition_root(
     for module in sorted(ROUND_REVIEW):
         offending = graph[module] & forbidden
         assert not offending, f"{module} must not depend on {sorted(offending)}"
+
+
+def test_opening_round_does_not_depend_on_grand_final_routes_or_composition_root(graph):
+    """`app.opening_round` (issue #69) sits above the season model and
+    lockouts -- see this file's OPENING_ROUND docstring -- but must stay a
+    sibling of the Grand Final vertical and must never depend on routes or
+    the composition root, exactly like every other application-service
+    module."""
+    forbidden = GRAND_FINAL_VERTICAL | ROUTES | COMPOSITION_ROOT
+    for module in sorted(OPENING_ROUND):
+        offending = graph[module] & forbidden
+        assert not offending, f"{module} must not depend on {sorted(offending)}"
+
+
+def test_season_model_and_lockouts_do_not_depend_on_opening_round(graph):
+    """The reverse direction of the edge above: neither the season model
+    nor lockouts (nor weekly-submission-sources) may depend on
+    `app.opening_round` -- it is a consumer of those layers, never a
+    dependency of them, exactly like app.round_review's relationship to
+    app.competition_lifecycle."""
+    for module in sorted(SEASON_MODEL | LOCKOUTS | WEEKLY_SUBMISSION_SOURCES):
+        assert "app.opening_round" not in graph[module], f"{module} must not depend on app.opening_round"
 
 
 def test_scorer_decisions_stays_repository_agnostic(graph):

@@ -70,6 +70,17 @@ cycle anywhere) rather than leaving it as prose that only this file states.
   importing `app.lockouts` — the reverse dependency (lockouts imports
   lineups, never lineups imports lockouts) is enforced by
   `test_lineups_and_lockouts_stay_decoupled`.
+- **Opening Round deferred selection** (issue #69) — `app/opening_round.py`
+  (`OpeningRoundRuleRepository`: versioned season+club configuration,
+  mirroring `app.round_mapping`; `OpeningRoundNominationRepository`: the
+  player-level nomination/correction boundary;
+  `OpeningRoundSelectionGuard`: another duck-typed `lock_guard`
+  collaborator, composable with `LockoutRepository.guard(...)`, that locks
+  a nominated slot and excludes it from ordinary lockout evaluation). Sits
+  above both weekly selections and lockouts — it reuses
+  `app.lockouts.resolve_match` for AFL match resolution rather than a
+  second copy — but, like lockouts, is never imported back by either; see
+  [`opening-round-deferred-selection.md`](opening-round-deferred-selection.md).
 - **Competition, fixtures, matchups and results** — `app/fixtures.py`
   (`FixtureRepository`: the frozen historical fixture draw), `app/
   round_mapping.py` (`RoundMappingRepository`: the versioned BBBFFL-round ->

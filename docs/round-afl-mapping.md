@@ -36,3 +36,19 @@ mapping rule. Such setup is represented as ambiguous and remains non-operational
 rather than inventing a rule. Modelling match-level/deferred-fact composition,
 if confirmed, belongs in a separate follow-up rather than this round-context
 foundation.
+
+## Whole-round mapping vs. player-level deferred scoring (issue #69)
+
+That follow-up is [`opening-round-deferred-selection.md`](opening-round-deferred-selection.md).
+It models a **separate, player-level** scoring-source override that can
+coexist with this module's whole-round mapping in the same BBBFFL round: an
+individual lineup slot with an active Opening Round nomination
+(`app.opening_round`) draws its statistics from the player's AFL Opening
+Round match, while `RoundMappingRepository`'s accepted mapping continues to
+supply every other slot's AFL context exactly as before. This module never
+gains Opening Round awareness itself -- a round's whole-round mapping and a
+slot's deferred source are deliberately independent boundaries; see that
+document for the full design, the 2024/2025/2026 evidence (which disproves
+any general `Opening Round -> R2..R4` assumption -- 2024's compensating
+byes extend to R5/R6), and why the exact historical BBBFFL nomination
+remains unresolved.

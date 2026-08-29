@@ -62,6 +62,21 @@ Stale advisory fallback may still be displayed with its diagnostics, while a
 cold failure degrades to unknown evidence; neither can make otherwise-fresh
 official scoring dependencies unfinalisable.
 
+## Opening Round deferred selections are not an ordinary bye
+
+A slot with an active Opening Round deferred nomination
+([`opening-round-deferred-selection.md`](opening-round-deferred-selection.md),
+issue #69) is assessed against the player's Opening Round match, never the
+target round's ordinary bye list -- even though that club genuinely has its
+compensating bye in the round being scored. It therefore classifies as
+`played_with_stats`/`participated_zero_stats` like any other played match
+(tagged `source="opening-round-deferred"`), not `club_bye`, and is not
+offered as an Interchange replacement target merely because the target
+round has no ordinary match for that player. Only when the Opening Round
+evidence itself cannot resolve a match/stat line does the slot fall back to
+`unknown`/`review_required`, with a reason naming the Opening Round
+explicitly rather than the generic "evidence indeterminate" case above.
+
 ## Replay coverage
 
 `tests/test_interchange_recommendation.py` uses clearly labelled synthetic,

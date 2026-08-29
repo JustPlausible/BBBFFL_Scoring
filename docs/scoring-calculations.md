@@ -27,3 +27,18 @@ stat fields remain null and make that slot's calculated score incomplete rather
 than being converted to zero. Interchange is retained as an unscored selection;
 recommendations, assignments, scorer rulings, review and publication remain
 deferred to packages 27 and 28.
+
+## Per-slot scoring source (issue #69)
+
+Not every slot in a round necessarily draws from the round's ordinarily
+mapped AFL round. A slot with an active Opening Round deferred nomination
+(`app.opening_round`, see
+[`opening-round-deferred-selection.md`](opening-round-deferred-selection.md))
+resolves its match/stats from the player's AFL Opening Round instead, via
+`_RoundFacts`'s per-AFL-round match/stat cache -- while every other slot in
+the same lineup is unaffected. Both paths call the identical
+`app.scoring.score_position` formula; there is no second scoring engine.
+Each slot's evidence in the calculated snapshot records `scoring_source`
+(`"ordinary"` or `"opening_round_deferred"`) and `source_afl_round_id`, so a
+mixed-source round's provenance stays inspectable wherever the snapshot is
+read (`app.round_review`, replay tooling).

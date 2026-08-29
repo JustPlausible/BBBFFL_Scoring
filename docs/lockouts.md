@@ -320,6 +320,19 @@ fact is not itself a privileged decision. `LockoutTriggerRepository.create`/
 configuring the lockout plan is itself a privileged BBBFFL competition
 decision, not an observation.
 
+## Coexistence with Opening Round deferred locking (issue #69)
+
+A lineup slot locked by an Opening Round deferred nomination
+([`opening-round-deferred-selection.md`](opening-round-deferred-selection.md))
+is a distinct, unrelated locking mechanism, never a change to this module.
+`app.opening_round.OpeningRoundSelectionGuard` composes with this module's
+`LockGuard` (via its `inner` argument): it locks its own nominated slot
+absolutely and excludes it before delegating every other position to this
+module's ordinary evaluation, so a deferred player -- whose club has no AFL
+match in the target round by construction -- never has to be resolved
+through `resolve_match` at all, and every other position keeps its normal
+staged-lock behaviour untouched.
+
 ## Non-goals of this issue
 
 Carry-forward/proxy entry (#22/roadmap 22), broader ownership/position/bye

@@ -18,15 +18,16 @@ class FakeSeason:
 
 
 class FakeRound:
-    def __init__(self, round_id=1, round_number=1):
+    def __init__(self, round_id=1, round_number=1, byes=()):
         self.round_id = round_id
         self.round_number = round_number
+        self.byes = byes
 
 
 class FakeAflClient:
     """A duck-typed stand-in for AflApiClient -- no network involved."""
 
-    def __init__(self, matches, players, stats_by_match=None, season_id=1, current_round_number=1, year=2026):
+    def __init__(self, matches, players, stats_by_match=None, season_id=1, current_round_number=1, year=2026, byes=()):
         self.matches = matches
         self.players = players
         self.stats_by_match = stats_by_match or {}
@@ -34,13 +35,14 @@ class FakeAflClient:
         self.get_player_calls = []
         self.get_round_calls = []
         self._season = FakeSeason(season_id=season_id, round_number=current_round_number, year=year)
+        self.byes = byes
 
     def get_current_season(self):
         return self._season
 
     def get_round(self, season_id, round_number):
         self.get_round_calls.append((season_id, round_number))
-        return FakeRound(round_number=round_number)
+        return FakeRound(round_number=round_number, byes=self.byes)
 
     def get_matches(self, round_id):
         return self.matches

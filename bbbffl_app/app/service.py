@@ -10,11 +10,13 @@ a scorer override changes only the resulting BBBFFL point score.
 
 import dataclasses
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from app.afl_client import Match, MatchState, Player, PlayerStatLine, Team
+from app.afl_client import AflApiError, Match, MatchState, Player, PlayerStatLine, Team
 from app.db import DecisionsRepository
+from app.participation import ParticipationEvidence, assess_participation
 from app.presentation import Number, football_score_for_position, format_football_line
 from app.scoring import FORWARD_POSITIONS, SCORABLE_POSITIONS, PlayerStats, score_position
 from app.teams import TeamConfig
@@ -108,6 +110,9 @@ class PositionResult:
     # vacant/DNP/yet_to_play) also has display_is_actual_afl=False, but
     # that's not an override artifact and must not be flagged as one.
     display_adjusted_by_override: bool
+    participation_evidence: ParticipationEvidence
+    # None means the scorer has not ruled; False is an explicit rejection.
+    dnp_ruling: bool | None
 
 
 @dataclass(frozen=True)
@@ -133,11 +138,30 @@ class InterchangeInfo:
     # position (if any) they're currently assigned to cover.
     match_state: InterchangeMatchState
     dnp: bool
+    # None means unresolved; False is an explicit scorer rejection.
+    dnp_ruling: bool | None
     target_position: str | None
     # None when unnamed, or when no AFL stats are available for this player
     # yet (e.g. their match hasn't started) -- a neutral "no data" state
     # rather than an invented all-zero line.
     potential_scores: InterchangePotentialScores | None
+    participation_evidence: ParticipationEvidence
+
+
+@dataclass(frozen=True)
+class InterchangeCandidate:
+    target_position: str
+    vacancy_kind: Literal["confirmed_dnp", "intentional_vacancy"]
+    replacement_score: float | None
+    team_outcome: float | None
+
+
+@dataclass(frozen=True)
+class InterchangeRecommendation:
+    state: Literal["clear_best", "equal_best", "no_eligible_replacement", "awaiting_evidence"]
+    candidates: list[InterchangeCandidate]
+    recommended_targets: list[str]
+    advisory_only: bool = True
 
 
 @dataclass(frozen=True)
@@ -155,6 +179,7 @@ class TeamResult:
     display_goals: Number
     display_behinds: Number
     football_line: str
+    interchange_recommendation: InterchangeRecommendation
 
 
 @dataclass(frozen=True)
@@ -264,6 +289,7 @@ def build_matchup_state(
         matches_by_team_id[match.away_team.team_id] = match
 
     dnp_map = decisions.get_dnp_map()
+    dnp_rulings = decisions.get_dnp_rulings()
     interchange_assignments = decisions.get_interchange_assignments()
     overrides = decisions.get_overrides()
 
@@ -314,9 +340,34 @@ def build_matchup_state(
         if match:
             needed_match_ids.add(match.match_id)
 
+    # Only these calls are authoritative scoring dependencies. The finalize
+    # route's outer evidence_batch observes them and fails closed if stale.
     stats_by_match: dict[int, dict[int, PlayerStatLine]] = {
         match_id: afl_client.get_match_player_stats(match_id) for match_id in needed_match_ids
     }
+    # Populate evidence for named players excluded above by accepted scorer
+    # decisions. ResilientAflClient batches are intentionally nested: only
+    # the innermost batch observes these advisory calls, leaving a finalize
+    # route's outer authoritative batch unaffected. A cold advisory failure
+    # degrades to missing evidence rather than invalidating the official score.
+    advisory_match_ids = {
+        match.match_id
+        for team in teams
+        for player_id in team.roster.values()
+        if (match := _match_for_player(team_by_player, matches_by_team_id, player_id)) is not None
+    } - needed_match_ids
+    evidence_batch = getattr(afl_client, "evidence_batch", None)
+    advisory_scope = evidence_batch() if callable(evidence_batch) else nullcontext(None)
+    with advisory_scope:
+        for match_id in advisory_match_ids:
+            try:
+                stats_by_match[match_id] = afl_client.get_match_player_stats(match_id)
+            except (AflApiError, KeyError, TypeError, ValueError):
+                # Advisory evidence must never block official scoring or
+                # finalisation. These are the transport/unavailable and
+                # public-contract parsing failures the AFL boundary exposes.
+                logger.warning("advisory afl participation evidence unavailable for match_id=%s", match_id)
+    bye_team_ids = None if getattr(round_, "byes", None) is None else frozenset(team.team_id for team in round_.byes)
 
     team_results: list[TeamResult] = []
     counts: dict[PositionState, int] = {
@@ -337,6 +388,13 @@ def build_matchup_state(
 
         interchange_match_state, interchange_stat_line = _resolve_underlying_match(
             team_by_player, matches_by_team_id, stats_by_match, interchange_id
+        )
+        interchange_match = _match_for_player(team_by_player, matches_by_team_id, interchange_id)
+        interchange_evidence = assess_participation(
+            afl_team_id=(team_by_player[interchange_id].team_id if interchange_id in team_by_player else None),
+            bye_team_ids=bye_team_ids,
+            match=interchange_match,
+            stat_line=interchange_stat_line,
         )
         interchange_potential_scores = None
         if interchange_stat_line is not None:
@@ -454,8 +512,81 @@ def build_matchup_state(
                     display_is_actual_afl=football.is_actual_afl,
                     football_line=football.line,
                     display_adjusted_by_override=adjusted_by_override,
+                    participation_evidence=assess_participation(
+                        afl_team_id=(
+                            team_by_player[starting_player_id].team_id if starting_player_id in team_by_player else None
+                        ),
+                        bye_team_ids=bye_team_ids,
+                        match=_match_for_player(team_by_player, matches_by_team_id, starting_player_id),
+                        stat_line=(
+                            stats_by_match.get(
+                                _match_for_player(team_by_player, matches_by_team_id, starting_player_id).match_id, {}
+                            ).get(starting_player_id)
+                            if _match_for_player(team_by_player, matches_by_team_id, starting_player_id)
+                            else None
+                        ),
+                    ),
+                    dnp_ruling=dnp_rulings.get((team.team_key, position)),
                 )
             )
+
+        eligible = [
+            (p, "confirmed_dnp" if p.starting_dnp else "intentional_vacancy")
+            for p in position_results
+            if p.starting_dnp or p.starting_player_id is None
+        ]
+        candidates: list[InterchangeCandidate] = []
+        baseline_total = sum(
+            (p.override_score if p.override_score is not None else 0.0)
+            if (p.starting_dnp or p.starting_player_id is None)
+            else (p.effective_score or 0.0)
+            for p in position_results
+        )
+        interchange_available = interchange_evidence.state != "club_bye"
+        if interchange_id is not None and not interchange_dnp and interchange_available:
+            for position_result, vacancy_kind in eligible:
+                current_target_contribution = (
+                    position_result.override_score if position_result.override_score is not None else 0.0
+                )
+                replacement = (
+                    position_result.override_score
+                    if position_result.override_score is not None
+                    else (
+                        score_position(position_result.position, _stats_to_player_stats(interchange_stat_line))
+                        if interchange_stat_line is not None
+                        else None
+                    )
+                )
+                candidates.append(
+                    InterchangeCandidate(
+                        target_position=position_result.position,
+                        vacancy_kind=vacancy_kind,
+                        replacement_score=replacement,
+                        team_outcome=(
+                            baseline_total - current_target_contribution + replacement
+                            if replacement is not None
+                            else None
+                        ),
+                    )
+                )
+        scored_candidates = [candidate for candidate in candidates if candidate.team_outcome is not None]
+        if not candidates:
+            recommendation_state = "no_eligible_replacement"
+            recommended_targets = []
+        elif not scored_candidates:
+            recommendation_state = "awaiting_evidence"
+            recommended_targets = []
+        else:
+            best = max(candidate.team_outcome for candidate in scored_candidates)
+            recommended_targets = [
+                candidate.target_position for candidate in scored_candidates if candidate.team_outcome == best
+            ]
+            recommendation_state = "clear_best" if len(recommended_targets) == 1 else "equal_best"
+        interchange_recommendation = InterchangeRecommendation(
+            state=recommendation_state,
+            candidates=candidates,
+            recommended_targets=recommended_targets,
+        )
 
         interchange_info = InterchangeInfo(
             canonical_player_id=interchange_id,
@@ -463,8 +594,10 @@ def build_matchup_state(
             afl_club=_team_name(team_by_player, interchange_id) or "",
             match_state=interchange_match_state,
             dnp=interchange_dnp,
+            dnp_ruling=dnp_rulings.get((team.team_key, "Interchange")),
             target_position=interchange_target,
             potential_scores=interchange_potential_scores,
+            participation_evidence=interchange_evidence,
         )
 
         team_results.append(
@@ -477,6 +610,7 @@ def build_matchup_state(
                 display_goals=team_display_goals,
                 display_behinds=team_display_behinds,
                 football_line=format_football_line(team_display_goals, team_display_behinds),
+                interchange_recommendation=interchange_recommendation,
             )
         )
 

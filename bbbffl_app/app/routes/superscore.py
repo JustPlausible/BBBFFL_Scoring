@@ -106,6 +106,7 @@ def serialize_public_superscore(state: dict) -> dict:
                     "afl_club": team["interchange"]["afl_club"],
                     "match_state": team["interchange"]["match_state"],
                     "dnp": team["interchange"]["dnp"],
+                    "dnp_ruling": team["interchange"]["dnp_ruling"],
                     "target_position": team["interchange"]["target_position"],
                     "potential_scores": team["interchange"]["potential_scores"],
                 },
@@ -148,7 +149,12 @@ def admin_superscore_state(request: Request):
 @router.post("/admin/superscore/dnp", dependencies=[Depends(_require_superscore), Depends(require_admin)])
 def set_superscore_dnp(payload: DnpRequest, request: Request):
     apply_dnp_decision(
-        request.app.state.superscore_decisions, _team_keys(request), payload.team_key, payload.slot, payload.dnp
+        request.app.state.superscore_decisions,
+        _team_keys(request),
+        payload.team_key,
+        payload.slot,
+        payload.dnp,
+        reason=payload.reason,
     )
     return _current_state(request)
 
@@ -159,7 +165,11 @@ def set_superscore_dnp(payload: DnpRequest, request: Request):
 )
 def set_superscore_interchange(payload: InterchangeRequest, request: Request):
     apply_interchange_decision(
-        request.app.state.superscore_decisions, _team_keys(request), payload.team_key, payload.target_position
+        request.app.state.superscore_decisions,
+        _team_keys(request),
+        payload.team_key,
+        payload.target_position,
+        reason=payload.reason,
     )
     return _current_state(request)
 

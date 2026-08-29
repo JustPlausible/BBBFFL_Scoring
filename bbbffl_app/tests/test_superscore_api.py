@@ -139,6 +139,7 @@ def test_superscore_public_state_lists_ten_entries_ranked(client_with_superscore
     assert len(body["standings"]) == 10
     assert body["season"] == 2026
     assert body["afl_round"] == 20
+    assert all(team["interchange"]["dnp_ruling"] is None for team in body["teams"])
 
 
 def test_concluded_afl_match_renders_superscore_players_as_final_not_yet_to_play(

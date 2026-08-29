@@ -302,9 +302,11 @@ def test_public_state_exposes_interchange_presentation_fields(client):
         "afl_club",
         "match_state",
         "dnp",
+        "dnp_ruling",
         "target_position",
         "potential_scores",
     }
+    assert ir["dnp_ruling"] is None
     assert ir["match_state"] in ("yet_to_play", "live", "postgame", "completed", "unnamed")
     # No AFL stats supplied by the test fixture -> neutral, not invented.
     assert ir["potential_scores"] is None

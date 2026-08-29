@@ -89,17 +89,32 @@ def _ensure_editable(decisions) -> None:
         raise CompetitionFinalizedError("competition instance already finalised; decisions are locked")
 
 
-def set_dnp(decisions, team_keys, team_key: str, slot: str, dnp: bool, *, actor: ActorContext = SCORER_ACTOR) -> None:
+def set_dnp(
+    decisions,
+    team_keys,
+    team_key: str,
+    slot: str,
+    dnp: bool,
+    *,
+    actor: ActorContext = SCORER_ACTOR,
+    reason: str | None = None,
+) -> None:
     """Record (or clear) a scorer DNP decision for one roster slot."""
     _ensure_editable(decisions)
     _ensure_known_team(team_keys, team_key)
     if slot not in ROSTER_SLOTS:
         raise InvalidSlotError(f"Unknown slot: {slot}")
-    decisions.set_dnp(team_key, slot, dnp, actor=actor)
+    decisions.set_dnp(team_key, slot, dnp, actor=actor, reason=reason)
 
 
 def set_interchange(
-    decisions, team_keys, team_key: str, target_position: str | None, *, actor: ActorContext = SCORER_ACTOR
+    decisions,
+    team_keys,
+    team_key: str,
+    target_position: str | None,
+    *,
+    actor: ActorContext = SCORER_ACTOR,
+    reason: str | None = None,
 ) -> None:
     """Assign (or clear, via `target_position=None`) the Interchange's
     covering position for one team."""
@@ -107,7 +122,7 @@ def set_interchange(
     _ensure_known_team(team_keys, team_key)
     if target_position is not None and target_position not in SCORABLE_POSITIONS:
         raise InvalidPositionError(f"Invalid target_position: {target_position}")
-    decisions.set_interchange_assignment(team_key, target_position, actor=actor)
+    decisions.set_interchange_assignment(team_key, target_position, actor=actor, reason=reason)
 
 
 def set_override(

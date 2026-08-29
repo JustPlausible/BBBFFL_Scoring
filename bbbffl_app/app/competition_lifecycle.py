@@ -14,6 +14,15 @@ from app.audit import ActorContext, append_event, new_correlation_id
 from app.db import _for_update_suffix, transaction
 from app.season import _now
 
+
+class StaleRoundVersionError(RuntimeError):
+    """A sign-off/correction attempt named a round or matchup review revision
+    that is no longer current -- see `publish_results`/`correct_matchup_result`
+    and `app.round_review` (issue #58 requirement 7). The caller must reload
+    the round review and retry with the current revision; this is never
+    silently resolved by overwriting the newer decision."""
+
+
 LEGAL_TRANSITIONS = {
     "upcoming": {"open"},
     "open": {"live"},
@@ -51,6 +60,7 @@ class Matchup:
     home_season_entry_id: str
     away_season_entry_id: str
     effective_official_version: int | None
+    review_version: int
 
 
 @dataclass(frozen=True)
@@ -62,6 +72,19 @@ class OfficialResult:
     published_at: str
     published_by: str | None
     reason: str | None
+    # Frozen scoring inputs (rules version, lineup versions, calculated-result
+    # revision, DNP/interchange rulings, overrides) this version was computed
+    # from -- see app.round_review, roadmap package 28 / issue #58. None for
+    # any result published before this existed, or by a caller that does not
+    # supply one; never backfilled, since a pre-existing version's meaning
+    # must not change after the fact.
+    input_snapshot: dict | None = None
+
+
+def _row_to_official_result(row) -> OfficialResult:
+    values = dict(row)
+    snapshot = values.pop("input_snapshot", None)
+    return OfficialResult(**values, input_snapshot=json.loads(snapshot) if snapshot else None)
 
 
 class CompetitionLifecycleRepository:
@@ -154,7 +177,7 @@ class CompetitionLifecycleRepository:
             for pair in pairs:
                 matchup_id = str(uuid5(UUID(bbbffl_round_id), f"fixture:{pair['fixture_matchup_id']}"))
                 conn.execute(
-                    "INSERT INTO bbbffl_matchup VALUES (?, ?, ?, ?, ?, ?, NULL)",
+                    "INSERT INTO bbbffl_matchup VALUES (?, ?, ?, ?, ?, ?, NULL, 1)",
                     (
                         matchup_id,
                         bbbffl_round_id,
@@ -221,21 +244,48 @@ class CompetitionLifecycleRepository:
         actor=ActorContext.anonymous_operator("scorer"),
         reason=None,
         failure_hook=None,
+        input_snapshots=None,
+        expected_round_version=None,
+        expected_review_versions=None,
     ):
-        """Publish all five version-1 results and final state in one transaction."""
+        """Publish all five version-1 results and final state in one transaction.
+
+        `input_snapshots` (optional, `{matchup_id: dict}`) freezes the exact
+        scoring inputs each result was computed from -- see
+        `OfficialResult.input_snapshot`. `expected_round_version` and
+        `expected_review_versions` (optional, `{matchup_id: int}`) are the
+        compare-and-swap guards `app.round_review` uses so a sign-off based
+        on a stale round/review revision fails closed instead of silently
+        overwriting a decision made after it was read (issue #58
+        requirement 7) -- both are re-checked against the row locked here,
+        inside this same transaction, so the check and the write can never
+        race. Omitting them (every pre-existing caller) keeps prior
+        behaviour exactly.
+        """
         with transaction(self.database) as conn:
             row = self._locked_round(conn, round_id)
+            if expected_round_version is not None and row["version"] != expected_round_version:
+                raise StaleRoundVersionError(
+                    f"round {round_id} is at version {row['version']}, not the expected {expected_round_version}"
+                )
             if row["state"] != "review":
                 raise ValueError("only a review round can be finalised")
             matchups = self._locked_matchups(conn, round_id)
             self._validate_result_set(matchups, results)
+            if expected_review_versions is not None:
+                self._validate_review_versions(matchups, expected_review_versions)
             correlation = new_correlation_id()
             now = _now()
             for index, matchup in enumerate(matchups):
                 home, away = results[matchup["matchup_id"]]
+                snapshot = (
+                    json.dumps(input_snapshots[matchup["matchup_id"]], sort_keys=True, default=str)
+                    if input_snapshots and matchup["matchup_id"] in input_snapshots
+                    else None
+                )
                 conn.execute(
-                    "INSERT INTO bbbffl_official_result VALUES (?, 1, ?, ?, ?, ?, ?)",
-                    (matchup["matchup_id"], home, away, now, actor.actor_id, reason),
+                    "INSERT INTO bbbffl_official_result VALUES (?, 1, ?, ?, ?, ?, ?, ?)",
+                    (matchup["matchup_id"], home, away, now, actor.actor_id, reason, snapshot),
                 )
                 conn.execute(
                     "UPDATE bbbffl_matchup SET effective_official_version=1 WHERE matchup_id=?",
@@ -281,16 +331,30 @@ class CompetitionLifecycleRepository:
         *,
         reason,
         actor=ActorContext.anonymous_operator("admin"),
+        input_snapshots=None,
+        expected_round_version=None,
+        expected_review_versions=None,
     ):
-        """Atomically append one new official version for every ordinary matchup."""
+        """Atomically append one new official version for every ordinary matchup.
+
+        See `publish_results` for `input_snapshots`/`expected_round_version`/
+        `expected_review_versions` -- the same freeze/compare-and-swap
+        guards, reused here so a round-wide correction is exactly as
+        stale-safe and reproducible as first publication."""
         if not reason:
             raise ValueError("an authorised post-final correction requires a reason")
         with transaction(self.database) as conn:
             row = self._locked_round(conn, round_id)
+            if expected_round_version is not None and row["version"] != expected_round_version:
+                raise StaleRoundVersionError(
+                    f"round {round_id} is at version {row['version']}, not the expected {expected_round_version}"
+                )
             if row["state"] != "final":
                 raise ValueError("only final results can be corrected")
             matchups = self._locked_matchups(conn, round_id)
             self._validate_result_set(matchups, results)
+            if expected_review_versions is not None:
+                self._validate_review_versions(matchups, expected_review_versions)
             correlation, now = new_correlation_id(), _now()
             for matchup in matchups:
                 old = matchup["effective_official_version"]
@@ -298,8 +362,13 @@ class CompetitionLifecycleRepository:
                     raise ValueError("final round has incomplete official results")
                 version = old + 1
                 home, away = results[matchup["matchup_id"]]
+                snapshot = (
+                    json.dumps(input_snapshots[matchup["matchup_id"]], sort_keys=True, default=str)
+                    if input_snapshots and matchup["matchup_id"] in input_snapshots
+                    else None
+                )
                 conn.execute(
-                    "INSERT INTO bbbffl_official_result VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO bbbffl_official_result VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         matchup["matchup_id"],
                         version,
@@ -308,10 +377,12 @@ class CompetitionLifecycleRepository:
                         now,
                         actor.actor_id,
                         reason,
+                        snapshot,
                     ),
                 )
                 conn.execute(
-                    "UPDATE bbbffl_matchup SET effective_official_version=? WHERE matchup_id=?",
+                    "UPDATE bbbffl_matchup SET effective_official_version=?, review_version=review_version+1 "
+                    "WHERE matchup_id=?",
                     (version, matchup["matchup_id"]),
                 )
                 append_event(
@@ -345,6 +416,92 @@ class CompetitionLifecycleRepository:
                 payload={"matchup_count": 5},
             )
         return self.get_round(round_id)
+
+    def correct_matchup_result(
+        self,
+        matchup_id,
+        home_score,
+        away_score,
+        *,
+        reason,
+        actor=ActorContext.anonymous_operator("admin"),
+        input_snapshot=None,
+        expected_review_version=None,
+    ):
+        """Correct exactly one already-final matchup's official result,
+        atomically: the previous official version is preserved unchanged,
+        a new version becomes effective, and both changes commit together
+        with the matchup's audit trail (issue #58 requirement 9). Unlike
+        `correct_results`, this does not require every matchup in the round
+        to be resubmitted -- "reopen[ing] the round" (requirement 9) is
+        represented explicitly by widening exactly this one matchup's
+        official-result history, without ever moving `bbbffl_round_lifecycle.
+        state` out of `final` (so no other matchup's effective version, and
+        no round-level fact, is ever put at risk by one matchup's correction)."""
+        if not reason:
+            raise ValueError("an authorised correction requires a reason")
+        with transaction(self.database) as conn:
+            matchup = conn.execute(
+                "SELECT * FROM bbbffl_matchup WHERE matchup_id=?" + _for_update_suffix(self.database),
+                (matchup_id,),
+            ).fetchone()
+            if not matchup:
+                raise KeyError(matchup_id)
+            if expected_review_version is not None and matchup["review_version"] != expected_review_version:
+                raise StaleRoundVersionError(
+                    f"matchup {matchup_id} review is at version {matchup['review_version']}, "
+                    f"not the expected {expected_review_version}"
+                )
+            round_row = conn.execute(
+                "SELECT state FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?" + _for_update_suffix(self.database),
+                (matchup["bbbffl_round_id"],),
+            ).fetchone()
+            if not round_row or round_row["state"] != "final":
+                raise ValueError("only a matchup in a final round can be corrected")
+            old = matchup["effective_official_version"]
+            if old is None:
+                raise ValueError("matchup has no effective official result to correct")
+            version = old + 1
+            now = _now()
+            correlation = new_correlation_id()
+            snapshot = json.dumps(input_snapshot, sort_keys=True, default=str) if input_snapshot is not None else None
+            conn.execute(
+                "INSERT INTO bbbffl_official_result VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (matchup_id, version, home_score, away_score, now, actor.actor_id, reason, snapshot),
+            )
+            conn.execute(
+                "UPDATE bbbffl_matchup SET effective_official_version=?, review_version=review_version+1 "
+                "WHERE matchup_id=?",
+                (version, matchup_id),
+            )
+            append_event(
+                conn,
+                actor=actor,
+                action="competition.result.corrected",
+                entity_type="competition.matchup",
+                entity_id=matchup_id,
+                entity_version=str(version),
+                correlation_id=correlation,
+                reason=reason,
+                before_state={"official_version": old},
+                after_state={"official_version": version},
+            )
+        return self.effective_result(matchup_id)
+
+    def get_calculation(self, matchup_id):
+        row = self.database.execute(
+            "SELECT * FROM bbbffl_matchup_calculation WHERE matchup_id=?", (matchup_id,)
+        ).fetchone()
+        if not row:
+            return None
+        from app.calculations import CalculatedMatchup
+
+        return CalculatedMatchup(
+            matchup_id=row["matchup_id"],
+            revision=row["revision"],
+            input_fingerprint=row["input_fingerprint"],
+            snapshot=json.loads(row["snapshot"]),
+        )
 
     def save_calculation(self, matchup_id, snapshot):
         """Legacy snapshot attachment; season scoring uses calculations service."""
@@ -405,19 +562,23 @@ class CompetitionLifecycleRepository:
         ).fetchall()
         return [Matchup(**dict(row)) for row in rows]
 
+    def get_matchup(self, matchup_id):
+        row = self.database.execute("SELECT * FROM bbbffl_matchup WHERE matchup_id=?", (matchup_id,)).fetchone()
+        return Matchup(**dict(row)) if row else None
+
     def result_history(self, matchup_id):
         rows = self.database.execute(
             "SELECT * FROM bbbffl_official_result WHERE matchup_id=? ORDER BY version",
             (matchup_id,),
         ).fetchall()
-        return [OfficialResult(**dict(row)) for row in rows]
+        return [_row_to_official_result(row) for row in rows]
 
     def effective_result(self, matchup_id):
         row = self.database.execute(
             "SELECT r.* FROM bbbffl_matchup m JOIN bbbffl_official_result r ON r.matchup_id=m.matchup_id AND r.version=m.effective_official_version WHERE m.matchup_id=?",
             (matchup_id,),
         ).fetchone()
-        return OfficialResult(**dict(row)) if row else None
+        return _row_to_official_result(row) if row else None
 
     def _locked_round(self, conn, round_id):
         row = conn.execute(
@@ -446,6 +607,20 @@ class CompetitionLifecycleRepository:
         for scores in results.values():
             if not isinstance(scores, (tuple, list)) or len(scores) != 2:
                 raise ValueError("each result requires home and away scores")
+
+    @staticmethod
+    def _validate_review_versions(matchups, expected_review_versions):
+        """Re-checked under the same row lock as the write itself, so a
+        ruling/override recorded after the caller last read the review
+        cannot be silently published/corrected over -- see
+        `StaleRoundVersionError`."""
+        for matchup in matchups:
+            expected = expected_review_versions.get(matchup["matchup_id"])
+            if expected is not None and matchup["review_version"] != expected:
+                raise StaleRoundVersionError(
+                    f"matchup {matchup['matchup_id']} review is at version {matchup['review_version']}, "
+                    f"not the expected {expected}"
+                )
 
     def _validate_frozen_context(self, conn, row):
         draw = conn.execute(

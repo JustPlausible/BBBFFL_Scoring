@@ -7,6 +7,8 @@ from fastapi.responses import JSONResponse
 from app.afl_client import AflApiClient, AflApiError
 from app.afl_resilience import ResilientAflClient, RetryPolicy
 from app.audit import AuditEventRepository
+from app.calculations import MatchupCalculationService
+from app.competition_lifecycle import CompetitionLifecycleRepository, StaleRoundVersionError
 from app.config import get_settings
 from app.db import DecisionsRepository, connect
 from app.draft import (
@@ -33,9 +35,21 @@ from app.preseason import (
     PreseasonWindowClosedError,
     PreseasonWindowExistsError,
 )
+from app.round_review import InvalidOverridePositionError as RoundReviewInvalidPositionError
+from app.round_review import InvalidSlotError as RoundReviewInvalidSlotError
+from app.round_review import (
+    MissingOverrideReasonError,
+    RoundReviewRepository,
+    SignoffValidationError,
+    UnauthorisedActorError,
+    UnknownEntryError,
+    UnknownMatchupError,
+    UnknownRoundError,
+)
 from app.routes import admin, health, public
 from app.routes import draft as draft_routes
 from app.routes import preseason as preseason_routes
+from app.routes import round_review as round_review_routes
 from app.routes import superscore as superscore_routes
 from app.scorer_decisions import (
     CompetitionFinalizedError,
@@ -128,6 +142,13 @@ async def lifespan(app: FastAPI):
     # app/routes/preseason.py) is an operator surface over this same
     # authoritative repository -- see docs/preseason-trades.md.
     app.state.preseason = PreseasonRepository(database)
+    # Roadmap package 28's scorer round-review/sign-off/correction workflow
+    # (issue #58, app/routes/round_review.py) sits on top of the persisted
+    # ordinary-round lifecycle (#32) and generalised match scoring (#35) --
+    # see docs/scorer-round-review.md.
+    app.state.lifecycle = CompetitionLifecycleRepository(database)
+    app.state.round_review = RoundReviewRepository(database)
+    app.state.calculations = MatchupCalculationService(database, afl_client)
     app.state.afl_client = afl_client
     app.state.identity_cache = PlayerIdentityCache(afl_client)
     app.state.teams = teams
@@ -189,6 +210,7 @@ app.include_router(superscore_routes.page_router)
 app.include_router(draft_routes.router)
 app.include_router(draft_routes.page_router)
 app.include_router(preseason_routes.router)
+app.include_router(round_review_routes.router)
 
 
 @app.exception_handler(AflApiError)
@@ -358,4 +380,58 @@ async def preseason_snapshot_error_handler(request: Request, exc: PreseasonSnaps
 
 @app.exception_handler(PreseasonStateError)
 async def preseason_state_error_handler(request: Request, exc: PreseasonStateError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+# app.round_review raises plain domain exceptions for the same reason
+# app.scorer_decisions does (see its handlers above) -- these are the sole
+# place that translates each one to an HTTP status for
+# app/routes/round_review.py (roadmap package 28, issue #58).
+@app.exception_handler(UnknownRoundError)
+async def unknown_round_error_handler(request: Request, exc: UnknownRoundError) -> JSONResponse:
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+
+@app.exception_handler(UnknownMatchupError)
+async def unknown_matchup_error_handler(request: Request, exc: UnknownMatchupError) -> JSONResponse:
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+
+@app.exception_handler(UnknownEntryError)
+async def unknown_entry_error_handler(request: Request, exc: UnknownEntryError) -> JSONResponse:
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+
+@app.exception_handler(RoundReviewInvalidSlotError)
+async def round_review_invalid_slot_error_handler(request: Request, exc: RoundReviewInvalidSlotError) -> JSONResponse:
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+@app.exception_handler(RoundReviewInvalidPositionError)
+async def round_review_invalid_position_error_handler(
+    request: Request, exc: RoundReviewInvalidPositionError
+) -> JSONResponse:
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+@app.exception_handler(MissingOverrideReasonError)
+async def missing_override_reason_error_handler(request: Request, exc: MissingOverrideReasonError) -> JSONResponse:
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+@app.exception_handler(UnauthorisedActorError)
+async def unauthorised_actor_error_handler(request: Request, exc: UnauthorisedActorError) -> JSONResponse:
+    return JSONResponse(status_code=403, content={"detail": str(exc)})
+
+
+@app.exception_handler(SignoffValidationError)
+async def signoff_validation_error_handler(request: Request, exc: SignoffValidationError) -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content={"detail": str(exc), "blockers": exc.blockers, "round_blockers": exc.round_blockers},
+    )
+
+
+@app.exception_handler(StaleRoundVersionError)
+async def stale_round_version_error_handler(request: Request, exc: StaleRoundVersionError) -> JSONResponse:
     return JSONResponse(status_code=409, content={"detail": str(exc)})

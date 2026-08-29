@@ -72,6 +72,9 @@ EXPECTED_TABLES = {
     "preseason_trade_leg",
     "preseason_opening_snapshot",
     "preseason_opening_snapshot_entry",
+    "bbbffl_matchup_slot_ruling",
+    "bbbffl_matchup_interchange_ruling",
+    "bbbffl_matchup_override",
 }
 
 

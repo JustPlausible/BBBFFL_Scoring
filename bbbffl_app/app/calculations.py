@@ -9,7 +9,9 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass
 
+from app.afl_client import AflApiError
 from app.db import transaction
+from app.participation import assess_participation
 from app.scoring import PlayerStats, ScoringRules, score_position
 from app.season import _now
 
@@ -43,7 +45,7 @@ class MatchupCalculationService:
         context = self._round_context(round_id)
         matches = self.afl_client.get_matches(context["afl_round_id"])
         stats_by_match = {match.match_id: self.afl_client.get_match_player_stats(match.match_id) for match in matches}
-        facts = (matches, stats_by_match)
+        facts = (matches, stats_by_match, self._bye_team_ids(context))
         return [
             self._calculate(row, context, facts, upstream_revision, observed_at) for row in self._matchups(round_id)
         ]
@@ -54,8 +56,36 @@ class MatchupCalculationService:
             raise KeyError(matchup_id)
         context = self._round_context(row["bbbffl_round_id"])
         matches = self.afl_client.get_matches(context["afl_round_id"])
-        facts = (matches, {match.match_id: self.afl_client.get_match_player_stats(match.match_id) for match in matches})
+        facts = (
+            matches,
+            {match.match_id: self.afl_client.get_match_player_stats(match.match_id) for match in matches},
+            self._bye_team_ids(context),
+        )
         return self._calculate(row, context, facts, upstream_revision, observed_at)
+
+    def _bye_team_ids(self, context):
+        """The AFL clubs on an ordinary bye for this round, if the configured
+        `afl_client` can report byes at all (`get_rounds` is optional --
+        the `Facts` test double used throughout `tests/test_calculations.py`
+        does not implement it, and omitting it must not fail calculation).
+        Feeds `app.participation.assess_participation` so the scorer round
+        review (issue #58) can tell a club-bye Interchange/starter apart
+        from genuinely ambiguous evidence without a second afl-api round
+        trip at review time."""
+        get_rounds = getattr(self.afl_client, "get_rounds", None)
+        if not callable(get_rounds):
+            return None
+        try:
+            rounds = get_rounds(context["afl_season_id"])
+        except (AflApiError, KeyError, TypeError, ValueError):
+            # Bye evidence is advisory only (see the docstring above): an
+            # afl-api failure here must degrade to "unknown byes", never
+            # block or corrupt the authoritative calculated score.
+            return None
+        for round_ in rounds:
+            if round_.round_id == context["afl_round_id"]:
+                return None if round_.byes is None else frozenset(team.team_id for team in round_.byes)
+        return None
 
     def _calculate(self, matchup, context, facts, upstream_revision, observed_at):
         rules = ScoringRules.from_dict(json.loads(context["scoring_rules"]) if context["scoring_rules"] else None)
@@ -102,7 +132,8 @@ class MatchupCalculationService:
             (lineup["lineup_id"], version),
         ).fetchall()
         evidence, total = [], 0
-        matches, stats_by_match = facts
+        matches, stats_by_match, bye_team_ids = facts
+        interchange_raw = None
         for slot in slots:
             match = next(
                 (m for m in matches if slot["afl_team_id"] is not None and m.involves_team(slot["afl_team_id"])), None
@@ -125,6 +156,14 @@ class MatchupCalculationService:
                     )
                 if score is not None:
                     total += score
+            elif raw is not None:
+                interchange_raw = raw
+            participation = assess_participation(
+                afl_team_id=slot["afl_team_id"],
+                bye_team_ids=bye_team_ids,
+                match=match,
+                stat_line=stat,
+            )
             evidence.append(
                 {
                     "position": slot["position"],
@@ -135,14 +174,38 @@ class MatchupCalculationService:
                     "stats": raw,
                     "score": score,
                     "interchange_available": slot["position"] == "Interchange",
+                    "participation": {
+                        "state": participation.state.value,
+                        "dnp_recommendation": participation.dnp_recommendation.value,
+                        "reason": participation.reason,
+                    },
                 }
             )
+        # What the Interchange's *current* AFL stats would score at each
+        # scorable position -- informational only, mirrors
+        # app.service.InterchangePotentialScores for the Grand Final
+        # vertical. Never added to `total`; a scorer must record an
+        # explicit interchange ruling (see app.round_review) before this
+        # replaces anything in an official result.
+        interchange_potential_scores = (
+            {
+                slot_name: score_position(
+                    target,
+                    PlayerStats(**{k: v for k, v in interchange_raw.items() if k != "canonical_player_id"}),
+                    rules,
+                )
+                for slot_name, target in POSITION_MAP.items()
+            }
+            if interchange_raw is not None
+            else None
+        )
         return {
             "season_entry_id": entry_id,
             "lineup_id": lineup["lineup_id"],
             "lineup_version": version,
             "score": total,
             "slots": evidence,
+            "interchange_potential_scores": interchange_potential_scores,
         }
 
     def _persist(self, matchup, context, home, away, snapshot, fingerprint, upstream_revision, observed_at):

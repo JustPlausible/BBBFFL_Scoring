@@ -48,20 +48,9 @@ def _seed(client, year):
 
 def _seed_with_vacancy(client, year, position="F2"):
     database = client.app.state.database
-    _, lifecycle, round_, entries, stats, canon = full_round(database, year=year)
+    _, lifecycle, round_, _, stats, _ = full_round(database, year=year, vacant_slots={(0, position)})
     matchup = lifecycle.list_matchups(round_.bbbffl_round_id)[0]
     entry_id = matchup.home_season_entry_id
-    lineup = database.execute(
-        "SELECT lineup_id, effective_submission_version FROM weekly_lineup "
-        "WHERE bbbffl_round_id=? AND season_entry_id=?",
-        (round_.bbbffl_round_id, entry_id),
-    ).fetchone()
-    with transaction(database) as connection:
-        connection.execute(
-            "UPDATE weekly_lineup_submission_slot SET season_player_id=NULL "
-            "WHERE lineup_id=? AND version=? AND position=?",
-            (lineup["lineup_id"], lineup["effective_submission_version"], position),
-        )
     progress_to_review(lifecycle, round_.bbbffl_round_id)
     fake = Facts(stats)
     calculations = MatchupCalculationService(database, fake)

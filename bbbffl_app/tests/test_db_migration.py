@@ -78,6 +78,8 @@ EXPECTED_TABLES = {
     "opening_round_rule",
     "opening_round_rule_revision",
     "opening_round_nomination",
+    "coach_credential",
+    "coach_session",
 }
 
 

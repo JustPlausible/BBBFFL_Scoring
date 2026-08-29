@@ -75,6 +75,14 @@ ENVIRONMENTS = ("development", "test", "production")
 AFL_MODES = ("live", "replay")
 SUPPORTED_AFL_API_CONTRACT_VERSIONS = ("v1",)
 
+# Development/test-only session/CSRF signing secret (roadmap package 19,
+# issue #74) -- see BBBFFL_SESSION_SECRET below. Never used to satisfy a
+# production requirement: get_settings() refuses this exact value outright
+# when BBBFFL_ENVIRONMENT=production, in case a deployment ever copies
+# .env.example without changing it.
+_DEV_SESSION_SECRET = "dev-insecure-session-secret-change-in-production"
+DEFAULT_SESSION_LIFETIME_SECONDS = 12 * 60 * 60
+
 
 class SettingsError(ValueError):
     """Raised by `get_settings()` for one or more invalid/missing settings.
@@ -168,6 +176,13 @@ class Settings:
     database_url: str
     teams_config_path: str
     admin_token: str | None
+    # Coach authentication CSRF-token signing secret (roadmap package 19,
+    # issue #74) -- keys the HMAC in app/csrf.py. Session bearer tokens
+    # themselves (app/auth.py) are independent high-entropy random values
+    # looked up by hash, so they need no secret of their own. See
+    # docs/coach-authentication.md.
+    session_secret: str | None
+    session_lifetime_seconds: int
     # The externally reachable base URL of this deployment. Not yet
     # consumed by application behaviour (no link generation/CORS exists
     # yet) -- validated and made explicit now per roadmap package 06 so
@@ -273,6 +288,32 @@ def get_settings() -> Settings:
             "BBBFFL_ADMIN_TOKEN: required in production (refusing to start with the admin interface open to any caller)"
         )
 
+    # Coach session/CSRF secret (roadmap package 19, issue #74): unlike
+    # BBBFFL_ADMIN_TOKEN (which simply disables its check when unset),
+    # this always has *some* value -- development/test get a fixed,
+    # clearly-labelled placeholder so the auth flow is exercisable locally
+    # without configuration, but that placeholder is refused outright in
+    # production, exactly like BBBFFL_AFL_MODE=replay is refused there.
+    raw_session_secret = os.getenv("BBBFFL_SESSION_SECRET") or None
+    if is_production:
+        if not raw_session_secret:
+            errors.append(
+                "BBBFFL_SESSION_SECRET: required in production (coach session/CSRF signing must not use "
+                "the shared development placeholder)"
+            )
+            session_secret = None
+        elif raw_session_secret == _DEV_SESSION_SECRET:
+            errors.append("BBBFFL_SESSION_SECRET: must not be the development placeholder value in production")
+            session_secret = None
+        else:
+            session_secret = raw_session_secret
+    else:
+        session_secret = raw_session_secret or _DEV_SESSION_SECRET
+
+    session_lifetime_seconds = int(os.getenv("BBBFFL_SESSION_LIFETIME_SECONDS", str(DEFAULT_SESSION_LIFETIME_SECONDS)))
+    if session_lifetime_seconds <= 0:
+        errors.append("BBBFFL_SESSION_LIFETIME_SECONDS: must be a positive number of seconds")
+
     if errors:
         raise SettingsError(errors)
 
@@ -293,6 +334,8 @@ def get_settings() -> Settings:
         database_url=database_url,
         teams_config_path=os.getenv("BBBFFL_TEAMS_CONFIG_PATH", str(BASE_DIR / "data" / "grand_final_teams.json")),
         admin_token=admin_token,
+        session_secret=session_secret,
+        session_lifetime_seconds=session_lifetime_seconds,
         public_base_url=public_base_url,
         poll_interval_seconds=int(os.getenv("BBBFFL_POLL_INTERVAL_SECONDS", "25")),
         log_level=os.getenv("BBBFFL_LOG_LEVEL", "INFO"),

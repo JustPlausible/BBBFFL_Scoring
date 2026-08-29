@@ -29,6 +29,7 @@
   }
   .page-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
   h1 { font-size: 1.3rem; margin: 4px 0 2px; }
+  .comp-nav { display: flex; gap: 6px; flex-wrap: wrap; }
   .comp-nav a {
     font-size: 0.8rem;
     color: var(--text);
@@ -118,9 +119,16 @@
 <body>
   <div class="page-head">
     <h1>BBBFFL Grand Final</h1>
-    {% if superscore_enabled %}
-    <div class="comp-nav"><a href="/superscore">SuperScore{% if superscore_round_label %} ({{ superscore_round_label }}){% endif %} →</a></div>
-    {% endif %}
+    <div class="comp-nav">
+      {% if superscore_enabled %}
+      <a href="/superscore">SuperScore{% if superscore_round_label %} ({{ superscore_round_label }}){% endif %} →</a>
+      {% endif %}
+      {% if authenticated_coach_name %}
+      <a href="/account">Signed in as {{ authenticated_coach_name }} →</a>
+      {% else %}
+      <a href="/login">Coach sign in →</a>
+      {% endif %}
+    </div>
   </div>
   <div class="status-banner" id="status-banner">Loading…</div>
   <div class="summary" id="summary"></div>

@@ -22,26 +22,35 @@ additionally installs a lightweight database trigger that rejects UPDATE/DELETE
 on `audit_event` as defence in depth; the application-level absence of those
 operations is the primary guarantee tests rely on.
 
-## Actor convention (pre-authentication)
+## Actor convention
 
-Authentication does not exist yet (see roadmap package 19/20), so every event
-must still name a well-defined, non-impersonating actor. `ActorContext` only
-accepts the values in `KNOWN_ACTOR_TYPES` today:
+`ActorContext` only accepts the values in `KNOWN_ACTOR_TYPES`:
 
 - `system` -- the application itself acted without any human operator
   (e.g. a scheduled job, a migration-triggered action).
 - `legacy` -- state inherited from a pre-audit database that has no true
   actor to attribute to (see the 0001/0002 bootstrap in app/migrations.py).
-- `anonymous_operator` -- a human used the shared-token scorer/admin surface
-  that exists today. `actor_role` can still distinguish "scorer" from
-  "admin" style actions even though there is no individual identity yet.
+- `anonymous_operator` -- a human used the shared-token scorer/admin proxy
+  surface. `actor_role` distinguishes "scorer" from "admin" style actions;
+  there is deliberately no individual identity behind this actor type, and
+  it must never be used for an authenticated coach's own action (see
+  app/lineup_proxy.py's module docstring, "Actor, never the coach").
+- `coach` -- roadmap package 19 (issue #74): a real, authenticated coach
+  identity resolved by `app.auth.AuthenticationService` from the persistent
+  `coach` row (`app/identity.py`) a valid session maps to. `actor_id` is
+  that `coach_id` -- never an email address or other contact detail. Used
+  only for the coach's *own* action (login, logout); a scorer/admin proxy
+  action on a coach's behalf still uses `anonymous_operator`, never this.
+- `unauthenticated` -- a request that presented no verified identity, used
+  only for audit events describing a login attempt itself (e.g. a failed
+  login) where no session/actor exists yet. `actor_id`, if set, is the
+  `coach_id` the attempt resolved to (never the submitted email/password).
 
-Once package 19/20 introduces real coach/scorer/admin authentication, new
-actor types (e.g. `coach`, `authenticated_scorer`) should be added to
-`KNOWN_ACTOR_TYPES` explicitly -- never by relaxing this allowlist to accept
-arbitrary strings. `append_event` raises if given an actor type outside the
-allowlist, which is what stops an unauthenticated action from ever
-masquerading as an authenticated identity.
+`append_event` raises if given an actor type outside the allowlist, which is
+what stops an unauthenticated action from ever masquerading as an
+authenticated identity. Extending this set (as `coach`/`unauthenticated`
+were for issue #74) is a conscious code change, not something a caller can
+opt into by passing an arbitrary string.
 
 ## Action naming convention
 
@@ -89,13 +98,11 @@ from typing import Any, Protocol
 
 AUDIT_PAYLOAD_VERSION = 1
 
-# Actor types this package is allowed to record. Deliberately closed: an
-# authenticated actor type (e.g. "coach", "scorer", "admin") must not be
-# added until a real authentication mechanism can populate actor_id
-# truthfully (see roadmap package 19/20). Extending this set is a conscious
-# code change, not something a caller can opt into by passing an arbitrary
-# string.
-KNOWN_ACTOR_TYPES = frozenset({"system", "legacy", "anonymous_operator"})
+# Actor types this package is allowed to record. Deliberately closed --
+# extending this set (as "coach"/"unauthenticated" were for roadmap package
+# 19, issue #74) is a conscious code change, not something a caller can opt
+# into by passing an arbitrary string. See "Actor convention" above.
+KNOWN_ACTOR_TYPES = frozenset({"system", "legacy", "anonymous_operator", "coach", "unauthenticated"})
 
 # Stable action-name convention: "<domain>.<entity>.<event>". These four
 # cover this PR's integration; later domains add their own constants here
@@ -109,6 +116,13 @@ PLAYER_RELEASED = "ownership.player.released"
 LINEUP_SUBMITTED = "lineup.submission.created"
 LOCKOUT_TRIGGER_CONFIGURED = "lockout.trigger.configured"
 
+# Roadmap package 19 (issue #74): coach authentication/session events. See
+# app/auth.py and docs/coach-authentication.md.
+AUTH_LOGIN_SUCCEEDED = "auth.login.succeeded"
+AUTH_LOGIN_FAILED = "auth.login.failed"
+AUTH_LOGOUT = "auth.session.logout"
+AUTH_SESSION_REVOKED = "auth.session.revoked"
+
 ENTITY_TYPE_SLOT = "scoring.slot"
 ENTITY_TYPE_INTERCHANGE = "scoring.interchange"
 ENTITY_TYPE_OVERRIDE = "scoring.override"
@@ -116,6 +130,8 @@ ENTITY_TYPE_MATCHUP = "scoring.matchup"
 ENTITY_TYPE_OWNERSHIP_PERIOD = "ownership.period"
 ENTITY_TYPE_LINEUP = "lineup.weekly"
 ENTITY_TYPE_LOCKOUT_TRIGGER = "lockout.trigger"
+ENTITY_TYPE_AUTH_SESSION = "auth.session"
+ENTITY_TYPE_AUTH_ATTEMPT = "auth.attempt"
 
 
 def _now() -> str:
@@ -166,6 +182,22 @@ class ActorContext:
     @classmethod
     def anonymous_operator(cls, role: str | None = None) -> "ActorContext":
         return cls(actor_type="anonymous_operator", actor_role=role)
+
+    @classmethod
+    def coach(cls, coach_id: str) -> "ActorContext":
+        """A real, authenticated coach acting as themselves -- never used
+        for a scorer/admin proxy action taken on a coach's behalf (see
+        app/lineup_proxy.py)."""
+        return cls(actor_type="coach", actor_id=coach_id)
+
+    @classmethod
+    def unauthenticated(cls, coach_id: str | None = None) -> "ActorContext":
+        """A request with no verified identity -- used only for audit
+        events describing the login attempt itself (e.g. a failed login).
+        `coach_id`, if the attempted identifier resolved to a real coach,
+        is the only detail ever recorded; the submitted email/password
+        never is."""
+        return cls(actor_type="unauthenticated", actor_id=coach_id)
 
 
 @dataclass(frozen=True)

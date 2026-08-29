@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BBBFFL Coach Account</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 24px; background: #0f1115; color: #e7e9ee; display: flex; justify-content: center; }
+  .card { width: 100%; max-width: 420px; background: #171a21; border: 1px solid #2a2f3a; border-radius: 10px; padding: 24px; margin-top: 40px; }
+  h1 { font-size: 1.2rem; margin: 0 0 6px; }
+  .muted { color: #9aa3b2; font-size: 0.85rem; margin-bottom: 18px; }
+  .field { margin-bottom: 10px; font-size: 0.9rem; }
+  .field span { color: #9aa3b2; }
+  form { margin-top: 18px; }
+  button { font-size: 0.9rem; padding: 8px 14px; border-radius: 6px; border: 1px solid #a53a3a; background: #a53a3a; color: white; cursor: pointer; }
+  button:hover { background: #8f3232; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Signed in</h1>
+    <div class="muted">This confirms which coach identity your browser session is authenticated as.</div>
+    <div class="field"><span>Coach:</span> {{ coach.display_name }}</div>
+    <div class="field"><span>Coach ID:</span> {{ coach.coach_id }}</div>
+    <form method="post" action="/logout">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit">Sign out</button>
+    </form>
+  </div>
+</body>
+</html>

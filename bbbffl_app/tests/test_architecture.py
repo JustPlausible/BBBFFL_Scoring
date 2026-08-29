@@ -34,7 +34,19 @@ APP_DIR = REPO_ROOT / "app"
 # Foundation: zero internal dependencies. `app.scoring` is the proven
 # scoring engine -- see app/scoring.py's module role and issue #36's
 # "preserve the existing proven scoring implementation" constraint.
-FOUNDATION = {"app.config", "app.audit", "app.scoring", "app.afl_client"}
+FOUNDATION = {
+    "app.config",
+    "app.audit",
+    "app.scoring",
+    "app.afl_client",
+    # Coach authentication leaves (roadmap package 19, issue #74): each
+    # takes whatever secret/clock it needs as a parameter rather than
+    # importing app.config or anything else internal, so they stay
+    # dependency-free exactly like the rest of this group.
+    "app.password_hashing",
+    "app.csrf",
+    "app.auth_rate_limit",
+}
 
 # Persistence core: the only place SQL/transaction plumbing lives.
 PERSISTENCE_CORE = {"app.db", "app.migrations"}
@@ -120,6 +132,20 @@ ROUND_REVIEW = {"app.round_review"}
 # the composition root.
 OPENING_ROUND = {"app.opening_round"}
 
+# Coach authentication/session application service (roadmap package 19,
+# issue #74): sits above the season model, the same shape as
+# app.round_review/app.opening_round -- it resolves logins directly to
+# app.identity.IdentityRepository's existing persistent coach identity
+# (never a second coach/user model) and owns app.db's coach_credential/
+# coach_session tables. Unlike app.round_review, it *is* meant to be
+# imported directly by its route module (app/routes/auth.py) for the same
+# reason app.scorer_decisions is -- see this file's ROUND_REVIEW comment.
+# Like every module in this position, it must stay a sibling of the Grand
+# Final vertical and must never depend on routes or the composition root,
+# and no lower layer (season model, lockouts, weekly-submission-sources)
+# may depend back on it.
+AUTH = {"app.auth"}
+
 # AFL participation-evidence classification (roadmap package 26, issue #57):
 # a pure function of public afl-api facts (a match, a bye list, a stat line)
 # with no state and no dependency beyond the foundation `app.afl_client`
@@ -149,6 +175,7 @@ ROUTES = {
     "app.routes.draft",
     "app.routes.preseason",
     "app.routes.round_review",
+    "app.routes.auth",
 }
 
 COMPOSITION_ROOT = {"app.main"}
@@ -164,6 +191,7 @@ ALL_GROUPS = (
     | REPLAY
     | ROUND_REVIEW
     | OPENING_ROUND
+    | AUTH
     | GRAND_FINAL_VERTICAL
     | ROUTES
     | COMPOSITION_ROOT
@@ -384,7 +412,10 @@ def test_afl_evidence_depends_only_on_foundation(graph):
 
 
 def test_replay_does_not_depend_on_routes_grand_final_or_composition_root(graph):
-    forbidden = GRAND_FINAL_VERTICAL | LOCKOUTS | ROUTES | COMPOSITION_ROOT
+    """Also asserts REPLAY never depends on AUTH (roadmap package 19, issue
+    #74): deterministic replay must stay independent of coach
+    authentication -- see docs/coach-authentication.md."""
+    forbidden = GRAND_FINAL_VERTICAL | LOCKOUTS | ROUTES | COMPOSITION_ROOT | AUTH
     for module in sorted(REPLAY):
         offending = graph[module] & forbidden
         assert not offending, f"{module} must not depend on {sorted(offending)}"
@@ -448,6 +479,26 @@ def test_season_model_and_lockouts_do_not_depend_on_opening_round(graph):
     app.competition_lifecycle."""
     for module in sorted(SEASON_MODEL | LOCKOUTS | WEEKLY_SUBMISSION_SOURCES):
         assert "app.opening_round" not in graph[module], f"{module} must not depend on app.opening_round"
+
+
+def test_auth_does_not_depend_on_grand_final_routes_or_composition_root(graph):
+    """`app.auth` (roadmap package 19, issue #74) sits above the season
+    model -- it depends on app.identity to resolve logins to the existing
+    persistent coach identity -- but must stay a sibling of the Grand
+    Final vertical and must never depend on routes or the composition
+    root, exactly like app.round_review/app.opening_round."""
+    forbidden = GRAND_FINAL_VERTICAL | ROUTES | COMPOSITION_ROOT
+    for module in sorted(AUTH):
+        offending = graph[module] & forbidden
+        assert not offending, f"{module} must not depend on {sorted(offending)}"
+
+
+def test_season_model_and_lockouts_do_not_depend_on_auth(graph):
+    """The reverse direction of the edge above: neither the season model
+    nor lockouts (nor weekly-submission-sources) may depend on app.auth --
+    it is a consumer of app.identity, never a dependency of it."""
+    for module in sorted(SEASON_MODEL | LOCKOUTS | WEEKLY_SUBMISSION_SOURCES):
+        assert "app.auth" not in graph[module], f"{module} must not depend on app.auth"
 
 
 def test_scorer_decisions_stays_repository_agnostic(graph):

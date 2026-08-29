@@ -55,25 +55,28 @@ to call it -- but it means a stray manual `UPDATE`/ad-hoc script can't
 silently rewrite history either. See `tests/test_audit.py` for both layers
 under test.
 
-## Actor convention (before authentication)
+## Actor convention
 
-Authentication does not exist yet (roadmap packages 19/20). `ActorContext`
-in `app/audit.py` deliberately only accepts a closed set of pre-authentication
-actor types (`KNOWN_ACTOR_TYPES`):
+`ActorContext` in `app/audit.py` only accepts a closed set of actor types
+(`KNOWN_ACTOR_TYPES`):
 
 | `actor_type` | Meaning |
 |---|---|
 | `system` | The application itself acted with no human operator (e.g. a scheduled job). |
 | `legacy` | State inherited from a pre-audit database with no true actor to attribute. |
-| `anonymous_operator` | A human used today's shared-token scorer/admin surface. `actor_role` (free-form, e.g. `"scorer"` / `"admin"`) still distinguishes duties even though there is no individual identity yet. |
+| `anonymous_operator` | A human used the shared-token scorer/admin proxy surface. `actor_role` (free-form, e.g. `"scorer"` / `"admin"`) still distinguishes duties even though there is no individual identity behind this actor type -- and it must never be used for an authenticated coach's own action (see [`coach-authentication.md`](coach-authentication.md), "Scorer/admin proxy provenance is unchanged"). |
+| `coach` | Roadmap package 19 (issue #74): a real, authenticated coach identity, resolved by `app.auth.AuthenticationService` to the existing persistent `coach` row. `actor_id` is that `coach_id` -- never an email or other contact detail. Used only for the coach's own action (login, logout); a proxy action on a coach's behalf still uses `anonymous_operator`. |
+| `unauthenticated` | Roadmap package 19: a request with no verified identity, used only for the login-attempt audit event itself (e.g. a failed login). `actor_id`, if set, is the `coach_id` the attempt resolved to -- never the submitted email/password. |
 
 `append_event` raises `ValueError` if given any other `actor_type` --
-including plausible-looking future values like `"coach"`, `"scorer"` or
-`"admin"` used as an *identity* rather than a role. That is the specific
-mechanism that stops an unauthenticated action from masquerading as an
-authenticated one: **only** package 19/20, by deliberately extending
-`KNOWN_ACTOR_TYPES` once real authentication exists, may introduce those
-values. Nothing here should be changed to accept them opportunistically.
+including plausible-looking values like `"scorer"` or `"admin"` used as an
+*identity* rather than `anonymous_operator`'s `actor_role`. That is the
+specific mechanism that stops an unauthenticated action from masquerading
+as an authenticated one: extending `KNOWN_ACTOR_TYPES` (as `coach`/
+`unauthenticated` were for package 19) is a deliberate code change, never
+something a caller opts into by passing an arbitrary string. See
+[`coach-authentication.md`](coach-authentication.md) for the full coach
+authentication/session design that introduced these two actor types.
 
 ## Action naming convention
 
@@ -84,6 +87,9 @@ what happened in domain terms, never UI labels or HTTP verbs:
 - `scoring.interchange.changed`
 - `scoring.override.changed`
 - `scoring.result.finalized`
+- `auth.login.succeeded` / `auth.login.failed` / `auth.session.logout` /
+  `auth.session.revoked` (roadmap package 19, issue #74 -- see
+  [`coach-authentication.md`](coach-authentication.md))
 
 Treat an existing action string as part of the audit contract: don't
 repurpose one for a materially different meaning. A new kind of event gets a

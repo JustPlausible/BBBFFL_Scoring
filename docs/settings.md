@@ -42,6 +42,7 @@ Set `BBBFFL_ENVIRONMENT=production` and provide every one of:
 | `BBBFFL_DATABASE_URL` | Required; must be a PostgreSQL URL (`postgresql://...` / `postgresql+psycopg://...`). SQLite is refused in production -- see [`database-migrations.md`](database-migrations.md). |
 | `BBBFFL_PUBLIC_BASE_URL` | Required; must be an absolute `http(s)://` URL -- the externally reachable base URL of the deployment. |
 | `BBBFFL_ADMIN_TOKEN` | Required; the admin interface refuses to start open to any caller in production. |
+| `BBBFFL_SESSION_SECRET` | Required; signs coach sign-in/sign-out CSRF tokens (roadmap package 19, issue #74). The development placeholder value is refused outright in production -- see [`coach-authentication.md`](coach-authentication.md). |
 | `AFL_API_BASE_URL` | Required; must be an absolute `http(s)://` URL. |
 | `BBBFFL_AFL_MODE` | Must be `live` (the default) or left unset -- `replay` is refused outright in production. |
 
@@ -113,13 +114,26 @@ issue -- their existing defaults and precedence rules (e.g.
 `BBBFFL_DATABASE_URL` winning over `BBBFFL_DB_PATH`, documented in
 [`database-migrations.md`](database-migrations.md)) still apply.
 
+## Coach session/CSRF secret and lifetime
+
+`BBBFFL_SESSION_SECRET` (roadmap package 19, issue #74) signs the CSRF
+tokens `app/csrf.py` issues for the coach sign-in/sign-out forms -- see
+[`coach-authentication.md`](coach-authentication.md) for the full session/
+CSRF design. It follows the exact same "development gets a fixed,
+clearly-labelled placeholder; production must set a real value and that
+placeholder is refused outright" pattern as `BBBFFL_ADMIN_TOKEN`/
+`BBBFFL_AFL_MODE=replay` above. Session bearer tokens themselves
+(`app/auth.py`) are independent high-entropy random values looked up by
+hash, so they need no secret of their own.
+
+`BBBFFL_SESSION_LIFETIME_SECONDS` (default 43200, i.e. 12 hours) bounds how
+long a coach's session lasts before re-authentication is required. Format-
+validated (must be a positive integer) in every environment.
+
 ## Scope notes
 
-- **Admin/session secrets:** only `BBBFFL_ADMIN_TOKEN` exists today. There
-  is no coach session/authentication mechanism yet (roadmap package 19);
-  this settings boundary will gain a required session-signing secret when
-  that package lands. "as applicable" in issue #38's scope is why only the
-  admin token is enforced now.
+- **Admin/session secrets:** `BBBFFL_ADMIN_TOKEN` and, since roadmap
+  package 19 (issue #74), `BBBFFL_SESSION_SECRET` above.
 - **Non-goals preserved:** this issue does not implement authentication,
   a secrets-management product, or any container/orchestrator redesign --
   it only makes existing and previously-implicit configuration explicit,

@@ -21,6 +21,8 @@ _ALL_SETTINGS_ENV_VARS = (
     "BBBFFL_DB_PATH",
     "BBBFFL_PUBLIC_BASE_URL",
     "BBBFFL_ADMIN_TOKEN",
+    "BBBFFL_SESSION_SECRET",
+    "BBBFFL_SESSION_LIFETIME_SECONDS",
     "BBBFFL_AFL_MODE",
     "BBBFFL_AFL_REPLAY_EVIDENCE_PATH",
     "BBBFFL_TEAMS_CONFIG_PATH",
@@ -55,6 +57,7 @@ def _set_valid_production_env(monkeypatch):
     monkeypatch.setenv("BBBFFL_DATABASE_URL", "postgresql+psycopg://bbbffl:s3cret@db.internal/bbbffl")
     monkeypatch.setenv("BBBFFL_PUBLIC_BASE_URL", "https://bbbffl.example.com")
     monkeypatch.setenv("BBBFFL_ADMIN_TOKEN", "a-real-production-admin-token")
+    monkeypatch.setenv("BBBFFL_SESSION_SECRET", "a-real-production-session-secret")
     monkeypatch.setenv("AFL_API_BASE_URL", "https://afl-api.example.net")
     monkeypatch.setenv("AFL_API_KEY", "a-real-afl-api-key")
 
@@ -202,6 +205,55 @@ def test_development_admin_token_default_does_not_satisfy_production(clean_env):
         get_settings()
 
     assert any("BBBFFL_ADMIN_TOKEN" in e for e in excinfo.value.errors)
+
+
+def test_production_refuses_missing_session_secret(clean_env):
+    """Roadmap package 19 (issue #74): production startup refuses a
+    missing coach session/CSRF secret, the same as it does for
+    BBBFFL_ADMIN_TOKEN."""
+    _set_valid_production_env(clean_env)
+    clean_env.delenv("BBBFFL_SESSION_SECRET", raising=False)
+
+    with pytest.raises(SettingsError) as excinfo:
+        get_settings()
+
+    assert any("BBBFFL_SESSION_SECRET" in e for e in excinfo.value.errors)
+
+
+def test_production_refuses_the_development_session_secret_placeholder(clean_env):
+    """The development-only placeholder secret must never accidentally
+    satisfy production's requirement, even if a deployment copies
+    .env.example without changing it -- mirrors the admin-token /
+    afl-replay-mode "development default never satisfies production"
+    design constraint."""
+    _set_valid_production_env(clean_env)
+    clean_env.setenv("BBBFFL_SESSION_SECRET", "dev-insecure-session-secret-change-in-production")
+
+    with pytest.raises(SettingsError) as excinfo:
+        get_settings()
+
+    assert any("BBBFFL_SESSION_SECRET" in e for e in excinfo.value.errors)
+
+
+def test_development_session_secret_default_does_not_satisfy_production(clean_env):
+    clean_env.setenv("BBBFFL_ENVIRONMENT", "production")
+    clean_env.setenv("BBBFFL_DATABASE_URL", "postgresql+psycopg://bbbffl:s3cret@db.internal/bbbffl")
+    clean_env.setenv("BBBFFL_PUBLIC_BASE_URL", "https://bbbffl.example.com")
+    clean_env.setenv("BBBFFL_ADMIN_TOKEN", "a-real-production-admin-token")
+    clean_env.setenv("AFL_API_BASE_URL", "https://afl-api.example.net")
+    clean_env.delenv("BBBFFL_SESSION_SECRET", raising=False)
+
+    with pytest.raises(SettingsError) as excinfo:
+        get_settings()
+
+    assert any("BBBFFL_SESSION_SECRET" in e for e in excinfo.value.errors)
+
+
+def test_development_gets_a_usable_session_secret_by_default(clean_env):
+    settings = get_settings()
+    assert settings.environment == "development"
+    assert settings.session_secret == "dev-insecure-session-secret-change-in-production"
+    assert settings.session_lifetime_seconds > 0
 
 
 def test_production_refuses_missing_database_url(clean_env):

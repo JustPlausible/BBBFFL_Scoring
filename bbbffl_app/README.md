@@ -217,14 +217,30 @@ above is what keeps that last one cheap to add later.
 
 `app/config.py`'s `get_settings()` is the single validated settings
 boundary for critical runtime configuration -- database URL, admin token,
-public base URL, afl-api base URL/contract version, and AFL access mode
-(`live` vs. `replay`). It fails closed early at startup (before migrations
-run or the app accepts a request) when `BBBFFL_ENVIRONMENT=production` is
-missing a required secret or holds an invalid critical URL, without ever
-logging a secret's value. Development/test keep today's permissive
-defaults unchanged. See [`../docs/settings.md`](../docs/settings.md)
-(roadmap package 06, issue #38) for the full production requirements and
-[`.env.example`](.env.example) for every variable.
+coach session/CSRF secret, public base URL, afl-api base URL/contract
+version, and AFL access mode (`live` vs. `replay`). It fails closed early
+at startup (before migrations run or the app accepts a request) when
+`BBBFFL_ENVIRONMENT=production` is missing a required secret or holds an
+invalid critical URL, without ever logging a secret's value.
+Development/test keep today's permissive defaults unchanged. See
+[`../docs/settings.md`](../docs/settings.md) (roadmap package 06, issue
+#38) for the full production requirements and [`.env.example`](.env.example)
+for every variable.
+
+## Coach authentication and sessions
+
+`/login`, `/logout` and `/account` (`app/routes/auth.py`) give a known
+coach a secure, server-authoritative browser session resolved directly to
+their existing persistent `coach` identity (roadmap package 10, issue
+#20) -- managed password credentials, hashed with `hashlib.scrypt`, no
+second coach/user model. This is deliberately minimal: sign-in, sign-out,
+and a landing page confirming which coach is authenticated -- not the
+coach dashboard or weekly selection UI (roadmap package 25). Scorer/admin
+`X-Admin-Token` access above remains a separate authority context,
+unaffected by any of this. See
+[`../docs/coach-authentication.md`](../docs/coach-authentication.md)
+(roadmap package 19, issue #74) for the full mechanism rationale, session/
+CSRF design, rate limiting, and recovery process.
 
 ## Running locally
 
@@ -374,11 +390,16 @@ and stale-data rules are documented in
    correct and is the only supported scheme in v1. See
    [`../docs/afl-api-v1-contract.md`](../docs/afl-api-v1-contract.md) §1.7.
 3. The admin interface is gated by a single shared `BBBFFL_ADMIN_TOKEN`
-   header, not per-user auth -- adequate for one trusted scorer on a
-   private home-server network for one weekend, not a general access
-   control model. `BBBFFL_ENVIRONMENT=production` refuses to start without
-   this token set (issue #38 / [`../docs/settings.md`](../docs/settings.md));
-   development/test remain permissive and may leave it unset.
+   header, not per-user auth -- adequate for one or a few trusted
+   scorers/admins on a private home-server network, not a general access
+   control model, and deliberately kept that way (roadmap package 19,
+   issue #74, does not turn this into per-user auth -- see
+   [`../docs/coach-authentication.md`](../docs/coach-authentication.md)).
+   `BBBFFL_ENVIRONMENT=production` refuses to start without this token set
+   (issue #38 / [`../docs/settings.md`](../docs/settings.md));
+   development/test remain permissive and may leave it unset. Coaches now
+   have their own, separate per-person authentication (`/login`) resolved
+   to the persistent coach identity -- see the section above.
 4. Live validation of `docs/afl-api-v1-contract.md`'s fixtures/diagnostic
    against the actual deployed dev instance is outstanding (blocked by this
    development environment's network egress policy when issue #18 was

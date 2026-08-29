@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from app.config import BASE_DIR
+from app.routes.auth import get_current_coach
 from app.service import get_matchup_view
 from app.superscore import superscore_round_label
 
@@ -87,6 +88,9 @@ def _build_state(request: Request) -> dict:
 def public_page(request: Request):
     settings = request.app.state.settings
     superscore_config = request.app.state.superscore_config
+    # A tiny sign-in-state nav link only -- not the coach dashboard/profile
+    # UX roadmap package 25 owns (see app/routes/auth.py's module docstring).
+    coach = get_current_coach(request)
     return templates.TemplateResponse(
         request,
         "public.html",
@@ -96,6 +100,7 @@ def public_page(request: Request):
             "superscore_round_label": (
                 superscore_round_label(superscore_config.afl_round) if superscore_config else None
             ),
+            "authenticated_coach_name": coach.display_name if coach else None,
         },
     )
 

@@ -21,14 +21,19 @@ import dataclasses
 from contextlib import nullcontext
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from app.audit import ActorContext
 from app.authorization import Principal
+from app.config import BASE_DIR
 from app.round_review import attempt_correction, attempt_signoff, build_round_review
 from app.routes.admin import require_admin, require_scorer
 
 router = APIRouter(prefix="/api/admin/round-review")
+page_router = APIRouter()
+templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
 
 
 def _actor(principal: Principal, operator_name: str | None) -> ActorContext:
@@ -87,7 +92,27 @@ def _round_review_view(request: Request, round_id: str, *, evidence_fresh: bool 
     review = build_round_review(
         state.lifecycle, state.round_review, state.identities, round_id, evidence_fresh=evidence_fresh
     )
-    return dataclasses.asdict(review)
+    result = dataclasses.asdict(review)
+    round_ = state.lifecycle.get_round(round_id)
+    result["identity"] = dataclasses.asdict(round_)
+    result["replay"] = {
+        "enabled": state.settings.afl_mode == "replay",
+        "classification": "replay evidence" if state.settings.afl_mode == "replay" else "live evidence",
+    }
+    for matchup in result["matchups"]:
+        history = state.lifecycle.result_history(matchup["matchup_id"])
+        matchup["official_history"] = [dataclasses.asdict(item) for item in history]
+        official = state.lifecycle.effective_result(matchup["matchup_id"])
+        matchup["official_result"] = dataclasses.asdict(official) if official else None
+    result["ladder"] = None
+    if round_.state == "final":
+        result["ladder"] = dataclasses.asdict(state.ladder.snapshot(round_.competition_id, round_.fixture_round_number))
+    return result
+
+
+@router.get("", dependencies=[Depends(require_scorer)])
+def list_round_reviews(request: Request):
+    return [dataclasses.asdict(item) for item in request.app.state.lifecycle.list_ordinary_rounds()]
 
 
 @router.get("/{round_id}", dependencies=[Depends(require_scorer)])
@@ -208,3 +233,10 @@ def correct_matchup(
             evidence_fresh=evidence_fresh,
         )
     return dataclasses.asdict(result)
+
+
+@page_router.get("/scorer/round-centre", response_class=HTMLResponse)
+@page_router.get("/scorer/round-centre/{round_id}", response_class=HTMLResponse)
+def round_centre_page(request: Request, round_id: str | None = None):
+    """Browser shell; private reads and all mutations remain API-authorised."""
+    return templates.TemplateResponse(request, "round_centre.html", {"round_id": round_id})

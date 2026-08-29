@@ -25,6 +25,7 @@ from app.draft import (
     DraftTurnError,
 )
 from app.identity import IdentityRepository
+from app.ladder import LadderRepository
 from app.lineups import LineupConflictError, WeeklyLineupRepository
 from app.migrations import migrate
 from app.player_pool import PlayerPoolRepository, PlayerUnavailableError, SquadCapacityError
@@ -155,6 +156,7 @@ async def lifespan(app: FastAPI):
     # ordinary-round lifecycle (#32) and generalised match scoring (#35) --
     # see docs/scorer-round-review.md.
     app.state.lifecycle = CompetitionLifecycleRepository(database)
+    app.state.ladder = LadderRepository(database)
     app.state.round_review = RoundReviewRepository(database)
     app.state.calculations = MatchupCalculationService(database, afl_client)
     app.state.afl_client = afl_client
@@ -222,6 +224,7 @@ app.include_router(draft_routes.router)
 app.include_router(draft_routes.page_router)
 app.include_router(preseason_routes.router)
 app.include_router(round_review_routes.router)
+app.include_router(round_review_routes.page_router)
 
 
 @app.exception_handler(AflApiError)

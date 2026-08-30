@@ -304,7 +304,7 @@ def test_public_grand_final_page_has_no_superscore_link_when_disabled(client_no_
 def test_public_superscore_page_links_back_to_grand_final(client_with_superscore):
     r = client_with_superscore.get("/superscore")
     assert r.status_code == 200
-    assert 'href="/"' in r.text
+    assert 'href="/legacy/grand-final"' in r.text
     assert "Grand Final" in r.text
 
 

@@ -348,3 +348,14 @@ and `app.afl_client.is_recognized_match_status` are the one narrow,
 documented `afl-api` client extension this issue required (both fields were
 already part of the validated v1 contract; only their consumption was
 missing -- see [`afl-api-v1-contract.md`](afl-api-v1-contract.md)).
+
+## Deterministic staged rehearsal (issue #91)
+
+The operator-ready [staged progressive-lockout rehearsal](staged-lockout-rehearsal.md)
+uses this service and a persisted single-match selective trigger, a persisted
+multi-match selective trigger, and Main through the normal coach browser flow.
+Its named replay-evidence stages demonstrate mixed locked/editable positions,
+immutable submitted versions, grouped activation while one covered match is
+still upcoming, and an already-live but selectively uncovered match remaining
+editable. It supplements the issue #85 Round 1 rehearsal and does not create a
+parallel lockout implementation.

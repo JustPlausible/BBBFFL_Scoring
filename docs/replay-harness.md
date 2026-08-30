@@ -51,8 +51,12 @@ or genuine historical evidence.
 
 ## Configuration and entry points
 
-Set `BBBFFL_AFL_MODE=replay` and
-`BBBFFL_AFL_REPLAY_EVIDENCE_PATH=/absolute/path/evidence.json`. Application
+Set `BBBFFL_AFL_MODE=replay` and an evidence path appropriate to the workflow.
+For the persistent interactive rehearsal the authoritative container value is
+`BBBFFL_AFL_REPLAY_EVIDENCE_PATH=/replay/evidence/round1-2026-rehearsal-evidence.json`;
+follow the Compose-first [`round1-rehearsal.md`](round1-rehearsal.md) runbook.
+The checked-in automated-test fixture below intentionally has a different
+filename and lifecycle. Application
 startup constructs `ReplayAflDataSource` rather than `AflApiClient`; the
 replay object has no HTTP transport or fallback. Missing, malformed,
 incomplete, cross-referenced, or unsupported evidence fails startup closed.

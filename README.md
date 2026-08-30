@@ -19,6 +19,18 @@ New BBBFFL features should normally be implemented in `bbbffl_app/`. The
 archive must not be treated as a second active application or ported as part
 of unrelated work.
 
+## Supported workflows
+
+- **Persistent server / Round 1 rehearsal (recommended for operators):** use
+  the Compose-first [`docs/round1-rehearsal.md`](docs/round1-rehearsal.md)
+  runbook. It builds the application, provisions its isolated PostgreSQL and
+  evidence volumes, bootstraps through a one-off container, and requires no
+  host Python installation.
+- **Source development:** use the version-pinned Python 3.11 instructions in
+  [`bbbffl_app/README.md`](bbbffl_app/README.md#source-development-workflow).
+  This is the workflow for editing code and running tests, not the persistent
+  home-server deployment path.
+
 ## Active development
 
 The application CI runs, as separate required checks so a failure names one

@@ -282,16 +282,27 @@ unaffected by any of this. See
 (roadmap package 19, issue #74) for the full mechanism rationale, session/
 CSRF design, rate limiting, and recovery process.
 
-## Running locally
+## Source development workflow
+
+The application image and project tooling target **Python 3.11** (see
+`Dockerfile` and `pyproject.toml`). Do not assume an arbitrary system
+`python3` is compatible. Developers running directly from the checkout use:
 
 ```bash
 cd bbbffl_app
-python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-dev.txt
 cp .env.example .env   # then fill in AFL_API_BASE_URL etc.
 edit data/grand_final_teams.json   # replace placeholder canonical_player_id values
 set -a && source .env && set +a
-.venv/bin/uvicorn app.main:app --reload
+uvicorn app.main:app --reload
 ```
+
+This source workflow is for code changes, tests, and local debugging. The
+persistent home-server and interactive Round 1 rehearsal workflow is Docker
+Compose-first and does not require host Python 3.11; follow the complete
+[`../docs/round1-rehearsal.md`](../docs/round1-rehearsal.md) operator runbook.
 
 - Public scoreboard: http://localhost:8000/
 - Scorer admin: http://localhost:8000/admin
@@ -300,173 +311,32 @@ set -a && source .env && set +a
   leaderboard at http://localhost:8000/superscore, scorer admin at
   http://localhost:8000/admin/superscore
 
-## Running with Docker (home server)
+## Compose server and Round 1 rehearsal workflow
+
+Docker Compose is the single recommended persistent server/operator workflow.
+The runbook covers the image build, isolated PostgreSQL startup, migrations and
+bootstrap, exact replay evidence handoff, application startup, verification,
+fail-closed troubleshooting, and project-scoped reset:
 
 ```bash
-cd bbbffl_app
-docker build -t bbbffl-grand-final .
-docker run -d \
-  --name bbbffl-grand-final \
-  -p 8000:8000 \
-  -v $(pwd)/data:/app/data \
-  --env-file .env \
-  bbbffl-grand-final
+docker compose -p bbbffl-round1-rehearsal build app
+docker compose -p bbbffl-round1-rehearsal up -d database
+docker compose -p bbbffl-round1-rehearsal run --rm \
+  -v "$PWD/bbbffl_app:/app" app \
+  python -m scripts.bootstrap_round1_2026 \
+  --database-url postgresql+psycopg://bbbffl:rehearsal-only@database/bbbffl_round1_rehearsal \
+  --evidence-path /replay/evidence/round1-2026-rehearsal-evidence.json
+docker compose -p bbbffl-round1-rehearsal up -d app
 ```
 
-When using the default local SQLite URL, the `data/` volume makes scorer decisions and the finalised result
-survive a container restart. Production uses `BBBFFL_DATABASE_URL` with PostgreSQL. Schema upgrades are described in [`docs/database-migrations.md`](docs/database-migrations.md). Put this alongside the existing `afl-api`
-container and expose it later through your reverse proxy of choice; no
-changes to `afl-api` are required.
-
-## Round 1 rehearsal quick start
-
-A concise, reproducible operator walkthrough (issue #85) that exercises the
-regular-season browser surfaces end-to-end against a normal, persistent
-database:
-
-    clean DB -> migrations -> Round 1 bootstrap -> coach login/submission ->
-    scorer Round Centre -> sign-off -> public Round Centre -> ladder
-
-This is an **interactive rehearsal checkpoint**, distinct from both the
-hermetic automated replay tests and the later historical Rounds 1-9 replay
--- see [`docs/replay-harness.md`](../docs/replay-harness.md) for how the
-three relate. Do not skip straight to `pytest` fixtures to figure out how
-to populate the application; the commands below are the supported path.
-
-1. **Prepare the development environment** (once):
-
-   ```bash
-   cd bbbffl_app
-   python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
-   ```
-
-2. **Create the persistent rehearsal database and run migrations.** The
-   bootstrap command below runs migrations itself (`app.migrations.migrate`,
-   the same idempotent call `app/main.py`'s startup makes), so a plain SQLite
-   file with no prior history is enough -- nothing to do here beyond
-   choosing a dedicated path, never your normal development database
-   (`data/scorer_decisions.db`) or a database already hosting a real
-   season:
-
-   ```bash
-   export BBBFFL_REHEARSAL_DATABASE_URL=sqlite:///$(pwd)/data/round1-2026-rehearsal.db
-   ```
-
-3. **Run the persistent Round 1 bootstrap**
-   (`scripts/bootstrap_round1_2026.py`). This seeds the 2026 season, all ten
-   teams/coaches/entries, Round 1 and its five fixture matchups, the AFL
-   round mapping, player pool/squad ownership, a lockout trigger, and a
-   freshly generated replay evidence file -- and submits nine of the ten
-   Round 1 lineups as scorer-proxy reconstructions, deliberately leaving
-   Coach A's lineup for you to submit through the browser in step 6. It is
-   **refusal-based, not idempotent**: running it a second time against the
-   same database refuses cleanly (see "Reset/recreate the rehearsal
-   database" below) rather than duplicating anything.
-
-   ```bash
-   .venv/bin/python -m scripts.bootstrap_round1_2026 \
-     --database-url "$BBBFFL_REHEARSAL_DATABASE_URL" \
-     --evidence-path "$(pwd)/data/round1-2026-rehearsal-evidence.json"
-   ```
-
-   The command prints Coach A's email/password, the `season_id`/
-   `bbbffl_round_id` it created, and the exact evidence path -- copy the
-   printed `BBBFFL_AFL_REPLAY_EVIDENCE_PATH` value for step 4. (A test
-   credential for Coach A is already set at this point -- see "Establish a
-   coach test password" below for how to reset it later if needed.)
-
-4. **Configure replay mode and point it at the Round 1 rehearsal
-   evidence** -- the exact file the previous step just generated (**not**
-   `tests/fixtures/replay_round_2026/evidence.json`, the hermetic test
-   fixture: that file's AFL match is already `CONCLUDED`, which would lock
-   every selection immediately in a real, wall-clock-driven browser
-   session -- see the bootstrap script's module docstring, "Evidence"):
-
-   ```bash
-   export BBBFFL_AFL_MODE=replay
-   export BBBFFL_AFL_REPLAY_EVIDENCE_PATH="$(pwd)/data/round1-2026-rehearsal-evidence.json"
-   export BBBFFL_DATABASE_URL="$BBBFFL_REHEARSAL_DATABASE_URL"
-   ```
-
-5. **Start the web app** against that same database/evidence:
-
-   ```bash
-   .venv/bin/uvicorn app.main:app --reload
-   ```
-
-6. **Visit the coach, scorer and public URLs** (default
-   `http://localhost:8000`):
-
-   1. `/login` -- sign in as Coach A with the email/password the bootstrap
-      printed.
-   2. `/account` -- confirms the authenticated coach and links straight to
-      the Round 1 lineup (no manually entered database IDs).
-   3. `/coach/seasons/{season_id}/rounds/{round_id}/lineup` -- select each
-      of Coach A's nine owned players into the nine slots (any arrangement
-      is legal), **Save private draft**, then **Submit lineup**.
-   4. `/scorer/round-centre` -- discovers Round 1 automatically. Click
-      **Advance round to 'live'**, then **Advance round to 'review'**, then
-      **Calculate / refresh scores** to see all five matchups' calculated
-      scores and DNP evidence, then **Publish all five results** once
-      "Ready for atomic sign-off" is shown.
-   5. `/seasons/{season_id}` and `/seasons/{season_id}/rounds/{round_id}`
-      -- the public regular-season Round Centre, now showing Round 1's
-      official results and ladder.
-
-7. **Reset/recreate the rehearsal safely.** Re-running the bootstrap
-   against the same database refuses with an actionable message rather
-   than duplicating state. To genuinely start over:
-
-   ```bash
-   rm "$(pwd)/data/round1-2026-rehearsal.db" "$(pwd)/data/round1-2026-rehearsal-evidence.json"
-   .venv/bin/python -m app.migrations upgrade --database-url "$BBBFFL_REHEARSAL_DATABASE_URL"
-   ```
-
-   then re-run step 3. (For a PostgreSQL rehearsal database, drop and
-   recreate the database instead of deleting a file, then run the same
-   migration command.)
-
-### Establish a coach test password
-
-The bootstrap already sets a rehearsal password for Coach A (printed to the
-console) using the same managed-password mechanism "Coach authentication
-and sessions" describes below -- there is no separate replay/rehearsal
-login path. To set a different password, or to reset it later, either pass
-`--coach-a-password` to the bootstrap before it runs, or use the existing
-admin-assisted reset endpoint against a running app:
-
-```bash
-curl -X POST http://localhost:8000/api/admin/coach-credential \
-  -H 'Content-Type: application/json' \
-  -d '{"email": "coach.a@rehearsal.bbbffl.local", "password": "a new rehearsal password"}'
-```
-
-(`X-Admin-Token` is only required if `BBBFFL_ADMIN_TOKEN` is set; development
-defaults leave it unset.)
-
-### Docker
-
-Where Docker is the normal home-server workflow (see "Running with Docker"
-above), run the bootstrap once against the same mounted `data/` volume
-before starting the container, then start the container with the same
-`BBBFFL_DATABASE_URL`/`BBBFFL_AFL_MODE`/`BBBFFL_AFL_REPLAY_EVIDENCE_PATH`
-environment (e.g. via `--env-file`):
-
-```bash
-cd bbbffl_app
-.venv/bin/python -m scripts.bootstrap_round1_2026 \
-  --database-url sqlite:///$(pwd)/data/round1-2026-rehearsal.db \
-  --evidence-path $(pwd)/data/round1-2026-rehearsal-evidence.json
-docker build -t bbbffl-rehearsal .
-docker run -d \
-  --name bbbffl-rehearsal \
-  -p 8000:8000 \
-  -v $(pwd)/data:/app/data \
-  -e BBBFFL_DATABASE_URL=sqlite:////app/data/round1-2026-rehearsal.db \
-  -e BBBFFL_AFL_MODE=replay \
-  -e BBBFFL_AFL_REPLAY_EVIDENCE_PATH=/app/data/round1-2026-rehearsal-evidence.json \
-  bbbffl-rehearsal
-```
+Do not run this abbreviated command list without first creating the environment
+file and reading the safety/verification instructions in
+[`../docs/round1-rehearsal.md`](../docs/round1-rehearsal.md). In particular,
+`scripts/` is not present in the production image: the one-off checkout mount
+above supplies it without expanding the runtime image. Replay configuration is
+fail-closed and its path must exactly match
+`/replay/evidence/round1-2026-rehearsal-evidence.json`; missing evidence stops
+startup rather than falling back to live AFL data.
 
 ### What this does not prove
 

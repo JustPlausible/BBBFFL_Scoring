@@ -60,6 +60,12 @@ def page_form(client, url, cookies, positions, action):
         draft_revision=hidden(page.text, "draft_revision"),
         submission_version=hidden(page.text, "submission_version"),
         action=action,
+        # Pre-accept issue #98's vacancy-confirmation UX safeguard (see
+        # tests/test_coach_lineup_vacancy_confirmation.py for that gate's
+        # own dedicated coverage) -- this file's rehearsal is about staged
+        # lockout mechanics, not that separate confirmation step, and the
+        # field is a no-op whenever nothing is actually vacant.
+        confirm_vacancies="1",
     )
     return form
 

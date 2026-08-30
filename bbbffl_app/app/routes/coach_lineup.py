@@ -9,6 +9,7 @@ from app.coach_lineup import (
     COACH_LINEUP_POSITIONS,
     EXPECTED_COACH_LINEUP_ERRORS,
     CoachLineupService,
+    vacant_ordinary_positions,
 )
 from app.config import BASE_DIR
 from app.csrf import verify_token
@@ -17,6 +18,14 @@ from app.routes.auth import _attach_csrf_cookie, _issue_csrf_token, _parse_form,
 
 router = APIRouter()
 templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
+
+# Hidden form field/value the vacancy-confirmation page round-trips to prove
+# the coach has already seen and accepted the named vacancies (issue #98) --
+# a coach UX safeguard only. It carries no domain meaning: a submission
+# lacking it is not invalid, `app.lineup_validation` never sees or requires
+# it, and it never becomes a fabricated player/DNP/zero-score placeholder.
+CONFIRM_VACANCIES_FIELD = "confirm_vacancies"
+CONFIRM_VACANCIES_VALUE = "1"
 
 
 def _service(request):
@@ -42,6 +51,36 @@ def _render(request, season_id, round_id, coach, *, positions=None, errors=(), v
             "csrf_token": token,
         },
         status_code=status,
+    )
+    _attach_csrf_cookie(request, response, token)
+    return response
+
+
+def _render_vacancy_confirmation(request, season_id, round_id, coach, draft, vacancies, submission_version):
+    """Issue #98 coach UX safeguard: interpose one explicit confirmation
+    step between `Submit Lineup` and actually creating an authoritative
+    submitted version whenever the draft about to be submitted leaves one
+    or more ordinary positions vacant. Purely a coach-facing prompt --
+    round-trips the exact draft content already saved (never re-derives or
+    alters it) and creates nothing itself; cancelling (navigating away
+    without posting the confirmation form) leaves the private draft as
+    already saved and submission history completely untouched."""
+    token = _issue_csrf_token(request)
+    response = templates.TemplateResponse(
+        request,
+        "coach_lineup_confirm_vacancies.html",
+        {
+            "coach": coach,
+            "season_id": season_id,
+            "round_id": round_id,
+            "positions": COACH_LINEUP_POSITIONS,
+            "draft": draft,
+            "vacancies": vacancies,
+            "submission_version": submission_version,
+            "csrf_token": token,
+            "confirm_field": CONFIRM_VACANCIES_FIELD,
+            "confirm_value": CONFIRM_VACANCIES_VALUE,
+        },
     )
     _attach_csrf_cookie(request, response, token)
     return response
@@ -89,7 +128,14 @@ async def lineup_action(request: Request, season_id: str, round_id: str):
             )
         if form.get("action") != "submit":
             raise ValueError("Choose Save Draft or Submit")
-        service.submit(draft, int(form.get("submission_version", "0")), coach.coach_id)
+        submission_version = int(form.get("submission_version", "0"))
+        vacancies = vacant_ordinary_positions(draft.positions)
+        if vacancies and form.get(CONFIRM_VACANCIES_FIELD) != CONFIRM_VACANCIES_VALUE:
+            # Not yet confirmed: ask, without creating a submitted version.
+            return _render_vacancy_confirmation(
+                request, season_id, round_id, coach, draft, vacancies, submission_version
+            )
+        service.submit(draft, submission_version, coach.coach_id)
         return RedirectResponse(
             f"/coach/seasons/{season_id}/rounds/{round_id}/lineup?notice=submitted", status_code=303
         )

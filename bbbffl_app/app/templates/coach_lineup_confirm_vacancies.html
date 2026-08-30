@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Confirm vacant positions · BBBFFL</title>
+<style>
+:root { color-scheme: light dark; --bg:#0d1117; --card:#161b22; --line:#30363d; --text:#f0f3f6; --muted:#9da7b3; --amber:#d29922; --green:#238636; }
+* { box-sizing:border-box } body { margin:0; background:var(--bg); color:var(--text); font:16px/1.45 system-ui,sans-serif; }
+main { width:min(640px,100%); margin:auto; padding:16px 12px 32px; } h1 { font-size:1.3rem; margin:.3rem 0 }
+.notice { background:var(--card); border:1px solid var(--amber); border-left:5px solid var(--amber); border-radius:12px; padding:16px; margin:16px 0 }
+.vacancies { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0 }
+.vacancies span { background:var(--card); border:1px solid var(--line); border-radius:99px; padding:4px 12px; font-weight:700 }
+.actions { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:20px }
+.actions button, .actions a { display:block; text-align:center; min-height:48px; line-height:48px; border-radius:10px; font-size:1rem; font-weight:800; cursor:pointer; text-decoration:none; }
+.confirm { color:white; background:var(--green); border:2px solid #3fb950 }
+.cancel { color:var(--text); background:#21262d; border:2px solid #8b949e }
+</style>
+</head>
+<body><main>
+<h1>Confirm submission with vacant positions</h1>
+<div class="notice">
+  <p>The following position{% if vacancies|length > 1 %}s are{% else %} is{% endif %} currently vacant -- no player selected:</p>
+  <div class="vacancies">{% for position in vacancies %}<span>{{ position }}</span>{% endfor %}</div>
+  <p>Submitting now will formally record {% if vacancies|length > 1 %}these positions{% else %}this position{% endif %} as an intentional vacancy in the authoritative submitted lineup, not an error -- a vacant position may become an Interchange opportunity. This does not fabricate a player, DNP ruling or score for it.</p>
+  <p>If this was not intentional, choose Cancel and fill the position{% if vacancies|length > 1 %}s{% endif %} first.</p>
+</div>
+<form method="post" action="/coach/seasons/{{ season_id }}/rounds/{{ round_id }}/lineup">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="draft_revision" value="{{ draft.revision }}">
+  <input type="hidden" name="submission_version" value="{{ submission_version }}">
+  <input type="hidden" name="action" value="submit">
+  <input type="hidden" name="{{ confirm_field }}" value="{{ confirm_value }}">
+  {% for position in positions %}<input type="hidden" name="position_{{ position }}" value="{{ draft.positions[position] or '' }}">{% endfor %}
+  <div class="actions">
+    <a class="cancel" href="/coach/seasons/{{ season_id }}/rounds/{{ round_id }}/lineup">Cancel</a>
+    <button class="confirm" type="submit">Confirm and submit</button>
+  </div>
+</form>
+</main></body></html>

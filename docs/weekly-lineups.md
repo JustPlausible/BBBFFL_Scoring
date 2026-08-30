@@ -37,6 +37,19 @@ remains an eligible Interchange target under the existing scoring rules
 scorer/public submitted-lineup views as an intentional vacancy rather than
 as unavailable or corrupt data.
 
+The coach-facing `Submit Lineup` web flow (`app/routes/coach_lineup.py`)
+adds one UX-only safeguard on top of this: if the draft about to be
+submitted leaves one or more of the eight ordinary (non-Interchange)
+positions vacant, submitting first shows a confirmation step naming those
+positions and explaining the Interchange consequence, rather than silently
+creating the submitted version. Declining (navigating away without posting
+the confirmation) creates nothing; confirming submits the same content
+exactly as already saved. This is purely a "did you mean to leave this
+empty" prompt for the coach -- it carries no domain meaning, is invisible
+to `app.lineup_validation`/`app.lineups`, and never turns into a required
+field, a fabricated selection, or an API-level requirement. A vacant
+Interchange alone never triggers it.
+
 PostgreSQL row locks serialize the lineup, lifecycle and selected player rows,
 coordinating with ownership's existing player locks. Expected draft and
 submission revisions provide compare-and-swap conflict detection.

@@ -39,10 +39,11 @@ The source submission's positions are copied verbatim into the new
 submission: the same player in the same position, never optimised,
 substituted, reordered or "repaired". Any resulting ownership,
 availability or DNP question is never used to alter the copy. The shared
-submission validator enforces completeness/identity/ownership first, and
-`submit_positions` retains its transactional ownership and lock checks, so a
-source player no longer owned by this entry fails explicitly rather than being
-silently substituted or dropped.
+submission validator enforces identity/ownership first (a deliberate vacant
+position in the source carries forward as vacant -- never fabricated, see
+issue #98), and `submit_positions` retains its transactional ownership and
+lock checks, so a source player no longer owned by this entry fails
+explicitly rather than being silently substituted or dropped.
 """
 
 from dataclasses import dataclass

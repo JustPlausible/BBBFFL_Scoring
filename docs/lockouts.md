@@ -320,6 +320,36 @@ fact is not itself a privileged decision. `LockoutTriggerRepository.create`/
 configuring the lockout plan is itself a privileged BBBFFL competition
 decision, not an observation.
 
+## Deliberately vacant positions (issue #98)
+
+A submitted position may deliberately hold no player (`season_player_id`
+`null`) -- a legitimate partial submission, never malformed input (see
+`docs/weekly-lineups.md`). `_evaluate_position` treats a vacant position as
+`editable`/`"empty"` unconditionally: with no selected player there is no AFL
+club/match to resolve, so there is nothing for a selective or main trigger to
+lock, and nothing is ever invented to fill the gap. Concretely:
+
+- a vacant position stays open to a later partial resubmission for as long
+  as the round's own lifecycle remains `open`, whatever the round's
+  selective/main trigger activation state -- this is a deliberate choice not
+  to pre-empt the still-unresolved "partial early submission followed by no
+  main submission" competition rule (`docs/plans/2027-season-decisions.md`)
+  by inventing a lock boundary for an empty slot;
+- filling a vacant position is still governed by the *new* player's own
+  match: `guard_transition`'s existing "introducing a genuinely new player"
+  rule (see above) applies identically whether the position was previously
+  vacant or held a different player, so a vacancy can never be used to
+  smuggle in a selection whose own match is already locked;
+- a position that already holds a *selected* player is unaffected by any of
+  this -- once locked, it locks exactly as before, and a later submission
+  can never revert a locked selection back to vacant (`proposed_player !=
+  previous_player` covers `None` like any other change).
+
+Reaching a round's main trigger therefore never locks a still-vacant
+position, and never infers or invents the player that was never submitted
+there -- it simply stays vacant, eligible for Interchange coverage
+(`app.round_review`).
+
 ## Coexistence with Opening Round deferred locking (issue #69)
 
 A lineup slot locked by an Opening Round deferred nomination

@@ -32,6 +32,27 @@ EXPECTED_COACH_LINEUP_ERRORS = (
     ValueError,
 )
 
+# The eight starting-lineup positions, excluding Interchange -- issue #98's
+# vacancy-confirmation UX safeguard only prompts about these. Interchange
+# itself being unnamed is ordinary/common and not the "did the coach forget
+# a starter" risk this exists to catch. This is a display/UX-only grouping
+# of the existing POSITIONS tuple (mirrors app.round_review's
+# OVERRIDE_POSITIONS), never a change to the domain vacancy rules
+# themselves: a vacant Interchange is still recorded and treated exactly
+# like any other deliberate vacancy by app.lineup_validation/app.lineups.
+ORDINARY_POSITIONS = tuple(position for position in POSITIONS if position != "Interchange")
+
+
+def vacant_ordinary_positions(positions):
+    """The ordinary positions in `positions` (a `{position: season_player_id
+    or None}` mapping, e.g. a draft's) that are currently vacant -- used
+    only to decide whether the coach-facing Submit flow should ask for an
+    explicit confirmation before creating an authoritative submitted
+    version (issue #98). Never a validation rule: an unconfirmed vacancy is
+    not invalid, just unconfirmed."""
+    return [position for position in ORDINARY_POSITIONS if positions.get(position) is None]
+
+
 # Display-only grouping of the domain's flat POSITIONS tuple, for the
 # desktop lineup layout (issue #90). Purely presentational: it groups
 # existing position names, it does not add, remove, reorder or reinterpret

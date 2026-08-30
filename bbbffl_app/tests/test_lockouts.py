@@ -887,6 +887,132 @@ def test_interchange_cannot_bypass_a_locked_players_match():
         )
 
 
+# ---------------------------------------------------------------------------
+# Issue #98: deliberately vacant positions never invent a lock/selection.
+# ---------------------------------------------------------------------------
+
+
+def test_vacant_position_is_fillable_before_its_boundary_and_never_invented_at_main():
+    """A deliberate partial submission (F1 named, everything else vacant):
+    an unlocked vacancy can still be filled and resubmitted before its own
+    boundary; a locked player survives that resubmission unchanged; and a
+    position left vacant right through Main lockout is never invented into a
+    selection -- it simply stays vacant, reported `editable`/`"empty"`."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_selective(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], key="early-1", sequence=1)
+    configure_main(triggers, round_.bbbffl_round_id, [LATE_MATCH_ID])
+    early = acquire(pool, ownership, scope, entry, 1, EARLY_HOME)
+    uncovered = acquire(pool, ownership, scope, entry, 2, UNCOVERED_HOME)
+    lineups = WeeklyLineupRepository(db)
+    matches = FakeMatchFacts(ALL_MATCHES)
+    lock_repo = LockoutRepository(db)
+
+    # Partial initial submission: only F1 is named; M1 and M2 are
+    # deliberate vacancies (never fabricated -- see issue #98).
+    draft, submitted = establish(lineups, round_, entry, scope, {"F1": early.season_player_id})
+    assert submitted.positions["M1"] is None and submitted.positions["M2"] is None
+
+    before = lock_repo.lock_state(
+        draft.lineup_id,
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        submitted.positions,
+        match_facts=matches,
+        evaluation_at=EARLY_START - timedelta(minutes=1),
+    )
+    assert before.positions["M1"].state == LockState.EDITABLE and before.positions["M1"].reason == "empty"
+
+    # Selective A activates: F1 locks. M1/M2 remain vacant/editable -- there
+    # is no player, hence no match, for any trigger to resolve or lock.
+    guard_a = lock_repo.guard(match_facts=matches, evaluation_at=EARLY_START + timedelta(minutes=1))
+    after_a = lock_repo.lock_state(
+        draft.lineup_id,
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        submitted.positions,
+        match_facts=matches,
+        evaluation_at=EARLY_START + timedelta(minutes=1),
+    )
+    assert after_a.positions["F1"].state == LockState.LOCKED
+    assert after_a.positions["M1"].state == LockState.EDITABLE and after_a.positions["M1"].reason == "empty"
+
+    # Fill the still-unlocked M1 vacancy and resubmit before its own
+    # (uncovered) match ever reaches boundary -- allowed, and F1 stays
+    # exactly as locked.
+    draft2 = edit_draft(
+        lineups,
+        round_,
+        entry,
+        scope,
+        draft.lineup_id,
+        {"F1": early.season_player_id, "M1": uncovered.season_player_id},
+        from_revision=draft.revision,
+    )
+    resubmitted = lineups.submit(
+        draft2.lineup_id,
+        expected_draft_revision=draft2.revision,
+        expected_submission_version=submitted.version,
+        lock_guard=guard_a,
+    )
+    assert resubmitted.positions["F1"] == early.season_player_id
+    assert resubmitted.positions["M1"] == uncovered.season_player_id
+    assert resubmitted.positions["M2"] is None
+
+    # Main activates. The still-vacant M2 is never inferred into a
+    # selection -- it stays vacant/editable in the read model...
+    guard_main = lock_repo.guard(match_facts=matches, evaluation_at=LATE_START)
+    after_main = lock_repo.lock_state(
+        draft2.lineup_id,
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        resubmitted.positions,
+        match_facts=matches,
+        evaluation_at=LATE_START,
+    )
+    assert after_main.positions["F1"].state == LockState.LOCKED
+    assert after_main.positions["M1"].state == LockState.LOCKED
+    assert after_main.positions["M1"].reason == "main_lockout_triggered"
+    assert after_main.positions["M2"].state == LockState.EDITABLE and after_main.positions["M2"].reason == "empty"
+
+    # ...but Main lockout still refuses to let a *new* player be introduced
+    # into that vacancy (or anywhere else): resubmitting it unchanged
+    # (still vacant) succeeds, resubmitting it with a newly-named player
+    # does not.
+    draft3 = edit_draft(
+        lineups, round_, entry, scope, draft2.lineup_id, resubmitted.positions, from_revision=draft2.revision
+    )
+    unchanged = lineups.submit(
+        draft3.lineup_id,
+        expected_draft_revision=draft3.revision,
+        expected_submission_version=resubmitted.version,
+        lock_guard=guard_main,
+    )
+    assert unchanged.positions["M2"] is None
+    assert (
+        unchanged.positions["F1"] == early.season_player_id and unchanged.positions["M1"] == uncovered.season_player_id
+    )
+
+    late_filler = acquire(pool, ownership, scope, entry, 3, LATE_HOME, name="Post-Main Filler")
+    draft4 = edit_draft(
+        lineups,
+        round_,
+        entry,
+        scope,
+        draft3.lineup_id,
+        {**unchanged.positions, "M2": late_filler.season_player_id},
+        from_revision=draft3.revision,
+    )
+    with pytest.raises(LockedSelectionError, match="M2"):
+        lineups.submit(
+            draft4.lineup_id,
+            expected_draft_revision=draft4.revision,
+            expected_submission_version=unchanged.version,
+            lock_guard=guard_main,
+        )
+
+
 def test_indeterminate_due_to_missing_match_data_blocks_change_but_allows_unchanged_resubmission():
     """A player selected while their match was normally resolvable can
     become indeterminate if a later afl-api response is missing that match

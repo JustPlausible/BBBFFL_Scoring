@@ -74,7 +74,20 @@ class LineupValidationService:
         players = {}
         for slot, player_id in selected:
             if player_id is None:
-                out.append(ValidationMessage("error", "positions", "required_position_unfilled", slot))
+                if slot in supplied:
+                    # A deliberate vacancy (the position key is present but
+                    # its value is null) is legitimate competition state,
+                    # never a validation failure -- see issue #98. It is
+                    # distinct from `required_position_missing` above (the
+                    # key itself absent, which stays a hard error: unknown/
+                    # corrupt input shape) and from a scorer DNP ruling on a
+                    # named player (a later, separate decision recorded in
+                    # app.round_review, never inferred here). Advisory only:
+                    # it never blocks submission and never fabricates a
+                    # player/DNP/zero-score placeholder.
+                    out.append(ValidationMessage("warning", "positions", "position_vacant", slot))
+                # else: already reported as required_position_missing above
+                # -- never also labelled a deliberate vacancy.
                 continue
             if player_id in seen:
                 out.append(

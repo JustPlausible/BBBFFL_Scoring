@@ -1,12 +1,27 @@
 # Weekly lineup validation and availability advice
 
 `LineupValidationService` is the reusable package-24 boundary for coach,
-scorer-proxy, carry-forward and replay callers. A submission must fill exactly
-the nine positions in `app.lineups.POSITIONS`, use unique stable
-`season_player_id` values, select players currently owned by the season entry,
-and retain a consistent season/competition/round/entry scope. Ownership is read
-only from package 21's ownership periods. Draft saves remain deliberately
-permissive so a coach can build a lineup progressively.
+scorer-proxy, carry-forward and replay callers. A submission addresses exactly
+the nine positions in `app.lineups.POSITIONS`, each either a stable
+`season_player_id` or deliberately `null` (vacant), uses unique player values
+across populated positions, selects players currently owned by the season
+entry, and retains a consistent season/competition/round/entry scope.
+Ownership is read only from package 21's ownership periods. Draft saves
+remain deliberately permissive so a coach can build a lineup progressively.
+
+A formal submission is **not** required to name a player in every position
+(issue #98). A position present in the submitted mapping with a `null` value
+is a deliberate vacancy -- legitimate, authoritative competition state, never
+a validation failure -- and is reported back only as an advisory
+`position_vacant` warning, never an error. This is distinct from a position
+whose key is missing from the submitted mapping entirely, which remains the
+hard `required_position_missing` error (unknown/corrupt input shape), and
+from a scorer DNP ruling on a named player, which is a separate, later
+decision recorded by `app.round_review`/`app.service` and never inferred
+here. A vacancy is never satisfied by fabricating a player, a DNP ruling, or
+a zero-score placeholder -- see `docs/weekly-lineups.md` and
+`docs/lockouts.md` for how submission persistence and staged lockout treat
+the same vacancy.
 
 `ValidatedLineupSubmissionService` is the single application submission
 boundary for coach drafts and explicit-position sources. Scorer proxy and

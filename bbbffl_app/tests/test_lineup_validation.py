@@ -72,31 +72,64 @@ def test_valid_owned_nine_player_lineup_submits_with_bye_advice_and_no_mutation(
     assert result.to_dict()["validation"]["messages"][0]["severity"] == "warning"
 
 
-def test_incomplete_draft_saves_but_submission_validation_rejects_it():
+def test_incomplete_draft_saves_and_partial_submission_is_accepted_as_vacant():
+    """Issue #98: a formal submission need not name a player in every
+    position. A deliberately vacant position is legitimate, authoritative
+    state -- persisted explicitly as `None`, reported only as an advisory
+    warning, never fabricated and never blocked."""
     db, round_, entries, scope, players, _, afl = mapped_context()
     draft = save(WeeklyLineupRepository(db), round_, entries, scope, {"F1": players[0].season_player_id})
     assert draft.positions["F2"] is None
-    with pytest.raises(LineupValidationError) as caught:
-        ValidatedLineupSubmissionService(db, afl).submit(
-            draft.lineup_id, expected_draft_revision=1, expected_submission_version=0
-        )
-    assert {m.code for m in caught.value.result.errors} == {"required_position_unfilled"}
-    assert WeeklyLineupRepository(db).get_effective_submission(draft.lineup_id) is None
+    result = ValidatedLineupSubmissionService(db, afl).submit(
+        draft.lineup_id, expected_draft_revision=1, expected_submission_version=0
+    )
+    assert result.validation.valid
+    assert result.submission.version == 1
+    assert result.submission.positions["F1"] == players[0].season_player_id
+    vacant_codes = {(m.position, m.code) for m in result.validation.warnings if m.code == "position_vacant"}
+    assert vacant_codes == {(position, "position_vacant") for position in POSITIONS if position != "F1"}
+    # Nothing was fabricated: every other position is explicitly None, never
+    # a placeholder player, DNP ruling or zero-score record.
+    assert all(result.submission.positions[position] is None for position in POSITIONS if position != "F1")
+    effective = WeeklyLineupRepository(db).get_effective_submission(draft.lineup_id)
+    assert effective.version == 1
+    assert effective.positions == result.submission.positions
+
+
+def test_position_missing_from_input_remains_a_hard_error_distinct_from_vacant():
+    """A position whose key is entirely absent from the submitted mapping is
+    unknown/corrupt input shape (`required_position_missing`), never the
+    same thing as a deliberately vacant position (`position_vacant`,
+    key present with a `None` value) -- see issue #98's three-way
+    vacant/DNP/missing-or-corrupt distinction."""
+    db, round_, entries, scope, players, _, afl = mapped_context()
+    draft = save(WeeklyLineupRepository(db), round_, entries, scope, {"F1": players[0].season_player_id})
+    malformed = dict(draft.positions)
+    del malformed["F3"]
+    result = LineupValidationService(db, afl).validate_submission(draft.lineup_id, malformed)
+    assert not result.valid
+    assert {m.code for m in result.errors} == {"required_position_missing"}
+    assert next(m for m in result.errors if m.code == "required_position_missing").position == "F3"
+    # F2 (present, explicitly None) is still only an advisory vacancy --
+    # F3 (key absent entirely) must never also be labelled a vacancy.
+    warning_positions = {(m.position, m.code) for m in result.warnings}
+    assert ("F2", "position_vacant") in warning_positions
+    assert ("F3", "position_vacant") not in warning_positions
 
 
 def test_scorer_proxy_cannot_bypass_hard_validation():
-    db, round_, entries, scope, players, _, _ = mapped_context()
+    db, round_, entries, scope, players, foreign, _ = mapped_context()
     proxy = LineupProxyService(db)
     draft = proxy.create_or_amend(
         scope["season_id"],
         scope["competition_id"],
         round_.bbbffl_round_id,
         entries[0].season_entry_id,
-        {"F1": players[0].season_player_id},
+        {"F1": players[0].season_player_id, "F2": foreign.season_player_id},
         expected_revision=0,
         actor=ActorContext.anonymous_operator("scorer"),
     )
-    with pytest.raises(LineupValidationError):
+    with pytest.raises(LineupValidationError) as caught:
         proxy.submit(
             draft.lineup_id,
             expected_draft_revision=draft.revision,
@@ -104,14 +137,16 @@ def test_scorer_proxy_cannot_bypass_hard_validation():
             actor=ActorContext.anonymous_operator("scorer"),
             reason="proxy",
         )
+    assert {m.code for m in caught.value.result.errors} == {"player_not_owned"}
 
 
-def test_carry_forward_cannot_bypass_hard_validation():
+def test_carry_forward_propagates_a_vacant_position_without_fabricating_a_player():
+    """Issue #98: carry-forward copies a previous partial submission exactly
+    -- including its deliberate vacancy -- rather than requiring (or
+    inventing) a full lineup to satisfy validation."""
     db, _, rounds, entries, scope, pool, ownership = carry_context(rounds=2)
     player = pool.refresh_player(scope["season_id"], 999001, "Only Player")
     ownership.acquire(player.season_player_id, entries[0].season_entry_id)
-    # Seed a legacy pre-Issue-56 partial submission through the persistence
-    # primitive; carry-forward must refuse to turn it into new submitted state.
     legacy = WeeklyLineupRepository(db).save_draft(
         scope["season_id"],
         scope["competition_id"],
@@ -123,15 +158,17 @@ def test_carry_forward_cannot_bypass_hard_validation():
     WeeklyLineupRepository(db).submit(
         legacy.lineup_id, expected_draft_revision=legacy.revision, expected_submission_version=0
     )
-    with pytest.raises(LineupValidationError):
-        CarryForwardService(db).carry_forward(
-            scope["season_id"],
-            scope["competition_id"],
-            rounds[1],
-            entries[0].season_entry_id,
-            expected_submission_version=0,
-            actor=ActorContext.anonymous_operator("scorer"),
-        )
+    submitted, source = CarryForwardService(db).carry_forward(
+        scope["season_id"],
+        scope["competition_id"],
+        rounds[1],
+        entries[0].season_entry_id,
+        expected_submission_version=0,
+        actor=ActorContext.anonymous_operator("scorer"),
+    )
+    assert submitted.positions["F1"] == player.season_player_id
+    assert all(submitted.positions[position] is None for position in POSITIONS if position != "F1")
+    assert source.positions == submitted.positions
 
 
 def test_validated_submission_still_delegates_to_authoritative_lock_guard():

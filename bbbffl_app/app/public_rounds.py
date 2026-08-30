@@ -17,7 +17,8 @@ def _number(value):
     return value
 
 
-def _player_names(database, season_player_ids):
+def authoritative_player_names(database, season_player_ids):
+    """Resolve display names for players in an authoritative submission."""
     ids = sorted({item for item in season_player_ids if item})
     if not ids:
         return {}
@@ -99,7 +100,7 @@ def _side(side, submitted, names, official_score, has_calculation):
     }
 
 
-def _effective_submissions(database, round_):
+def authoritative_submissions(database, round_):
     """Effective immutable submission slots only; draft rows are never read."""
     rows = database.execute(
         "SELECT w.season_entry_id, w.effective_submission_version AS version, "
@@ -125,9 +126,9 @@ def build_public_round(database, lifecycle, review_repo, identities, round_id):
     if round_ is None:
         raise KeyError(round_id)
     review = build_round_review(lifecycle, review_repo, identities, round_id)
-    submissions = _effective_submissions(database, round_)
+    submissions = authoritative_submissions(database, round_)
     player_ids = [slot["season_player_id"] for slots in submissions.values() for slot in slots]
-    names = _player_names(database, player_ids)
+    names = authoritative_player_names(database, player_ids)
 
     matchups = []
     for matchup in review.matchups:

@@ -52,6 +52,14 @@ def test_round1_rehearsal_browser_vertical(rehearsal_client):
     client, result = rehearsal_client
     lineup_url = f"/coach/seasons/{result.season_id}/rounds/{result.bbbffl_round_id}/lineup"
 
+    # The normal browser entry discovers the persisted ordinary season and
+    # delegates round selection to its stable season URL. It neither renders
+    # nor polls the separately retained Grand Final implementation.
+    root = client.get("/", follow_redirects=False)
+    assert root.status_code == 302
+    assert root.headers["location"] == f"/seasons/{result.season_id}"
+    assert "/api/public/state" not in root.text
+
     # 1. Coach A authenticates through the real /login form.
     login_page = client.get("/login")
     assert login_page.status_code == 200

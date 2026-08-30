@@ -84,8 +84,9 @@ def _build_state(request: Request) -> dict:
     return get_matchup_view(state.afl_client, state.teams, state.decisions, state.identity_cache)
 
 
-@router.get("/", response_class=HTMLResponse)
-def public_page(request: Request):
+@router.get("/legacy/grand-final", response_class=HTMLResponse)
+def legacy_grand_final_page(request: Request):
+    """Retained Grand Final prototype; the regular season owns ``/``."""
     settings = request.app.state.settings
     superscore_config = request.app.state.superscore_config
     # A tiny sign-in-state nav link only -- not the coach dashboard/profile

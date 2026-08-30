@@ -12,10 +12,11 @@ main { width:min(720px,100%); margin:auto; padding:16px 12px 120px; } a { color:
 .context { padding:14px; margin:12px 0 }.context-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:10px }.context-grid span { display:block }
 .state { display:inline-block; padding:3px 9px; border-radius:99px; background:#1f6f3d; font-size:.8rem; font-weight:700 }.state.private { background:#6e5318 }.state.changed { background:#7d4e13 }
 .messages { display:grid; gap:8px; margin:12px 0 }.message { padding:12px }.message.error { border-left:5px solid var(--red) }.message.warning { border-left:5px solid var(--amber) }.message.success { border-left:5px solid var(--green) }
-.slots { display:grid; gap:10px; margin-top:10px }.slot { padding:14px }.slot-head { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px }.position { font-size:1.05rem; font-weight:800 }.badge { font-size:.75rem; padding:3px 8px; border:1px solid var(--line); border-radius:99px }.locked { border-color:var(--amber); color:#f2cc60 }
+.position-groups { display:grid; gap:20px; margin-top:10px }.group-title { font-size:.8rem; margin:0 0 8px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em }
+.slots { display:grid; gap:10px }.slot { padding:14px }.slot-head { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px }.position { font-size:1.05rem; font-weight:800 }.badge { font-size:.75rem; padding:3px 8px; border:1px solid var(--line); border-radius:99px }.locked { border-color:var(--amber); color:#f2cc60 }
 select { width:100%; min-height:48px; border:1px solid #59636e; border-radius:9px; background:var(--bg); color:var(--text); padding:8px; font-size:1rem }.player-info,.lock-info { margin-top:7px; font-size:.82rem; color:var(--muted) }.lock-info { color:#f2cc60 }
 .actions { position:fixed; left:0; right:0; bottom:0; padding:10px max(12px,calc((100vw - 720px)/2 + 12px)); display:grid; grid-template-columns:1fr 1fr; gap:10px; box-shadow:0 -6px 20px #0008 }.actions button { min-height:52px; border-radius:10px; font-size:1rem; font-weight:800; cursor:pointer }.save { color:var(--text); background:#21262d; border:2px solid #8b949e }.submit { color:white; background:var(--green); border:2px solid #3fb950 }
-@media(min-width:600px) { .slots { grid-template-columns:1fr 1fr } main { padding-top:26px }.actions { position:static; margin-top:16px } }
+@media(min-width:640px) { .slots { grid-template-columns:repeat(auto-fit,minmax(170px,1fr)) } main { padding-top:26px }.actions { position:static; margin-top:16px } }
 </style>
 </head>
 <body><main>
@@ -44,9 +45,7 @@ select { width:100%; min-height:48px; border:1px solid #59636e; border-radius:9p
 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 <input type="hidden" name="draft_revision" value="{{ lineup.draft.revision }}">
 <input type="hidden" name="submission_version" value="{{ lineup.submission.version if lineup.submission else 0 }}">
-<h2>Nine positions</h2><div class="muted">Players come from your current authoritative owned squad.</div>
-<div class="slots">
-{% for position in positions %}{% set selected = lineup.draft.positions[position] %}{% set selected_player = lineup.selected_players[position] %}{% set lock = lineup.locks.get(position) %}{% set deferred = lineup.deferred.get(position) %}
+{% macro render_slot(position, lineup) %}{% set selected = lineup.draft.positions[position] %}{% set selected_player = lineup.selected_players[position] %}{% set lock = lineup.locks.get(position) %}{% set deferred = lineup.deferred.get(position) %}
 <article class="slot">
  <div class="slot-head"><span class="position">{{ position }}</span>{% if deferred %}<span class="badge locked">Opening Round · locked</span>{% elif lock and lock.state.value != 'editable' %}<span class="badge locked">{{ lock.state.value|capitalize }}</span>{% else %}<span class="badge">Editable</span>{% endif %}</div>
  {% if deferred or (lock and lock.state.value != 'editable') %}
@@ -57,7 +56,17 @@ select { width:100%; min-height:48px; border:1px solid #59636e; border-radius:9p
  {% endif %}
  {% if deferred %}<div class="lock-info">Preloaded by the Opening Round deferred-selection mechanism. Source AFL match {{ deferred.source_afl_match_id or 'not recorded' }}; nomination {{ deferred.nomination_id }}.</div>
  {% elif lock and lock.state.value != 'editable' %}<div class="lock-info">{{ lock.reason|replace('_',' ') }}{% if lock.afl_match_id %} · AFL match {{ lock.afl_match_id }}{% endif %}{% if lock.effective_lock_at %} · {{ lock.effective_lock_at }}{% endif %}</div>{% endif %}
-</article>{% endfor %}
+</article>{% endmacro %}
+<h2>Nine positions</h2><div class="muted">Players come from your current authoritative owned squad.</div>
+<div class="position-groups">
+{% for group_name, group_positions in position_groups %}
+<section class="position-group" aria-label="{{ group_name }}">
+  <h3 class="group-title">{{ group_name }}</h3>
+  <div class="slots">
+  {% for position in group_positions %}{{ render_slot(position, lineup) }}{% endfor %}
+  </div>
+</section>
+{% endfor %}
 </div>
 <div class="actions"><button class="save" name="action" value="save">Save private draft</button><button class="submit" name="action" value="submit">Submit lineup</button></div>
 </form>

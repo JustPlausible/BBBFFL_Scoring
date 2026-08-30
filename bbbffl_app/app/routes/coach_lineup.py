@@ -4,7 +4,12 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from app.coach_lineup import COACH_LINEUP_POSITIONS, EXPECTED_COACH_LINEUP_ERRORS, CoachLineupService
+from app.coach_lineup import (
+    COACH_LINEUP_POSITION_GROUPS,
+    COACH_LINEUP_POSITIONS,
+    EXPECTED_COACH_LINEUP_ERRORS,
+    CoachLineupService,
+)
 from app.config import BASE_DIR
 from app.csrf import verify_token
 from app.lineup_validation import LineupValidationError
@@ -31,6 +36,7 @@ def _render(request, season_id, round_id, coach, *, positions=None, errors=(), v
             "coach": coach,
             "lineup": context,
             "positions": COACH_LINEUP_POSITIONS,
+            "position_groups": COACH_LINEUP_POSITION_GROUPS,
             "errors": errors,
             "notice": notice,
             "csrf_token": token,

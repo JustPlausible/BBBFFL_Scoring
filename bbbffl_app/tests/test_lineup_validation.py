@@ -110,8 +110,11 @@ def test_position_missing_from_input_remains_a_hard_error_distinct_from_vacant()
     assert not result.valid
     assert {m.code for m in result.errors} == {"required_position_missing"}
     assert next(m for m in result.errors if m.code == "required_position_missing").position == "F3"
-    # F2 (present, explicitly None) is still only an advisory vacancy.
-    assert ("F2", "position_vacant") in {(m.position, m.code) for m in result.warnings}
+    # F2 (present, explicitly None) is still only an advisory vacancy --
+    # F3 (key absent entirely) must never also be labelled a vacancy.
+    warning_positions = {(m.position, m.code) for m in result.warnings}
+    assert ("F2", "position_vacant") in warning_positions
+    assert ("F3", "position_vacant") not in warning_positions
 
 
 def test_scorer_proxy_cannot_bypass_hard_validation():

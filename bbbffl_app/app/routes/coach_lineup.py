@@ -112,7 +112,6 @@ async def lineup_action(request: Request, season_id: str, round_id: str):
 
 def _message_text(message):
     labels = {
-        "required_position_unfilled": "Choose a player for this position before submitting.",
         "player_selected_multiple_times": "This player is selected in more than one position.",
         "player_not_owned": "This player is not in your authoritative owned squad.",
         "season_player_invalid": "This player does not belong to this season.",

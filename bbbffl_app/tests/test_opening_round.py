@@ -449,6 +449,39 @@ def test_ordinary_edit_cannot_replace_or_reposition_the_deferred_player():
     assert submitted.positions["M1"] == player.season_player_id
 
 
+def test_submitting_a_vacancy_elsewhere_never_clears_the_deferred_lock():
+    """Issue #98: a coach formally submitting a partial lineup with
+    deliberate vacancies elsewhere must never disturb an existing Opening
+    Round deferred/preloaded lock -- the deferred slot stays exactly as
+    nominated, and the vacancies are persisted as `None`, not fabricated."""
+    db = migrated_connection()
+    _, round_, entries, scope = setup_scope(db, 2024, 956)
+    rule, player, nomination = nominate_bl_2024(db, scope["season_id"], round_.bbbffl_round_id, entries[0])
+    lineups = WeeklyLineupRepository(db)
+    nominations = OpeningRoundNominationRepository(db)
+    nominations.preload_target_lineup(
+        lineups, scope["season_id"], scope["competition_id"], round_.bbbffl_round_id, entries[0].season_entry_id
+    )
+    draft = lineups.get_draft(
+        scope["season_id"], scope["competition_id"], round_.bbbffl_round_id, entries[0].season_entry_id
+    )
+    assert draft.positions["M1"] == player.season_player_id
+    assert all(v is None for k, v in draft.positions.items() if k != "M1")
+
+    guard = OpeningRoundSelectionGuard(nominations)
+    submitted = lineups.submit_positions(
+        draft.lineup_id,
+        draft.positions,
+        expected_submission_version=0,
+        actor=SCORER,
+        source_type="scorer_proxy",
+        reason="partial submission: only the deferred slot is named",
+        lock_guard=guard,
+    )
+    assert submitted.positions["M1"] == player.season_player_id
+    assert all(v is None for k, v in submitted.positions.items() if k != "M1")
+
+
 # -- 13: carry-forward cannot overwrite a deferred slot --------------------
 
 

@@ -212,3 +212,105 @@ def test_progressive_plan_through_real_coach_flow_and_persisted_versions(rehears
     assert "main_lockout_triggered" in final_rejection.text
     assert effective(database, lineup_id).positions == third.positions
     assert effective(database, lineup_id).version == 3
+
+
+def test_part_3_partial_submit_selective_lock_fill_vacancy_resubmit_then_main_lock(rehearsal):
+    """Issue #98 acceptance sequence: partial submit -> selective lock ->
+    fill unlocked vacancy -> resubmit -> later/main lock, driven through the
+    real coach HTTP flow exactly like the #91 rehearsal above."""
+    client, result, cookies = rehearsal
+    base = result.bootstrap
+    database = client.app.state.database
+    url = f"/coach/seasons/{base.season_id}/rounds/{base.bbbffl_round_id}/lineup"
+    squad = OwnershipRepository(database).current_squad(base.coach_a.season_entry_id)
+    full = {position: period.season_player_id for position, period in zip(POSITIONS, squad, strict=True)}
+
+    # 1. Initial partial submission: only F1 (selective-a's own match) is
+    # named. Every other position is a deliberate vacancy.
+    partial = {"F1": full["F1"]}
+    assert post(client, url, cookies, partial, "save").status_code == 303
+    submitted = post(client, url, cookies, partial)
+    assert submitted.status_code == 303 and "notice=submitted" in submitted.headers["location"]
+    lineup = database.execute(
+        "SELECT lineup_id FROM weekly_lineup WHERE bbbffl_round_id=? AND season_entry_id=?",
+        (base.bbbffl_round_id, base.coach_a.season_entry_id),
+    ).fetchone()
+    lineup_id = lineup["lineup_id"]
+    first = effective(database, lineup_id)
+    assert first.version == 1
+    assert first.positions["F1"] == full["F1"]
+    assert all(first.positions[position] is None for position in POSITIONS if position != "F1")
+    initial_page = client.get(url, cookies=cookies)
+    # F1 is named and editable; every vacant slot renders its "Empty" option
+    # selected and is likewise still editable -- a partial submission is
+    # never presented as unavailable/corrupt.
+    assert initial_page.text.count('<span class="badge">Editable</span>') == len(POSITIONS)
+    assert initial_page.text.count('<option value="">Empty — choose later</option>') == len(POSITIONS)
+
+    # 2. Selective A activates: F1 locks. Every still-vacant position
+    # remains editable -- there is no player, hence no match, to lock.
+    reload_stage(client, result, "selective-a")
+    stage_a_page = client.get(url, cookies=cookies)
+    assert "selective trigger activated · AFL match 9101" in stage_a_page.text
+    assert stage_a_page.text.count('<span class="badge">Editable</span>') == len(POSITIONS) - 1
+    locked_f1 = dict(first.positions)
+    locked_f1["F1"] = None
+    assert post(client, url, cookies, locked_f1).status_code == 409
+
+    # 3. Fill one of the still-unlocked vacancies (M2, whose own match --
+    # main's, 9105 -- has not activated yet) and resubmit. F1 stays locked
+    # and unchanged; the still-open vacancies remain vacant, not fabricated.
+    fill_vacancy = {"F1": full["F1"], "M2": full["M2"]}
+    assert post(client, url, cookies, fill_vacancy, "save").status_code == 303
+    resubmitted = post(client, url, cookies, fill_vacancy)
+    assert resubmitted.status_code == 303 and "notice=submitted" in resubmitted.headers["location"]
+    second = effective(database, lineup_id)
+    assert second.version == 2
+    assert second.positions["F1"] == full["F1"]
+    assert second.positions["M2"] == full["M2"]
+    assert all(second.positions[position] is None for position in POSITIONS if position not in ("F1", "M2"))
+
+    # Attempting to fill a vacancy whose own match is already covered by an
+    # *activated* trigger is still refused, exactly like an ordinary named
+    # selection would be -- a vacancy is never a way to route around a lock.
+    reload_stage(client, result, "selective-b")
+    stage_b_page = client.get(url, cookies=cookies)
+    assert "F2" in stage_b_page.text  # still rendered, still vacant, not hidden
+    blocked_fill = {**second.positions, "F2": full["F2"]}
+    blocked = post(client, url, cookies, blocked_fill)
+    assert blocked.status_code == 409
+    assert "F2" in blocked.text
+    assert effective(database, lineup_id).version == 2
+    # The rejected attempt still saved its (rejected) content to the private
+    # draft, per ordinary save-then-submit form handling -- restore the
+    # draft to the last submitted content before continuing, exactly as a
+    # coach reverting their own attempted edit would.
+    assert post(client, url, cookies, second.positions, "save").status_code == 303
+
+    # 4. Main activates. The two *named* positions (F1, M2) lock; the seven
+    # still-vacant positions have no player -- hence no match -- for any
+    # trigger to lock, so they keep reporting editable/"empty" (see
+    # docs/lockouts.md, "Deliberately vacant positions"). Nothing is ever
+    # invented into them: Main still refuses to let a *new* player be
+    # introduced there (checked below), it just never fabricates a lock
+    # reason for an empty slot.
+    reload_stage(client, result, "main")
+    final_page = client.get(url, cookies=cookies)
+    assert final_page.text.count('class="badge locked"') == 2
+    assert final_page.text.count('<span class="badge">Editable</span>') == len(POSITIONS) - 2
+    final = effective(database, lineup_id)
+    assert final.version == 2
+    assert final.positions["F1"] == full["F1"] and final.positions["M2"] == full["M2"]
+    assert all(final.positions[position] is None for position in POSITIONS if position not in ("F1", "M2"))
+    late_fill = {**final.positions, "Interchange": full["Interchange"]}
+    late_rejection = post(client, url, cookies, late_fill)
+    assert late_rejection.status_code == 409
+    assert "main_lockout_triggered" in late_rejection.text
+    assert effective(database, lineup_id).positions == final.positions
+    assert effective(database, lineup_id).version == 2
+
+    # Prior partial versions remain immutable and inspectable.
+    history = [WeeklyLineupRepository(database).get_submission(lineup_id, version) for version in (1, 2)]
+    assert all(history)
+    assert history[0].positions == first.positions
+    assert history[1].positions == second.positions

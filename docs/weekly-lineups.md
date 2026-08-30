@@ -24,6 +24,19 @@ IDs currently owned by the entry, and no duplicate selected player. Ownership
 is queried from the existing ledger and is **not copied as a second current-owner
 authority**. Submitted player IDs remain intact after a later release or trade.
 
+A formal submission is not required to name a player in every position
+(issue #98). One or more positions may be deliberately left `null` -- a
+vacant position is legitimate, authoritative competition state, immutably
+recorded exactly like any populated one, and is never rejected, never
+silently filled, and never confused with a scorer's later DNP ruling on a
+named player or with missing/corrupt input (see `docs/lineup-validation.md`
+for the validation-layer distinction). Duplicate-player and ownership
+validation still apply to every populated position. A vacant position
+remains an eligible Interchange target under the existing scoring rules
+(`docs/lockouts.md`, `app.round_review`/`app.service`), and stays visible on
+scorer/public submitted-lineup views as an intentional vacancy rather than
+as unavailable or corrupt data.
+
 PostgreSQL row locks serialize the lineup, lifecycle and selected player rows,
 coordinating with ownership's existing player locks. Expected draft and
 submission revisions provide compare-and-swap conflict detection.

@@ -6,7 +6,8 @@ from contextlib import contextmanager
 from app.afl_client import Match, Player, Team
 from app.scorer_decisions import finalize
 from app.service import build_matchup_state
-from tests.conftest import CATS, PIES, FakeAflClient, stat_line
+from app.teams import TeamConfig
+from tests.conftest import CATS, PIES, TEAM_A_ROSTER, TEAM_B_ROSTER, FakeAflClient, stat_line
 
 
 def _team(result):
@@ -51,6 +52,37 @@ def test_intentional_vacancy_is_explicit_candidate(partial_teams, decisions, sin
     assert any(
         c.target_position == "Tackler" and c.vacancy_kind == "intentional_vacancy" for c in recommendation.candidates
     )
+
+
+def test_vacancy_and_genuine_dnp_coexist_and_highest_score_still_wins(decisions, single_match, players_on_one_match):
+    """Issue #98: a deliberate intentional vacancy and a genuine scorer-ruled
+    DNP can be eligible Interchange targets in the same lineup at once, and
+    the confirmed 2027 rule (docs/plans/2027-season-decisions.md) still
+    applies unmodified -- the highest-scoring option wins, whichever kind it
+    is, subject to scorer confirmation."""
+    mixed_roster = dict(TEAM_A_ROSTER)
+    mixed_roster["Midfield1"] = None  # deliberate vacancy, never a DNP
+    mixed_teams = [
+        TeamConfig(team_key="team_a", name="Alpha", roster=mixed_roster),
+        TeamConfig(team_key="team_b", name="Bravo", roster=dict(TEAM_B_ROSTER)),
+    ]
+    decisions.set_dnp("team_a", "Forward2", True, reason="Synthetic replay withdrawal")
+    # Interchange player 9's own stats favour the Midfield formula
+    # (disposals) far more than the Forward formula (goals*6+behinds).
+    stats = {100: {9: stat_line(9, goals=1, behinds=0, disposals=30)}}
+    recommendation = _team(
+        build_matchup_state(FakeAflClient([single_match], players_on_one_match, stats), mixed_teams, decisions)
+    ).interchange_recommendation
+
+    by_position = {c.target_position: c for c in recommendation.candidates}
+    assert by_position["Forward2"].vacancy_kind == "confirmed_dnp"
+    assert by_position["Midfield1"].vacancy_kind == "intentional_vacancy"
+    assert by_position["Midfield1"].team_outcome > by_position["Forward2"].team_outcome
+    assert recommendation.state == "clear_best"
+    assert recommendation.recommended_targets == ["Midfield1"]
+    assert recommendation.advisory_only is True
+    # Advisory only: nothing is applied until the scorer confirms it.
+    assert decisions.get_interchange_assignments() == {}
 
 
 def test_no_eligible_target_and_missing_interchange_evidence_states(

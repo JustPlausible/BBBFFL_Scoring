@@ -25,8 +25,8 @@ SCORER = ActorContext.anonymous_operator(role="scorer")
 ADMIN = ActorContext.anonymous_operator(role="admin")
 
 
-def _setup(year, *, stat_line=None, calculate=True):
-    db, lifecycle, round_, entries, stats, canon = full_round(year=year, stat_line=stat_line)
+def _setup(year, *, stat_line=None, calculate=True, vacant_slots=None):
+    db, lifecycle, round_, entries, stats, canon = full_round(year=year, stat_line=stat_line, vacant_slots=vacant_slots)
     progress_to_review(lifecycle, round_.bbbffl_round_id)
     if calculate:
         MatchupCalculationService(db, Facts(stats)).calculate_round(round_.bbbffl_round_id)
@@ -87,6 +87,44 @@ def test_ambiguous_evidence_surfaces_as_an_unresolved_ruling_blocker():
     f1 = next(s for s in reviewed.home.slots if s.slot == "F1")
     assert f1.dnp_ruling is None
     assert f1.dnp_recommendation == "review_required"
+
+
+def test_intentional_vacancy_and_genuine_dnp_are_distinct_and_both_interchange_eligible():
+    """Issue #98: a deliberately vacant submitted position (never named) and
+    a genuine scorer-ruled DNP (named, then withdrawn) can coexist in one
+    lineup. Both are legitimate Interchange opportunities, but they are
+    never conflated: only the named-and-unresolved case blocks sign-off on
+    its own account, and the vacancy is scored/assigned using the canonical
+    formula of whichever position the Interchange fills."""
+    db, lifecycle, round_, entries, stats, canon, review_repo, identities = _setup(3007, vacant_slots={(0, "F2")})
+    matchup = lifecycle.list_matchups(round_.bbbffl_round_id)[0]
+    entry = matchup.home_season_entry_id
+
+    review = build_round_review(lifecycle, review_repo, identities, round_.bbbffl_round_id)
+    reviewed = next(m for m in review.matchups if m.matchup_id == matchup.matchup_id)
+    f2 = next(s for s in reviewed.home.slots if s.slot == "F2")
+    assert f2.season_player_id is None
+    assert f2.dnp_ruling is None
+    assert f2.effective_source == "zero"
+    # Never named, so it is never a "DNP status unresolved" blocker -- only
+    # the still-open Interchange decision blocks, and only because a
+    # genuine vacancy is a real, unresolved scoring opportunity.
+    assert not any("F2" in reason and "DNP" in reason for reason in reviewed.blockers)
+    assert any("vacant position(s) F2" in reason for reason in reviewed.blockers)
+    assert reviewed.eligible_for_signoff is False
+
+    review_repo.record_interchange_ruling(
+        matchup.matchup_id, entry, "F2", expected_review_version=1, actor=SCORER, reason="cover intentional vacancy"
+    )
+    review = build_round_review(lifecycle, review_repo, identities, round_.bbbffl_round_id)
+    reviewed = next(m for m in review.matchups if m.matchup_id == matchup.matchup_id)
+    assert reviewed.eligible_for_signoff is True
+    f2 = next(s for s in reviewed.home.slots if s.slot == "F2")
+    # Scored with the Forward formula (F2's own position), never DNP/zero
+    # once the Interchange is confirmed to cover it.
+    assert f2.interchange_applied is True
+    assert f2.effective_source == "interchange"
+    assert f2.effective_score > 0
 
 
 def test_interchange_ruling_targeting_an_occupied_position_never_overrides_it():

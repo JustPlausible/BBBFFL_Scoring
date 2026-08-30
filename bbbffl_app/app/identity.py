@@ -4,8 +4,30 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from sqlalchemy.exc import IntegrityError
+
 from app.audit import ActorContext, append_event
 from app.db import DatabaseConnection, _for_update_suffix, transaction
+
+
+class _UnsetType:
+    """Sentinel type distinguishing "this keyword was not supplied" from an
+    explicit ``None`` -- see `IdentityRepository.update_coach`'s docstring.
+    A dedicated type (rather than a bare ``object()``) so a keyword's type
+    hint can name it explicitly and stay checkable under this module's
+    strict mypy gate (see [tool.mypy] in pyproject.toml)."""
+
+    def __repr__(self) -> str:
+        return "UNSET"
+
+
+UNSET = _UnsetType()
+
+
+class CoachEmailConflictError(ValueError):
+    """Another coach already has this email (case-insensitively) -- the
+    unique index `migrations/versions/0021_coach_authentication.py` adds on
+    `lower(coach.email)`."""
 
 
 def _id() -> str:
@@ -94,8 +116,11 @@ class IdentityRepository:
     ) -> Coach:
         now = _now()
         item = Coach(_id(), display_name, email, phone, profile_notes, now, now)
-        with transaction(self.database) as conn:
-            conn.execute("INSERT INTO coach VALUES (?, ?, ?, ?, ?, ?, ?)", tuple(item.__dict__.values()))
+        try:
+            with transaction(self.database) as conn:
+                conn.execute("INSERT INTO coach VALUES (?, ?, ?, ?, ?, ?, ?)", tuple(item.__dict__.values()))
+        except IntegrityError as exc:
+            raise CoachEmailConflictError(f"another coach already uses the email {email!r}") from exc
         return item
 
     def create_entry(
@@ -237,10 +262,10 @@ class IdentityRepository:
         self,
         coach_id: str,
         *,
-        display_name: str | None = None,
-        email: str | None = None,
-        phone: str | None = None,
-        profile_notes: str | None = None,
+        display_name: str | None | _UnsetType = UNSET,
+        email: str | None | _UnsetType = UNSET,
+        phone: str | None | _UnsetType = UNSET,
+        profile_notes: str | None | _UnsetType = UNSET,
         actor: ActorContext = ActorContext.anonymous_operator("admin"),
         reason: str | None = None,
     ) -> Coach:
@@ -248,11 +273,20 @@ class IdentityRepository:
         scorer/admin coach-editing workflow). Unlike team name/coach
         assignment, a coach's own display name/contact details have no
         separate history table -- there is exactly one current coach row,
-        matching `create_coach`'s shape. Only the fields passed are changed;
-        omitted (``None``) fields keep their current value. The audit event
-        never carries email/phone/profile_notes (see `test_identity.py`'s
-        existing "audit events never carry private contact data" convention
-        for season-entry renames -- the same discipline applies here)."""
+        matching `create_coach`'s shape.
+
+        Each keyword defaults to the `UNSET` sentinel, not ``None``: an
+        *omitted* field keeps its current value, while an explicit ``None``
+        clears it (e.g. removing a coach's email so it no longer resolves
+        through `get_coach_by_email` for a future login). Passing a plain
+        ``None`` default here would make "leave email alone" and "clear
+        email" indistinguishable -- exactly the ambiguity this sentinel
+        exists to avoid.
+
+        The audit event never carries email/phone/profile_notes (see
+        `test_identity.py`'s existing "audit events never carry private
+        contact data" convention for season-entry renames -- the same
+        discipline applies here)."""
         now = _now()
         with transaction(self.database) as conn:
             row = conn.execute(
@@ -260,16 +294,19 @@ class IdentityRepository:
             ).fetchone()
             if not row:
                 raise KeyError(coach_id)
-            new_display_name = display_name if display_name is not None else row["display_name"]
+            new_display_name: str | None = row["display_name"] if isinstance(display_name, _UnsetType) else display_name
             if not new_display_name or not new_display_name.strip():
                 raise ValueError("coach display name must not be empty")
-            new_email = email if email is not None else row["email"]
-            new_phone = phone if phone is not None else row["phone"]
-            new_notes = profile_notes if profile_notes is not None else row["profile_notes"]
-            conn.execute(
-                "UPDATE coach SET display_name=?, email=?, phone=?, profile_notes=?, updated_at=? WHERE coach_id=?",
-                (new_display_name, new_email, new_phone, new_notes, now, coach_id),
-            )
+            new_email: str | None = row["email"] if isinstance(email, _UnsetType) else email
+            new_phone: str | None = row["phone"] if isinstance(phone, _UnsetType) else phone
+            new_notes: str | None = row["profile_notes"] if isinstance(profile_notes, _UnsetType) else profile_notes
+            try:
+                conn.execute(
+                    "UPDATE coach SET display_name=?, email=?, phone=?, profile_notes=?, updated_at=? WHERE coach_id=?",
+                    (new_display_name, new_email, new_phone, new_notes, now, coach_id),
+                )
+            except IntegrityError as exc:
+                raise CoachEmailConflictError(f"another coach already uses the email {new_email!r}") from exc
             append_event(
                 conn,
                 actor=actor,

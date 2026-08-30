@@ -123,15 +123,24 @@ def create_coach(payload: CreateCoachRequest, request: Request):
 def update_coach(
     coach_id: str, payload: UpdateCoachRequest, request: Request, principal: Principal = Depends(require_admin)
 ):
+    # Forward only the fields the caller actually sent -- an omitted field
+    # must leave that value unchanged, while an explicit `null` in the
+    # request body must clear it. `payload.model_fields_set` is how these
+    # are told apart; passing every field unconditionally (including
+    # unset ones, which pydantic defaults to `None`) would make every
+    # omitted field look like an explicit clear. See
+    # `app.season_centre.update_coach`'s docstring and `app.identity.UNSET`.
+    fields = {
+        field: getattr(payload, field)
+        for field in ("display_name", "email", "phone", "profile_notes")
+        if field in payload.model_fields_set
+    }
     return update_coach_service(
         request.app.state.identities,
         coach_id,
-        display_name=payload.display_name,
-        email=payload.email,
-        phone=payload.phone,
-        profile_notes=payload.profile_notes,
         actor=_actor(principal),
         reason=payload.reason,
+        **fields,
     )
 
 

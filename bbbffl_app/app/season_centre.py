@@ -34,6 +34,7 @@ from uuid import uuid4
 from sqlalchemy.exc import IntegrityError
 
 from app.audit import ActorContext
+from app.identity import UNSET, CoachEmailConflictError
 
 
 class SeasonCentreError(ValueError):
@@ -77,9 +78,12 @@ def list_coaches_overview(identities) -> list[dict]:
 
 def create_coach(identities, display_name: str, *, email=None, phone=None, profile_notes=None) -> dict:
     display_name = _require_text(display_name, "coach display name")
-    coach = identities.create_coach(
-        display_name, email=email or None, phone=phone or None, profile_notes=profile_notes or None
-    )
+    try:
+        coach = identities.create_coach(
+            display_name, email=email or None, phone=phone or None, profile_notes=profile_notes or None
+        )
+    except CoachEmailConflictError as exc:
+        raise SeasonCentreError(str(exc)) from exc
     return dataclasses.asdict(coach)
 
 
@@ -87,24 +91,31 @@ def update_coach(
     identities,
     coach_id: str,
     *,
-    display_name: str | None = None,
-    email: str | None = None,
-    phone: str | None = None,
-    profile_notes: str | None = None,
+    display_name: str | None | object = UNSET,
+    email: str | None | object = UNSET,
+    phone: str | None | object = UNSET,
+    profile_notes: str | None | object = UNSET,
     actor: ActorContext,
     reason: str | None = None,
 ) -> dict:
-    if display_name is not None:
+    """`display_name`/`email`/`phone`/`profile_notes` each default to
+    `app.identity.UNSET`, not ``None`` -- a caller that omits a keyword
+    leaves that field unchanged, while passing ``email=None`` explicitly
+    clears it. See `IdentityRepository.update_coach`'s docstring."""
+    if display_name is not UNSET:
         display_name = _require_text(display_name, "coach display name")
-    coach = identities.update_coach(
-        coach_id,
-        display_name=display_name,
-        email=email,
-        phone=phone,
-        profile_notes=profile_notes,
-        actor=actor,
-        reason=reason,
-    )
+    try:
+        coach = identities.update_coach(
+            coach_id,
+            display_name=display_name,
+            email=email,
+            phone=phone,
+            profile_notes=profile_notes,
+            actor=actor,
+            reason=reason,
+        )
+    except CoachEmailConflictError as exc:
+        raise SeasonCentreError(str(exc)) from exc
     return dataclasses.asdict(coach)
 
 

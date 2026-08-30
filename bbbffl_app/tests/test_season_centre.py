@@ -223,6 +223,44 @@ def test_update_coach_changes_display_name_without_touching_season_entry_identit
     assert reloaded.email == "keep@example.test"
 
 
+def test_update_coach_explicit_none_clears_email_but_omitting_it_leaves_it_alone(repos):
+    """Regression test for a Codex review finding: `update_coach`'s
+    keywords must distinguish "not supplied" (keep) from an explicit
+    ``None`` (clear) -- see `app.identity.UNSET`."""
+    coach = create_coach(repos["identities"], "Coach", email="old@example.test", phone="0400000000")
+
+    # Omitting email/phone entirely leaves both untouched.
+    update_coach(repos["identities"], coach["coach_id"], display_name="Coach Renamed", actor=ACTOR)
+    reloaded = repos["identities"].get_coach(coach["coach_id"])
+    assert reloaded.display_name == "Coach Renamed"
+    assert reloaded.email == "old@example.test"
+    assert reloaded.phone == "0400000000"
+
+    # An explicit None clears the field, and it stops resolving logins.
+    update_coach(repos["identities"], coach["coach_id"], email=None, actor=ACTOR)
+    reloaded = repos["identities"].get_coach(coach["coach_id"])
+    assert reloaded.email is None
+    assert reloaded.phone == "0400000000"
+    assert repos["identities"].get_coach_by_email("old@example.test") is None
+
+
+def test_create_coach_rejects_duplicate_email_with_a_domain_error_not_a_raw_integrity_error(repos):
+    create_coach(repos["identities"], "First Coach", email="shared@example.test")
+    with pytest.raises(SeasonCentreError) as excinfo:
+        create_coach(repos["identities"], "Second Coach", email="Shared@Example.Test")
+    assert not isinstance(excinfo.value, IntegrityError)
+
+
+def test_update_coach_rejects_email_already_used_by_another_coach(repos):
+    create_coach(repos["identities"], "First Coach", email="taken@example.test")
+    other = create_coach(repos["identities"], "Second Coach", email="free@example.test")
+    with pytest.raises(SeasonCentreError):
+        update_coach(repos["identities"], other["coach_id"], email="taken@example.test", actor=ACTOR)
+    # Rejected update must not have partially applied.
+    reloaded = repos["identities"].get_coach(other["coach_id"])
+    assert reloaded.email == "free@example.test"
+
+
 def test_list_seasons_and_list_coaches_overviews(repos):
     create_season(repos["seasons"], 2026, "2026 Replay")
     create_season(repos["seasons"], 2027, "2027")

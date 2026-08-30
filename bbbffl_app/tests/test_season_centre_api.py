@@ -163,3 +163,47 @@ def test_2026_replay_and_2027_season_entries_stay_separated_over_http(season_cen
     live_centre = client.get(f"/api/admin/season-centre/{live_id}").json()
     assert [e["team_name"] for e in replay_centre["entries"]] == ["Replay Team"]
     assert [e["team_name"] for e in live_centre["entries"]] == ["Live Team"]
+
+
+def test_update_coach_over_http_distinguishes_omitted_fields_from_explicit_null(season_centre_client):
+    """Regression test for a Codex review finding: the browser form sends
+    an explicit `null` to clear email/phone, and omits fields it does not
+    edit -- the API must honour that distinction rather than treating a
+    JSON-default `None` the same as an omitted field."""
+    client = season_centre_client
+    coach = client.post(
+        "/api/admin/season-centre/coaches",
+        json={"display_name": "Coach", "email": "old@example.test", "phone": "0400000000"},
+    ).json()
+
+    # Body omits "email" and "phone" entirely -- both must be left alone.
+    renamed = client.post(f"/api/admin/season-centre/coaches/{coach['coach_id']}", json={"display_name": "Renamed"})
+    assert renamed.status_code == 200
+    body = renamed.json()
+    assert body["display_name"] == "Renamed"
+    assert body["email"] == "old@example.test"
+    assert body["phone"] == "0400000000"
+
+    # Body sends an explicit null for "email" -- it must be cleared.
+    cleared = client.post(f"/api/admin/season-centre/coaches/{coach['coach_id']}", json={"email": None})
+    assert cleared.status_code == 200
+    body = cleared.json()
+    assert body["email"] is None
+    assert body["phone"] == "0400000000"
+    assert body["display_name"] == "Renamed"
+
+
+def test_create_and_update_coach_reject_duplicate_email_with_400_not_500(season_centre_client):
+    client = season_centre_client
+    client.post("/api/admin/season-centre/coaches", json={"display_name": "First", "email": "dup@example.test"})
+    other = client.post("/api/admin/season-centre/coaches", json={"display_name": "Second"}).json()
+
+    duplicate_create = client.post(
+        "/api/admin/season-centre/coaches", json={"display_name": "Third", "email": "Dup@Example.Test"}
+    )
+    assert duplicate_create.status_code == 400
+
+    duplicate_update = client.post(
+        f"/api/admin/season-centre/coaches/{other['coach_id']}", json={"email": "dup@example.test"}
+    )
+    assert duplicate_update.status_code == 400

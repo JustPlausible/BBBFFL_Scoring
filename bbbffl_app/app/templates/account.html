@@ -13,7 +13,15 @@
   .field { margin-bottom: 10px; font-size: 0.9rem; }
   .field span { color: #9aa3b2; }
   .rounds { display: grid; gap: 8px; margin: 18px 0; }
-  .rounds a { color: #d8e9ff; background: #202838; border-radius: 7px; padding: 10px 12px; text-decoration: none; min-height: 44px; }
+  .rounds a { display: flex; flex-direction: column; gap: 3px; color: #d8e9ff; background: #202838; border-radius: 7px; padding: 10px 12px; text-decoration: none; min-height: 44px; border-left: 4px solid #566078; }
+  .rounds a:hover { background: #263044; }
+  .round-label { font-weight: 700; }
+  .round-status { font-size: 0.85rem; font-weight: 600; }
+  .round-meta { font-size: 0.78rem; color: #9aa3b2; }
+  .rounds a.state-submitted { border-left-color: #3fb950; }
+  .rounds a.state-submitted_with_changes { border-left-color: #d29922; }
+  .rounds a.state-draft_saved { border-left-color: #58a6ff; }
+  .rounds a.state-not_submitted { border-left-color: #566078; }
   form { margin-top: 18px; }
   button { font-size: 0.9rem; padding: 8px 14px; border-radius: 6px; border: 1px solid #a53a3a; background: #a53a3a; color: white; cursor: pointer; }
   button:hover { background: #8f3232; }
@@ -25,7 +33,11 @@
     <div class="muted">This confirms which coach identity your browser session is authenticated as.</div>
     <div class="field"><span>Coach:</span> {{ coach.display_name }}</div>
     <div class="field"><span>Coach ID:</span> {{ coach.coach_id }}</div>
-    {% if lineup_rounds %}<h2>Weekly selections</h2><div class="rounds">{% for round in lineup_rounds %}<a href="/coach/seasons/{{ round.season_id }}/rounds/{{ round.round_id }}/lineup">{{ round.round_label }} →</a>{% endfor %}</div>{% endif %}
+    {% if lineup_rounds %}<h2>Weekly selections</h2><div class="rounds">{% for round in lineup_rounds %}<a class="state-{{ round.state }}" href="/coach/seasons/{{ round.season_id }}/rounds/{{ round.round_id }}/lineup">
+      <span class="round-label">{{ round.round_label }} →</span>
+      <span class="round-status">{% if round.state == 'submitted_with_changes' %}Submitted + private changes{% elif round.state == 'submitted' %}Submitted{% elif round.state == 'draft_saved' %}Draft saved{% else %}Not submitted{% endif %}</span>
+      {% if round.submission_version %}<span class="round-meta">Submitted version {{ round.submission_version }}{% if round.submitted_at %} · {{ round.submitted_at }}{% endif %}</span>{% endif %}
+    </a>{% endfor %}</div>{% endif %}
     <form method="post" action="/logout">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit">Sign out</button>

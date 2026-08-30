@@ -6,6 +6,49 @@ ten-lineup/five-matchup vertical without pre-empting #67's specialist early
 lockout, bye and non-submission cases. The harness is round-data driven; a
 future manifest may name a different round.
 
+## Three distinct checkpoints -- do not conflate them
+
+This repository now has three separate things that all involve "Round 1"
+and "replay evidence"; each proves something different, and none of them
+substitutes for another:
+
+1. **Hermetic automated replay tests** (this document, `tests/
+   test_replay.py`, `tests/test_replay_round.py`, `tests/
+   test_replay_checkpoint.py`) -- deterministic, network-free automated
+   test coverage. Every run builds its own isolated in-memory/temp-file
+   database, uses fixed `ReplayClock` instants, and asserts the resulting
+   report is bit-for-bit reproducible. Proves the production services
+   compose correctly against controlled evidence; proves nothing about the
+   browser routes.
+2. **Persistent interactive Round 1 rehearsal** (issue #85,
+   `bbbffl_app/scripts/bootstrap_round1_2026.py`, see
+   `bbbffl_app/README.md`'s "Round 1 rehearsal quick start") -- the
+   browser/operator integration checkpoint: seeds a normal persistent
+   database with the minimum ordinary Round 1 state, then a human operator
+   drives the *real* coach login/lineup, scorer Round Centre, sign-off and
+   public Round Centre routes by hand, at real wall-clock time. Its replay
+   evidence is deliberately **not** this document's `evidence.json` (see
+   that script's module docstring, "Evidence") -- an already-`CONCLUDED`
+   match would lock every selection the instant a wall-clock-driven
+   browser session evaluates it, which would make the coach-submission step
+   impossible to demonstrate. Proves the browser wiring works end-to-end
+   against real persisted state; proves nothing about historical accuracy,
+   since every fact in its evidence is synthetic and explicitly labelled as
+   such.
+3. **Historical sequential Rounds 1-9 replay** (issue #67's later
+   milestone, procedure documented at the end of
+   [`replay-checkpoint-2026.md`](replay-checkpoint-2026.md)) -- the actual
+   season-validation exercise: nine real BBBFFL rounds, in order, each
+   inspected and finalised before the next begins, comparing replayed
+   results against whatever historical official results exist.
+
+Completing the Round 1 browser rehearsal (#2) does **not** prove the full
+2026 historical replay (#3) -- it proves the mechanism the historical
+replay will drive is reachable and wired correctly. Passing the hermetic
+tests (#1) is itself a prerequisite for attempting either #2 or #3, but
+proves neither by itself, since neither exercises the real browser routes
+or genuine historical evidence.
+
 ## Configuration and entry points
 
 Set `BBBFFL_AFL_MODE=replay` and

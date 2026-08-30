@@ -82,6 +82,12 @@ class SignoffRequest(BaseModel):
     scorer_name: str | None = None
 
 
+class TransitionRequest(BaseModel):
+    target: str
+    reason: str | None = None
+    scorer_name: str | None = None
+
+
 class CorrectionRequest(BaseModel):
     reason: str
     scorer_name: str | None = None
@@ -117,6 +123,34 @@ def list_round_reviews(request: Request):
 
 @router.get("/{round_id}", dependencies=[Depends(require_scorer)])
 def get_round_review(round_id: str, request: Request):
+    return _round_review_view(request, round_id)
+
+
+@router.post("/{round_id}/calculate")
+def calculate_round_review(round_id: str, request: Request, principal: Principal = Depends(require_scorer)):
+    """Run `MatchupCalculationService.calculate_round` on demand and return
+    the refreshed review -- the browser Round Centre's only way to see
+    calculated scores/DNP evidence before deciding whether to sign off.
+    `/signoff` also recalculates immediately before publishing (see below),
+    but until this existed there was no way to trigger a first calculation
+    at all through the API/UI, so a scorer could never review a round's
+    scores ahead of that one, all-or-nothing sign-off attempt."""
+    request.app.state.calculations.calculate_round(round_id)
+    return _round_review_view(request, round_id)
+
+
+@router.post("/{round_id}/transition")
+def transition_round_review(
+    round_id: str, payload: TransitionRequest, request: Request, principal: Principal = Depends(require_scorer)
+):
+    """Advance the round's ordinary lifecycle state (`app.competition_
+    lifecycle.LEGAL_TRANSITIONS`: upcoming -> open -> live -> review).
+    `attempt_signoff` already requires `state == "review"`, but nothing
+    else exposed a way to reach it -- this is the scorer-facing wiring for
+    that existing, otherwise-unreachable transition."""
+    request.app.state.lifecycle.transition(
+        round_id, payload.target, actor=_actor(principal, payload.scorer_name), reason=payload.reason
+    )
     return _round_review_view(request, round_id)
 
 

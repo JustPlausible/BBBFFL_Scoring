@@ -20,7 +20,12 @@ contributes no sporting rule of its own; it only shapes each scenario's
 already-computed results into one deterministic, comparable report. See
 `docs/replay-harness.md` for the shared replay evidence/report conventions
 this checkpoint reuses (evidence schema, provenance classification,
-`ReplayClock`, `write_replay_report`'s sibling `write_checkpoint_suite_report`).
+`ReplayClock`, `write_replay_report`'s sibling `write_checkpoint_suite_report`),
+and that document's "Three distinct checkpoints" section for how this
+hermetic checkpoint suite, issue #85's persistent interactive Round 1
+rehearsal, and the historical Rounds 1-9 replay this document's own
+"Operator procedure" section below describes relate to (and do not
+substitute for) one another.
 
 ## Running the checkpoint suite
 

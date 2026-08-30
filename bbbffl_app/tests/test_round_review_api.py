@@ -625,10 +625,12 @@ def test_scorer_submitted_lineups_are_independent_of_first_calculation(review_cl
     # A genuinely absent effective submission remains distinct from an
     # uncalculated, submitted lineup.
     entry_id = lifecycle.list_matchups(round_.bbbffl_round_id)[0].home_season_entry_id
-    client.app.state.database.execute(
-        "UPDATE weekly_lineup SET effective_submission_version=NULL WHERE bbbffl_round_id=? AND season_entry_id=?",
-        (round_.bbbffl_round_id, entry_id),
-    )
+    with transaction(client.app.state.database) as connection:
+        connection.execute(
+            "UPDATE weekly_lineup SET effective_submission_version=NULL "
+            "WHERE bbbffl_round_id=? AND season_entry_id=?",
+            (round_.bbbffl_round_id, entry_id),
+        )
     missing = client.get(f"/api/admin/round-review/{round_.bbbffl_round_id}").json()
     assert missing["matchups"][0]["home"]["submitted_lineup"] is None
 

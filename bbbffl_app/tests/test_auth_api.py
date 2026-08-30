@@ -332,7 +332,7 @@ def test_one_coachs_session_cookie_never_resolves_to_another_coach(client):
 
 
 def test_public_page_shows_sign_in_link_when_unauthenticated(client):
-    response = client.get("/")
+    response = client.get("/legacy/grand-final")
     assert "Coach sign in" in response.text
 
 
@@ -349,7 +349,7 @@ def test_public_page_shows_signed_in_state_after_login(client):
     )
     session_cookie = login_response.cookies.get("bbbffl_session")
 
-    response = client.get("/", cookies={"bbbffl_session": session_cookie})
+    response = client.get("/legacy/grand-final", cookies={"bbbffl_session": session_cookie})
     assert "Signed in as Test Coach" in response.text
 
 

@@ -195,7 +195,7 @@ async def lifespan(app: FastAPI):
             )
 
     logger.info(
-        "BBBFFL Grand Final prototype starting up (environment=%s, afl_mode=%s, "
+        "BBBFFL Scoring application starting up (environment=%s, afl_mode=%s, "
         "afl_api=%s, afl_api_contract_version=%s, teams=%s)",
         settings.environment,
         settings.afl_mode,
@@ -210,7 +210,7 @@ async def lifespan(app: FastAPI):
         database.close()
 
 
-app = FastAPI(title="BBBFFL Grand Final Live Scoring", lifespan=lifespan)
+app = FastAPI(title="BBBFFL Scoring", lifespan=lifespan)
 
 app.include_router(health.router)
 app.include_router(public.router)

@@ -328,7 +328,7 @@ def test_admin_superscore_page_links_back_to_grand_final_admin(client_with_super
 
 def test_public_pages_never_link_to_admin(client_with_superscore):
     """Public -> Admin navigation must never be added (task brief #6/#7)."""
-    for path in ("/", "/superscore"):
+    for path in ("/", "/legacy/grand-final", "/superscore"):
         r = client_with_superscore.get(path)
         assert 'href="/admin"' not in r.text
         assert 'href="/admin/superscore"' not in r.text

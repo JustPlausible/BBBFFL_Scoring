@@ -68,6 +68,23 @@ def test_health(client):
     assert client.get("/health").json() == {"status": "ok"}
 
 
+def test_root_without_regular_season_is_a_useful_empty_state(client):
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "No regular season is available yet" in response.text
+    assert 'href="/legacy/grand-final"' in response.text
+    assert "/api/public/state" not in response.text
+    assert "Loading…" not in response.text
+
+
+def test_legacy_grand_final_page_remains_available(client):
+    response = client.get("/legacy/grand-final")
+    assert response.status_code == 200
+    assert "Legacy prototype surface" in response.text
+    assert "/api/public/state" in response.text
+    assert 'href="/"' in response.text
+
+
 def test_public_state_requires_no_token(client):
     r = client.get("/api/public/state")
     assert r.status_code == 200

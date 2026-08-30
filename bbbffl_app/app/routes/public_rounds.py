@@ -11,6 +11,24 @@ router = APIRouter()
 templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
 
 
+@router.get("/", response_class=HTMLResponse)
+def regular_season_home(request: Request):
+    """Enter the latest persisted ordinary season without requiring a UUID.
+
+    ``list_ordinary_rounds`` is ordered newest AFL season/round first. Linking
+    to the season URL deliberately delegates round choice to
+    :func:`season_overview`, keeping one owner for that policy.
+    """
+    rounds = request.app.state.lifecycle.list_ordinary_rounds()
+    if rounds:
+        return RedirectResponse(f"/seasons/{rounds[0].season_id}", status_code=302)
+    return templates.TemplateResponse(
+        request,
+        "regular_season_empty.html",
+        {"superscore_enabled": request.app.state.superscore_config is not None},
+    )
+
+
 def _round(request, season_id, round_id):
     state = request.app.state
     try:

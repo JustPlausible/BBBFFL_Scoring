@@ -28,6 +28,7 @@ from pydantic import BaseModel
 from app.audit import ActorContext
 from app.authorization import Principal
 from app.config import BASE_DIR
+from app.public_rounds import authoritative_player_names, authoritative_submissions
 from app.round_review import attempt_correction, attempt_signoff, build_round_review
 from app.routes.admin import require_admin, require_scorer
 
@@ -105,7 +106,31 @@ def _round_review_view(request: Request, round_id: str, *, evidence_fresh: bool 
         "enabled": state.settings.afl_mode == "replay",
         "classification": "replay evidence" if state.settings.afl_mode == "replay" else "live evidence",
     }
+    # A submitted team exists independently of its calculated snapshot.  Use
+    # the exact effective immutable submission reader used by the public Round
+    # Centre so the scorer never has to infer a lineup from calculation data.
+    submissions = authoritative_submissions(state.database, round_)
+    player_ids = [slot["season_player_id"] for slots in submissions.values() for slot in slots]
+    player_names = authoritative_player_names(state.database, player_ids)
     for matchup in result["matchups"]:
+        for side_name in ("home", "away"):
+            side = matchup[side_name]
+            submitted = submissions.get(side["season_entry_id"])
+            side["submitted_lineup"] = (
+                {
+                    "submission_version": submitted[0]["version"],
+                    "players": [
+                        {
+                            "position": slot["position"],
+                            "season_player_id": slot["season_player_id"],
+                            "player_name": player_names.get(slot["season_player_id"]),
+                        }
+                        for slot in submitted
+                    ],
+                }
+                if submitted
+                else None
+            )
         history = state.lifecycle.result_history(matchup["matchup_id"])
         matchup["official_history"] = [dataclasses.asdict(item) for item in history]
         official = state.lifecycle.effective_result(matchup["matchup_id"])

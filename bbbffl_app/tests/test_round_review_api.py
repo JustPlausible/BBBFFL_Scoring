@@ -605,3 +605,50 @@ def test_round_centre_exposes_actual_mixed_slot_source_not_only_round_mapping(re
     page = client.get(f"/scorer/round-centre/{round_id}")
     assert "each player card shows its actual evidence source" in page.text
     assert "source_afl_round_id" in page.text
+
+
+def test_scorer_submitted_lineups_are_independent_of_first_calculation(review_client):
+    client = review_client
+    _, lifecycle, round_, _, _, _ = full_round(client.app.state.database, year=8788)
+
+    response = client.get(f"/api/admin/round-review/{round_.bbbffl_round_id}")
+    assert response.status_code == 200
+    body = response.json()
+    assert all(matchup["calculation_revision"] is None for matchup in body["matchups"])
+    for matchup in body["matchups"]:
+        for side in (matchup["home"], matchup["away"]):
+            assert side["lineup_id"] is None  # calculation snapshot remains absent
+            assert side["submitted_lineup"]["submission_version"] == 1
+            assert len(side["submitted_lineup"]["players"]) == 9
+            assert all(player["player_name"] for player in side["submitted_lineup"]["players"])
+
+    # A genuinely absent effective submission remains distinct from an
+    # uncalculated, submitted lineup.
+    entry_id = lifecycle.list_matchups(round_.bbbffl_round_id)[0].home_season_entry_id
+    with transaction(client.app.state.database) as connection:
+        connection.execute(
+            "UPDATE weekly_lineup SET effective_submission_version=NULL WHERE bbbffl_round_id=? AND season_entry_id=?",
+            (round_.bbbffl_round_id, entry_id),
+        )
+    missing = client.get(f"/api/admin/round-review/{round_.bbbffl_round_id}").json()
+    assert missing["matchups"][0]["home"]["submitted_lineup"] is None
+
+
+def test_final_scorer_round_centre_has_terminal_published_presentation(review_client):
+    client = review_client
+    round_, _, _, _ = _seed(client, 8787)
+    signed = client.post(
+        f"/api/admin/round-review/{round_.bbbffl_round_id}/signoff",
+        json={"reason": "final presentation regression"},
+    )
+    assert signed.status_code == 200
+    review = client.get(f"/api/admin/round-review/{round_.bbbffl_round_id}").json()
+    assert review["state"] == "final"
+    assert all(matchup["official_result"] for matchup in review["matchups"])
+
+    page = client.get(f"/scorer/round-centre/{round_.bbbffl_round_id}")
+    assert page.status_code == 200
+    assert "Final · Published" in page.text
+    assert "Published successfully" in page.text
+    assert "no further sign-off is required" in page.text
+    assert "d.ready_for_signoff&&!final" in page.text

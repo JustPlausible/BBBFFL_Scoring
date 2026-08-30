@@ -59,6 +59,7 @@ from app.routes import lineups as lineup_routes
 from app.routes import preseason as preseason_routes
 from app.routes import public_rounds as public_round_routes
 from app.routes import round_review as round_review_routes
+from app.routes import season_centre as season_centre_routes
 from app.routes import superscore as superscore_routes
 from app.scorer_decisions import (
     CompetitionFinalizedError,
@@ -68,6 +69,7 @@ from app.scorer_decisions import (
     StaleAflEvidenceError,
     UnknownTeamError,
 )
+from app.season import SeasonRepository
 from app.service import PlayerIdentityCache
 from app.superscore import competition_key as superscore_competition_key
 from app.superscore import get_superscore_config
@@ -131,7 +133,10 @@ async def lifespan(app: FastAPI):
     app.state.audit_events = AuditEventRepository(database)
     # Roadmap package 14's scorer-operated draft workflow (app/routes/draft.py)
     # is an operator surface over these authoritative repositories -- see
-    # docs/draft-ledger.md and docs/scorer-draft-workflow.md.
+    # docs/draft-ledger.md and docs/scorer-draft-workflow.md. Issue #100's
+    # Season Centre (app/routes/season_centre.py) is an operator surface over
+    # both `seasons` and `identities` -- see docs/season-centre.md.
+    app.state.seasons = SeasonRepository(database)
     app.state.identities = IdentityRepository(database)
     app.state.lineups = WeeklyLineupRepository(database)
     # Roadmap package 19's coach authentication/session boundary (issue
@@ -227,6 +232,8 @@ app.include_router(draft_routes.page_router)
 app.include_router(preseason_routes.router)
 app.include_router(round_review_routes.router)
 app.include_router(round_review_routes.page_router)
+app.include_router(season_centre_routes.router)
+app.include_router(season_centre_routes.page_router)
 
 
 @app.exception_handler(AflApiError)

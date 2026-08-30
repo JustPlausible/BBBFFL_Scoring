@@ -136,6 +136,15 @@ class SeasonRepository:
         row = self.database.execute("SELECT * FROM bbbffl_season WHERE year = ?", (year,)).fetchone()
         return self._season_from_row(row) if row else None
 
+    def list_seasons(self) -> list[Season]:
+        """Every season, most recent year first -- lets an operator surface
+        (the Season Centre, issue #100) pick a season without a caller
+        needing to already know its UUID, and keeps distinct seasons (e.g.
+        the 2026 replay and 2027) explicitly separated rather than any one
+        of them becoming an implicit default."""
+        rows = self.database.execute("SELECT * FROM bbbffl_season ORDER BY year DESC").fetchall()
+        return [self._season_from_row(row) for row in rows]
+
     def transition_lifecycle(
         self,
         season_id: str,

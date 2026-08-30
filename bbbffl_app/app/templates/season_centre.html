@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BBBFFL Season Centre — Scorer</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 12px; background: #0f1115; color: #e7e9ee; }
+  h1 { font-size: 1.2rem; }
+  h2 { font-size: 1rem; margin-top: 20px; }
+  a { color: #79c0ff; }
+  .token-bar { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+  input, select, button, textarea { font-size: 0.9rem; padding: 5px 8px; border-radius: 6px; border: 1px solid #333a48; background: #171a21; color: inherit; }
+  button { cursor: pointer; }
+  button.primary { background: #3a6ea5; border-color: #3a6ea5; color: white; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 8px; font-size: 0.85rem; }
+  th, td { padding: 6px; border-bottom: 1px solid #2a2f3a; text-align: left; vertical-align: middle; }
+  .block { background: #171a21; border: 1px solid #2a2f3a; border-radius: 10px; padding: 10px 14px; margin-bottom: 16px; }
+  .pill { font-size: 0.7rem; padding: 1px 6px; border-radius: 6px; background: #2a2f3a; display: inline-block; }
+  .pill.ok { background: #2f6e3a; }
+  .pill.warn { background: #a5823a; }
+  .pill.off { background: #4a3a6e; }
+  #message:empty { display: none; }
+  #message { margin-bottom: 10px; font-size: 0.9rem; padding: 8px 10px; border-radius: 8px; }
+  #message.error { background: #4a1f1f; border: 1px solid #a53a3a; }
+  #message.success { background: #1f3a24; border: 1px solid #2f6e3a; }
+  .page-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  .readiness-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+  .readiness-item { background: #0d1117; border-radius: 8px; padding: 8px 10px; }
+  .readiness-item .value { font-size: 1.3rem; font-weight: 700; }
+  .readiness-item .label { color: #9aa3b2; font-size: 0.78rem; }
+  .links-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .form-row { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; align-items: center; }
+  .form-row input { flex: 1; min-width: 140px; }
+  .muted { color: #9aa3b2; font-size: 0.8rem; }
+  .season-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #2a2f3a; }
+  .inline-edit { display: none; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
+  .inline-edit.open { display: flex; }
+</style>
+</head>
+<body>
+  <div class="page-head">
+    <h1>BBBFFL Season Centre — Scorer</h1>
+    <a href="/admin/season-centre">All seasons</a>
+  </div>
+  <div class="token-bar">
+    <input type="password" id="token" placeholder="Admin token (if required)">
+    <button id="save-token">Save token</button>
+  </div>
+  <div id="message"></div>
+
+  <div id="index-view"></div>
+  <div id="season-view"></div>
+
+<script>
+const SEASON_ID = {{ season_id | tojson }};
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function getToken() { return localStorage.getItem('bbbffl_admin_token') || ''; }
+document.getElementById('token').value = getToken();
+document.getElementById('save-token').onclick = () => {
+  localStorage.setItem('bbbffl_admin_token', document.getElementById('token').value);
+  boot();
+};
+
+async function api(path, body, method) {
+  const response = await fetch(path, {
+    method: method || (body ? 'POST' : 'GET'),
+    headers: { 'Content-Type': 'application/json', 'X-Admin-Token': getToken() },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await response.json().catch(() => ({ detail: response.statusText }));
+  if (!response.ok) throw new Error(data.detail || response.statusText);
+  return data;
+}
+
+function say(text, kind) {
+  const el = document.getElementById('message');
+  el.textContent = text;
+  el.className = kind || '';
+}
+
+async function withFeedback(action, successMessage) {
+  try {
+    await action();
+    say(successMessage, 'success');
+  } catch (error) {
+    say(error.message, 'error');
+  }
+}
+
+// -- Season index (no SEASON_ID) --------------------------------------
+
+async function renderIndex() {
+  const seasons = await api('/api/admin/season-centre/seasons');
+  const rows = seasons.map(s => `
+    <div class="season-row">
+      <div><strong><a href="/admin/season-centre/${esc(s.season_id)}">${esc(s.year)} — ${esc(s.label)}</a></strong>
+        <div class="muted">Lifecycle: ${esc(s.lifecycle_state)}</div></div>
+    </div>`).join('') || '<p class="muted">No seasons yet. Create one below.</p>';
+  document.getElementById('index-view').innerHTML = `
+    <div class="block">
+      <h2>Seasons</h2>
+      ${rows}
+    </div>
+    <div class="block">
+      <h2>Create a season</h2>
+      <p class="muted">Creates only the season record itself (year, label, lifecycle). Coaches, teams and entries are established afterwards in that season's own Season Centre.</p>
+      <div class="form-row">
+        <input type="number" id="new-year" placeholder="Year, e.g. 2026">
+        <input type="text" id="new-label" placeholder="Label, e.g. 2026 Replay">
+        <button class="primary" id="create-season">Create season</button>
+      </div>
+    </div>`;
+  document.getElementById('create-season').onclick = () => withFeedback(async () => {
+    const year = parseInt(document.getElementById('new-year').value, 10);
+    const label = document.getElementById('new-label').value;
+    const created = await api('/api/admin/season-centre/seasons', { year, label });
+    window.location.href = `/admin/season-centre/${created.season_id}`;
+  }, 'Season created.');
+}
+
+// -- One season's Season Centre -----------------------------------------
+
+function readinessHtml(r) {
+  const draft = r.draft
+    ? `${r.draft.is_finalized ? 'Finalized' : r.draft.is_paused ? 'Paused' : 'In progress'} (${r.draft.completed_picks}/${r.draft.total_picks} picks)`
+    : 'Not started';
+  const preseason = r.preseason_window
+    ? (r.preseason_window.is_open ? 'Open' : 'Closed')
+    : 'Not opened';
+  return `
+    <div class="readiness-grid">
+      <div class="readiness-item"><div class="value">${r.entries_established}</div><div class="label">Season entries established</div></div>
+      <div class="readiness-item"><div class="value">${r.distinct_coaches}</div><div class="label">Distinct coaches</div></div>
+      <div class="readiness-item"><div class="value">${r.competition_streams_configured}</div><div class="label">Competition streams configured</div></div>
+      <div class="readiness-item"><div class="value">${r.player_pool_loaded}</div><div class="label">Player pool loaded</div></div>
+      <div class="readiness-item"><div class="value">${draft}</div><div class="label">Draft</div></div>
+      <div class="readiness-item"><div class="value">${preseason}</div><div class="label">Preseason window</div></div>
+      <div class="readiness-item"><div class="value">${r.ordinary_rounds_created}</div><div class="label">Ordinary rounds created</div></div>
+    </div>`;
+}
+
+function linksHtml(links) {
+  const item = (label, href) => href
+    ? `<a class="pill ok" href="${esc(href)}">${esc(label)} →</a>`
+    : `<span class="pill off">${esc(label)}: not yet available</span>`;
+  return `
+    <div class="links-row">
+      ${item('Draft', links.draft)}
+      ${item('Round Centre', links.round_centre)}
+      <span class="pill off">Player pool: not yet available in UI</span>
+      <span class="pill off">Opening squads: not yet available in UI</span>
+      <span class="pill off">Fixture setup: not yet available in UI</span>
+    </div>`;
+}
+
+function entryRow(entry, coaches) {
+  const coachOptions = coaches.map(c => `<option value="${esc(c.coach_id)}" ${c.coach_id === entry.coach_id ? 'selected' : ''}>${esc(c.display_name)}</option>`).join('');
+  return `
+    <tr data-entry="${esc(entry.season_entry_id)}">
+      <td>${esc(entry.team_name)}</td>
+      <td>${esc(entry.coach_display_name)}</td>
+      <td class="muted">${esc(entry.licence_key)}</td>
+      <td><button data-edit-entry="${esc(entry.season_entry_id)}">Edit</button></td>
+    </tr>
+    <tr class="inline-edit-row" data-entry-edit="${esc(entry.season_entry_id)}" style="display:none">
+      <td colspan="4">
+        <div class="form-row">
+          <input type="text" data-rename-input value="${esc(entry.team_name)}" placeholder="Public team name">
+          <button data-rename="${esc(entry.season_entry_id)}">Rename team</button>
+          <select data-coach-input>${coachOptions}</select>
+          <button data-transfer="${esc(entry.season_entry_id)}">Assign coach</button>
+        </div>
+      </td>
+    </tr>`;
+}
+
+async function renderSeason() {
+  const [centre, coaches] = await Promise.all([
+    api(`/api/admin/season-centre/${SEASON_ID}`),
+    api('/api/admin/season-centre/coaches'),
+  ]);
+  const season = centre.season;
+  const competitions = centre.competitions.map(c => `<span class="pill">${esc(c.stream_key)} · ${esc(c.stream_type)}</span>`).join(' ') || '<span class="muted">No competition streams configured yet.</span>';
+  const entryRows = centre.entries.map(e => entryRow(e, coaches)).join('') || '<tr><td colspan="4" class="muted">No season entries yet — add one below.</td></tr>';
+  const coachOptions = coaches.map(c => `<option value="${esc(c.coach_id)}">${esc(c.display_name)}</option>`).join('');
+  const coachRows = coaches.map(c => `
+    <tr data-coach="${esc(c.coach_id)}">
+      <td>${esc(c.display_name)}</td><td>${esc(c.email || '')}</td><td>${esc(c.phone || '')}</td>
+      <td><button data-edit-coach="${esc(c.coach_id)}">Edit</button></td>
+    </tr>
+    <tr class="inline-edit-row" data-coach-edit="${esc(c.coach_id)}" style="display:none">
+      <td colspan="4">
+        <div class="form-row">
+          <input type="text" data-coach-name value="${esc(c.display_name)}" placeholder="Display name">
+          <input type="text" data-coach-email value="${esc(c.email || '')}" placeholder="Email (private)">
+          <input type="text" data-coach-phone value="${esc(c.phone || '')}" placeholder="Phone (private)">
+          <button data-save-coach="${esc(c.coach_id)}">Save</button>
+        </div>
+      </td>
+    </tr>`).join('');
+
+  document.getElementById('season-view').innerHTML = `
+    <div class="block">
+      <div class="page-head"><h2>${esc(season.year)} — ${esc(season.label)}</h2><span class="pill">${esc(season.lifecycle_state)}</span></div>
+      <div class="muted">${competitions}</div>
+    </div>
+    <div class="block">
+      <h2>Readiness</h2>
+      ${readinessHtml(centre.readiness)}
+      ${linksHtml(centre.links)}
+    </div>
+    <div class="block">
+      <h2>Season entries (${centre.entries.length})</h2>
+      <table><thead><tr><th>Public team name</th><th>Coach</th><th>Licence</th><th></th></tr></thead>
+        <tbody id="entries-body">${entryRows}</tbody></table>
+      <h2>Add a season entry</h2>
+      <div class="form-row">
+        <select id="new-entry-coach"><option value="">Select a coach…</option>${coachOptions}</select>
+        <input type="text" id="new-entry-team" placeholder="Public BBBFFL team name">
+        <button class="primary" id="add-entry">Add entry</button>
+      </div>
+    </div>
+    <div class="block">
+      <h2>Coaches</h2>
+      <p class="muted">Private coach identity/contact -- never shown on public-facing pages.</p>
+      <table><thead><tr><th>Display name</th><th>Email</th><th>Phone</th><th></th></tr></thead>
+        <tbody>${coachRows}</tbody></table>
+      <h2>Add a coach</h2>
+      <div class="form-row">
+        <input type="text" id="new-coach-name" placeholder="Coach display name">
+        <input type="text" id="new-coach-email" placeholder="Email (optional, private)">
+        <button class="primary" id="add-coach">Add coach</button>
+      </div>
+    </div>`;
+
+  document.getElementById('add-entry').onclick = () => withFeedback(async () => {
+    const coach_id = document.getElementById('new-entry-coach').value;
+    const team_name = document.getElementById('new-entry-team').value;
+    if (!coach_id) throw new Error('Select a coach first.');
+    await api(`/api/admin/season-centre/${SEASON_ID}/entries`, { coach_id, team_name });
+    await renderSeason();
+  }, 'Season entry created.');
+
+  document.getElementById('add-coach').onclick = () => withFeedback(async () => {
+    const display_name = document.getElementById('new-coach-name').value;
+    const email = document.getElementById('new-coach-email').value || null;
+    await api('/api/admin/season-centre/coaches', { display_name, email });
+    await renderSeason();
+  }, 'Coach created.');
+
+  document.querySelectorAll('[data-edit-entry]').forEach(b => b.onclick = () => {
+    const row = document.querySelector(`[data-entry-edit="${b.dataset.editEntry}"]`);
+    row.style.display = row.style.display === 'none' ? 'table-row' : 'none';
+  });
+  document.querySelectorAll('[data-rename]').forEach(b => b.onclick = () => withFeedback(async () => {
+    const input = b.parentElement.querySelector('[data-rename-input]');
+    await api(`/api/admin/season-centre/entries/${b.dataset.rename}/team-name`, { team_name: input.value });
+    await renderSeason();
+  }, 'Team renamed.'));
+  document.querySelectorAll('[data-transfer]').forEach(b => b.onclick = () => withFeedback(async () => {
+    const select = b.parentElement.querySelector('[data-coach-input]');
+    await api(`/api/admin/season-centre/entries/${b.dataset.transfer}/coach`, { coach_id: select.value });
+    await renderSeason();
+  }, 'Coach assigned.'));
+  document.querySelectorAll('[data-edit-coach]').forEach(b => b.onclick = () => {
+    const row = document.querySelector(`[data-coach-edit="${b.dataset.editCoach}"]`);
+    row.style.display = row.style.display === 'none' ? 'table-row' : 'none';
+  });
+  document.querySelectorAll('[data-save-coach]').forEach(b => b.onclick = () => withFeedback(async () => {
+    const cell = b.parentElement;
+    const display_name = cell.querySelector('[data-coach-name]').value;
+    const email = cell.querySelector('[data-coach-email]').value || null;
+    const phone = cell.querySelector('[data-coach-phone]').value || null;
+    await api(`/api/admin/season-centre/coaches/${b.dataset.saveCoach}`, { display_name, email, phone });
+    await renderSeason();
+  }, 'Coach updated.'));
+}
+
+async function boot() {
+  try {
+    if (SEASON_ID) {
+      document.getElementById('index-view').innerHTML = '';
+      await renderSeason();
+    } else {
+      document.getElementById('season-view').innerHTML = '';
+      await renderIndex();
+    }
+  } catch (error) {
+    say(error.message, 'error');
+  }
+}
+boot();
+</script>
+</body>
+</html>

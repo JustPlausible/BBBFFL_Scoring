@@ -135,6 +135,21 @@ cycle anywhere) rather than leaving it as prose that only this file states.
   meant to be the one application-service layer routes call for this
   domain. See `docs/scorer-round-review.md` and `tests/test_
   architecture.py`'s `ROUND_REVIEW` group.
+- **Season Centre** (issue #100) — `app/season_centre.py`: the scorer/admin
+  operator surface over `app/season.py` (season identity/lifecycle) and
+  `app/identity.py` (private coach records, public season-entry team
+  identity) -- read-model assembly (`build_season_centre`) plus thin
+  create/edit command wrappers (`create_season`, `create_coach`/
+  `update_coach`, `create_entry`, `rename_team`, `transfer_entry`) that
+  translate the underlying repositories' `IntegrityError`s into a plain
+  `SeasonCentreError`. It adds no new identity storage of its own -- every
+  fact returned is read straight from `app.season`/`app.identity`, plus
+  read-only readiness signals from the draft, preseason, player-pool and
+  persisted ordinary-round-lifecycle repositories. Same shape as
+  `app/round_review.py`: imported directly by its route module
+  (`app/routes/season_centre.py`) rather than only reached via
+  `request.app.state`. See [`season-centre.md`](season-centre.md) and
+  `tests/test_architecture.py`'s `SEASON_CENTRE` group.
 
 ## What this PR adds: `app/scorer_decisions.py`
 

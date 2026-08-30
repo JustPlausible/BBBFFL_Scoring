@@ -1,0 +1,165 @@
+"""Season Centre driven through the real HTTP admin API and page routes
+(issue #100) -- proves the workflow (reach the page, create a season,
+create coaches/entries, edit team names/coach assignments, see readiness)
+works end-to-end through `app.main.app`, not merely that the underlying
+repositories do. Mirrors `tests/test_preseason_api.py`'s isolated-database
+fixture pattern.
+"""
+
+import tempfile
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+
+@pytest.fixture
+def season_centre_client(monkeypatch):
+    db_path = Path(tempfile.mkstemp(suffix=".db")[1])
+    monkeypatch.setenv("BBBFFL_DATABASE_URL", f"sqlite:///{db_path}")
+    monkeypatch.setenv("BBBFFL_ENVIRONMENT", "test")
+    monkeypatch.delenv("BBBFFL_ADMIN_TOKEN", raising=False)
+
+    from app.main import app
+
+    with TestClient(app) as client:
+        yield client
+    db_path.unlink(missing_ok=True)
+
+
+def test_season_centre_reachable_from_a_clean_database_for_the_2026_replay_season(season_centre_client):
+    client = season_centre_client
+
+    created = client.post("/api/admin/season-centre/seasons", json={"year": 2026, "label": "2026 Replay"})
+    assert created.status_code == 200
+    season_id = created.json()["season_id"]
+
+    page = client.get(f"/admin/season-centre/{season_id}")
+    assert page.status_code == 200
+    assert "Season Centre" in page.text
+
+    centre = client.get(f"/api/admin/season-centre/{season_id}")
+    assert centre.status_code == 200
+    body = centre.json()
+    assert body["season"]["year"] == 2026
+    assert body["entries"] == []
+    assert body["readiness"]["entries_established"] == 0
+
+
+def test_season_index_page_is_reachable(season_centre_client):
+    page = season_centre_client.get("/admin/season-centre")
+    assert page.status_code == 200
+    assert "Season Centre" in page.text
+
+
+def test_operator_can_establish_ten_replay_entries_without_sql_via_the_api(season_centre_client):
+    client = season_centre_client
+    season_id = client.post("/api/admin/season-centre/seasons", json={"year": 2026, "label": "2026 Replay"}).json()[
+        "season_id"
+    ]
+
+    for letter in "ABCDEFGHIJ":
+        coach_id = client.post("/api/admin/season-centre/coaches", json={"display_name": f"Coach {letter}"}).json()[
+            "coach_id"
+        ]
+        response = client.post(
+            f"/api/admin/season-centre/{season_id}/entries",
+            json={"coach_id": coach_id, "team_name": f"BBBFFL Team {letter}"},
+        )
+        assert response.status_code == 200, response.text
+
+    centre = client.get(f"/api/admin/season-centre/{season_id}").json()
+    assert len(centre["entries"]) == 10
+    assert centre["readiness"]["entries_established"] == 10
+    assert centre["readiness"]["distinct_coaches"] == 10
+
+
+def test_rename_team_and_transfer_coach_persist_and_keep_the_entry_id_stable(season_centre_client):
+    client = season_centre_client
+    season_id = client.post("/api/admin/season-centre/seasons", json={"year": 2027, "label": "2027"}).json()[
+        "season_id"
+    ]
+    coach_a = client.post("/api/admin/season-centre/coaches", json={"display_name": "Coach A"}).json()
+    coach_b = client.post("/api/admin/season-centre/coaches", json={"display_name": "Coach B"}).json()
+    entry = client.post(
+        f"/api/admin/season-centre/{season_id}/entries",
+        json={"coach_id": coach_a["coach_id"], "team_name": "Original Team"},
+    ).json()
+    # create_entry's response is the full rebuilt Season Centre view.
+    entry_id = entry["entries"][0]["season_entry_id"]
+
+    renamed = client.post(f"/api/admin/season-centre/entries/{entry_id}/team-name", json={"team_name": "Renamed Team"})
+    assert renamed.status_code == 200
+    assert renamed.json()["entries"][0]["team_name"] == "Renamed Team"
+    assert renamed.json()["entries"][0]["season_entry_id"] == entry_id
+
+    transferred = client.post(
+        f"/api/admin/season-centre/entries/{entry_id}/coach", json={"coach_id": coach_b["coach_id"]}
+    )
+    assert transferred.status_code == 200
+    view = transferred.json()["entries"][0]
+    assert view["season_entry_id"] == entry_id
+    assert view["coach_display_name"] == "Coach B"
+    assert view["team_name"] == "Renamed Team"
+
+
+def test_validation_error_returns_400_not_a_raw_500(season_centre_client):
+    client = season_centre_client
+    season_id = client.post("/api/admin/season-centre/seasons", json={"year": 2027, "label": "2027"}).json()[
+        "season_id"
+    ]
+    coach = client.post("/api/admin/season-centre/coaches", json={"display_name": "Coach"}).json()
+
+    blank_name = client.post(
+        f"/api/admin/season-centre/{season_id}/entries", json={"coach_id": coach["coach_id"], "team_name": "   "}
+    )
+    assert blank_name.status_code == 400
+
+    unknown_coach = client.post(
+        f"/api/admin/season-centre/{season_id}/entries", json={"coach_id": "missing", "team_name": "A Team"}
+    )
+    assert unknown_coach.status_code == 400
+
+    duplicate_year = client.post("/api/admin/season-centre/seasons", json={"year": 2027, "label": "dup"})
+    assert duplicate_year.status_code == 400
+
+
+def test_unknown_season_returns_404(season_centre_client):
+    response = season_centre_client.get("/api/admin/season-centre/does-not-exist")
+    assert response.status_code == 404
+
+
+def test_season_centre_endpoints_require_admin_authority_not_merely_scorer(season_centre_client):
+    """Every Season Centre mutation/read here uses `require_admin`, the same
+    strict-admin dependency `app.routes.draft`/`app.routes.preseason` use for
+    their own setup endpoints (never the looser `require_scorer_or_admin`) --
+    narrowing the shared operator token to the `scorer` authority (see
+    `app.authorization.resolve_principal`) must be refused."""
+    client = season_centre_client
+    season_id = client.post("/api/admin/season-centre/seasons", json={"year": 2027, "label": "2027"}).json()[
+        "season_id"
+    ]
+    scorer_headers = {"X-Admin-Token": "open-mode", "X-Authority-Role": "scorer"}
+    response = client.get(f"/api/admin/season-centre/{season_id}", headers=scorer_headers)
+    assert response.status_code == 403
+
+
+def test_2026_replay_and_2027_season_entries_stay_separated_over_http(season_centre_client):
+    client = season_centre_client
+    replay_id = client.post("/api/admin/season-centre/seasons", json={"year": 2026, "label": "2026 Replay"}).json()[
+        "season_id"
+    ]
+    live_id = client.post("/api/admin/season-centre/seasons", json={"year": 2027, "label": "2027"}).json()["season_id"]
+    coach = client.post("/api/admin/season-centre/coaches", json={"display_name": "Shared Coach"}).json()
+    client.post(
+        f"/api/admin/season-centre/{replay_id}/entries",
+        json={"coach_id": coach["coach_id"], "team_name": "Replay Team"},
+    )
+    client.post(
+        f"/api/admin/season-centre/{live_id}/entries", json={"coach_id": coach["coach_id"], "team_name": "Live Team"}
+    )
+
+    replay_centre = client.get(f"/api/admin/season-centre/{replay_id}").json()
+    live_centre = client.get(f"/api/admin/season-centre/{live_id}").json()
+    assert [e["team_name"] for e in replay_centre["entries"]] == ["Replay Team"]
+    assert [e["team_name"] for e in live_centre["entries"]] == ["Live Team"]

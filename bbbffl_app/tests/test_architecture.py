@@ -172,6 +172,18 @@ AFL_EVIDENCE = {"app.participation"}
 # scenarios, with no imports of its own beyond the standard library.
 REPLAY = {"app.replay", "app.replay_checkpoint"}
 
+# Scorer/admin Season Centre application service (issue #100): the operator
+# surface over `app.season`/`app.identity` -- season identity/lifecycle and
+# private-coach/public-season-entry identity -- plus read-only readiness
+# signals from the draft, preseason, player-pool and persisted ordinary-
+# round-lifecycle repositories. Sits directly on the season model, the same
+# shape as `app.round_review`/`app.opening_round`/`app.auth`: it *is* meant
+# to be imported directly by its route module (`app.routes.season_centre`)
+# for the same reason those are (see this file's ROUND_REVIEW comment), but
+# must stay a sibling of the Grand Final vertical and must never depend on
+# routes or the composition root.
+SEASON_CENTRE = {"app.season_centre"}
+
 ROUTES = {
     "app.routes",
     "app.routes.admin",
@@ -185,6 +197,7 @@ ROUTES = {
     "app.routes.lineups",
     "app.routes.coach_lineup",
     "app.routes.public_rounds",
+    "app.routes.season_centre",
 }
 
 COMPOSITION_ROOT = {"app.main"}
@@ -204,6 +217,7 @@ ALL_GROUPS = (
     | AUTH
     | COACH_LINEUP
     | GRAND_FINAL_VERTICAL
+    | SEASON_CENTRE
     | ROUTES
     | COMPOSITION_ROOT
 )
@@ -510,6 +524,27 @@ def test_season_model_and_lockouts_do_not_depend_on_auth(graph):
     it is a consumer of app.identity, never a dependency of it."""
     for module in sorted(SEASON_MODEL | LOCKOUTS | WEEKLY_SUBMISSION_SOURCES):
         assert "app.auth" not in graph[module], f"{module} must not depend on app.auth"
+
+
+def test_season_centre_does_not_depend_on_grand_final_routes_or_composition_root(graph):
+    """`app.season_centre` (issue #100) sits above the season model -- it
+    depends on app.season/app.identity -- but must stay a sibling of the
+    Grand Final vertical and must never depend on lockouts, routes, or the
+    composition root, exactly like app.round_review/app.opening_round/
+    app.auth."""
+    forbidden = GRAND_FINAL_VERTICAL | LOCKOUTS | ROUTES | COMPOSITION_ROOT
+    for module in sorted(SEASON_CENTRE):
+        offending = graph[module] & forbidden
+        assert not offending, f"{module} must not depend on {sorted(offending)}"
+
+
+def test_season_model_and_lockouts_do_not_depend_on_season_centre(graph):
+    """The reverse direction of the edge above: neither the season model
+    nor lockouts (nor weekly-submission-sources) may depend on
+    app.season_centre -- it is a consumer of app.season/app.identity, never
+    a dependency of them."""
+    for module in sorted(SEASON_MODEL | LOCKOUTS | WEEKLY_SUBMISSION_SOURCES):
+        assert "app.season_centre" not in graph[module], f"{module} must not depend on app.season_centre"
 
 
 def test_scorer_decisions_stays_repository_agnostic(graph):

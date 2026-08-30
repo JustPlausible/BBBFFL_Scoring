@@ -356,6 +356,19 @@ class IdentityRepository:
         ).fetchone()
         return row is not None
 
+    def coach_has_current_entry(self, coach_id: str) -> bool:
+        """Whether the coach currently represents *any* season entry --
+        used by roadmap package #107's active-context resolution to decide
+        whether "Coach" is a meaningful role to offer a signed-in person,
+        alongside any explicitly granted roles (`app.auth.RoleGrantRepository`).
+        A person with no current entry (e.g. a league officer with no team
+        of their own) simply has no Coach authority to exercise; this never
+        affects `coach_owns_entry`'s own per-entry ownership check."""
+        row = self.database.execute(
+            "SELECT 1 FROM season_entry_coach_history WHERE coach_id=? AND ended_at IS NULL LIMIT 1", (coach_id,)
+        ).fetchone()
+        return row is not None
+
     def list_assignments(self, entry_id: str) -> list[CoachAssignment]:
         rows = self.database.execute(
             "SELECT * FROM season_entry_coach_history WHERE season_entry_id=? ORDER BY started_at", (entry_id,)

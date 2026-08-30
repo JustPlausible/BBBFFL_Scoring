@@ -1,10 +1,10 @@
-"""Scorer/admin Season Centre (issue #100) -- an operator surface over the
-season-model domain established by roadmap packages 09-10 (issues #19/#20):
-season identity/lifecycle, private coach records, and public season-entry
-team identity. It is the human replay operator's way to establish and
-inspect recognisable BBBFFL season state (real coach names, real BBBFFL team
-names) before draft/fixture/round setup, without SQL or direct database
-manipulation.
+"""Secretary/League Manager (or Administrator) Season Centre (issue #100) --
+an operator surface over the season-model domain established by roadmap
+packages 09-10 (issues #19/#20): season identity/lifecycle, private coach
+records, and public season-entry team identity. It is the human replay
+operator's way to establish and inspect recognisable BBBFFL season state
+(real coach names, real BBBFFL team names) before draft/fixture/round
+setup, without SQL or direct database manipulation.
 
 Every rule -- non-empty names, valid coach/season references, licence
 uniqueness -- lives in `app.season_centre` (called through its thin
@@ -19,6 +19,29 @@ This module deliberately does not implement draft, fixture-generation, round
 -configuration or weekly scoring/selection behaviour -- see `app.routes.
 draft` and `app.routes.round_review` for those; this router only links to
 their existing pages once their own state says they are reachable.
+
+## Retrofit for roadmap package #107 (issue #107)
+
+Season Centre is ordinary league-season setup -- season entries, team
+names, coach records -- exactly the kind of operation issue #107 says must
+not require blanket Administrator authority. Every endpoint below now
+requires `require_secretary_or_admin` (Secretary/League Manager authority
+or Administrator, either satisfies it) rather than strict Administrator
+authority alone: an authorised Secretary can run this page without also
+being granted Administrator. `require_secretary_or_admin` accepts a
+principal resolved from either the legacy shared `X-Admin-Token` (an
+ambient credential, still narrowable to `scorer`, unaffected by this
+package -- but note it can never satisfy this dependency, since a bare
+`X-Admin-Token` resolves to `admin`/`scorer`, both handled independently
+by `Role`, not `secretary`, unless narrowed to `admin`) or an authenticated
+coach session whose active role (`app.authorization.Principal.role`) has
+been switched to Secretary/Administrator via `app.routes.context` -- see
+docs/acting-context.md. The page shell (`season_centre_index_page`/
+`season_centre_page`) now also issues the double-submit CSRF cookie/token
+(`app.routes.auth._issue_csrf_token`/`_attach_csrf_cookie`) so its JS can
+call the CSRF-protected `/api/context/*` endpoints when rendering the
+context bar -- its own admin-token-authenticated endpoints are unaffected
+(a custom header, not a cookie, is what authorises them).
 """
 
 from fastapi import APIRouter, Depends, Request
@@ -27,9 +50,9 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from app.audit import ActorContext
-from app.authorization import Principal
+from app.authorization import Principal, require_secretary_or_admin, resolve_principal
 from app.config import BASE_DIR
-from app.routes.admin import require_admin
+from app.routes.auth import _attach_csrf_cookie, _issue_csrf_token
 from app.season_centre import build_season_centre, list_coaches_overview, list_seasons_overview
 from app.season_centre import create_coach as create_coach_service
 from app.season_centre import create_entry as create_entry_service
@@ -81,19 +104,35 @@ class TransferCoachRequest(BaseModel):
     reason: str | None = None
 
 
+def require_secretary(principal: Principal = Depends(resolve_principal)) -> Principal:
+    """Route-level `Depends`-ready wrapper, matching `app.routes.admin`'s
+    established local-wrapper convention for its own `require_admin`/
+    `require_scorer`."""
+    return require_secretary_or_admin(principal)
+
+
 def _actor(principal: Principal) -> ActorContext:
-    """Provenance authority comes only from the resolved credential -- see
-    `app.routes.round_review`'s identical `_actor` helper, which this
-    mirrors."""
-    return ActorContext(actor_type="anonymous_operator", actor_id=None, actor_role=principal.role.value)
+    """Provenance authority comes from the resolved credential -- the same
+    shape as `app.routes.round_review`'s `_actor` helper, extended for
+    roadmap package #107 (issue #107): `actor_id` now carries the
+    authenticated operator's `coach_id` when this principal was resolved
+    from a real coach session (Secretary/Administrator acting under their
+    own login), so the audit trail distinguishes *which* operator performed
+    a Season Centre change -- never the affected coach/season entry, and
+    never anything beyond what `ActorContext.anonymous_operator` already
+    permits (`actor_type` stays `"anonymous_operator"`; see app/audit.py's
+    module docstring, "Actor convention"). Remains `None` for the legacy
+    shared `X-Admin-Token` credential, which has no per-operator identity to
+    attribute."""
+    return ActorContext(actor_type="anonymous_operator", actor_id=principal.coach_id, actor_role=principal.role.value)
 
 
-@router.get("/seasons", dependencies=[Depends(require_admin)])
+@router.get("/seasons", dependencies=[Depends(require_secretary)])
 def list_seasons(request: Request):
     return list_seasons_overview(request.app.state.seasons)
 
 
-@router.post("/seasons", dependencies=[Depends(require_admin)])
+@router.post("/seasons", dependencies=[Depends(require_secretary)])
 def create_season(payload: CreateSeasonRequest, request: Request):
     return create_season_service(
         request.app.state.seasons,
@@ -103,12 +142,12 @@ def create_season(payload: CreateSeasonRequest, request: Request):
     )
 
 
-@router.get("/coaches", dependencies=[Depends(require_admin)])
+@router.get("/coaches", dependencies=[Depends(require_secretary)])
 def list_coaches(request: Request):
     return list_coaches_overview(request.app.state.identities)
 
 
-@router.post("/coaches", dependencies=[Depends(require_admin)])
+@router.post("/coaches", dependencies=[Depends(require_secretary)])
 def create_coach(payload: CreateCoachRequest, request: Request):
     return create_coach_service(
         request.app.state.identities,
@@ -119,9 +158,9 @@ def create_coach(payload: CreateCoachRequest, request: Request):
     )
 
 
-@router.post("/coaches/{coach_id}", dependencies=[Depends(require_admin)])
+@router.post("/coaches/{coach_id}", dependencies=[Depends(require_secretary)])
 def update_coach(
-    coach_id: str, payload: UpdateCoachRequest, request: Request, principal: Principal = Depends(require_admin)
+    coach_id: str, payload: UpdateCoachRequest, request: Request, principal: Principal = Depends(require_secretary)
 ):
     # Forward only the fields the caller actually sent -- an omitted field
     # must leave that value unchanged, while an explicit `null` in the
@@ -144,7 +183,7 @@ def update_coach(
     )
 
 
-@router.get("/{season_id}", dependencies=[Depends(require_admin)])
+@router.get("/{season_id}", dependencies=[Depends(require_secretary)])
 def season_centre(season_id: str, request: Request):
     state = request.app.state
     return build_season_centre(
@@ -152,9 +191,9 @@ def season_centre(season_id: str, request: Request):
     )
 
 
-@router.post("/{season_id}/entries", dependencies=[Depends(require_admin)])
+@router.post("/{season_id}/entries", dependencies=[Depends(require_secretary)])
 def create_entry(
-    season_id: str, payload: CreateEntryRequest, request: Request, principal: Principal = Depends(require_admin)
+    season_id: str, payload: CreateEntryRequest, request: Request, principal: Principal = Depends(require_secretary)
 ):
     create_entry_service(
         request.app.state.identities,
@@ -171,9 +210,9 @@ def create_entry(
     )
 
 
-@router.post("/entries/{entry_id}/team-name", dependencies=[Depends(require_admin)])
+@router.post("/entries/{entry_id}/team-name", dependencies=[Depends(require_secretary)])
 def rename_team(
-    entry_id: str, payload: RenameTeamRequest, request: Request, principal: Principal = Depends(require_admin)
+    entry_id: str, payload: RenameTeamRequest, request: Request, principal: Principal = Depends(require_secretary)
 ):
     state = request.app.state
     rename_team_service(state.identities, entry_id, payload.team_name, actor=_actor(principal), reason=payload.reason)
@@ -189,9 +228,9 @@ def rename_team(
     )
 
 
-@router.post("/entries/{entry_id}/coach", dependencies=[Depends(require_admin)])
+@router.post("/entries/{entry_id}/coach", dependencies=[Depends(require_secretary)])
 def transfer_entry(
-    entry_id: str, payload: TransferCoachRequest, request: Request, principal: Principal = Depends(require_admin)
+    entry_id: str, payload: TransferCoachRequest, request: Request, principal: Principal = Depends(require_secretary)
 ):
     state = request.app.state
     transfer_entry_service(state.identities, entry_id, payload.coach_id, actor=_actor(principal), reason=payload.reason)
@@ -207,11 +246,25 @@ def transfer_entry(
     )
 
 
+def _render_page(request: Request, season_id: str | None) -> HTMLResponse:
+    # Issues the double-submit CSRF cookie/token for this admin-token-
+    # authenticated shell too (roadmap package #107, issue #107): the shell
+    # itself stays reachable without a header/cookie (see app/authorization
+    # -and-privacy.md, "non-sensitive token-entry/application shells"), but
+    # its embedded context bar now also calls the CSRF-protected
+    # `/api/context/*` endpoints when the visitor is a signed-in coach
+    # identity, not just the admin-token flow those endpoints never use.
+    token = _issue_csrf_token(request)
+    response = templates.TemplateResponse(request, "season_centre.html", {"season_id": season_id, "csrf_token": token})
+    _attach_csrf_cookie(request, response, token)
+    return response
+
+
 @page_router.get("/admin/season-centre", response_class=HTMLResponse)
 def season_centre_index_page(request: Request):
-    return templates.TemplateResponse(request, "season_centre.html", {"season_id": None})
+    return _render_page(request, None)
 
 
 @page_router.get("/admin/season-centre/{season_id}", response_class=HTMLResponse)
 def season_centre_page(season_id: str, request: Request):
-    return templates.TemplateResponse(request, "season_centre.html", {"season_id": season_id})
+    return _render_page(request, season_id)

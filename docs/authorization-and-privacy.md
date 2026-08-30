@@ -8,11 +8,22 @@ identity (or an operator credential) may do.
 ## Principals and capabilities
 
 Every request resolves to exactly one typed principal: anonymous spectator,
-coach, scorer, or administrator.  The legacy `X-Admin-Token` remains an
+coach, scorer, secretary/league manager, administrator, or replay operator
+(`app.authorization.Role`).  The legacy `X-Admin-Token` remains an
 administrator credential by default for compatibility.  Supplying
 `X-Authority-Role: scorer` explicitly narrows that credential to scorer
-capabilities.  It never creates a coach identity.  Conversely, a valid coach
-session never grants scorer or administrator authority.
+capabilities.  It never creates a coach identity.
+
+A coach session's active role is no longer fixed at "coach": roadmap
+package #107 (issue #107, see [acting-context](acting-context.md)) lets a
+signed-in coach identity hold additional granted roles (Scorer, Secretary/
+League Manager, Administrator, Replay Operator) and switch which one is
+active without re-authenticating.  A coach session *never* acquires the
+legacy `X-Admin-Token`'s ambient authority this way, and switching active
+role never changes which coach identity is authenticated
+(`Principal.coach_id` is untouched by any context switch) -- see
+[acting-context](acting-context.md) for the full model, including
+represented-season-entry delegation and provenance.
 
 When the token is unset in the supported development/test configuration, the
 historic open operator mode is preserved as an explicit administrator

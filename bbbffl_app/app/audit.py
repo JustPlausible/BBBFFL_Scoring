@@ -41,6 +41,25 @@ operations is the primary guarantee tests rely on.
   that `coach_id` -- never an email address or other contact detail. Used
   only for the coach's *own* action (login, logout); a scorer/admin proxy
   action on a coach's behalf still uses `anonymous_operator`, never this.
+  Also used for roadmap package #107's own active-context events (role
+  activation, represented-entry selection) -- switching context is always
+  the authenticated person's own action, never a proxy action.
+
+  Roadmap package #107 (issue #107, `app.auth.ActingContextService`) adds
+  one more thing an authenticated person can do without becoming this actor
+  type: activate a granted Scorer/Secretary/Administrator/Replay Operator
+  role and, once active, act on a represented season entry. Those delegated
+  *domain* writes still use `anonymous_operator` exactly as before -- but
+  `actor_id` on that `anonymous_operator` context may now be populated with
+  the authenticated operator's `coach_id` (never the represented team's
+  coach) wherever a caller resolved that operator through a real session
+  rather than the legacy shared `X-Admin-Token`. This is additional
+  provenance, not a new actor type or a new impersonation path: the actor
+  the domain reasons about (`actor_type="anonymous_operator"`) and the
+  represented entity (the write's own `entity_id`/`season_entry_id`) are
+  unchanged; only *which* operator performed it becomes attributable where
+  it wasn't before. See `app.season_centre`'s `_actor` helper and
+  docs/acting-context.md.
 - `unauthenticated` -- a request that presented no verified identity, used
   only for audit events describing a login attempt itself (e.g. a failed
   login) where no session/actor exists yet. `actor_id`, if set, is the
@@ -123,6 +142,14 @@ AUTH_LOGIN_FAILED = "auth.login.failed"
 AUTH_LOGOUT = "auth.session.logout"
 AUTH_SESSION_REVOKED = "auth.session.revoked"
 
+# Roadmap package #107 (issue #107): multi-role / acting-context events.
+# See app/auth.py's RoleGrantRepository/ActingContextService and
+# docs/acting-context.md.
+ROLE_GRANT_CREATED = "identity.role_grant.created"
+ROLE_GRANT_REVOKED = "identity.role_grant.revoked"
+CONTEXT_ROLE_ACTIVATED = "auth.context.role_activated"
+CONTEXT_REPRESENTED_ENTRY_SET = "auth.context.represented_entry_set"
+
 ENTITY_TYPE_SLOT = "scoring.slot"
 ENTITY_TYPE_INTERCHANGE = "scoring.interchange"
 ENTITY_TYPE_OVERRIDE = "scoring.override"
@@ -132,6 +159,7 @@ ENTITY_TYPE_LINEUP = "lineup.weekly"
 ENTITY_TYPE_LOCKOUT_TRIGGER = "lockout.trigger"
 ENTITY_TYPE_AUTH_SESSION = "auth.session"
 ENTITY_TYPE_AUTH_ATTEMPT = "auth.attempt"
+ENTITY_TYPE_ROLE_GRANT = "identity.role_grant"
 
 
 def _now() -> str:

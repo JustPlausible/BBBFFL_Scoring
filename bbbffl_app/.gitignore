@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 .env
+.env.rehearsal
 data/*.db
 data/scorer_decisions.db
 data/round1-2026-rehearsal-evidence.json

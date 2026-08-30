@@ -6,6 +6,7 @@ weekly-lineup submission history remain the only production boundaries used.
 """
 
 import re
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,7 +16,7 @@ from app.lockouts import LockoutRepository, LockoutTriggerRepository, LockState,
 from app.player_pool import OwnershipRepository
 from app.replay import ReplayAflDataSource
 from app.round_mapping import RoundMappingRepository
-from scripts.staged_lockout_rehearsal import advance_evidence, bootstrap_staged_lockout_rehearsal
+from scripts.staged_lockout_rehearsal import REPLAY_EFFECTIVE_AT, advance_evidence, bootstrap_staged_lockout_rehearsal
 
 
 def hidden(html, name):
@@ -80,6 +81,26 @@ def effective(database, lineup_id):
     return WeeklyLineupRepository(database).get_effective_submission(lineup_id)
 
 
+def test_bootstrap_advance_reset_and_bootstrap_again(tmp_path):
+    """The documented disposable-file lifecycle is repeatable verbatim."""
+    database_path = tmp_path / "staged.db"
+    evidence_path = tmp_path / "evidence.json"
+    database_url = f"sqlite:///{database_path}"
+
+    first = bootstrap_staged_lockout_rehearsal(database_url, evidence_path)
+    for stage in ("selective-a", "selective-b", "main"):
+        advance_evidence(evidence_path, stage)
+        source = ReplayAflDataSource(evidence_path)
+        assert source.manifest["staged_lockout_stage"] == stage
+        assert source.clock.now().isoformat() == "2000-02-01T00:00:00+00:00"
+
+    Path(database_path).unlink()
+    Path(evidence_path).unlink()
+    second = bootstrap_staged_lockout_rehearsal(database_url, evidence_path)
+    assert second.bootstrap.season_id != first.bootstrap.season_id
+    assert ReplayAflDataSource(evidence_path).manifest["staged_lockout_stage"] == "initial"
+
+
 def test_progressive_plan_through_real_coach_flow_and_persisted_versions(rehearsal):
     client, result, cookies = rehearsal
     base = result.bootstrap
@@ -110,6 +131,19 @@ def test_progressive_plan_through_real_coach_flow_and_persisted_versions(rehears
     assert first.version == 1 and first.positions == positions
     initial_page = client.get(url, cookies=cookies)
     assert initial_page.text.count('<span class="badge">Editable</span>') == len(POSITIONS)
+    initial_view = LockoutRepository(database).lock_state(
+        lineup_id,
+        base.bbbffl_round_id,
+        base.coach_a.season_entry_id,
+        first.positions,
+        match_facts=RoundMatchFactsProvider(RoundMappingRepository(database), client.app.state.afl_client),
+    )
+    # All scheduled boundaries are in 2000 (long before the real CI clock),
+    # but the manifest's explicit replay clock is before them. If lockout
+    # evaluation accidentally falls back to wall time this assertion fails.
+    assert initial_view.evaluated_at == "2000-02-01T00:00:00+00:00"
+    assert client.app.state.afl_client.clock.now().isoformat() == "2000-02-01T00:00:00+00:00"
+    assert REPLAY_EFFECTIVE_AT == "2000-02-01T00:00:00Z"
 
     # Trigger A: a mixed lineup. A crafted locked mutation is rejected with a
     # clear 409 page and cannot replace authoritative version 1.

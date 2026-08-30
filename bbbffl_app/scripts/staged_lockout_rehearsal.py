@@ -27,12 +27,13 @@ STAGES = ("initial", "selective-a", "selective-b", "main")
 MATCH_IDS = (9101, 9102, 9103, 9104, 9105)
 TEAM_IDS = (1101, 1201, 1301, 1401, 1501)
 STARTS = (
-    "2035-03-01T08:00:00Z",
-    "2035-03-02T08:00:00Z",
-    "2035-03-03T08:00:00Z",
-    "2035-02-28T08:00:00Z",  # uncovered: chronology must not imply a BBBFFL lock
-    "2035-03-04T08:00:00Z",
+    "2000-03-01T08:00:00Z",
+    "2000-03-02T08:00:00Z",
+    "2000-03-03T08:00:00Z",
+    "2000-02-28T08:00:00Z",  # uncovered: chronology must not imply a BBBFFL lock
+    "2000-03-04T08:00:00Z",
 )
+REPLAY_EFFECTIVE_AT = "2000-02-01T00:00:00Z"
 POSITION_MATCH = dict(zip(POSITIONS, (9101, 9102, 9103, 9104, 9105, 9105, 9105, 9105, 9105), strict=True))
 
 
@@ -66,6 +67,7 @@ def advance_evidence(evidence_path: str | Path, stage: str) -> None:
     for match in payload["matches"]:
         match["status"] = statuses[int(match["match_id"])]
     payload["manifest"]["staged_lockout_stage"] = stage
+    payload["manifest"]["replay_effective_at"] = REPLAY_EFFECTIVE_AT
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
@@ -73,7 +75,7 @@ def bootstrap_staged_lockout_rehearsal(database_url: str, evidence_path: str | P
     base = bootstrap_round1_2026(
         database_url,
         evidence_path,
-        generated_at=datetime(2035, 1, 1, tzinfo=timezone.utc),
+        generated_at=datetime(2000, 1, 1, tzinfo=timezone.utc),
         lockout_in_days=365,
         afl_match_id=MATCH_IDS[-1],
     )

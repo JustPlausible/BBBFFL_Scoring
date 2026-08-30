@@ -11,9 +11,10 @@ or other global state) and asks whether a configured trigger covering that
 match has activated.
 
 Nothing here calls `datetime.now()` on its own initiative: every entry point
-either receives `evaluation_at` explicitly or defaults it once, at the outer
-edge, to `datetime.now(timezone.utc)` -- so tests and 2026 replay can always
-supply a fixed instant and get a deterministic answer.
+uses an explicit `evaluation_at` first, then an available replay match-facts
+clock, and only otherwise defaults once at the outer edge to
+`datetime.now(timezone.utc)` -- so tests and replay can always supply a fixed
+instant and get a deterministic answer.
 
 ## The round lockout plan
 
@@ -286,6 +287,24 @@ class RoundMatchFactsProvider:
             raise MatchResolutionError(f"BBBFFL round {bbbffl_round_id} has no accepted AFL round mapping")
         return self._afl_client.get_matches(mapping.afl_round_id)
 
+    def evaluation_at(self) -> datetime | None:
+        """Return a replay's explicit clock, if it has one.
+
+        Live AFL clients have no ``clock`` and therefore retain the normal
+        wall-clock evaluation. This is only clock plumbing; trigger coverage
+        and activation continue to use the persisted BBBFFL plan below.
+        """
+        clock = getattr(self._afl_client, "clock", None)
+        return clock.now() if clock is not None else None
+
+
+def _evaluation_at(explicit: datetime | None, match_facts: MatchFactsProvider) -> datetime:
+    if explicit is not None:
+        return explicit
+    provider_clock = getattr(match_facts, "evaluation_at", None)
+    replay_at = provider_clock() if provider_clock is not None else None
+    return replay_at or datetime.now(timezone.utc)
+
 
 def _parse_instant(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -540,7 +559,7 @@ class LockGuard:
         self._evaluation_at = evaluation_at
 
     def _at(self) -> datetime:
-        return self._evaluation_at or datetime.now(timezone.utc)
+        return _evaluation_at(self._evaluation_at, self._match_facts)
 
     def materialize(self, lineup_id: str) -> None:
         self._repository._materialize(lineup_id, match_facts=self._match_facts, evaluation_at=self._at())
@@ -600,7 +619,7 @@ class LockoutRepository:
         unknown = set(positions) - set(POSITIONS)
         if unknown:
             raise LockoutIntegrityError(f"unknown scoring positions: {sorted(unknown)}")
-        at = evaluation_at or datetime.now(timezone.utc)
+        at = _evaluation_at(evaluation_at, match_facts)
         self._materialize_round_triggers(bbbffl_round_id, match_facts=match_facts, evaluation_at=at)
         self._materialize_lineup(lineup_id, match_facts=match_facts, evaluation_at=at)
         matches = match_facts.matches_for(bbbffl_round_id)

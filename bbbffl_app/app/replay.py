@@ -95,6 +95,14 @@ class ReplayAflDataSource:
         except (KeyError, ValueError) as exc:
             raise ReplayEvidenceError("manifest.evidence_class is missing or unknown") from exc
         self.manifest = dict(manifest)
+        # A replay may carry its own explicit effective instant so an
+        # interactive application process uses the same deterministic clock
+        # as a repository-level replay. A caller-supplied clock remains the
+        # highest-precedence choice. Ordinary/live AFL sources never pass
+        # through this boundary and manifests without the field retain the
+        # existing behaviour.
+        if self.clock is None and manifest.get("replay_effective_at") is not None:
+            self.clock = ReplayClock.from_iso(manifest["replay_effective_at"])
         self._payload = payload
         for section in ("seasons", "rounds", "matches", "players"):
             for index, record in enumerate(self._list(payload, section)):

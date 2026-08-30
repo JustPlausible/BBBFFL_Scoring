@@ -7,8 +7,10 @@ coach draft/submission surface and the persisted BBBFFL lockout plan.
 
 ## Initialise
 
-Use a disposable database and evidence file, then start the application in
-replay mode exactly as for the [Round 1 rehearsal](round1-rehearsal.md):
+Run every command in this document from the repository's `bbbffl_app`
+directory. Use a disposable database and evidence file, then start the
+application in replay mode exactly as for the
+[Round 1 rehearsal](round1-rehearsal.md):
 
 ```bash
 cd bbbffl_app
@@ -49,7 +51,11 @@ python -m scripts.staged_lockout_rehearsal advance STAGE \
 ```
 
 Restart the application after each command (replay evidence is intentionally
-loaded eagerly). The commands perform no sleeps and use fixed evidence:
+loaded eagerly). The commands perform no sleeps. Every evidence stage embeds
+the same explicit replay evaluation instant, `2000-02-01T00:00:00Z`, before
+all scheduled boundaries. Consequently even the deliberately past fixture
+dates cannot expire against the operator machine's wall clock; only the named
+status changes activate triggers:
 
 | Stage | Expected coach view and action |
 | --- | --- |
@@ -71,9 +77,12 @@ Stop the app and delete the disposable SQLite database and evidence file, then
 run `bootstrap` again:
 
 ```bash
-rm -f bbbffl_app/data/staged-lockout-rehearsal.db \
-  bbbffl_app/data/staged-lockout-rehearsal-evidence.json
+rm -f data/staged-lockout-rehearsal.db \
+  data/staged-lockout-rehearsal-evidence.json
 ```
+
+This path matches the explicit `cd bbbffl_app` at initialization. The same
+`bootstrap` command can now be copied again to initialise a clean rehearsal.
 
 Opening Round deferred nominations remain a separate composed guard documented
 in [Opening Round deferred selection](opening-round-deferred-selection.md).

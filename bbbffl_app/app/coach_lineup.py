@@ -51,11 +51,14 @@ assert {position for _, group_positions in COACH_LINEUP_POSITION_GROUPS for posi
 # diverge from -- coach_lineup.html's existing "Lineup state" wording,
 # derived from the same draft/submission facts: whether an authoritative
 # submission exists and whether the draft revision it was based on is still
-# current. `DRAFT_SAVED` additionally uses `LineupDraft.revision` > 1 as the
-# authoritative signal that the coach explicitly saved a draft at least once
-# -- `ensure_draft` only ever creates revision 1 automatically, and every
-# explicit Save/Submit goes through `save()`, which always advances the
-# revision -- so this never has to guess or persist a new field.
+# current. `DRAFT_SAVED` additionally needs a signal that the coach chose at
+# least one position themselves -- `LineupDraft.revision` alone is not safe
+# for this: `ensure_draft`'s `preload_target_lineup` call (#69) can advance
+# the revision on a mere page view, with no coach action at all, whenever
+# this round/entry has an active Opening Round nomination. So this compares
+# the persisted draft positions against the same Opening Round preload
+# baseline `save()`/`preload_target_lineup` already compute, rather than
+# guessing from the revision number or persisting a new field.
 ACCOUNT_STATE_NOT_SUBMITTED = "not_submitted"
 ACCOUNT_STATE_DRAFT_SAVED = "draft_saved"
 ACCOUNT_STATE_SUBMITTED = "submitted"
@@ -91,11 +94,12 @@ class CoachLineupService:
     def list_rounds(self, coach_id):
         """Account-page rounds (issue #90), each carrying a cheap,
         authoritative draft/submission status summary alongside the
-        season/round navigation data. Reads only the existing lineup
-        repository's persisted draft and submission rows -- no AFL API
-        calls, live lockout evaluation, Opening Round preload or
-        submission validation, unlike `view()`, which a heavyweight
-        lineup-editor page needs and an account summary does not."""
+        season/round navigation data. Reads only the existing lineup and
+        Opening Round nomination repositories' persisted rows -- no AFL API
+        calls, live lockout evaluation, draft/nomination writes (unlike
+        `ensure_draft`'s preload) or submission validation, unlike `view()`,
+        which a heavyweight lineup-editor page needs and an account summary
+        does not."""
         rows = self.database.execute(
             "SELECT e.season_id, e.season_entry_id, c.competition_id, "
             "r.bbbffl_round_id round_id, r.label round_label, r.sequence "
@@ -115,7 +119,7 @@ class CoachLineupService:
                 state = ACCOUNT_STATE_SUBMITTED_WITH_CHANGES
             else:
                 state = ACCOUNT_STATE_SUBMITTED
-        elif draft is not None and draft.revision > 1:
+        elif draft is not None and self._has_coach_chosen_content(row, draft):
             state = ACCOUNT_STATE_DRAFT_SAVED
         else:
             state = ACCOUNT_STATE_NOT_SUBMITTED
@@ -129,6 +133,21 @@ class CoachLineupService:
             "submission_based_on_revision": submission.based_on_draft_revision if submission else None,
             "state": state,
         }
+
+    def _has_coach_chosen_content(self, row, draft):
+        """True only once the persisted draft holds a position the coach
+        picked, as opposed to a freshly auto-created empty draft or one an
+        Opening Round preload alone has populated. `revision > 1` is not a
+        safe proxy for this on its own -- see this module's "Account-page
+        lineup states" note above -- so this instead compares the draft's
+        positions against exactly what an untouched preload would have set
+        (`{}` merged with any active nomination), the same computation
+        `save()` and `preload_target_lineup` already perform."""
+        if draft.revision <= 1:
+            return False
+        deferred = self.nominations.active_positions(row["round_id"], row["season_entry_id"])
+        baseline = {position: deferred.get(position) for position in POSITIONS}
+        return draft.positions != baseline
 
     def resolve(self, coach_id, season_id, round_id):
         row = self.database.execute(

@@ -12,6 +12,7 @@ included -- can run without reimplementing that evidence stubbing here.
 """
 
 import re
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -25,6 +26,8 @@ from app.coach_lineup import (
 )
 from app.player_pool import OwnershipRepository
 from scripts.bootstrap_round1_2026 import bootstrap_round1_2026
+from tests.db_helpers import migrated_connection
+from tests.test_opening_round import nominate_bl_2024, setup_scope
 
 
 def _hidden(html: str, name: str) -> str:
@@ -218,3 +221,31 @@ def test_account_status_progression_save_submit_edit_resubmit(rehearsal):
     account = client.get("/account", cookies=cookies)
     assert _round_status_text(account.text) == "Submitted"
     assert "Submitted version 2" in _round_meta_text(account.text)
+
+
+def test_opening_round_preload_alone_is_not_read_as_a_saved_draft():
+    """An active Opening Round nomination (issue #69) makes `ensure_draft`'s
+    `preload_target_lineup` call advance the draft's revision past 1 the
+    first time the coach merely *views* the round -- with no Save/Submit
+    action at all. `revision > 1` on its own would misreport that as
+    "Draft saved"; the account summary must still call it "Not submitted"."""
+    database = migrated_connection()
+    _, round_, entries, scope = setup_scope(database, 2024, 956)
+    entry = entries[0]
+    nominate_bl_2024(database, scope["season_id"], round_.bbbffl_round_id, entry)
+    coach = database.execute(
+        "SELECT coach_id FROM season_entry_coach_history WHERE season_entry_id=? AND ended_at IS NULL",
+        (entry.season_entry_id,),
+    ).fetchone()
+
+    service = CoachLineupService(database, afl_client=SimpleNamespace())
+    entry_context = service.resolve(coach["coach_id"], scope["season_id"], round_.bbbffl_round_id)
+    draft = service.ensure_draft(scope["season_id"], round_.bbbffl_round_id, entry_context)
+
+    # Confirms this test actually exercises the preload-bumps-revision
+    # behaviour, not a no-op.
+    assert draft.revision > 1
+
+    [summary] = service.list_rounds(coach["coach_id"])
+    assert summary["state"] == ACCOUNT_STATE_NOT_SUBMITTED
+    assert summary["draft_revision"] == draft.revision

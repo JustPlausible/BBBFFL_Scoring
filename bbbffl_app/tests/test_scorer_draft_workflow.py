@@ -59,11 +59,20 @@ def _seed_season(database):
     ]
     OwnershipRepository(database).configure_squad_limit(season.season_id, SQUAD_LIMIT)
     pool = PlayerPoolRepository(database)
-    players = [
-        pool.refresh_player(season.season_id, number + 1, f"Synthetic Player {number:03d}")
-        for number in range(TOTAL_PICKS + 15)
+    recognisable = [
+        (1001, "Marcus Bontempelli", 7, "Western Bulldogs"),
+        (1002, "Nick Daicos", 4, "Collingwood"),
+        (1003, "Patrick Cripps", 3, "Carlton"),
     ]
-    ineligible = pool.refresh_player(season.season_id, 9999, "Ineligible Player", eligible=False)
+    players = [
+        pool.refresh_player(season.season_id, canonical_id, name, afl_team_id=team_id, afl_team_name=team)
+        for canonical_id, name, team_id, team in recognisable
+    ]
+    players.extend(
+        pool.refresh_player(season.season_id, number + 2000, f"Synthetic Player {number:03d}")
+        for number in range(TOTAL_PICKS + 12)
+    )
+    ineligible = pool.refresh_player(season.season_id, 9999, "Identity unresolved", eligible=False)
     return season, entries, players, ineligible
 
 
@@ -103,6 +112,56 @@ def test_full_ten_entry_draft_runs_through_finalisation_via_the_admin_api(synthe
     assert initial["current_pick"]["current_season_entry_id"] == entries[0].season_entry_id
     assert initial["order"][0]["season_entry_id"] == entries[0].season_entry_id
 
+    # -- Issue #101's player-pool browser is a season-scoped joined view of
+    # real player facts and ownership, not a second availability ledger.
+    page = client.get(f"/admin/draft/{season.season_id}")
+    assert page.status_code == 200
+    assert "Season player pool" in page.text
+    assert "if (token) headers['X-Admin-Token'] = token" in page.text
+    assert "'X-Admin-Token': getToken()" not in page.text
+    scorer_page = client.get(
+        f"/admin/draft/{season.season_id}",
+        headers={"X-Admin-Token": "legacy-operator", "X-Authority-Role": "scorer"},
+    )
+    assert scorer_page.status_code == 200
+
+    # Season Centre must not advertise a scorer-only workflow to a
+    # Secretary, whose player-pool read capability alone is insufficient.
+    from app.authorization import Principal, Role
+    from app.routes.season_centre import _season_view
+
+    secretary_view = _season_view(client.app.state, season.season_id, Principal(Role.SECRETARY))
+    admin_view = _season_view(client.app.state, season.season_id, Principal(Role.ADMIN))
+    assert secretary_view["links"]["draft"] is None
+    assert admin_view["links"]["draft"] == f"/admin/draft/{season.season_id}"
+    searched = client.get(f"{api}/players", params={"q": "marcus bont"}).json()
+    assert len(searched) == 1
+    assert searched[0]["display_name"] == "Marcus Bontempelli"
+    assert searched[0]["canonical_player_id"] == 1001
+    assert searched[0]["afl_team_name"] == "Western Bulldogs"
+    assert searched[0]["availability"] == "available"
+    unresolved = client.get(f"{api}/players", params={"availability": "unresolved"}).json()
+    assert unresolved == [
+        {
+            "season_player_id": ineligible.season_player_id,
+            "season_id": season.season_id,
+            "canonical_player_id": 9999,
+            "display_name": "Identity unresolved",
+            "afl_team_id": None,
+            "afl_team_name": None,
+            "eligible": False,
+            "availability": "unresolved",
+            "owner_season_entry_id": None,
+            "owner_team_name": None,
+            "diagnostic": "Not selectable: season player identity or eligibility requires investigation",
+        }
+    ]
+
+    other_season = SeasonRepository(database).create_season(2097, "Other pool")
+    other_player = PlayerPoolRepository(database).refresh_player(other_season.season_id, 1001, "Wrong-season Marcus")
+    scoped_ids = {item["season_player_id"] for item in client.get(f"{api}/players").json()}
+    assert other_player.season_player_id not in scoped_ids
+
     # -- The ineligible player never appears in search results.
     available_names = {player["display_name"] for player in client.get(f"{api}/available-players").json()}
     assert ineligible.display_name not in available_names
@@ -120,6 +179,10 @@ def test_full_ten_entry_draft_runs_through_finalisation_via_the_admin_api(synthe
     assert board()["status"]["completed_picks"] == 1
     events = AuditEventRepository(database).list_events(action="draft.pick.completed")
     assert events[-1].actor_role == "scorer" and events[-1].actor_id == "Steve the Scorer"
+    claimed = client.get(f"{api}/players", params={"q": first_player["canonical_player_id"]}).json()[0]
+    assert claimed["availability"] == "owned"
+    assert claimed["owner_season_entry_id"] == entries[0].season_entry_id
+    assert claimed["owner_team_name"] == "Synthetic Team 0"
 
     # -- Picking an already-owned player is rejected without advancing the turn.
     completed_count = board()["status"]["completed_picks"]

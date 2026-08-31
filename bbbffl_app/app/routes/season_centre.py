@@ -50,7 +50,13 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from app.audit import ActorContext
-from app.authorization import Principal, require_role_covers_season, require_secretary_or_admin, resolve_principal
+from app.authorization import (
+    Principal,
+    principal_has_capability,
+    require_role_covers_season,
+    require_secretary_or_admin,
+    resolve_principal,
+)
 from app.config import BASE_DIR
 from app.routes.auth import _attach_csrf_cookie, _issue_csrf_token
 from app.season_centre import build_season_centre, list_coaches_overview, list_seasons_overview
@@ -64,6 +70,15 @@ from app.season_centre import update_coach as update_coach_service
 router = APIRouter(prefix="/api/admin/season-centre")
 page_router = APIRouter()
 templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
+
+
+def _season_view(state, season_id: str, principal: Principal):
+    view = build_season_centre(
+        state.seasons, state.identities, state.draft, state.preseason, state.player_pool, state.lifecycle, season_id
+    )
+    if not principal_has_capability(principal, "draft.participate"):
+        view["links"]["draft"] = None
+    return view
 
 
 class CreateSeasonRequest(BaseModel):
@@ -187,9 +202,7 @@ def update_coach(
 def season_centre(season_id: str, request: Request, principal: Principal = Depends(require_secretary)):
     require_role_covers_season(request, principal, season_id)
     state = request.app.state
-    return build_season_centre(
-        state.seasons, state.identities, state.draft, state.preseason, state.player_pool, state.lifecycle, season_id
-    )
+    return _season_view(state, season_id, principal)
 
 
 @router.post("/{season_id}/entries", dependencies=[Depends(require_secretary)])
@@ -207,9 +220,7 @@ def create_entry(
         reason=payload.reason,
     )
     state = request.app.state
-    return build_season_centre(
-        state.seasons, state.identities, state.draft, state.preseason, state.player_pool, state.lifecycle, season_id
-    )
+    return _season_view(state, season_id, principal)
 
 
 def _require_entry_season_covered(request: Request, principal: Principal, entry_id: str):
@@ -233,15 +244,7 @@ def rename_team(
     entry = _require_entry_season_covered(request, principal, entry_id)
     state = request.app.state
     rename_team_service(state.identities, entry_id, payload.team_name, actor=_actor(principal), reason=payload.reason)
-    return build_season_centre(
-        state.seasons,
-        state.identities,
-        state.draft,
-        state.preseason,
-        state.player_pool,
-        state.lifecycle,
-        entry.season_id,
-    )
+    return _season_view(state, entry.season_id, principal)
 
 
 @router.post("/entries/{entry_id}/coach", dependencies=[Depends(require_secretary)])
@@ -251,15 +254,7 @@ def transfer_entry(
     entry = _require_entry_season_covered(request, principal, entry_id)
     state = request.app.state
     transfer_entry_service(state.identities, entry_id, payload.coach_id, actor=_actor(principal), reason=payload.reason)
-    return build_season_centre(
-        state.seasons,
-        state.identities,
-        state.draft,
-        state.preseason,
-        state.player_pool,
-        state.lifecycle,
-        entry.season_id,
-    )
+    return _season_view(state, entry.season_id, principal)
 
 
 def _render_page(request: Request, season_id: str | None) -> HTMLResponse:

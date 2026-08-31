@@ -36,6 +36,7 @@ def main() -> int:
     c.add_argument("--state", required=True)
     c.add_argument("--effective-at", required=True)
     c.add_argument("--stage", choices=("scheduled", "final-results"), default="scheduled")
+    c.add_argument("--round-id", type=int, help="AFL round whose final results are released at final-results")
     args = p.parse_args()
     try:
         if args.command == "acquire":
@@ -56,7 +57,7 @@ def main() -> int:
                             "display_name": x["display_name"],
                             "afl_team_id": x["team_id"],
                             "afl_team_name": x["team_name"],
-                            "eligible": True,
+                            "eligible": x.get("eligible", True),
                             "source_updated_at": None,
                         }
                         for x in payload["players"]
@@ -75,10 +76,32 @@ def main() -> int:
         clock = ReplayClock.from_iso(args.effective_at)
         target = Path(args.state)
         target.parent.mkdir(parents=True, exist_ok=True)
+        finalised_round_ids: set[int] = set()
+        if target.exists():
+            existing = json.loads(target.read_text(encoding="utf-8"))
+            if existing.get("schema") != "bbbffl.replay-checkpoint/v1":
+                raise ValueError(f"unsupported replay checkpoint schema: {existing.get('schema')!r}")
+            previous = ReplayClock.from_iso(existing["effective_at"])
+            if clock.now() < previous.now():
+                raise ValueError(
+                    f"replay effective time cannot move backwards: {clock.now().isoformat()} < {previous.now().isoformat()}"
+                )
+            finalised_round_ids.update(int(value) for value in existing.get("finalised_round_ids", []))
+        if args.stage == "final-results":
+            if args.round_id is None:
+                raise ValueError("--round-id is required with --stage final-results")
+            finalised_round_ids.add(args.round_id)
+        elif args.round_id is not None:
+            raise ValueError("--round-id is only valid with --stage final-results")
         temporary = target.with_suffix(target.suffix + ".tmp")
         temporary.write_text(
             json.dumps(
-                {"schema": "bbbffl.replay-checkpoint/v1", "effective_at": clock.now().isoformat(), "stage": args.stage},
+                {
+                    "schema": "bbbffl.replay-checkpoint/v1",
+                    "effective_at": clock.now().isoformat(),
+                    "stage": args.stage,
+                    "finalised_round_ids": sorted(finalised_round_ids),
+                },
                 indent=2,
             )
             + "\n"

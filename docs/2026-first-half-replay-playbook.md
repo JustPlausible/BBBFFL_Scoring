@@ -83,12 +83,14 @@ Destructive reset is intentionally explicit and project-scoped: back up, run `$C
 Copy `config/replay/2026-first-half.template.json` to `replay/2026-first-half/config/2026-first-half.json`, enter genuine accepted identities/rules/order, and point `player_pool_file` at `/replay/evidence/2026-player-pool.json`. This directory is mounted read-only at `/secure`. Do not invent coach facts or use SQL. Then:
 
 ```bash
-$COMPOSE run --rm app python -m scripts.bootstrap_2026_first_half --config /secure/2026-first-half.json
+$COMPOSE run --rm -v "$PWD/bbbffl_app:/app" app \
+  python -m scripts.bootstrap_2026_first_half --config /secure/2026-first-half.json
 read -rsp 'Replay operator password: ' BBBFFL_REPLAY_OPERATOR_PASSWORD; echo; export BBBFFL_REPLAY_OPERATOR_PASSWORD
-$COMPOSE run --rm -e BBBFFL_REPLAY_OPERATOR_PASSWORD app python -m scripts.bootstrap_2026_first_half \
+$COMPOSE run --rm -v "$PWD/bbbffl_app:/app" -e BBBFFL_REPLAY_OPERATOR_PASSWORD app \
+  python -m scripts.bootstrap_2026_first_half \
   --config /secure/2026-first-half.json --provision-operator
 unset BBBFFL_REPLAY_OPERATOR_PASSWORD
-$COMPOSE run --rm app python -m scripts.bootstrap_2026_first_half \
+$COMPOSE run --rm -v "$PWD/bbbffl_app:/app" app python -m scripts.bootstrap_2026_first_half \
   --config /secure/2026-first-half.json --readiness-only --json
 ```
 
@@ -112,14 +114,14 @@ Historical exports commonly have only scheduled starts and final facts. That is 
 For each round:
 
 1. Record commit/image and evidence package/version.
-2. Stage a timezone-aware pre-lockout instant with `python -m scripts.first_half_replay checkpoint --state ../replay/2026-first-half/state/checkpoint.json --effective-at <UTC-ISO> --stage scheduled`; restart app.
+2. Stage a timezone-aware pre-lockout instant with `$COMPOSE run --rm -v "$PWD/bbbffl_app:/app" -v "$PWD/replay/2026-first-half/state:/replay/state" app python -m scripts.first_half_replay checkpoint --state /replay/state/checkpoint.json --effective-at <UTC-ISO> --stage scheduled`; restart app. The source mount supplies the intentionally image-excluded operator script, while the writable one-off state mount overrides the application's read-only state mount without changing the runtime container.
 3. Verify the persisted JSON and replay time/checkpoint shown in diagnostics/logging.
 4. Verify authenticated role and acting context.
 5. Open **Round Preflight**; verify five fixtures, accepted AFL mapping, and selective/main trigger configuration.
 6. Inspect **Opening Round Operations** deferred selections where applicable, pass readiness, then **Open Round**.
 7. Through **Weekly Lineup**, create, carry forward, or Administrator-proxy all ten lineups using only supported actions; record submission/proxy provenance.
 8. Repeat the checkpoint command at each relevant scheduled match start and main boundary, restarting app each time. Confirm later-club edits remain possible and started/triggered edits are rejected.
-9. Stage finality: `python -m scripts.first_half_replay checkpoint ... --effective-at <after-final-UTC> --stage final-results`; restart. Verify `CONCLUDED` and final stat availability.
+9. Stage finality with the same source-mounted command plus `--effective-at <after-final-UTC> --stage final-results --round-id <mapped-AFL-round-id>`; restart. The command retains all previously released round IDs and refuses to move effective time backwards. Verify only the released round becomes `CONCLUDED` with final stats; future rounds remain hidden.
 10. In **Scorer Round Review**, calculate/refresh all scores; inspect DNP, interchange and availability cases. Resolve only legitimate scorer/manual-review cases.
 11. Move to review, sign off, and publish all five results through existing controls.
 12. Verify public **Round Centre**, results, and cumulative ladder immediately.

@@ -42,6 +42,29 @@ def acquire_first_half_2026(api: ConsumerApi, *, source_base_url: str, acquired_
         raise ReplayEvidenceError("AFL 2026 season is missing season_id")
     rounds_path = f"/api/v1/seasons/{season_id}/rounds"
     all_rounds = _rows(api.get(rounds_path), "rounds", path=rounds_path)
+    players_path = f"/api/v1/seasons/{season_id}/players"
+    season_players = _rows(api.get(players_path), "players", path=players_path)
+    players: dict[int, dict] = {}
+    for row in season_players:
+        player_id = row.get("canonical_player_id")
+        team = row.get("team") or row.get("current_team")
+        if player_id is None or not isinstance(team, dict) or team.get("team_id") is None:
+            raise ReplayEvidenceError(
+                f"AFL season {season_id} has malformed season-player identity for player {player_id}"
+            )
+        if player_id in players:
+            raise ReplayEvidenceError(f"AFL season {season_id} contains duplicate canonical player {player_id}")
+        players[player_id] = {
+            "canonical_player_id": player_id,
+            "display_name": row.get("display_name", f"Player {player_id}"),
+            "team_id": team["team_id"],
+            "team_name": team.get("name", ""),
+            "identifiers": row.get("identifiers", {}),
+            "eligible": bool(row.get("eligible", True)),
+            "provenance": _prov(players_path),
+        }
+    if not players:
+        raise ReplayEvidenceError(f"authoritative AFL season-player pool is empty for season {season_id}")
 
     def wanted(row: dict) -> bool:
         number = row.get("round_number")
@@ -57,7 +80,7 @@ def acquire_first_half_2026(api: ConsumerApi, *, source_base_url: str, acquired_
             f"found ordinary={sorted(ordinary)}, opening={len(opening)}"
         )
     rounds.sort(key=lambda r: (r.get("round_number", 999), r.get("round_id", 0)))
-    matches_out, stats_out, players, rosters, roster_missing = [], {}, {}, {}, []
+    matches_out, stats_out, rosters, roster_missing = [], {}, {}, []
     for round_row in rounds:
         round_id = round_row.get("round_id")
         if round_id is None:
@@ -76,14 +99,25 @@ def acquire_first_half_2026(api: ConsumerApi, *, source_base_url: str, acquired_
                 if not match.get(field):
                     raise ReplayEvidenceError(f"AFL match {match_id} is missing required {field}")
             try:
-                datetime.fromisoformat(str(match["start_time_utc"]).replace("Z", "+00:00"))
+                start = datetime.fromisoformat(str(match["start_time_utc"]).replace("Z", "+00:00"))
+                if start.tzinfo is None:
+                    raise ValueError("timestamp is not timezone-aware")
                 for side in ("home_team", "away_team"):
                     int(match[side]["team_id"])
             except (KeyError, TypeError, ValueError) as exc:
                 raise ReplayEvidenceError(f"AFL match {match_id} has malformed start/team identity: {exc}") from exc
             matches_out.append({**match, "round_id": round_id, "provenance": _prov(path)})
             stats_path = f"/api/v1/matches/{match_id}/player-stats"
-            stat_rows = _rows(api.get(stats_path), "players", path=stats_path)
+            stats_payload = api.get(stats_path)
+            if not isinstance(stats_payload, dict):
+                raise ReplayEvidenceError(f"malformed consumer API response at {stats_path}: expected object")
+            finality = (stats_payload.get("lifecycle") or {}).get("finality")
+            if str(finality).lower() != "final":
+                raise ReplayEvidenceError(
+                    f"required final player stats unavailable for AFL match {match_id} "
+                    f"in round {round_id}: finality={finality!r}"
+                )
+            stat_rows = _rows(stats_payload, "players", path=stats_path)
             if not stat_rows:
                 raise ReplayEvidenceError(f"required final player stats missing for AFL match {match_id}")
             exported_stats = []
@@ -92,6 +126,10 @@ def acquire_first_half_2026(api: ConsumerApi, *, source_base_url: str, acquired_
                 if pid is None or row.get("team_id") is None or not isinstance(row.get("stats"), dict):
                     raise ReplayEvidenceError(
                         f"AFL match {match_id} has malformed player-stat identity for player {pid}"
+                    )
+                if pid not in players:
+                    raise ReplayEvidenceError(
+                        f"AFL match {match_id} stats reference player {pid} missing from season {season_id} player pool"
                     )
                 stat = row["stats"]
                 exported_stats.append(
@@ -102,14 +140,6 @@ def acquire_first_half_2026(api: ConsumerApi, *, source_base_url: str, acquired_
                         "provenance": _prov(stats_path),
                     }
                 )
-                players[pid] = {
-                    "canonical_player_id": pid,
-                    "display_name": row.get("display_name", f"Player {pid}"),
-                    "team_id": row["team_id"],
-                    "team_name": row.get("team_name", ""),
-                    "identifiers": row.get("identifiers", {}),
-                    "provenance": _prov(stats_path),
-                }
             stats_out[str(match_id)] = exported_stats
             roster_path = f"/api/v1/matches/{match_id}/rosters"
             try:

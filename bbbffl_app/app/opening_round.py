@@ -67,6 +67,8 @@ touches positions with no active nomination.
 from dataclasses import dataclass
 from typing import Protocol
 
+from sqlalchemy.exc import IntegrityError
+
 from app.audit import ActorContext, ConnectionLike, append_event
 from app.db import DatabaseConnection, _for_update_suffix, transaction
 from app.lineups import POSITIONS, LineupIntegrityError, WeeklyLineupRepository
@@ -716,12 +718,35 @@ class OpeningRoundNominationRepository:
                 ).fetchone()
                 if not owner or owner["season_entry_id"] != existing["season_entry_id"]:
                     raise IneligiblePlayerError("replacement player is not currently owned by the nominating entry")
+            conflicting_slot = conn.execute(
+                "SELECT nomination_id FROM opening_round_nomination "
+                "WHERE bbbffl_round_id=? AND season_entry_id=? AND position=? AND nomination_id<>?",
+                (existing["bbbffl_round_id"], existing["season_entry_id"], new_position, nomination_id),
+            ).fetchone()
+            if conflicting_slot:
+                raise OpeningRoundError(f"target slot {new_position} for this round/entry is already nominated")
+            conflicting_player = conn.execute(
+                "SELECT nomination_id FROM opening_round_nomination "
+                "WHERE bbbffl_round_id=? AND season_entry_id=? AND season_player_id=? AND nomination_id<>?",
+                (existing["bbbffl_round_id"], existing["season_entry_id"], new_player, nomination_id),
+            ).fetchone()
+            if conflicting_player:
+                raise OpeningRoundError("this player is already nominated into another slot for this round/entry")
             before = {"position": existing["position"], "season_player_id": existing["season_player_id"]}
             now = _now()
-            conn.execute(
-                "UPDATE opening_round_nomination SET position=?, season_player_id=?, updated_at=? WHERE nomination_id=?",
-                (new_position, new_player, now, nomination_id),
-            )
+            try:
+                conn.execute(
+                    "UPDATE opening_round_nomination SET position=?, season_player_id=?, updated_at=? "
+                    "WHERE nomination_id=?",
+                    (new_position, new_player, now, nomination_id),
+                )
+            except IntegrityError as exc:
+                # Pre-checks provide useful deterministic messages; the
+                # constraint translation closes the concurrent-write race.
+                raise OpeningRoundError(
+                    "nomination correction conflicts with an existing target slot or nominated player"
+                ) from exc
+            self._reconcile_corrected_target_draft(conn, existing, new_position, new_player, now)
             append_event(
                 conn,
                 actor=actor,
@@ -737,6 +762,44 @@ class OpeningRoundNominationRepository:
                     "SELECT * FROM opening_round_nomination WHERE nomination_id=?", (nomination_id,)
                 ).fetchone()
             )
+
+    @staticmethod
+    def _reconcile_corrected_target_draft(conn, previous, new_position: str, new_player: str, now: str) -> None:
+        """Reconcile an already-preloaded draft in the correction transaction.
+
+        The old position is cleared only when it still contains the exact
+        assignment originally preloaded by this nomination. A later,
+        legitimate draft value is never blindly erased. The corrected active
+        nomination is then installed exactly once and the draft revision is
+        advanced so concurrent browser edits fail rather than overwrite it.
+        If no target draft exists yet, the normal preload operation will seed
+        the corrected nomination when that lineup is first opened.
+        """
+        lineup = conn.execute(
+            "SELECT lineup_id FROM weekly_lineup WHERE bbbffl_round_id=? AND season_entry_id=?",
+            (previous["bbbffl_round_id"], previous["season_entry_id"]),
+        ).fetchone()
+        if lineup is None:
+            return
+        lineup_id = lineup["lineup_id"]
+        if previous["position"] != new_position:
+            old_slot = conn.execute(
+                "SELECT season_player_id FROM weekly_lineup_draft_slot WHERE lineup_id=? AND position=?",
+                (lineup_id, previous["position"]),
+            ).fetchone()
+            if old_slot is not None and old_slot["season_player_id"] == previous["season_player_id"]:
+                conn.execute(
+                    "UPDATE weekly_lineup_draft_slot SET season_player_id=NULL WHERE lineup_id=? AND position=?",
+                    (lineup_id, previous["position"]),
+                )
+        conn.execute(
+            "UPDATE weekly_lineup_draft_slot SET season_player_id=? WHERE lineup_id=? AND position=?",
+            (new_player, lineup_id, new_position),
+        )
+        conn.execute(
+            "UPDATE weekly_lineup SET draft_revision=draft_revision+1, updated_at=? WHERE lineup_id=?",
+            (now, lineup_id),
+        )
 
     @staticmethod
     def _resolve_source_match(afl_client, afl_opening_round_id, afl_club_id) -> int | None:

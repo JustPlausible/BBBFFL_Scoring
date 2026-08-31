@@ -209,6 +209,7 @@ ROUTES = {
     "app.routes.auth",
     "app.routes.lineups",
     "app.routes.coach_lineup",
+    "app.routes.delegated_operations",
     "app.routes.public_rounds",
     "app.routes.season_centre",
     "app.routes.context",

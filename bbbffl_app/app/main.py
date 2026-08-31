@@ -36,6 +36,7 @@ from app.identity import IdentityRepository
 from app.ladder import LadderRepository
 from app.lineups import LineupConflictError, WeeklyLineupRepository
 from app.migrations import migrate
+from app.opening_round import OpeningRoundError
 from app.player_pool import PlayerPoolRepository, PlayerUnavailableError, SquadCapacityError
 from app.preseason import (
     PreseasonDraftNotFinalizedError,
@@ -278,6 +279,12 @@ async def afl_api_error_handler(request: Request, exc: AflApiError) -> JSONRespo
 @app.exception_handler(LineupConflictError)
 async def lineup_conflict_handler(request: Request, exc: LineupConflictError) -> JSONResponse:
     """An expected optimistic-concurrency loss, never an internal error."""
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(OpeningRoundError)
+async def opening_round_error_handler(request: Request, exc: OpeningRoundError) -> JSONResponse:
+    """Expected nomination/locking conflicts are operator-resolvable, not 500s."""
     return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 

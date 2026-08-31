@@ -14,11 +14,10 @@ from pydantic import BaseModel
 from app.audit import ActorContext
 from app.authorization import Principal, require_capability, require_entry_context, require_role_covers_season
 from app.carry_forward import CarryForwardService
-from app.coach_lineup import CoachLineupService
+from app.coach_lineup import COACH_LINEUP_POSITIONS, CoachLineupService
 from app.config import BASE_DIR
 from app.csrf import issue_token, verify_token
 from app.lineup_proxy import LineupProxyService
-from app.lineups import POSITIONS
 from app.opening_round import OpeningRoundNominationRepository, OpeningRoundRuleRepository, OpeningRoundSelectionGuard
 
 router = APIRouter(prefix="/api/operations")
@@ -34,6 +33,7 @@ class DraftRequest(BaseModel):
 
 
 class SubmitRequest(BaseModel):
+    positions: dict[str, str | None]
     expected_draft_revision: int
     expected_submission_version: int
     reason: str
@@ -110,7 +110,7 @@ def _lineup_view(request: Request, principal: Principal, scope: dict) -> dict:
     )
     deferred = {
         position: service.nominations.deferred_context(scope["bbbffl_round_id"], scope["season_entry_id"], position)
-        for position in POSITIONS
+        for position in COACH_LINEUP_POSITIONS
     }
     players = [
         service.pool.get_by_id(p.season_player_id) for p in service.ownership.current_squad(scope["season_entry_id"])
@@ -165,14 +165,23 @@ def save_draft(round_id: str, payload: DraftRequest, request: Request, principal
 def submit(round_id: str, payload: SubmitRequest, request: Request, principal: Principal = Depends(require_proxy)):
     scope = _scope(request, principal, round_id)
     _csrf(request, principal)
-    draft = request.app.state.lineups.get_draft(
-        scope["season_id"], scope["competition_id"], round_id, scope["season_entry_id"]
+    proxy = LineupProxyService(request.app.state.database, request.app.state.afl_client)
+    # Submit is intentionally save-then-submit on the server. The browser's
+    # visible choices and vacancy confirmation therefore describe the exact
+    # persisted revision which becomes authoritative, even when the operator
+    # never clicked the separate Save Draft convenience action.
+    draft = proxy.create_or_amend(
+        scope["season_id"],
+        scope["competition_id"],
+        round_id,
+        scope["season_entry_id"],
+        payload.positions,
+        expected_revision=payload.expected_draft_revision,
+        actor=_actor(principal),
     )
-    if draft is None:
-        raise HTTPException(409, "Save a delegated draft before submitting")
-    LineupProxyService(request.app.state.database, request.app.state.afl_client).submit(
+    proxy.submit(
         draft.lineup_id,
-        expected_draft_revision=payload.expected_draft_revision,
+        expected_draft_revision=draft.revision,
         expected_submission_version=payload.expected_submission_version,
         actor=_actor(principal),
         reason=payload.reason,
@@ -286,12 +295,6 @@ def correct(
         season_player_id=payload.season_player_id,
         actor=_actor(principal),
         reason=f"Replay/reconstructed input correction: {payload.reason}",
-    )
-    competition_id = request.app.state.database.execute(
-        "SELECT competition_id FROM bbbffl_round WHERE bbbffl_round_id=?", (corrected.bbbffl_round_id,)
-    ).fetchone()["competition_id"]
-    repo.preload_target_lineup(
-        request.app.state.lineups, season_id, competition_id, corrected.bbbffl_round_id, corrected.season_entry_id
     )
     return {"nomination": asdict(corrected), "provenance": "replay/reconstructed", "entered_by": principal.display_name}
 

@@ -262,7 +262,9 @@ function renderCompleted(board) {
       const reason = prompt('Reason for correcting this pick?');
       if (reason === null) return;
       if (!confirm('This audited correction reopens the latest pick and releases its player. Later picks are not deleted. Continue?')) return;
-      api(`${API}/correct`, { draft_pick_id: btn.dataset.pick, reason }).then(() => refresh('Pick corrected; select a replacement.'));
+      api(`${API}/correct`, { draft_pick_id: btn.dataset.pick, reason })
+        .then(() => refresh('Pick corrected; select a replacement.'))
+        .catch(handleError);
     };
   });
   document.getElementById('corrections-list').innerHTML = board.corrections.length
@@ -291,23 +293,29 @@ async function renderPlayers(query) {
   `).join('') || '<p class="muted">No matching season players.</p>';
   document.querySelectorAll('.pick-btn').forEach(btn => {
     btn.onclick = () => {
+      const selectedPlayer = players.find(player => player.season_player_id === btn.dataset.player);
+      const selectedPlayerName = selectedPlayer ? selectedPlayer.display_name : 'Player';
+      const selectingTeamName = board.current_pick.current_team_name;
       api(`${API}/pick`, {
         season_entry_id: board.current_pick.current_season_entry_id,
         season_player_id: btn.dataset.player,
         draft_pick_id: board.current_pick.draft_pick_id,
         reason: document.getElementById('pick-reason').value || null,
-      }).then(() => refresh(`${p.display_name} drafted for ${board.current_pick.current_team_name}.`)).catch(handleError);
+      }).then(() => refresh(`${selectedPlayerName} drafted for ${selectingTeamName}.`)).catch(handleError);
     };
   });
 }
 
 let searchTimer = null;
+function refreshPlayers(query) {
+  return renderPlayers(query).catch(error => say(error.message || 'Player search could not be refreshed.'));
+}
 document.getElementById('player-search').oninput = (e) => {
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => renderPlayers(e.target.value), 200);
+  searchTimer = setTimeout(() => refreshPlayers(e.target.value), 200);
 };
 document.getElementById('availability-filter').onchange = () => {
-  renderPlayers(document.getElementById('player-search').value);
+  refreshPlayers(document.getElementById('player-search').value);
 };
 
 document.getElementById('pause-btn').onclick = () => {
@@ -324,13 +332,18 @@ document.getElementById('reopen-btn').onclick = () => {
   const reason = document.getElementById('reopen-reason').value;
   const confirmText = document.getElementById('reopen-confirm').value;
   if (!confirm('Reopen the finalised draft? This is a deliberately unusual action.')) return;
-  api(`${API}/reopen`, { reason, confirm: confirmText }).then(refresh);
+  api(`${API}/reopen`, { reason, confirm: confirmText }).then(() => refresh('Draft reopened.')).catch(handleError);
 };
 
 function say(text, kind='error') {
   const message = document.getElementById('message'); message.textContent = text || ''; message.className = text ? `message ${kind}` : 'message';
 }
-function handleError(error) { say(error.message); refresh(); }
+async function handleError(error) {
+  // Refresh first so stale turn/availability state is authoritative, then
+  // restore the useful domain message that `refresh()` normally clears.
+  await refresh();
+  say(error.message || 'The draft action could not be completed.');
+}
 
 async function refresh(successMessage) {
   try {
@@ -352,7 +365,7 @@ async function refresh(successMessage) {
     document.getElementById('completion-summary').innerHTML = board.status.finalized_at
       ? `<p><strong>Draft finalised.</strong> All ${board.status.total_picks} required picks and team squad targets are satisfied.</p><p><a href="${escapeHtml(board.preseason_url)}">Continue to preseason and opening-squad management →</a></p>`
       : (board.status.completed_picks === board.status.total_picks ? '<p><strong>Every required pick and squad target is complete.</strong> Review the board, then finalise.</p>' : '');
-    renderPlayers(document.getElementById('player-search').value);
+    await renderPlayers(document.getElementById('player-search').value);
     if (successMessage) say(successMessage, 'success'); else say('');
   } catch (e) {
     document.getElementById('status-line').textContent = 'The draft board could not be loaded.';

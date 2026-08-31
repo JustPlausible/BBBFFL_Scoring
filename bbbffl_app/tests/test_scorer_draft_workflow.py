@@ -93,6 +93,33 @@ def test_readiness_explains_missing_authoritative_setup(synthetic_draft_client):
     assert "database" not in str(readiness).lower()
 
 
+def test_readiness_rejects_a_nonempty_but_insufficient_player_pool(synthetic_draft_client):
+    client = synthetic_draft_client
+    database = client.app.state.database
+    season = SeasonRepository(database).create_season(2095, "Insufficient pool")
+    identities = IdentityRepository(database)
+    entries = [
+        identities.create_entry(
+            season.season_id,
+            f"insufficient-{number}",
+            identities.create_coach(f"Insufficient Coach {number}").coach_id,
+            f"Insufficient Team {number}",
+        )
+        for number in range(ENTRIES)
+    ]
+    OwnershipRepository(database).configure_squad_limit(season.season_id, 2)
+    PlayerPoolRepository(database).refresh_player(season.season_id, 5001, "Only Available Player")
+
+    from app.draft import DraftRepository
+
+    DraftRepository(database).accept_order(season.season_id, [entry.season_entry_id for entry in entries])
+    readiness = client.get(f"/api/admin/draft/{season.season_id}/readiness").json()
+    players = next(item for item in readiness["checks"] if item["key"] == "players")
+    assert players["ready"] is False
+    assert players["detail"] == "Only 1 selectable player is available; 20 remaining selections are required."
+    assert readiness["ready"] is False
+
+
 def test_full_ten_entry_draft_runs_through_finalisation_via_the_admin_api(synthetic_draft_client):
     client = synthetic_draft_client
     database = client.app.state.database
@@ -144,6 +171,10 @@ def test_full_ten_entry_draft_runs_through_finalisation_via_the_admin_api(synthe
     assert "Season player pool" in page.text
     assert "if (token) headers['X-Admin-Token'] = token" in page.text
     assert "'X-Admin-Token': getToken()" not in page.text
+    assert "const selectedPlayer = players.find" in page.text
+    assert "${p.display_name} drafted for" not in page.text
+    assert "await refresh();" in page.text
+    assert ".catch(handleError);" in page.text
     scorer_page = client.get(
         f"/admin/draft/{season.season_id}",
         headers={"X-Admin-Token": "legacy-operator", "X-Authority-Role": "scorer"},

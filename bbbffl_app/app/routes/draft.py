@@ -87,13 +87,6 @@ def _pick_actor(principal: Principal, legacy_scorer_name: str | None) -> ActorCo
     return _scorer_actor(legacy_scorer_name)
 
 
-def _team_name(request: Request, entry_id: str, cache: dict) -> str:
-    if entry_id not in cache:
-        team = request.app.state.identities.get_public_team(entry_id)
-        cache[entry_id] = team.team_name if team else entry_id
-    return cache[entry_id]
-
-
 def _entry_view(request: Request, entry_id: str, cache: dict) -> dict:
     """Resolve stable entry identity into public, human-facing labels."""
     if entry_id not in cache:
@@ -124,12 +117,9 @@ def _pick_view(request: Request, pick, cache: dict, player_cache: dict, event_ca
         if pick.selected_season_player_id
         else None
     )
-    if pick.draft_pick_id not in event_cache:
-        events = AuditEventRepository(request.app.state.database).list_events(
-            action="draft.pick.completed", entity_type="draft.pick", entity_id=pick.draft_pick_id
-        )
-        event_cache[pick.draft_pick_id] = events[-1] if events else None
-    event = event_cache[pick.draft_pick_id]
+    # Completion provenance is bulk-loaded once by `_board`. Current and
+    # upcoming picks cannot have a completion event, so never query for it.
+    event = event_cache.get(pick.draft_pick_id) if pick.completed_at else None
     actor_name = None
     if event and event.actor_id:
         actor = request.app.state.identities.get_coach(event.actor_id)
@@ -169,9 +159,18 @@ def _readiness(request: Request, season_id: str) -> dict:
     config = database.execute(
         "SELECT squad_limit FROM season_squad_configuration WHERE season_id=?", (season_id,)
     ).fetchone()
-    player_count = database.execute(
-        "SELECT COUNT(*) AS count FROM season_player_pool WHERE season_id=? AND eligible=TRUE", (season_id,)
-    ).fetchone()["count"]
+    available_count = len(request.app.state.player_pool.list_available(season_id))
+    if status is not None:
+        total_required = status.total_picks
+        completed = status.completed_picks
+    else:
+        total_required = len(entries) * config["squad_limit"] if config is not None else 0
+        completed = 0
+    remaining_required = max(total_required - completed, 0)
+    pool_sufficient = total_required > 0 and available_count >= remaining_required
+    player_word = "player" if available_count == 1 else "players"
+    player_verb = "is" if available_count == 1 else "are"
+    selection_word = "selection" if remaining_required == 1 else "selections"
     checks = [
         {
             "key": "entries",
@@ -189,11 +188,15 @@ def _readiness(request: Request, season_id: str) -> dict:
         },
         {
             "key": "players",
-            "ready": player_count > 0,
+            "ready": pool_sufficient,
             "label": "Season player pool",
-            "detail": f"{player_count} eligible AFL players are loaded."
-            if player_count
-            else "Load the season's AFL player pool before drafting.",
+            "detail": (
+                f"{available_count} selectable {player_word} {player_verb} available for "
+                f"{remaining_required} remaining {selection_word}."
+                if pool_sufficient
+                else f"Only {available_count} selectable {player_word} {player_verb} available; "
+                f"{remaining_required} remaining {selection_word} are required."
+            ),
         },
         {
             "key": "squad",
@@ -223,6 +226,12 @@ def _board(request: Request, season_id: str) -> dict:
     remaining = [pick for pick in all_picks if pick.completed_at is None]
     current = remaining[0] if remaining else None
     latest_completed = completed[-1] if completed else None
+    completed_ids = {pick.draft_pick_id for pick in completed}
+    event_cache = {
+        event.entity_id: event
+        for event in AuditEventRepository(request.app.state.database).list_events(action="draft.pick.completed")
+        if event.entity_id in completed_ids
+    }
     return {
         "season_id": season_id,
         "status": dataclasses.asdict(status),

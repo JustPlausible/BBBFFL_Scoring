@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from app.audit import ActorContext
 from app.authorization import Principal, require_capability, require_role_covers_season
 from app.config import BASE_DIR
-from app.routes.auth import _attach_csrf_cookie, _issue_csrf_token
+from app.csrf import issue_token, verify_token
 
 router = APIRouter(prefix="/api/admin/fixture-setup")
 page_router = APIRouter()
@@ -20,13 +20,17 @@ class FixtureAssignmentRequest(BaseModel):
     entries_by_fixture_number: list[str]
 
 
+class FreezeFixtureRequest(BaseModel):
+    expected_version: int
+
+
 def _actor(principal: Principal) -> ActorContext:
     return ActorContext(actor_type="anonymous_operator", actor_id=principal.coach_id, actor_role=principal.role.value)
 
 
 def _view(request: Request, season_id: str) -> dict:
     state = request.app.state
-    season = state.seasons.get(season_id)
+    season = state.seasons.get_season(season_id)
     if season is None:
         raise HTTPException(status_code=404, detail="Unknown season")
     entries = state.identities.list_entries(season_id)
@@ -67,6 +71,7 @@ def preview_fixture(
     principal: Principal = Depends(require_fixture_manager),
 ):
     require_role_covers_season(request, principal, season_id)
+    _require_session_csrf(request, principal)
     try:
         request.app.state.fixtures.save_draft(
             season_id,
@@ -82,11 +87,20 @@ def preview_fixture(
 
 
 @router.post("/{season_id}/freeze")
-def freeze_fixture(season_id: str, request: Request, principal: Principal = Depends(require_fixture_manager)):
+def freeze_fixture(
+    season_id: str,
+    payload: FreezeFixtureRequest,
+    request: Request,
+    principal: Principal = Depends(require_fixture_manager),
+):
     require_role_covers_season(request, principal, season_id)
+    _require_session_csrf(request, principal)
     try:
         request.app.state.fixtures.freeze(
-            season_id, actor=_actor(principal), reason="Fixture explicitly accepted and frozen in operator UI"
+            season_id,
+            expected_version=payload.expected_version,
+            actor=_actor(principal),
+            reason="Fixture explicitly accepted and frozen in operator UI",
         )
     except KeyError as exc:
         raise HTTPException(status_code=422, detail="Preview a complete fixture before accepting it") from exc
@@ -97,7 +111,24 @@ def freeze_fixture(season_id: str, request: Request, principal: Principal = Depe
 
 @page_router.get("/admin/fixture-setup/{season_id}", response_class=HTMLResponse)
 def fixture_setup_page(season_id: str, request: Request):
-    token = _issue_csrf_token(request)
+    token = issue_token(request.app.state.settings.session_secret)
     response = templates.TemplateResponse(request, "fixture_setup.html", {"season_id": season_id, "csrf_token": token})
-    _attach_csrf_cookie(request, response, token)
+    response.set_cookie(
+        "bbbffl_csrf",
+        token,
+        max_age=3600,
+        httponly=True,
+        secure=request.app.state.settings.is_production,
+        samesite="lax",
+    )
     return response
+
+
+def _require_session_csrf(request: Request, principal: Principal) -> None:
+    """Cookie-authenticated writes need CSRF; header-token writes do not."""
+    if principal.session_id is not None and not verify_token(
+        request.app.state.settings.session_secret,
+        request.cookies.get("bbbffl_csrf"),
+        request.headers.get("X-CSRF-Token"),
+    ):
+        raise HTTPException(status_code=403, detail="Invalid CSRF token")

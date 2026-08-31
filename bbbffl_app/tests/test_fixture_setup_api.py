@@ -83,8 +83,13 @@ def test_preview_validates_assignment_and_uses_authoritative_rotation(fixture_cl
 
 def test_explicit_freeze_persists_reopens_and_rejects_ordinary_change(fixture_client):
     season_id, entry_ids = _season_entries(fixture_client)
-    fixture_client.post(f"/api/admin/fixture-setup/{season_id}/preview", json={"entries_by_fixture_number": entry_ids})
-    frozen = fixture_client.post(f"/api/admin/fixture-setup/{season_id}/freeze", json={})
+    preview = fixture_client.post(
+        f"/api/admin/fixture-setup/{season_id}/preview", json={"entries_by_fixture_number": entry_ids}
+    ).json()
+    frozen = fixture_client.post(
+        f"/api/admin/fixture-setup/{season_id}/freeze",
+        json={"expected_version": preview["draw"]["version"]},
+    )
     assert frozen.status_code == 200
     assert frozen.json()["draw"]["state"] == "frozen"
     rejected = fixture_client.post(
@@ -95,6 +100,36 @@ def test_explicit_freeze_persists_reopens_and_rejects_ordinary_change(fixture_cl
     reopened = fixture_client.get(f"/api/admin/fixture-setup/{season_id}").json()
     assert reopened["draw"]["state"] == "frozen"
     assert reopened["fixture_numbers"] == frozen.json()["fixture_numbers"]
+
+
+def test_stale_review_version_cannot_freeze_a_newer_proposal(fixture_client):
+    season_id, entry_ids = _season_entries(fixture_client)
+    first = fixture_client.post(
+        f"/api/admin/fixture-setup/{season_id}/preview", json={"entries_by_fixture_number": entry_ids}
+    ).json()
+    second = fixture_client.post(
+        f"/api/admin/fixture-setup/{season_id}/preview",
+        json={"entries_by_fixture_number": list(reversed(entry_ids))},
+    ).json()
+    assert second["draw"]["version"] == first["draw"]["version"] + 1
+
+    stale = fixture_client.post(
+        f"/api/admin/fixture-setup/{season_id}/freeze",
+        json={"expected_version": first["draw"]["version"]},
+    )
+    assert stale.status_code == 409
+    assert "changed after it was reviewed" in stale.json()["detail"]
+    unchanged = fixture_client.get(f"/api/admin/fixture-setup/{season_id}").json()
+    assert unchanged["draw"]["state"] == "draft"
+    assert unchanged["draw"]["version"] == second["draw"]["version"]
+    assert unchanged["fixture_numbers"] == second["fixture_numbers"]
+
+    accepted = fixture_client.post(
+        f"/api/admin/fixture-setup/{season_id}/freeze",
+        json={"expected_version": second["draw"]["version"]},
+    )
+    assert accepted.status_code == 200
+    assert accepted.json()["draw"]["state"] == "frozen"
 
 
 def test_scorer_authority_comes_from_shared_active_role_capability(fixture_client):

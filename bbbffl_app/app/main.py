@@ -7,7 +7,14 @@ from fastapi.responses import JSONResponse
 from app.afl_client import AflApiClient, AflApiError
 from app.afl_resilience import ResilientAflClient, RetryPolicy
 from app.audit import AuditEventRepository
-from app.auth import AuthenticationService, CredentialRepository, SessionRepository
+from app.auth import (
+    ActingContextService,
+    AuthenticationService,
+    CredentialRepository,
+    RoleGrantRepository,
+    SessionRepository,
+    UnauthorizedContextSwitchError,
+)
 from app.auth_rate_limit import LoginRateLimiter
 from app.calculations import MatchupCalculationService
 from app.competition_lifecycle import CompetitionLifecycleRepository, StaleRoundVersionError
@@ -54,6 +61,7 @@ from app.round_review import (
 from app.routes import admin, health, public
 from app.routes import auth as auth_routes
 from app.routes import coach_lineup as coach_lineup_routes
+from app.routes import context as context_routes
 from app.routes import draft as draft_routes
 from app.routes import lineups as lineup_routes
 from app.routes import preseason as preseason_routes
@@ -151,6 +159,15 @@ async def lifespan(app: FastAPI):
     app.state.auth_service = AuthenticationService(
         app.state.identities, app.state.credentials, app.state.sessions, app.state.login_rate_limiter
     )
+    # Roadmap package #107's shared multi-role/acting-context boundary
+    # (issue #107, app/routes/context.py): who a signed-in coach identity
+    # may additionally act as (Scorer/Secretary/Administrator/Replay
+    # Operator), and which season entry a delegated role may represent.
+    # See docs/acting-context.md. Computed fresh by
+    # app.authorization.resolve_principal on every request -- never trusted
+    # from client input.
+    app.state.role_grants = RoleGrantRepository(database)
+    app.state.acting_context = ActingContextService(app.state.identities, app.state.role_grants, app.state.sessions)
     app.state.player_pool = PlayerPoolRepository(database)
     app.state.draft = DraftRepository(database)
     # Roadmap package 15's preseason trade/finalisation window (issue #54,
@@ -234,6 +251,7 @@ app.include_router(round_review_routes.router)
 app.include_router(round_review_routes.page_router)
 app.include_router(season_centre_routes.router)
 app.include_router(season_centre_routes.page_router)
+app.include_router(context_routes.router)
 
 
 @app.exception_handler(AflApiError)
@@ -464,3 +482,19 @@ async def signoff_validation_error_handler(request: Request, exc: SignoffValidat
 @app.exception_handler(StaleRoundVersionError)
 async def stale_round_version_error_handler(request: Request, exc: StaleRoundVersionError) -> JSONResponse:
     return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+# Roadmap package #107 (issue #107): a role/represented-entry context
+# switch that the authenticated coach identity is not authorised for --
+# distinct from a plain `ValueError` (a malformed request), this is the
+# same "authenticated but not permitted" outcome
+# `app.authorization`'s `require_*` checks return as 403. Must be
+# registered before the generic `ValueError` handler below is *reached* at
+# dispatch time, but FastAPI/Starlette always prefer the most-derived
+# registered handler regardless of registration order, so this is
+# effective either way -- see that handler's own comment.
+@app.exception_handler(UnauthorizedContextSwitchError)
+async def unauthorized_context_switch_error_handler(
+    request: Request, exc: UnauthorizedContextSwitchError
+) -> JSONResponse:
+    return JSONResponse(status_code=403, content={"detail": str(exc)})

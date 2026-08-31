@@ -48,6 +48,33 @@ continues to use `ActorContext.anonymous_operator(role=...)` exactly as
 before (see `app/lineup_proxy.py`) -- this module changes nothing about
 that boundary; see docs/coach-authentication.md, "Scorer/admin proxy
 provenance is unchanged".
+
+## Multi-role / acting context (roadmap package #107, issue #107)
+
+Real people can hold more than one BBBFFL authority: a coach may also
+Score; a league officer may hold Secretary/League Manager and
+Administrator authority; a 2026 replay operator needs Secretary, Scorer,
+Administrator and Replay Operator all at once. `RoleGrantRepository` records
+which of `GRANTABLE_ROLES` a coach identity has been explicitly granted (on
+top of the "Coach" authority `app.identity.IdentityRepository.
+coach_has_current_entry` already gives them implicitly through
+`season_entry_coach_history` -- "Coach" is therefore never itself a grantable
+role). `ActingContextService` is the one reusable place that turns those
+grants into "which role is this session currently acting as" and "which
+season entry may it represent" -- see docs/acting-context.md. It is meant to
+be reused exactly the way `app.authorization.resolve_principal` already
+reuses `AuthenticationService`/`SessionRepository`, not re-derived per page.
+
+Session-scoped active-context state (`coach_session.active_role`/
+`represented_season_entry_id`, migration 0022) follows the exact same
+server-authoritative design as the session itself: nothing about a client
+request -- a role name, a team ID, a query parameter -- confers authority by
+itself. Every resolution re-checks the stored value against `role_grant` (a
+grant revoked mid-session can never keep conferring authority merely
+because the session row still names it), and switching role/represented
+entry never changes `coach_session.coach_id` -- the authenticated actor is
+untouched by any of this, by construction: `ActingContextService` has no
+operation that writes `coach_id` anywhere.
 """
 
 import hashlib
@@ -61,8 +88,13 @@ from app.audit import (
     AUTH_LOGIN_SUCCEEDED,
     AUTH_LOGOUT,
     AUTH_SESSION_REVOKED,
+    CONTEXT_REPRESENTED_ENTRY_SET,
+    CONTEXT_ROLE_ACTIVATED,
     ENTITY_TYPE_AUTH_ATTEMPT,
     ENTITY_TYPE_AUTH_SESSION,
+    ENTITY_TYPE_ROLE_GRANT,
+    ROLE_GRANT_CREATED,
+    ROLE_GRANT_REVOKED,
     ActorContext,
     append_event,
 )
@@ -74,6 +106,16 @@ from app.password_hashing import verify_password as _verify_password_hash
 
 MIN_PASSWORD_LENGTH = 8
 DEFAULT_SESSION_LIFETIME_SECONDS = 12 * 3600  # 12 hours
+
+# Additional authority roles a coach identity may be explicitly granted
+# (roadmap package #107, issue #107) -- deliberately excludes "coach"
+# (implicit through `IdentityRepository.coach_has_current_entry`/
+# `season_entry_coach_history`, never granted) and "spectator" (the
+# unauthenticated default, never a role anyone holds). Kept as plain
+# strings independent of `app.authorization.Role` -- the same decoupling
+# `app.lineup_proxy.PROXY_ACTOR_ROLES` already uses -- so this foundation-
+# adjacent module never needs to import the HTTP-boundary module.
+GRANTABLE_ROLES = frozenset({"scorer", "secretary", "admin", "replay_operator"})
 
 # A precomputed hash of a value nobody will ever submit, verified whenever
 # no real credential exists to check against -- so "unknown email" and
@@ -118,6 +160,15 @@ class Session:
     last_seen_at: str
     revoked_at: str | None
     rotated_from_session_id: str | None
+    # Roadmap package #107 (issue #107): server-authoritative active-context
+    # state, added by migration 0022. `active_role=None` means "Coach" (the
+    # default every session had before this package, and still the default
+    # for one that has never switched -- see module docstring). Neither
+    # field is trusted at face value: `app.authorization.resolve_principal`
+    # re-validates both against `role_grant`/`season_entry` on every
+    # resolution via `app.auth.ActingContextService`.
+    active_role: str | None = None
+    represented_season_entry_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -236,8 +287,8 @@ class SessionRepository:
                 """
                 INSERT INTO coach_session
                     (session_id, token_hash, coach_id, created_at, expires_at, last_seen_at, revoked_at,
-                     rotated_from_session_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     rotated_from_session_id, active_role, represented_season_entry_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
                 """,
                 (
                     session.session_id,
@@ -269,7 +320,8 @@ class SessionRepository:
         never audited; see app/audit.py's module docstring)."""
         token_hash = _hash_token(raw_token)
         row = self.database.execute(
-            "SELECT session_id, coach_id, created_at, expires_at, last_seen_at, revoked_at, rotated_from_session_id "
+            "SELECT session_id, coach_id, created_at, expires_at, last_seen_at, revoked_at, rotated_from_session_id, "
+            "active_role, represented_season_entry_id "
             "FROM coach_session WHERE token_hash = ?",
             (token_hash,),
         ).fetchone()
@@ -352,6 +404,55 @@ class SessionRepository:
                     reason=reason,
                 )
         return len(rows)
+
+    def set_active_role(
+        self, session_id: str, role: str | None, *, actor: ActorContext, reason: str | None = None
+    ) -> None:
+        """Set this session's active authority role (roadmap package #107).
+        `role=None` means "Coach" -- the default. Switching role always
+        clears any `represented_season_entry_id`: a represented team
+        selected under one delegated role must never silently carry over
+        into a different role's context. Callers must already have
+        validated `role` against `ActingContextService.available_roles` --
+        this method trusts its caller the same way `SessionRepository.
+        create` trusts `AuthenticationService.login` to have already
+        verified the password."""
+        with transaction(self.database) as conn:
+            conn.execute(
+                "UPDATE coach_session SET active_role = ?, represented_season_entry_id = NULL WHERE session_id = ?",
+                (role, session_id),
+            )
+            append_event(
+                conn,
+                actor=actor,
+                action=CONTEXT_ROLE_ACTIVATED,
+                entity_type=ENTITY_TYPE_AUTH_SESSION,
+                entity_id=session_id,
+                reason=reason,
+                after_state={"active_role": role or "coach"},
+            )
+
+    def set_represented_entry(
+        self, session_id: str, season_entry_id: str | None, *, actor: ActorContext, reason: str | None = None
+    ) -> None:
+        """Set (or clear, with `season_entry_id=None`) this session's
+        represented season entry. Callers must already have validated the
+        entry against `ActingContextService.can_represent` -- see
+        `set_active_role`'s docstring for the same trust boundary."""
+        with transaction(self.database) as conn:
+            conn.execute(
+                "UPDATE coach_session SET represented_season_entry_id = ? WHERE session_id = ?",
+                (season_entry_id, session_id),
+            )
+            append_event(
+                conn,
+                actor=actor,
+                action=CONTEXT_REPRESENTED_ENTRY_SET,
+                entity_type=ENTITY_TYPE_AUTH_SESSION,
+                entity_id=session_id,
+                reason=reason,
+                after_state={"represented_season_entry_id": season_entry_id},
+            )
 
 
 @dataclass(frozen=True)
@@ -475,3 +576,295 @@ class AuthenticationService:
                 entity_id=coach_id or "unknown",
                 reason="invalid_credentials",
             )
+
+
+@dataclass(frozen=True)
+class RoleGrant:
+    grant_id: str
+    coach_id: str
+    role: str
+    season_id: str | None
+    granted_at: str
+    granted_by_actor_type: str
+    granted_by_actor_id: str | None
+    revoked_at: str | None
+    reason: str | None
+
+    @property
+    def active(self) -> bool:
+        return self.revoked_at is None
+
+
+class InvalidRoleError(ValueError):
+    """`role` is not one of `GRANTABLE_ROLES`."""
+
+
+class RoleGrantRepository:
+    """Persistent record of the additional authority roles (`GRANTABLE_ROLES`)
+    an authenticated coach identity holds, beyond the implicit "Coach"
+    authority `IdentityRepository.coach_has_current_entry` already gives
+    them (roadmap package #107, issue #107; migration 0022). A `season_id`
+    scopes a grant to season entries within that one season -- this is how
+    a Replay Operator grant is confined to the ten 2026 replay entries and
+    can never represent a live/current-season entry (see
+    `ActingContextService.can_represent`); `season_id=None` grants the role
+    across every season, the ordinary case for Scorer/Secretary/Admin.
+
+    Granting/revoking are both administrator-only operations at the HTTP
+    boundary (see `app.routes.context`) -- this repository itself enforces
+    only that `role` is one of `GRANTABLE_ROLES`, exactly like `app.identity.
+    IdentityRepository` enforces domain invariants while its callers own
+    who may invoke it."""
+
+    def __init__(self, database: DatabaseConnection):
+        self.database = database
+
+    def grant(
+        self,
+        coach_id: str,
+        role: str,
+        *,
+        actor: ActorContext,
+        season_id: str | None = None,
+        reason: str | None = None,
+    ) -> RoleGrant:
+        if role not in GRANTABLE_ROLES:
+            raise InvalidRoleError(f"{role!r} is not a grantable role; must be one of {sorted(GRANTABLE_ROLES)}")
+        if role == "admin" and season_id is not None:
+            # Administrator authority is never season-scoped: every
+            # `require_admin`/`require_admin_principal` check across the
+            # codebase (app.routes.admin, app.routes.draft, app.routes.
+            # preseason, app.routes.round_review, ...) treats `Role.ADMIN`
+            # as blanket authority over every season -- none of them consult
+            # `role_grant.season_id`, unlike `ActingContextService.
+            # can_represent`/`representable_entries`, which is the only
+            # place season scoping is actually enforced. A season-scoped
+            # "admin" grant would therefore silently become blanket admin
+            # the moment it reached any of those routes, breaking the scope
+            # it was meant to have. Reject it at the source instead of
+            # letting it be created and quietly not mean what it says.
+            raise InvalidRoleError(
+                "administrator grants cannot be scoped to one season; grant scorer/secretary/replay_operator instead, "
+                "or grant admin without a season_id"
+            )
+        now = _now_iso()
+        item = RoleGrant(
+            grant_id=_id(),
+            coach_id=coach_id,
+            role=role,
+            season_id=season_id,
+            granted_at=now,
+            granted_by_actor_type=actor.actor_type,
+            granted_by_actor_id=actor.actor_id,
+            revoked_at=None,
+            reason=reason,
+        )
+        with transaction(self.database) as conn:
+            conn.execute(
+                "INSERT INTO role_grant (grant_id, coach_id, role, season_id, granted_at, "
+                "granted_by_actor_type, granted_by_actor_id, revoked_at, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    item.grant_id,
+                    item.coach_id,
+                    item.role,
+                    item.season_id,
+                    item.granted_at,
+                    item.granted_by_actor_type,
+                    item.granted_by_actor_id,
+                    item.revoked_at,
+                    item.reason,
+                ),
+            )
+            append_event(
+                conn,
+                actor=actor,
+                action=ROLE_GRANT_CREATED,
+                entity_type=ENTITY_TYPE_ROLE_GRANT,
+                entity_id=item.grant_id,
+                reason=reason,
+                after_state={"coach_id": coach_id, "role": role, "season_id": season_id},
+            )
+        return item
+
+    def revoke(self, grant_id: str, *, actor: ActorContext, reason: str | None = None) -> bool:
+        """Idempotent: revoking an unknown or already-revoked grant returns
+        `False` without appending an event -- matching `SessionRepository.
+        revoke`'s convention."""
+        with transaction(self.database) as conn:
+            row = conn.execute(
+                "SELECT grant_id, coach_id, role, season_id FROM role_grant WHERE grant_id = ? AND revoked_at IS NULL"
+                + _for_update_suffix(self.database),
+                (grant_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            conn.execute("UPDATE role_grant SET revoked_at = ? WHERE grant_id = ?", (_now_iso(), grant_id))
+            append_event(
+                conn,
+                actor=actor,
+                action=ROLE_GRANT_REVOKED,
+                entity_type=ENTITY_TYPE_ROLE_GRANT,
+                entity_id=grant_id,
+                reason=reason,
+                before_state={"coach_id": row["coach_id"], "role": row["role"], "season_id": row["season_id"]},
+            )
+        return True
+
+    def list_active_for_coach(self, coach_id: str) -> list[RoleGrant]:
+        rows = self.database.execute(
+            "SELECT * FROM role_grant WHERE coach_id = ? AND revoked_at IS NULL ORDER BY granted_at", (coach_id,)
+        ).fetchall()
+        return [RoleGrant(**dict(row)) for row in rows]
+
+    def list_all_for_coach(self, coach_id: str) -> list[RoleGrant]:
+        """Every grant, including revoked ones -- the administrator-facing
+        history view (`app.routes.context`), never used for authorization
+        decisions (see `list_active_for_coach`/`is_role_granted`)."""
+        rows = self.database.execute(
+            "SELECT * FROM role_grant WHERE coach_id = ? ORDER BY granted_at", (coach_id,)
+        ).fetchall()
+        return [RoleGrant(**dict(row)) for row in rows]
+
+    def is_role_granted(self, coach_id: str, role: str) -> bool:
+        """Whether `role` is actively granted to this coach at all, in any
+        season scope -- used to decide whether a role belongs in a
+        session's *switcher* (see `ActingContextService.available_roles`).
+        Does not itself authorise representing any particular entry; see
+        `role_covers_season`."""
+        return any(g.role == role for g in self.list_active_for_coach(coach_id))
+
+    def role_covers_season(self, coach_id: str, role: str, season_id: str | None) -> bool:
+        """Whether an active grant of `role` authorises acting within
+        `season_id` -- a `NULL`-scoped grant covers every season; a
+        season-scoped grant (the Replay Operator case) covers only that
+        one. Used by `ActingContextService.can_represent`/
+        `representable_entries` to decide which season entries a
+        delegated role may represent."""
+        return any(
+            g.role == role and (g.season_id is None or g.season_id == season_id)
+            for g in self.list_active_for_coach(coach_id)
+        )
+
+
+class UnauthorizedContextSwitchError(ValueError):
+    """The requested active role or represented season entry is not
+    authorised for this coach identity -- `app.main` maps this to HTTP 403
+    (see `app.routes.context`), the same "authenticated but not permitted"
+    outcome `app.authorization`'s other `require_*` checks return."""
+
+
+class ActingContextService:
+    """The one reusable active-context boundary roadmap package #107
+    (issue #107) introduces over `RoleGrantRepository`/`SessionRepository`/
+    `IdentityRepository`: which roles a signed-in coach identity may
+    activate, and which season entry a delegated role may represent --
+    kept entirely separate from *who* they are. `app.authorization.
+    resolve_principal` calls this on every request to compute the
+    authoritative `Principal`; `app.routes.context` calls it to validate
+    and perform a context switch. No other module should re-derive this
+    logic -- see this module's docstring and docs/acting-context.md.
+    """
+
+    def __init__(self, identities: IdentityRepository, role_grants: RoleGrantRepository, sessions: SessionRepository):
+        self.identities = identities
+        self.role_grants = role_grants
+        self.sessions = sessions
+
+    def available_roles(self, coach_id: str) -> frozenset[str]:
+        """Every role this coach identity may currently activate: "coach"
+        if they currently represent any season entry
+        (`IdentityRepository.coach_has_current_entry`), plus every
+        `GRANTABLE_ROLES` value with an active grant."""
+        roles = {role for role in GRANTABLE_ROLES if self.role_grants.is_role_granted(coach_id, role)}
+        if self.identities.coach_has_current_entry(coach_id):
+            roles.add("coach")
+        return frozenset(roles)
+
+    def can_represent(self, coach_id: str, role: str, season_entry_id: str) -> bool:
+        """Whether the currently-active delegated `role` may represent
+        `season_entry_id`. "Coach" never represents another entry (it
+        always resolves the coach's own, automatically -- see
+        `resolve_represented_entry`); an unknown entry is never
+        representable (fails closed, the same enumeration-safe posture
+        `app.authorization.require_owned_season_entry` uses for private
+        coach resources)."""
+        if role == "coach" or role not in GRANTABLE_ROLES:
+            return False
+        entry = self.identities.get_public_team(season_entry_id)
+        if entry is None:
+            return False
+        return self.role_grants.role_covers_season(coach_id, role, entry.season_id)
+
+    def representable_entries(self, coach_id: str, role: str, season_id: str) -> list:
+        """Every season entry `role` may represent within `season_id` --
+        the represented-team selector's data source (`app.routes.context`).
+        Empty (never an error) if the role does not cover this season at
+        all, so a Replay Operator scoped to the 2026 replay season simply
+        sees no entries when asked about 2027, rather than learning
+        anything about who is in it."""
+        if role == "coach" or role not in GRANTABLE_ROLES:
+            return []
+        if not self.role_grants.role_covers_season(coach_id, role, season_id):
+            return []
+        return self.identities.list_entries(season_id)
+
+    def resolve_active_role(self, coach_id: str, stored_active_role: str | None) -> str:
+        """Self-healing resolution used on every request: a stored role no
+        longer actively granted (e.g. revoked mid-session) always falls
+        back to `"coach"` -- the one role a coach session cannot lose --
+        rather than continuing to confer authority the session row merely
+        still *names*. `stored_active_role=None` (never switched) also
+        resolves to `"coach"`, preserving this package's pre-existing
+        default exactly."""
+        role = stored_active_role or "coach"
+        if role == "coach":
+            return "coach"
+        if self.role_grants.is_role_granted(coach_id, role):
+            return role
+        return "coach"
+
+    def resolve_represented_entry(self, coach_id: str, active_role: str, stored_entry_id: str | None) -> str | None:
+        """Companion to `resolve_active_role`: a represented entry is only
+        ever trusted for a delegated (non-"coach") active role, and only
+        while still authorised -- an entry chosen under a grant later
+        revoked, or simply never chosen, resolves to `None` rather than
+        silently granting stale access."""
+        if active_role == "coach" or stored_entry_id is None:
+            return None
+        if self.can_represent(coach_id, active_role, stored_entry_id):
+            return stored_entry_id
+        return None
+
+    def activate_role(
+        self, *, coach_id: str, session_id: str, role: str, actor: ActorContext, reason: str | None = None
+    ) -> None:
+        """Switch `session_id`'s active role to `role` ("coach" or any
+        `GRANTABLE_ROLES` value). Raises `UnauthorizedContextSwitchError`
+        if `role` is unknown or not currently available to `coach_id` --
+        never partially applies a rejected switch."""
+        if role != "coach" and role not in GRANTABLE_ROLES:
+            raise UnauthorizedContextSwitchError(f"unknown role {role!r}")
+        if role not in self.available_roles(coach_id):
+            raise UnauthorizedContextSwitchError(f"role {role!r} has not been granted to this coach")
+        self.sessions.set_active_role(session_id, None if role == "coach" else role, actor=actor, reason=reason)
+
+    def set_represented_entry(
+        self,
+        *,
+        coach_id: str,
+        session_id: str,
+        active_role: str,
+        season_entry_id: str | None,
+        actor: ActorContext,
+        reason: str | None = None,
+    ) -> None:
+        """Switch (or, with `season_entry_id=None`, clear) `session_id`'s
+        represented season entry. Raises `UnauthorizedContextSwitchError`
+        if `active_role` is "coach" (coach mode never represents another
+        entry -- see `resolve_represented_entry`) or the role is not
+        authorised to represent that entry."""
+        if season_entry_id is not None and not self.can_represent(coach_id, active_role, season_entry_id):
+            raise UnauthorizedContextSwitchError("the active role may not represent that season entry")
+        if season_entry_id is not None and active_role == "coach":
+            raise UnauthorizedContextSwitchError("coach mode does not support representing another season entry")
+        self.sessions.set_represented_entry(session_id, season_entry_id, actor=actor, reason=reason)

@@ -198,6 +198,7 @@ ROUTES = {
     "app.routes.coach_lineup",
     "app.routes.public_rounds",
     "app.routes.season_centre",
+    "app.routes.context",
 }
 
 COMPOSITION_ROOT = {"app.main"}

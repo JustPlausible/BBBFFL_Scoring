@@ -86,10 +86,19 @@ knowing its UUID.
   `round_centre.html` pattern (token bar, fetch-and-render, inline
   success/error feedback).
 
-Every endpoint requires the strict admin authority (`require_admin`, the
-same dependency `app/routes/draft.py`/`app/routes/preseason.py` use for
-their own setup endpoints) -- narrowing the shared operator token to the
-`scorer` authority is refused, matching those routers' existing convention.
+Every endpoint requires `require_secretary_or_admin` (Secretary/League
+Manager authority or Administrator) -- **retrofitted by roadmap package
+#107** (issue #107, see [acting-context](acting-context.md)) from the
+strict admin-only authority this router originally required. Ordinary
+league-season setup is Secretary/League Manager's own operational
+authority; the legacy shared operator token still resolves to
+Administrator by default (narrowing it to `scorer` is refused here, same
+as before), but a signed-in coach identity granted Secretary authority
+(`app.auth.RoleGrantRepository`) can now run this whole page without also
+holding Administrator. The page shell also renders the shared active-
+context bar (`app.routes.context`) so the operator can see and switch
+their active role/represented context, and an Administrator-only panel to
+grant/revoke roles for a coach identity.
 
 ## Privacy
 

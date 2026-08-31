@@ -38,9 +38,19 @@
   .season-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #2a2f3a; }
   .inline-edit { display: none; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
   .inline-edit.open { display: flex; }
+  /* Roadmap package #107 (issue #107): shared active-context presentation. */
+  #context-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; padding: 8px 12px; background: #171a21; border: 1px solid #2a2f3a; border-radius: 8px; font-size: 0.85rem; }
+  #context-bar:empty { display: none; }
+  #context-bar .who { font-weight: 600; }
+  #context-bar .role-pill { background: #2a2f3a; padding: 2px 8px; border-radius: 10px; }
+  #context-bar select { padding: 3px 6px; font-size: 0.82rem; }
+  #replay-banner { display: none; margin-bottom: 10px; padding: 8px 12px; border-radius: 8px; font-weight: 700; letter-spacing: 0.02em; background: repeating-linear-gradient(45deg, #7a1f1f, #7a1f1f 12px, #5a1414 12px, #5a1414 24px); color: #fff; border: 2px solid #ff5c5c; }
+  #replay-banner.active { display: block; }
 </style>
 </head>
 <body>
+  <div id="replay-banner"></div>
+  <div id="context-bar"></div>
   <div class="page-head">
     <h1>BBBFFL Season Centre — Scorer</h1>
     <a href="/admin/season-centre">All seasons</a>
@@ -56,6 +66,11 @@
 
 <script>
 const SEASON_ID = {{ season_id | tojson }};
+// Roadmap package #107 (issue #107): rendered by app/routes/season_centre.py's
+// _render_page, so this page's own context-switch calls (below) can be
+// CSRF-protected exactly like every other cookie-authenticated form in this
+// codebase (app/csrf.py's double-submit design).
+const CSRF_TOKEN = {{ csrf_token | tojson }};
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function getToken() { return localStorage.getItem('bbbffl_admin_token') || ''; }
 document.getElementById('token').value = getToken();
@@ -65,10 +80,34 @@ document.getElementById('save-token').onclick = () => {
 };
 
 async function api(path, body, method) {
+  // A signed-in coach session (roadmap package #107) authenticates via the
+  // same-origin cookie the browser attaches automatically -- the
+  // X-Admin-Token header is only sent when an operator has actually saved
+  // one, so it never masks a coach session with an empty/mismatched value
+  // (an empty header used to be sent unconditionally, which made this page
+  // reachable only via the admin token; see docs/acting-context.md).
+  const headers = { 'Content-Type': 'application/json' };
+  const token = getToken();
+  if (token) headers['X-Admin-Token'] = token;
   const response = await fetch(path, {
     method: method || (body ? 'POST' : 'GET'),
-    headers: { 'Content-Type': 'application/json', 'X-Admin-Token': getToken() },
+    headers,
     body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await response.json().catch(() => ({ detail: response.statusText }));
+  if (!response.ok) throw new Error(data.detail || response.statusText);
+  return data;
+}
+
+// CSRF-protected variant for the coach-session-authenticated /api/context/*
+// endpoints (app/routes/context.py) -- never used for this page's own
+// admin-token endpoints, which are immune to cookie-based CSRF by construction
+// (a custom header an attacker's page cannot set, not a cookie).
+async function contextApi(path, body) {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF_TOKEN },
+    body: JSON.stringify(body || {}),
   });
   const data = await response.json().catch(() => ({ detail: response.statusText }));
   if (!response.ok) throw new Error(data.detail || response.statusText);
@@ -234,7 +273,8 @@ async function renderSeason() {
         <input type="text" id="new-coach-email" placeholder="Email (optional, private)">
         <button class="primary" id="add-coach">Add coach</button>
       </div>
-    </div>`;
+    </div>
+    ${CURRENT_CONTEXT && CURRENT_CONTEXT.granted_roles.includes('admin') ? rolesAdminHtml(coaches) : ''}`;
 
   document.getElementById('add-entry').onclick = () => withFeedback(async () => {
     const coach_id = document.getElementById('new-entry-coach').value;
@@ -277,10 +317,160 @@ async function renderSeason() {
     await api(`/api/admin/season-centre/coaches/${b.dataset.saveCoach}`, { display_name, email, phone });
     await renderSeason();
   }, 'Coach updated.'));
+
+  const grantBtn = document.getElementById('grant-role-btn');
+  if (grantBtn) {
+    const roleSelect = document.getElementById('grant-role');
+    const scopeCheckbox = document.getElementById('grant-scope-season');
+    // Administrator authority is never season-scoped (app.auth.
+    // RoleGrantRepository.grant refuses to create one -- see its
+    // docstring): every existing require_admin check across the app
+    // treats Role.ADMIN as blanket, so a scoped admin grant would
+    // silently stop meaning what it says the moment it reached one of
+    // those routes. Reflect that here rather than letting the operator
+    // hit a 400 after filling in the form.
+    const syncScopeAvailability = () => {
+      const isAdmin = roleSelect.value === 'admin';
+      scopeCheckbox.disabled = isAdmin;
+      if (isAdmin) scopeCheckbox.checked = false;
+    };
+    roleSelect.onchange = syncScopeAvailability;
+    syncScopeAvailability();
+
+    grantBtn.onclick = () => withFeedback(async () => {
+      const coach_id = document.getElementById('grant-coach').value;
+      const role = roleSelect.value;
+      const scoped = scopeCheckbox.checked && role !== 'admin';
+      if (!coach_id) throw new Error('Select a coach first.');
+      await api('/api/admin/role-grants', { coach_id, role, season_id: scoped ? SEASON_ID : null });
+      await loadGrantsList(coach_id);
+    }, 'Role granted.');
+    document.getElementById('grant-coach').onchange = () => loadGrantsList(document.getElementById('grant-coach').value);
+    loadGrantsList(document.getElementById('grant-coach').value);
+  }
+}
+
+// -- Roadmap package #107 (issue #107): shared active-context bar --------
+
+let CURRENT_CONTEXT = null;
+
+function roleLabel(role) {
+  return {
+    coach: 'Coach', scorer: 'Scorer', secretary: 'Secretary / League Manager',
+    admin: 'Administrator', replay_operator: 'Replay Operator',
+  }[role] || role;
+}
+
+function rolesAdminHtml(coaches) {
+  const coachOptions = coaches.map(c => `<option value="${esc(c.coach_id)}">${esc(c.display_name)}</option>`).join('');
+  const roleOptions = ['scorer', 'secretary', 'admin', 'replay_operator']
+    .map(r => `<option value="${r}">${esc(roleLabel(r))}</option>`).join('');
+  return `
+    <div class="block">
+      <h2>Role grants</h2>
+      <p class="muted">Grant a coach identity additional authority (Scorer, Secretary/League Manager,
+        Administrator, or Replay Operator) on top of their own team, without a second login. A grant scoped to
+        this season (e.g. for a 2026 replay operator) can only ever represent entries within it -- never a
+        live/current season.</p>
+      <div class="form-row">
+        <select id="grant-coach">${coachOptions}</select>
+        <select id="grant-role">${roleOptions}</select>
+        <label class="muted"><input type="checkbox" id="grant-scope-season" checked> scope to this season</label>
+        <button class="primary" id="grant-role-btn">Grant</button>
+      </div>
+      <div id="grants-list" class="muted">Select a coach above to see their current grants.</div>
+    </div>`;
+}
+
+async function loadGrantsList(coach_id) {
+  const list = document.getElementById('grants-list');
+  if (!list || !coach_id) return;
+  try {
+    const grants = await api(`/api/admin/role-grants?coach_id=${encodeURIComponent(coach_id)}`);
+    const active = grants.filter(g => !g.revoked_at);
+    list.innerHTML = active.length ? active.map(g => `
+      <div class="form-row">
+        <span class="pill ok">${esc(roleLabel(g.role))}${g.season_id ? ' · this season' : ' · all seasons'}</span>
+        <button data-revoke-grant="${esc(g.grant_id)}">Revoke</button>
+      </div>`).join('') : '<span class="muted">No active grants for this coach.</span>';
+    list.querySelectorAll('[data-revoke-grant]').forEach(b => b.onclick = () => withFeedback(async () => {
+      await api(`/api/admin/role-grants/${b.dataset.revokeGrant}/revoke`, {});
+      await loadGrantsList(coach_id);
+    }, 'Role revoked.'));
+  } catch (error) {
+    list.innerHTML = `<span class="muted">${esc(error.message)}</span>`;
+  }
+}
+
+async function renderContextBar() {
+  let ctx;
+  try {
+    ctx = await api('/api/context');
+  } catch (error) {
+    return; // Context is a presentation aid; a failure here must never block the page itself.
+  }
+  CURRENT_CONTEXT = ctx;
+  const bar = document.getElementById('context-bar');
+  const who = ctx.display_name ? `Signed in as <span class="who">${esc(ctx.display_name)}</span>` : 'Shared operator token';
+  // Offer a switch whenever there is any activatable role different from
+  // the current one -- not just when granted_roles.length > 1. A league
+  // officer with no team of their own and exactly one grant (e.g. only
+  // "secretary") still lands on active_role "coach" by default (the
+  // pre-#107 default for a session that has never switched), even though
+  // "coach" is not itself one of their granted_roles; excluding that case
+  // would leave them stuck on a non-functional Coach view with no visible
+  // way to become the one role they actually hold.
+  const switchableRoles = Array.from(new Set([...ctx.granted_roles, ctx.active_role]));
+  const roleSwitcher = (ctx.coach_id && switchableRoles.length > 1)
+    ? `<select id="role-switch">${switchableRoles.map(r =>
+        `<option value="${esc(r)}" ${r === ctx.active_role ? 'selected' : ''}>${esc(roleLabel(r))}</option>`).join('')}</select>`
+    : `<span class="role-pill">Acting as ${esc(roleLabel(ctx.active_role))}</span>`;
+  // Represented-team switching is a deliberately separate control from the
+  // role selector above (issue #107) -- it only appears for a delegated
+  // (non-"coach") active role held through a real coach session, and only
+  // once a season is in view to represent entries within.
+  const entrySelector = (ctx.coach_id && ctx.active_role !== 'coach' && SEASON_ID)
+    ? `<span>Representing: <select id="represented-entry-select"><option value="">— none selected —</option></select></span>`
+    : '';
+  bar.innerHTML = `${who} ${roleSwitcher} ${entrySelector}`;
+
+  const banner = document.getElementById('replay-banner');
+  if (ctx.is_replay_context) {
+    banner.className = 'active';
+    banner.textContent = `REPLAY CONTEXT — acting for ${ctx.represented_season_entry ? ctx.represented_season_entry.team_name : 'no team selected yet'}. Never a live/current season.`;
+  } else {
+    banner.className = '';
+    banner.textContent = '';
+  }
+
+  const roleSelect = document.getElementById('role-switch');
+  if (roleSelect) {
+    roleSelect.onchange = () => withFeedback(async () => {
+      await contextApi('/api/context/role', { role: roleSelect.value });
+      await boot();
+    }, 'Active role changed.');
+  }
+
+  const entrySelect = document.getElementById('represented-entry-select');
+  if (entrySelect) {
+    try {
+      const entries = await api(`/api/context/entries?season_id=${encodeURIComponent(SEASON_ID)}`);
+      entrySelect.innerHTML = '<option value="">— none selected —</option>' + entries.map(e =>
+        `<option value="${esc(e.season_entry_id)}" ${ctx.represented_season_entry && ctx.represented_season_entry.season_entry_id === e.season_entry_id ? 'selected' : ''}>${esc(e.team_name)} (${esc(e.coach_display_name)})</option>`
+      ).join('');
+    } catch (error) {
+      entrySelect.innerHTML = '<option value="">(none available for this role/season)</option>';
+    }
+    entrySelect.onchange = () => withFeedback(async () => {
+      await contextApi('/api/context/represented-entry', { season_entry_id: entrySelect.value || null });
+      await renderContextBar();
+    }, 'Represented team changed.');
+  }
 }
 
 async function boot() {
   try {
+    await renderContextBar();
     if (SEASON_ID) {
       document.getElementById('index-view').innerHTML = '';
       await renderSeason();

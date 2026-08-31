@@ -80,6 +80,7 @@ EXPECTED_TABLES = {
     "opening_round_nomination",
     "coach_credential",
     "coach_session",
+    "role_grant",
 }
 
 

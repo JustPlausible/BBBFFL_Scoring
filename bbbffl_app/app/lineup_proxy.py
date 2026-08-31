@@ -15,11 +15,11 @@ store or a second proxy audit log.
 The receiving coach/season entry is never the actor. Every write here is
 attributed to the operator: an `ActorContext` with `actor_type=
 "anonymous_operator"` and `actor_role` one of `PROXY_ACTOR_ROLES`
-("scorer"/"admin") -- see app/audit.py's module docstring for why an
-anonymous-but-non-impersonating operator identity, rather than an
-authenticated coach identity, is the correct pre-authentication actor
-(roadmap package 19/20). `_ensure_operator` rejects any other actor before
-any write is attempted.
+("scorer"/"admin"/"replay_operator"). The actor ID retains the real
+authenticated user's ID for session-native operations; the historical
+classification name remains for compatibility and means an operator action,
+not an unauthenticated or impersonated coach action. `_ensure_operator`
+rejects any other actor before any write is attempted.
 
 ## Provenance
 
@@ -73,7 +73,7 @@ from app.lineup_validation import ValidatedLineupSubmissionService
 from app.lineups import LineupIntegrityError, WeeklyLineupRepository
 
 SCORER_PROXY_SOURCE_TYPE = "scorer_proxy"
-PROXY_ACTOR_ROLES = frozenset({"scorer", "admin"})
+PROXY_ACTOR_ROLES = frozenset({"scorer", "admin", "replay_operator"})
 
 
 class LineupProxyError(LineupIntegrityError):
@@ -88,7 +88,7 @@ class UnauthorizedProxyActorError(LineupProxyError):
 def _ensure_operator(actor: ActorContext) -> None:
     if actor.actor_type != "anonymous_operator" or actor.actor_role not in PROXY_ACTOR_ROLES:
         raise UnauthorizedProxyActorError(
-            "proxy lineup actions require an anonymous_operator actor with actor_role scorer or admin, "
+            "proxy lineup actions require an anonymous_operator actor with actor_role scorer, admin, or replay_operator, "
             f"got actor_type={actor.actor_type!r} actor_role={actor.actor_role!r}"
         )
 

@@ -152,6 +152,32 @@ def test_admin_role_is_also_an_authorised_proxy_actor():
     assert submitted.source_type == "scorer_proxy"
 
 
+def test_authenticated_replay_operator_identity_is_an_authorised_proxy_actor():
+    db, _, rounds, entries, scope, pool, ownership = context(rounds=1)
+    entry = entries[0]
+    players = acquire_players(pool, ownership, scope, entry, 1, 1)
+    actor = ActorContext("anonymous_operator", "authenticated-replay-user", "replay_operator")
+    draft = CompleteLineupProxy(db).create_or_amend(
+        scope["season_id"],
+        scope["competition_id"],
+        rounds[0],
+        entry.season_entry_id,
+        {"F1": players[0].season_player_id},
+        expected_revision=0,
+        actor=actor,
+    )
+    submitted = CompleteLineupProxy(db).submit(
+        draft.lineup_id,
+        expected_draft_revision=draft.revision,
+        expected_submission_version=0,
+        actor=actor,
+        reason="first-half replay delegated entry",
+    )
+    assert submitted.actor_id == "authenticated-replay-user"
+    assert submitted.actor_role == "replay_operator"
+    assert submitted.source_type == "scorer_proxy"
+
+
 def test_proxy_resubmission_preserves_every_prior_immutable_version():
     db, _, rounds, entries, scope, pool, ownership = context(rounds=1)
     entry = entries[0]

@@ -337,3 +337,21 @@ guessed, and remains open input for #66/#67's replay work: any 2026 replay
 that needs a specific historical nomination must supply it as
 scorer-confirmed evidence (`known_fact`) or explicitly flag it
 `unresolved_scorer_input`, never infer it from the CFS fixture alone.
+## Replay operator browser workflow
+
+After selecting an authorised represented entry in shared acting context, open
+`/operations/seasons/<season-id>/opening-round`. The page lists only accepted
+Opening Round rule revisions; those rules, rather than browser calculations or
+hard-coded 2026 club lists, determine the compensating bye and target BBBFFL
+round. Choose an owned player and legal slot, enter the replay reason, and create
+the nomination. The existing nomination repository validates rule, club,
+ownership, slot, player and conflicts, and the existing preload operation places
+the selection in the target weekly draft. The delegated lineup displays it as
+**Opening Round deferred — locked** and submission remains protected by the
+server-side deferred-selection guard.
+
+Corrections use the page's audited correction operation and require a reason.
+Browser-created records are labelled **replay/reconstructed input entered by the
+authenticated operator**. This wording is intentional: the available AFL
+evidence establishes the Opening Round structure, but does not establish that a
+historical BBBFFL coach made a particular nomination.

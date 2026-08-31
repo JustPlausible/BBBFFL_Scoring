@@ -83,7 +83,7 @@ NOMINATION_CORRECTED = "opening_round.nomination.corrected"
 ENTITY_TYPE_RULE = "opening_round.rule"
 ENTITY_TYPE_NOMINATION = "opening_round.nomination"
 
-PROXY_ACTOR_ROLES = frozenset({"scorer", "admin"})
+PROXY_ACTOR_ROLES = frozenset({"scorer", "admin", "replay_operator"})
 
 # See docs/roadmap/2027-season-roadmap.md's "Evidence and confidence
 # convention" -- the same four replay evidence classifications, reused here
@@ -129,7 +129,7 @@ class DeferredSlotLockedError(OpeningRoundError):
 def _ensure_operator(actor: ActorContext) -> None:
     if actor.actor_type != "anonymous_operator" or actor.actor_role not in PROXY_ACTOR_ROLES:
         raise UnauthorizedNominationActorError(
-            "Opening Round nominations require an anonymous_operator actor with actor_role scorer or admin "
+            "Opening Round nominations require an anonymous_operator actor with actor_role scorer, admin, or replay_operator "
             f"(acting as proxy for the historical coach), got actor_type={actor.actor_type!r} "
             f"actor_role={actor.actor_role!r}"
         )

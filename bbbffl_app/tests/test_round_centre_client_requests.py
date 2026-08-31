@@ -23,6 +23,7 @@ dependency for the rest of the suite to stay green.
 import re
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -80,3 +81,30 @@ mutation('/api/admin/round-review/some-round-id/calculate')
     result = subprocess.run(["node", str(script_path)], capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "POST"
+
+
+def test_api_only_emits_legacy_header_for_a_deliberate_non_empty_token(round_centre_client_functions):
+    api_source, _ = round_centre_client_functions
+    assert "if(legacyToken)headers['X-Admin-Token']=legacyToken" in api_source
+    template = Path(__file__).parents[1] / "app" / "templates" / "round_centre.html"
+    source = template.read_text(encoding="utf-8")
+    assert ".trim()" in source
+    assert "localStorage.removeItem('bbbffl_admin_token')" in source
+    assert "'X-Admin-Token':token()" not in source
+
+
+def test_stale_initial_round_falls_back_to_first_authorised_round(tmp_path):
+    template = Path(__file__).parents[1] / "app" / "templates" / "round_centre.html"
+    source = template.read_text(encoding="utf-8")
+    match = re.search(r"^function chooseRound\(.*\)\{.*\}$", source, re.MULTILINE)
+    assert match, "chooseRound() function definition not found in Round Centre"
+    script = f"""
+{match.group(0)}
+const rounds = [{{bbbffl_round_id: 'authorised-a'}}, {{bbbffl_round_id: 'authorised-b'}}];
+console.log(chooseRound(rounds, 'stale-out-of-scope', null));
+"""
+    script_path = tmp_path / "round_centre_selection_check.js"
+    script_path.write_text(script, encoding="utf-8")
+    result = subprocess.run(["node", str(script_path)], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "authorised-a"

@@ -73,7 +73,15 @@ naming a `matchup_id` that actually belongs to a different round is
 rejected (`UnknownMatchupError`) rather than mutating that other round
 through this one's URL.
 
-A manual override requires `actor_role` in `{"scorer", "admin"}`
+Every review read and mutation resolves the season from the persisted target
+round (or, for correction/history, from the persisted target matchup) and
+checks the active role grant against that season before doing work. The round
+index is filtered by the same rule. Season-scoped scorer/replay grants
+therefore cannot be escaped by changing a URL or payload identifier, while
+unscoped Administrator and deliberate legacy-token authority retain their
+global compatibility semantics.
+
+A manual override requires `actor_role` in `{"scorer", "replay_operator", "admin"}`
 (`AUTHORISED_OVERRIDE_ROLES`) and a non-empty reason; every other role
 is rejected with `UnauthorisedActorError`. This is the same
 pre-authentication `ActorContext`/`actor_role` convention

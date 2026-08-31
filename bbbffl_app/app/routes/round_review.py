@@ -26,15 +26,24 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from app.audit import ActorContext
-from app.authorization import Principal
+from app.authorization import Principal, Role, require_authenticated, require_role_covers_season, resolve_principal
 from app.config import BASE_DIR
 from app.public_rounds import authoritative_player_names, authoritative_submissions
 from app.round_review import attempt_correction, attempt_signoff, build_round_review
-from app.routes.admin import require_admin, require_scorer
+from app.routes.admin import require_admin
 
 router = APIRouter(prefix="/api/admin/round-review")
 page_router = APIRouter()
 templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
+
+
+def require_round_reviewer(principal: Principal = Depends(resolve_principal)) -> Principal:
+    """Round-scoped review authority, deliberately narrower than the
+    legacy/global admin router's shared ``require_scorer`` dependency."""
+    require_authenticated(principal)
+    if principal.role not in (Role.SCORER, Role.REPLAY_OPERATOR, Role.ADMIN):
+        raise HTTPException(status_code=403, detail="Round review authority required")
+    return principal
 
 
 def _actor(principal: Principal, operator_name: str | None) -> ActorContext:
@@ -44,7 +53,27 @@ def _actor(principal: Principal, operator_name: str | None) -> ActorContext:
     prototype token is shared and has no persistent operator identity.  It can
     never elevate or otherwise select the audited role.
     """
-    return ActorContext(actor_type="anonymous_operator", actor_id=operator_name, actor_role=principal.role.value)
+    actor_id = principal.coach_id if principal.coach_id is not None else operator_name
+    return ActorContext(actor_type="anonymous_operator", actor_id=actor_id, actor_role=principal.role.value)
+
+
+def _authorise_round(request: Request, principal: Principal, round_id: str):
+    """Resolve the target round server-side before applying season scope."""
+    try:
+        round_ = request.app.state.lifecycle.get_round(round_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unknown BBBFFL round") from exc
+    require_role_covers_season(request, principal, round_.season_id)
+    return round_
+
+
+def _authorise_matchup(request: Request, principal: Principal, matchup_id: str) -> None:
+    row = request.app.state.database.execute(
+        "SELECT bbbffl_round_id FROM bbbffl_matchup WHERE matchup_id=?", (matchup_id,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Unknown matchup")
+    _authorise_round(request, principal, row["bbbffl_round_id"])
 
 
 class DnpRulingRequest(BaseModel):
@@ -141,18 +170,28 @@ def _round_review_view(request: Request, round_id: str, *, evidence_fresh: bool 
     return result
 
 
-@router.get("", dependencies=[Depends(require_scorer)])
-def list_round_reviews(request: Request):
-    return [dataclasses.asdict(item) for item in request.app.state.lifecycle.list_ordinary_rounds()]
+@router.get("")
+def list_round_reviews(request: Request, principal: Principal = Depends(require_round_reviewer)):
+    result = []
+    for item in request.app.state.lifecycle.list_ordinary_rounds():
+        try:
+            require_role_covers_season(request, principal, item.season_id)
+        except HTTPException as exc:
+            if exc.status_code == 403:
+                continue
+            raise
+        result.append(dataclasses.asdict(item))
+    return result
 
 
-@router.get("/{round_id}", dependencies=[Depends(require_scorer)])
-def get_round_review(round_id: str, request: Request):
+@router.get("/{round_id}")
+def get_round_review(round_id: str, request: Request, principal: Principal = Depends(require_round_reviewer)):
+    _authorise_round(request, principal, round_id)
     return _round_review_view(request, round_id)
 
 
 @router.post("/{round_id}/calculate")
-def calculate_round_review(round_id: str, request: Request, principal: Principal = Depends(require_scorer)):
+def calculate_round_review(round_id: str, request: Request, principal: Principal = Depends(require_round_reviewer)):
     """Run `MatchupCalculationService.calculate_round` on demand and return
     the refreshed review -- the browser Round Centre's only way to see
     calculated scores/DNP evidence before deciding whether to sign off.
@@ -160,19 +199,21 @@ def calculate_round_review(round_id: str, request: Request, principal: Principal
     but until this existed there was no way to trigger a first calculation
     at all through the API/UI, so a scorer could never review a round's
     scores ahead of that one, all-or-nothing sign-off attempt."""
+    _authorise_round(request, principal, round_id)
     request.app.state.calculations.calculate_round(round_id)
     return _round_review_view(request, round_id)
 
 
 @router.post("/{round_id}/transition")
 def transition_round_review(
-    round_id: str, payload: TransitionRequest, request: Request, principal: Principal = Depends(require_scorer)
+    round_id: str, payload: TransitionRequest, request: Request, principal: Principal = Depends(require_round_reviewer)
 ):
     """Advance the round's ordinary lifecycle state (`app.competition_
     lifecycle.LEGAL_TRANSITIONS`: upcoming -> open -> live -> review).
     `attempt_signoff` already requires `state == "review"`, but nothing
     else exposed a way to reach it -- this is the scorer-facing wiring for
     that existing, otherwise-unreachable transition."""
+    _authorise_round(request, principal, round_id)
     request.app.state.lifecycle.transition(
         round_id, payload.target, actor=_actor(principal, payload.scorer_name), reason=payload.reason
     )
@@ -181,8 +222,9 @@ def transition_round_review(
 
 @router.post("/{round_id}/dnp")
 def record_dnp_ruling(
-    round_id: str, payload: DnpRulingRequest, request: Request, principal: Principal = Depends(require_scorer)
+    round_id: str, payload: DnpRulingRequest, request: Request, principal: Principal = Depends(require_round_reviewer)
 ):
+    _authorise_round(request, principal, round_id)
     request.app.state.round_review.record_dnp_ruling(
         payload.matchup_id,
         payload.season_entry_id,
@@ -198,8 +240,12 @@ def record_dnp_ruling(
 
 @router.post("/{round_id}/interchange")
 def record_interchange_ruling(
-    round_id: str, payload: InterchangeRulingRequest, request: Request, principal: Principal = Depends(require_scorer)
+    round_id: str,
+    payload: InterchangeRulingRequest,
+    request: Request,
+    principal: Principal = Depends(require_round_reviewer),
 ):
+    _authorise_round(request, principal, round_id)
     request.app.state.round_review.record_interchange_ruling(
         payload.matchup_id,
         payload.season_entry_id,
@@ -214,9 +260,10 @@ def record_interchange_ruling(
 
 @router.post("/{round_id}/override")
 def record_override(
-    round_id: str, payload: OverrideRequest, request: Request, principal: Principal = Depends(require_scorer)
+    round_id: str, payload: OverrideRequest, request: Request, principal: Principal = Depends(require_round_reviewer)
 ):
-    if payload.actor_role not in (None, "scorer", "admin"):
+    _authorise_round(request, principal, round_id)
+    if payload.actor_role not in (None, "scorer", "replay_operator", "admin"):
         raise HTTPException(status_code=403, detail="actor_role cannot grant authority")
     request.app.state.round_review.record_override(
         payload.matchup_id,
@@ -233,7 +280,10 @@ def record_override(
 
 
 @router.post("/{round_id}/signoff")
-def signoff(round_id: str, payload: SignoffRequest, request: Request, principal: Principal = Depends(require_scorer)):
+def signoff(
+    round_id: str, payload: SignoffRequest, request: Request, principal: Principal = Depends(require_round_reviewer)
+):
+    _authorise_round(request, principal, round_id)
     state = request.app.state
     afl_client = state.afl_client
     # Recompute every matchup's calculated snapshot immediately before
@@ -260,8 +310,9 @@ def signoff(round_id: str, payload: SignoffRequest, request: Request, principal:
     return dataclasses.asdict(result)
 
 
-@router.get("/matchup/{matchup_id}/history", dependencies=[Depends(require_admin)])
-def matchup_history(matchup_id: str, request: Request):
+@router.get("/matchup/{matchup_id}/history")
+def matchup_history(matchup_id: str, request: Request, principal: Principal = Depends(require_admin)):
+    _authorise_matchup(request, principal, matchup_id)
     history = request.app.state.lifecycle.result_history(matchup_id)
     return [dataclasses.asdict(result) for result in history]
 
@@ -270,6 +321,7 @@ def matchup_history(matchup_id: str, request: Request):
 def correct_matchup(
     matchup_id: str, payload: CorrectionRequest, request: Request, principal: Principal = Depends(require_admin)
 ):
+    _authorise_matchup(request, principal, matchup_id)
     state = request.app.state
     afl_client = state.afl_client
     # Same fresh-evidence discipline as /signoff above: a correction must

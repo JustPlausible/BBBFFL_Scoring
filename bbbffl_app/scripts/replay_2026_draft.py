@@ -2,6 +2,10 @@
 interactively exercising the scorer-operated draft workflow (roadmap
 package 14, issue #53) against the real admin UI.
 
+Deprecated for historical first-half bootstrap: operators must use
+``scripts.bootstrap_2026_first_half`` with explicit replay configuration and
+captured afl-api data. This file remains demo/test scaffolding only.
+
 This is a software simulation only -- it is NOT part of the hermetic test
 suite, is never run by CI or plain `pytest`, and its generated player pool
 is NOT real 2026 AFL player data (BBBFFL has no live afl-api access to a

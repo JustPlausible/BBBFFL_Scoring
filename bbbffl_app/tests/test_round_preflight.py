@@ -203,19 +203,23 @@ def test_authenticated_preflight_happy_path_retains_operator_provenance_and_free
     csrf = re.search(r'name="csrf_token" value="([^"]+)"', account.text).group(1)
     cookies = {"bbbffl_session": session, "bbbffl_csrf": account.cookies["bbbffl_csrf"]}
     headers = {"X-CSRF-Token": csrf}
-    assert preflight_client.post(
-        "/api/context/role", json={"role": "secretary"}, cookies=cookies, headers=headers
-    ).status_code == 200
+    assert (
+        preflight_client.post(
+            "/api/context/role", json={"role": "secretary"}, cookies=cookies, headers=headers
+        ).status_code
+        == 200
+    )
     represented = entries[0]
-    represented_coach_id = db.execute(
-        "SELECT coach_id FROM season_entry WHERE season_entry_id=?", (represented.season_entry_id,)
-    ).fetchone()["coach_id"]
-    assert preflight_client.post(
-        "/api/context/represented-entry",
-        json={"season_entry_id": represented.season_entry_id},
-        cookies=cookies,
-        headers=headers,
-    ).status_code == 200
+    represented_coach_id = app.state.identities.get_current_coach(represented.season_entry_id).coach_id
+    assert (
+        preflight_client.post(
+            "/api/context/represented-entry",
+            json={"season_entry_id": represented.season_entry_id},
+            cookies=cookies,
+            headers=headers,
+        ).status_code
+        == 200
+    )
 
     evidence = Evidence([_match(9001), _match(9002)])
     monkeypatch.setattr(app.state, "afl_client", evidence)
@@ -238,9 +242,7 @@ def test_authenticated_preflight_happy_path_retains_operator_provenance_and_free
         {"trigger_key": "early", "trigger_type": "selective", "sequence": 1, "afl_match_ids": [9001]},
         {"trigger_key": "main", "trigger_type": "main", "sequence": 2, "afl_match_ids": [9002]},
     ):
-        response = preflight_client.post(
-            f"{url}/lockout-trigger", json=payload, cookies=cookies, headers=headers
-        )
+        response = preflight_client.post(f"{url}/lockout-trigger", json=payload, cookies=cookies, headers=headers)
         assert response.status_code == 200, response.text
 
     ready = preflight_client.get(url, cookies=cookies).json()
@@ -257,7 +259,12 @@ def test_authenticated_preflight_happy_path_retains_operator_provenance_and_free
         event
         for event in events
         if event.action
-        in {"round_mapping.corrected", "lockout.trigger.configured", "competition.round.created", "competition.round.transitioned"}
+        in {
+            "round_mapping.corrected",
+            "lockout.trigger.configured",
+            "competition.round.created",
+            "competition.round.transitioned",
+        }
     ]
     assert [event.action for event in workflow] == [
         "round_mapping.corrected",

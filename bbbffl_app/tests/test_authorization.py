@@ -28,7 +28,7 @@ from app.authorization import (
         (Principal(Role.SCORER), 403, None, 403, 403),
         (Principal(Role.ADMIN), 403, None, None, None),
         (Principal(Role.SECRETARY), 403, 403, 403, None),
-        (Principal(Role.REPLAY_OPERATOR), 403, None, 403, 403),
+        (Principal(Role.REPLAY_OPERATOR), 403, 403, 403, 403),
     ],
 )
 def test_permission_matrix(principal, coach, scorer, admin, secretary):

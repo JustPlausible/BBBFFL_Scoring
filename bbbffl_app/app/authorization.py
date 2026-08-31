@@ -142,8 +142,8 @@ def require_coach(principal: Principal) -> Principal:
 
 def require_scorer_or_admin(principal: Principal) -> Principal:
     require_authenticated(principal)
-    if principal.role not in (Role.SCORER, Role.REPLAY_OPERATOR, Role.ADMIN):
-        raise HTTPException(status_code=403, detail="Scorer, replay operator or administrator authority required")
+    if principal.role not in (Role.SCORER, Role.ADMIN):
+        raise HTTPException(status_code=403, detail="Scorer authority required")
     return principal
 
 

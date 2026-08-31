@@ -37,8 +37,10 @@ When the token is unset in the supported development/test configuration, the
 historic open operator mode is preserved as an explicit administrator
 principal. Production configuration already refuses to start without a token.
 
-Scorers and replay operators may use delegated scoring, review, sign-off, and proxy domain
-operations.  Administrative configuration, credential recovery, audit access,
+Scorers may use delegated scoring, review, sign-off, and proxy domain
+operations. Replay Operators may use season-authorised Round Centre review
+operations, but do not satisfy the legacy/global scorer dependency used by
+Grand Final and SuperScore mutations. Administrative configuration, credential recovery, audit access,
 corrections, and administrative pages require administrator authority where
 the existing API distinguishes them.  Operator actions continue to pass their
 real scorer/admin `ActorContext` into domain services; they do not impersonate

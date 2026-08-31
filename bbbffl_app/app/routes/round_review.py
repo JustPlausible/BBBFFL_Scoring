@@ -26,15 +26,24 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from app.audit import ActorContext
-from app.authorization import Principal, require_role_covers_season
+from app.authorization import Principal, Role, require_authenticated, require_role_covers_season, resolve_principal
 from app.config import BASE_DIR
 from app.public_rounds import authoritative_player_names, authoritative_submissions
 from app.round_review import attempt_correction, attempt_signoff, build_round_review
-from app.routes.admin import require_admin, require_scorer
+from app.routes.admin import require_admin
 
 router = APIRouter(prefix="/api/admin/round-review")
 page_router = APIRouter()
 templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
+
+
+def require_round_reviewer(principal: Principal = Depends(resolve_principal)) -> Principal:
+    """Round-scoped review authority, deliberately narrower than the
+    legacy/global admin router's shared ``require_scorer`` dependency."""
+    require_authenticated(principal)
+    if principal.role not in (Role.SCORER, Role.REPLAY_OPERATOR, Role.ADMIN):
+        raise HTTPException(status_code=403, detail="Round review authority required")
+    return principal
 
 
 def _actor(principal: Principal, operator_name: str | None) -> ActorContext:
@@ -162,7 +171,7 @@ def _round_review_view(request: Request, round_id: str, *, evidence_fresh: bool 
 
 
 @router.get("")
-def list_round_reviews(request: Request, principal: Principal = Depends(require_scorer)):
+def list_round_reviews(request: Request, principal: Principal = Depends(require_round_reviewer)):
     result = []
     for item in request.app.state.lifecycle.list_ordinary_rounds():
         try:
@@ -176,13 +185,13 @@ def list_round_reviews(request: Request, principal: Principal = Depends(require_
 
 
 @router.get("/{round_id}")
-def get_round_review(round_id: str, request: Request, principal: Principal = Depends(require_scorer)):
+def get_round_review(round_id: str, request: Request, principal: Principal = Depends(require_round_reviewer)):
     _authorise_round(request, principal, round_id)
     return _round_review_view(request, round_id)
 
 
 @router.post("/{round_id}/calculate")
-def calculate_round_review(round_id: str, request: Request, principal: Principal = Depends(require_scorer)):
+def calculate_round_review(round_id: str, request: Request, principal: Principal = Depends(require_round_reviewer)):
     """Run `MatchupCalculationService.calculate_round` on demand and return
     the refreshed review -- the browser Round Centre's only way to see
     calculated scores/DNP evidence before deciding whether to sign off.
@@ -197,7 +206,7 @@ def calculate_round_review(round_id: str, request: Request, principal: Principal
 
 @router.post("/{round_id}/transition")
 def transition_round_review(
-    round_id: str, payload: TransitionRequest, request: Request, principal: Principal = Depends(require_scorer)
+    round_id: str, payload: TransitionRequest, request: Request, principal: Principal = Depends(require_round_reviewer)
 ):
     """Advance the round's ordinary lifecycle state (`app.competition_
     lifecycle.LEGAL_TRANSITIONS`: upcoming -> open -> live -> review).
@@ -213,7 +222,7 @@ def transition_round_review(
 
 @router.post("/{round_id}/dnp")
 def record_dnp_ruling(
-    round_id: str, payload: DnpRulingRequest, request: Request, principal: Principal = Depends(require_scorer)
+    round_id: str, payload: DnpRulingRequest, request: Request, principal: Principal = Depends(require_round_reviewer)
 ):
     _authorise_round(request, principal, round_id)
     request.app.state.round_review.record_dnp_ruling(
@@ -231,7 +240,10 @@ def record_dnp_ruling(
 
 @router.post("/{round_id}/interchange")
 def record_interchange_ruling(
-    round_id: str, payload: InterchangeRulingRequest, request: Request, principal: Principal = Depends(require_scorer)
+    round_id: str,
+    payload: InterchangeRulingRequest,
+    request: Request,
+    principal: Principal = Depends(require_round_reviewer),
 ):
     _authorise_round(request, principal, round_id)
     request.app.state.round_review.record_interchange_ruling(
@@ -248,7 +260,7 @@ def record_interchange_ruling(
 
 @router.post("/{round_id}/override")
 def record_override(
-    round_id: str, payload: OverrideRequest, request: Request, principal: Principal = Depends(require_scorer)
+    round_id: str, payload: OverrideRequest, request: Request, principal: Principal = Depends(require_round_reviewer)
 ):
     _authorise_round(request, principal, round_id)
     if payload.actor_role not in (None, "scorer", "replay_operator", "admin"):
@@ -268,7 +280,9 @@ def record_override(
 
 
 @router.post("/{round_id}/signoff")
-def signoff(round_id: str, payload: SignoffRequest, request: Request, principal: Principal = Depends(require_scorer)):
+def signoff(
+    round_id: str, payload: SignoffRequest, request: Request, principal: Principal = Depends(require_round_reviewer)
+):
     _authorise_round(request, principal, round_id)
     state = request.app.state
     afl_client = state.afl_client

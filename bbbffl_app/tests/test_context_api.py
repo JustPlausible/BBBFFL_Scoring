@@ -146,6 +146,21 @@ def test_granting_an_ungrantable_role_is_rejected(client):
     assert response.status_code == 400
 
 
+def test_granting_a_season_scoped_administrator_role_is_rejected(client):
+    from app.main import app
+
+    operator = _register_coach(app, email="operator2@example.com", name="Operator Two")
+    season_id = _create_season(client, year=2026, label="2026 Replay")
+    response = client.post(
+        "/api/admin/role-grants", json={"coach_id": operator.coach_id, "role": "admin", "season_id": season_id}
+    )
+    assert response.status_code == 400
+    # Unscoped remains fine.
+    assert (
+        client.post("/api/admin/role-grants", json={"coach_id": operator.coach_id, "role": "admin"}).status_code == 200
+    )
+
+
 def test_grant_then_revoke_round_trip(client):
     from app.main import app
 
@@ -338,6 +353,60 @@ def test_a_secretary_role_session_can_use_season_centre_without_the_admin_token(
         "/api/admin/season-centre/seasons", json={"year": 2028, "label": "2028 Season"}, cookies=cookies
     )
     assert created.status_code == 200, created.text
+
+
+def test_a_season_scoped_secretary_cannot_manage_a_different_seasons_entries(client):
+    """Regression for a code-review finding: a Secretary grant scoped to
+    one season (e.g. confined to the 2026 replay) must never be usable to
+    rename a team or reassign a coach in a *different* season through
+    Season Centre, even though `require_secretary_or_admin` alone only
+    checks the role name, not which season(s) it was granted for."""
+    from app.main import app
+
+    officer = _register_coach(app, email="scoped-officer@example.com", name="Scoped Officer")
+    coach = _register_coach(app, email="live-season-coach@example.com", name="Live Season Coach")
+    allowed_season = _create_season(client, year=2026, label="2026 Replay")
+    other_season = _create_season(client, year=2027, label="2027 Season")
+    other_entry = _create_entry(client, season_id=other_season, coach_id=coach.coach_id, team_name="Live Team")
+    _grant_role(client, coach_id=officer.coach_id, role="secretary", season_id=allowed_season)
+
+    session_cookie = _login(client, email="scoped-officer@example.com")
+    csrf_token, csrf_cookie = _csrf_for_session(client, session_cookie)
+    cookies = {"bbbffl_session": session_cookie, "bbbffl_csrf": csrf_cookie}
+    headers = {"X-CSRF-Token": csrf_token}
+    client.post("/api/context/role", json={"role": "secretary"}, cookies=cookies, headers=headers)
+
+    # The allowed (granted) season works normally.
+    allowed = client.get(f"/api/admin/season-centre/{allowed_season}", cookies=cookies)
+    assert allowed.status_code == 200
+
+    # A different season -- view, create-entry, rename, and reassign are
+    # all refused, not just the ones that happen to be exercised elsewhere.
+    assert client.get(f"/api/admin/season-centre/{other_season}", cookies=cookies).status_code == 403
+    assert (
+        client.post(
+            f"/api/admin/season-centre/{other_season}/entries",
+            json={"coach_id": coach.coach_id, "team_name": "Another Team"},
+            cookies=cookies,
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            f"/api/admin/season-centre/entries/{other_entry}/team-name",
+            json={"team_name": "Renamed"},
+            cookies=cookies,
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            f"/api/admin/season-centre/entries/{other_entry}/coach",
+            json={"coach_id": officer.coach_id},
+            cookies=cookies,
+        ).status_code
+        == 403
+    )
 
 
 def test_a_scorer_only_session_cannot_use_season_centre(client):

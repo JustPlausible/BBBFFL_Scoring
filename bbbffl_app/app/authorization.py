@@ -239,3 +239,29 @@ def require_entry_context(request: Request, principal: Principal, season_entry_i
     require_authenticated(principal)
     if principal.represented_season_entry_id != season_entry_id:
         raise HTTPException(status_code=404, detail="Private resource not found")
+
+
+def require_role_covers_season(request: Request, principal: Principal, season_id: str) -> None:
+    """A Secretary/Scorer/Replay Operator active role may have been granted
+    only for one season (`app.auth.RoleGrantRepository`'s `season_id`
+    scope) rather than every season -- e.g. a Secretary scoped to the 2026
+    replay season only. `require_secretary_or_admin`/`require_scorer_or_admin`
+    alone only check *that* a role is active, not *which* season(s) it was
+    granted for; any route that resolves one specific `season_id` (Season
+    Centre, and later #101-#105's draft/fixture/round-setup pages) must
+    call this too, or a season-scoped grant silently becomes blanket
+    authority the instant it reaches such a route.
+
+    A principal resolved from the legacy shared `X-Admin-Token` (no
+    `coach_id`) is never season-scoped and always passes -- that ambient
+    credential predates and is untouched by role grants. `Role.ADMIN` from
+    a coach session also always passes: `RoleGrantRepository.grant` refuses
+    to create a season-scoped admin grant in the first place (see its
+    docstring), so an authenticated Administrator is always unscoped too.
+    Coach mode is entry-specific, not season-generic, and is governed by
+    `require_owned_season_entry`/`require_entry_context` instead."""
+    if principal.coach_id is None or principal.role in (Role.ADMIN, Role.COACH):
+        return
+    require_authenticated(principal)
+    if not request.app.state.role_grants.role_covers_season(principal.coach_id, principal.role.value, season_id):
+        raise HTTPException(status_code=403, detail="This role is not authorised for that season")

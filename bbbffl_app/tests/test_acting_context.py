@@ -101,6 +101,22 @@ def test_grant_rejects_an_ungrantable_role(role_grants, operator_coach):
         role_grants.grant(operator_coach.coach_id, "not-a-role", actor=ADMIN)
 
 
+def test_grant_rejects_a_season_scoped_administrator_grant(role_grants, operator_coach, two_seasons_with_entries):
+    """Administrator authority is blanket by design: every existing
+    `require_admin`/`require_admin_principal` check across the app (and any
+    router this PR does not retrofit for season-awareness) treats
+    `Role.ADMIN` as unscoped, so a season-scoped admin grant would silently
+    stop meaning what it says the moment it reached one of those routes
+    (found in code review). Refusing to create one at the source is safer
+    than trying to make every admin-gated route season-aware."""
+    replay_season, _, _, _ = two_seasons_with_entries
+    with pytest.raises(InvalidRoleError):
+        role_grants.grant(operator_coach.coach_id, "admin", actor=ADMIN, season_id=replay_season.season_id)
+    # An unscoped admin grant remains perfectly valid.
+    grant = role_grants.grant(operator_coach.coach_id, "admin", actor=ADMIN)
+    assert grant.season_id is None
+
+
 @pytest.mark.parametrize("role", sorted(GRANTABLE_ROLES))
 def test_grant_and_list_active(role_grants, operator_coach, role):
     grant = role_grants.grant(operator_coach.coach_id, role, actor=ADMIN, reason="setup")

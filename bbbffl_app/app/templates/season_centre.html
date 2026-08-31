@@ -320,10 +320,27 @@ async function renderSeason() {
 
   const grantBtn = document.getElementById('grant-role-btn');
   if (grantBtn) {
+    const roleSelect = document.getElementById('grant-role');
+    const scopeCheckbox = document.getElementById('grant-scope-season');
+    // Administrator authority is never season-scoped (app.auth.
+    // RoleGrantRepository.grant refuses to create one -- see its
+    // docstring): every existing require_admin check across the app
+    // treats Role.ADMIN as blanket, so a scoped admin grant would
+    // silently stop meaning what it says the moment it reached one of
+    // those routes. Reflect that here rather than letting the operator
+    // hit a 400 after filling in the form.
+    const syncScopeAvailability = () => {
+      const isAdmin = roleSelect.value === 'admin';
+      scopeCheckbox.disabled = isAdmin;
+      if (isAdmin) scopeCheckbox.checked = false;
+    };
+    roleSelect.onchange = syncScopeAvailability;
+    syncScopeAvailability();
+
     grantBtn.onclick = () => withFeedback(async () => {
       const coach_id = document.getElementById('grant-coach').value;
-      const role = document.getElementById('grant-role').value;
-      const scoped = document.getElementById('grant-scope-season').checked;
+      const role = roleSelect.value;
+      const scoped = scopeCheckbox.checked && role !== 'admin';
       if (!coach_id) throw new Error('Select a coach first.');
       await api('/api/admin/role-grants', { coach_id, role, season_id: scoped ? SEASON_ID : null });
       await loadGrantsList(coach_id);
@@ -395,8 +412,17 @@ async function renderContextBar() {
   CURRENT_CONTEXT = ctx;
   const bar = document.getElementById('context-bar');
   const who = ctx.display_name ? `Signed in as <span class="who">${esc(ctx.display_name)}</span>` : 'Shared operator token';
-  const roleSwitcher = (ctx.coach_id && ctx.granted_roles.length > 1)
-    ? `<select id="role-switch">${ctx.granted_roles.map(r =>
+  // Offer a switch whenever there is any activatable role different from
+  // the current one -- not just when granted_roles.length > 1. A league
+  // officer with no team of their own and exactly one grant (e.g. only
+  // "secretary") still lands on active_role "coach" by default (the
+  // pre-#107 default for a session that has never switched), even though
+  // "coach" is not itself one of their granted_roles; excluding that case
+  // would leave them stuck on a non-functional Coach view with no visible
+  // way to become the one role they actually hold.
+  const switchableRoles = Array.from(new Set([...ctx.granted_roles, ctx.active_role]));
+  const roleSwitcher = (ctx.coach_id && switchableRoles.length > 1)
+    ? `<select id="role-switch">${switchableRoles.map(r =>
         `<option value="${esc(r)}" ${r === ctx.active_role ? 'selected' : ''}>${esc(roleLabel(r))}</option>`).join('')}</select>`
     : `<span class="role-pill">Acting as ${esc(roleLabel(ctx.active_role))}</span>`;
   // Represented-team switching is a deliberately separate control from the

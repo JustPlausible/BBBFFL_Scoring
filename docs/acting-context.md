@@ -208,6 +208,35 @@ changes, and every delegated write still carries `actor_type=
 domain fields -- never recorded as though the represented (historical)
 coach authenticated and performed the action themselves.
 
+## Season scoping is enforced where roles are actually consumed
+
+A grant's `season_id` scope is only as real as the checks that consult it.
+Two related gaps were found and closed in code review:
+
+- **Administrator is never season-scoped.** `RoleGrantRepository.grant`
+  refuses to create a season-scoped `admin` grant at all. Every existing
+  `require_admin`/`require_admin_principal` check across the codebase
+  (`app.routes.admin`, `app.routes.draft`, `app.routes.preseason`,
+  `app.routes.round_review`, and this package's own `app.routes.
+  season_centre`) treats `Role.ADMIN` as blanket authority over every
+  season -- none of them (other than the one exception below) consult
+  `role_grant.season_id`. A season-scoped admin grant would therefore
+  silently become blanket admin the moment it reached any of those routes,
+  which is worse than simply refusing to create one.
+- **`app.authorization.require_role_covers_season`** is the check every
+  route that resolves one specific `season_id` must perform in addition to
+  a role check alone. `require_secretary_or_admin` (or any `require_*`)
+  only proves a role is active, not which season(s) it was granted for.
+  `app.routes.season_centre` calls it on every endpoint that reads or
+  mutates a specific season's entries (the season-centre view, entry
+  creation, team rename, coach reassignment -- the latter two resolve the
+  entry's season *before* mutating it, precisely so the check runs before
+  any write). A `Role.ADMIN` principal or the legacy `X-Admin-Token`
+  always passes it (per the point above); `Role.COACH` is exempt (entry-
+  specific authority, governed by `require_owned_season_entry`/
+  `require_entry_context` instead). Any #101-#105 route that accepts a
+  `season_id` must call this too.
+
 ## Deliberate scope boundaries
 
 - No generic "log in as another user" impersonation exists anywhere in

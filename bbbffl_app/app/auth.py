@@ -630,6 +630,23 @@ class RoleGrantRepository:
     ) -> RoleGrant:
         if role not in GRANTABLE_ROLES:
             raise InvalidRoleError(f"{role!r} is not a grantable role; must be one of {sorted(GRANTABLE_ROLES)}")
+        if role == "admin" and season_id is not None:
+            # Administrator authority is never season-scoped: every
+            # `require_admin`/`require_admin_principal` check across the
+            # codebase (app.routes.admin, app.routes.draft, app.routes.
+            # preseason, app.routes.round_review, ...) treats `Role.ADMIN`
+            # as blanket authority over every season -- none of them consult
+            # `role_grant.season_id`, unlike `ActingContextService.
+            # can_represent`/`representable_entries`, which is the only
+            # place season scoping is actually enforced. A season-scoped
+            # "admin" grant would therefore silently become blanket admin
+            # the moment it reached any of those routes, breaking the scope
+            # it was meant to have. Reject it at the source instead of
+            # letting it be created and quietly not mean what it says.
+            raise InvalidRoleError(
+                "administrator grants cannot be scoped to one season; grant scorer/secretary/replay_operator instead, "
+                "or grant admin without a season_id"
+            )
         now = _now_iso()
         item = RoleGrant(
             grant_id=_id(),

@@ -44,13 +44,13 @@ context bar -- its own admin-token-authenticated endpoints are unaffected
 (a custom header, not a cookie, is what authorises them).
 """
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from app.audit import ActorContext
-from app.authorization import Principal, require_secretary_or_admin, resolve_principal
+from app.authorization import Principal, require_role_covers_season, require_secretary_or_admin, resolve_principal
 from app.config import BASE_DIR
 from app.routes.auth import _attach_csrf_cookie, _issue_csrf_token
 from app.season_centre import build_season_centre, list_coaches_overview, list_seasons_overview
@@ -184,7 +184,8 @@ def update_coach(
 
 
 @router.get("/{season_id}", dependencies=[Depends(require_secretary)])
-def season_centre(season_id: str, request: Request):
+def season_centre(season_id: str, request: Request, principal: Principal = Depends(require_secretary)):
+    require_role_covers_season(request, principal, season_id)
     state = request.app.state
     return build_season_centre(
         state.seasons, state.identities, state.draft, state.preseason, state.player_pool, state.lifecycle, season_id
@@ -195,6 +196,7 @@ def season_centre(season_id: str, request: Request):
 def create_entry(
     season_id: str, payload: CreateEntryRequest, request: Request, principal: Principal = Depends(require_secretary)
 ):
+    require_role_covers_season(request, principal, season_id)
     create_entry_service(
         request.app.state.identities,
         season_id,
@@ -210,13 +212,27 @@ def create_entry(
     )
 
 
+def _require_entry_season_covered(request: Request, principal: Principal, entry_id: str):
+    """Resolve `entry_id`'s season *before* mutating it, so a season-scoped
+    Secretary/Scorer grant (e.g. one confined to the 2026 replay season)
+    can be checked against the entry's real season -- never trusted from
+    the client, and never deferred until after the write already
+    happened. 404 for an unknown entry, matching this router's existing
+    not-found convention (see `app.authorization.require_owned_season_entry`)."""
+    entry = request.app.state.identities.get_public_team(entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Unknown season entry")
+    require_role_covers_season(request, principal, entry.season_id)
+    return entry
+
+
 @router.post("/entries/{entry_id}/team-name", dependencies=[Depends(require_secretary)])
 def rename_team(
     entry_id: str, payload: RenameTeamRequest, request: Request, principal: Principal = Depends(require_secretary)
 ):
+    entry = _require_entry_season_covered(request, principal, entry_id)
     state = request.app.state
     rename_team_service(state.identities, entry_id, payload.team_name, actor=_actor(principal), reason=payload.reason)
-    entry = state.identities.get_public_team(entry_id)
     return build_season_centre(
         state.seasons,
         state.identities,
@@ -232,9 +248,9 @@ def rename_team(
 def transfer_entry(
     entry_id: str, payload: TransferCoachRequest, request: Request, principal: Principal = Depends(require_secretary)
 ):
+    entry = _require_entry_season_covered(request, principal, entry_id)
     state = request.app.state
     transfer_entry_service(state.identities, entry_id, payload.coach_id, actor=_actor(principal), reason=payload.reason)
-    entry = state.identities.get_public_team(entry_id)
     return build_season_centre(
         state.seasons,
         state.identities,

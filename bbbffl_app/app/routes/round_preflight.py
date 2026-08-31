@@ -35,7 +35,11 @@ class TriggerRequest(BaseModel):
 
 
 def _actor(principal):
-    return ActorContext(actor_type="authenticated_coach", actor_id=principal.coach_id, actor_role=principal.role.value)
+    # Administrative domain writes retain the authenticated person's identity,
+    # even when their active context represents another coach's season entry.
+    # The shared audit model classifies these as operator/proxy actions rather
+    # than actions performed by a coach on their own behalf.
+    return ActorContext(actor_type="anonymous_operator", actor_id=principal.coach_id, actor_role=principal.role.value)
 
 
 def _authorise(request, principal, round_id):

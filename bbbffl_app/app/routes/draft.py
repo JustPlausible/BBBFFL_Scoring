@@ -256,7 +256,7 @@ def reopen(season_id: str, payload: ReopenRequest, request: Request):
 def draft_page(
     season_id: str,
     request: Request,
-    principal: Principal = Depends(require_capability("player_pool.read")),
+    principal: Principal = Depends(require_capability("draft.participate")),
 ):
     _authorise_season(request, principal, season_id)
     return templates.TemplateResponse(request, "draft.html", {"season_id": season_id})

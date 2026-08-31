@@ -132,9 +132,14 @@ document.getElementById('save-token').onclick = () => {
 };
 
 async function api(path, body) {
+  const headers = { 'Content-Type': 'application/json' };
+  const token = getToken().trim();
+  // Do not let an empty legacy-token header mask the authenticated #107
+  // session cookie. The compatibility credential is sent only when used.
+  if (token) headers['X-Admin-Token'] = token;
   const res = await fetch(path, {
     method: body ? 'POST' : 'GET',
-    headers: { 'Content-Type': 'application/json', 'X-Admin-Token': getToken() },
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
@@ -148,8 +153,8 @@ async function api(path, body) {
 // Every string below comes from the database (team/player names, scorer-
 // entered pause/finalise/correction reasons) or a request body -- never
 // trust it to be safe HTML before interpolating into innerHTML, since the
-// admin token lives in localStorage and a stored script would run with
-// full scorer/admin access.
+// a legacy admin token may live in localStorage and a stored script could
+// run with full scorer/admin access.
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',

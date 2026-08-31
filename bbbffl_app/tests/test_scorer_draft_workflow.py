@@ -117,6 +117,23 @@ def test_full_ten_entry_draft_runs_through_finalisation_via_the_admin_api(synthe
     page = client.get(f"/admin/draft/{season.season_id}")
     assert page.status_code == 200
     assert "Season player pool" in page.text
+    assert "if (token) headers['X-Admin-Token'] = token" in page.text
+    assert "'X-Admin-Token': getToken()" not in page.text
+    scorer_page = client.get(
+        f"/admin/draft/{season.season_id}",
+        headers={"X-Admin-Token": "legacy-operator", "X-Authority-Role": "scorer"},
+    )
+    assert scorer_page.status_code == 200
+
+    # Season Centre must not advertise a scorer-only workflow to a
+    # Secretary, whose player-pool read capability alone is insufficient.
+    from app.authorization import Principal, Role
+    from app.routes.season_centre import _season_view
+
+    secretary_view = _season_view(client.app.state, season.season_id, Principal(Role.SECRETARY))
+    admin_view = _season_view(client.app.state, season.season_id, Principal(Role.ADMIN))
+    assert secretary_view["links"]["draft"] is None
+    assert admin_view["links"]["draft"] == f"/admin/draft/{season.season_id}"
     searched = client.get(f"{api}/players", params={"q": "marcus bont"}).json()
     assert len(searched) == 1
     assert searched[0]["display_name"] == "Marcus Bontempelli"

@@ -397,7 +397,7 @@ def test_full_ten_entry_draft_runs_through_finalisation_via_the_admin_api(synthe
     finalized_board = board()
     assert finalized_board["status"]["finalized_at"] is not None
     assert finalized_board["status"]["finalized_note"] == "synthetic ten-team draft complete"
-    assert finalized_board["preseason_url"] == f"/admin/season-centre/{season.season_id}"
+    assert finalized_board["preseason_url"] == f"/admin/preseason/{season.season_id}"
 
     # -- Ordinary controls no longer mutate the finalised draft.
     post_finalize_pick = client.post(

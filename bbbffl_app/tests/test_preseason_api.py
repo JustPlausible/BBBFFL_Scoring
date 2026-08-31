@@ -75,6 +75,13 @@ def test_preseason_window_workflow_end_to_end_via_the_admin_api(preseason_client
     opened = client.post(f"{api}/open", json={"reason": "start trading"})
     assert opened.status_code == 200
     assert opened.json()["window"]["closed_at"] is None
+    assert len(opened.json()["teams"]) == ENTRIES
+    assert {team["team_name"] for team in opened.json()["teams"]} == {f"Team {n}" for n in range(ENTRIES)}
+    assert {team["coach_display_name"] for team in opened.json()["teams"]} == {f"Coach {n}" for n in range(ENTRIES)}
+    assert all(team["squad_count"] == SQUAD_LIMIT and team["ready"] for team in opened.json()["teams"])
+    assert {player["display_name"] for team in opened.json()["teams"] for player in team["players"]} == {
+        f"Player {n}" for n in range(ENTRIES * SQUAD_LIMIT)
+    }
 
     # A second open is a clear conflict, not a silent no-op.
     assert client.post(f"{api}/open", json={}).status_code == 409
@@ -115,6 +122,10 @@ def test_preseason_window_workflow_end_to_end_via_the_admin_api(preseason_client
     assert invalid.json()["issues"]
 
     assert len(client.get(f"{api}/trades").json()) == 1
+    history = client.get(f"{api}/status").json()["trades"][0]
+    assert history["trade"]["reason"] == "agreed trade"
+    assert len(history["legs"]) == 2
+    assert all(leg["player_name"] and leg["from_team_name"] and leg["to_team_name"] for leg in history["legs"])
 
     close = client.post(f"{api}/close", json={"reason": "opening squads locked"})
     assert close.status_code == 200
@@ -202,3 +213,17 @@ def test_closing_with_invalid_squads_reports_diagnostics_and_does_not_close(pres
 
     status = client.get(f"{api}/status").json()
     assert status["window"]["closed_at"] is None
+    broken = next(team for team in status["teams"] if team["season_entry_id"] == broken_entry)
+    assert broken["ready"] is False
+    assert broken["squad_count"] == SQUAD_LIMIT - 1
+    assert "squad size" in broken["readiness_problem"]
+
+
+def test_human_preseason_page_is_part_of_season_operations(preseason_client):
+    season, _entries, _players = _seed_finalized_draft(preseason_client.app.state.database)
+    response = preseason_client.get(f"/admin/preseason/{season.season_id}")
+    assert response.status_code == 200
+    assert "All BBBFFL squads" in response.text
+    assert "Accept &amp; freeze opening squads" in response.text
+    assert "Transaction history &amp; provenance" in response.text
+    assert f"/admin/season-centre/{season.season_id}" in response.text

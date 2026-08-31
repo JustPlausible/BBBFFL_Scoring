@@ -177,7 +177,15 @@ CAPABILITIES: dict[Role, frozenset[str]] = {
     Role.SPECTATOR: frozenset(),
     Role.COACH: frozenset({"own_team.manage"}),
     Role.SCORER: frozenset(
-        {"scoring.manage", "lineup.proxy", "draft.participate", "round.review", "player_pool.read", "preseason.manage"}
+        {
+            "scoring.manage",
+            "lineup.proxy",
+            "draft.participate",
+            "fixture.manage",
+            "round.review",
+            "player_pool.read",
+            "preseason.manage",
+        }
     ),
     Role.SECRETARY: frozenset(
         {

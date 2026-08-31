@@ -192,7 +192,7 @@ function linksHtml(links) {
       ${item('Round Centre', links.round_centre)}
       <span class="pill off">Player pool: not yet available in UI</span>
       <span class="pill off">Opening squads: not yet available in UI</span>
-      <span class="pill off">Fixture setup: not yet available in UI</span>
+      ${SEASON_ID ? item('Fixture setup', `/admin/fixture-setup/${SEASON_ID}`) : ''}
     </div>`;
 }
 

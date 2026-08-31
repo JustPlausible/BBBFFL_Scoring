@@ -31,6 +31,7 @@ from app.draft import (
     DraftStateError,
     DraftTurnError,
 )
+from app.fixtures import FixtureRepository
 from app.identity import IdentityRepository
 from app.ladder import LadderRepository
 from app.lineups import LineupConflictError, WeeklyLineupRepository
@@ -63,6 +64,7 @@ from app.routes import auth as auth_routes
 from app.routes import coach_lineup as coach_lineup_routes
 from app.routes import context as context_routes
 from app.routes import draft as draft_routes
+from app.routes import fixture_setup as fixture_setup_routes
 from app.routes import lineups as lineup_routes
 from app.routes import preseason as preseason_routes
 from app.routes import public_rounds as public_round_routes
@@ -146,6 +148,7 @@ async def lifespan(app: FastAPI):
     # both `seasons` and `identities` -- see docs/season-centre.md.
     app.state.seasons = SeasonRepository(database)
     app.state.identities = IdentityRepository(database)
+    app.state.fixtures = FixtureRepository(database)
     app.state.lineups = WeeklyLineupRepository(database)
     # Roadmap package 19's coach authentication/session boundary (issue
     # #74, app/routes/auth.py) resolves logins directly to `identities`
@@ -252,6 +255,8 @@ app.include_router(round_review_routes.router)
 app.include_router(round_review_routes.page_router)
 app.include_router(season_centre_routes.router)
 app.include_router(season_centre_routes.page_router)
+app.include_router(fixture_setup_routes.router)
+app.include_router(fixture_setup_routes.page_router)
 app.include_router(context_routes.router)
 
 

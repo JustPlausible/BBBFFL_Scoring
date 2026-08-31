@@ -42,6 +42,15 @@
   .danger-zone summary { cursor: pointer; color: #e07a3f; }
   .muted { color: #9aa3b2; font-size: 0.8rem; }
   .corrections-list { font-size: 0.78rem; color: #9aa3b2; }
+  .turn-card { border: 2px solid #3a6ea5; background: #101d2b; }
+  .current-pick { font-size: 1.35rem; }
+  .readiness-grid, .progress-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; }
+  .readiness-item, .progress-item { padding: 9px; border-radius: 8px; background: #0f1115; border-left: 4px solid #a53a3a; }
+  .readiness-item.ready { border-left-color: #2f8a44; }
+  .message { display:none; padding: 9px; margin-bottom: 12px; border-radius: 8px; }
+  .message.error { display:block; background:#4a1f1f; border:1px solid #a53a3a; }
+  .message.success { display:block; background:#1f3a24; border:1px solid #2f6e3a; }
+  a { color: #79c0ff; }
 </style>
 </head>
 <body>
@@ -53,13 +62,19 @@
     <button id="save-token">Save token</button>
   </div>
   <div id="status-line">Loading…</div>
+  <div id="message" class="message" role="alert"></div>
+
+  <div class="block" id="readiness-block">
+    <h2>Pre-draft readiness</h2>
+    <div class="readiness-grid" id="readiness-grid"></div>
+  </div>
 
   <div class="block">
     <h2>Draft order</h2>
     <div class="order-list" id="order-list"></div>
   </div>
 
-  <div class="block" id="current-pick-block">
+  <div class="block turn-card" id="current-pick-block">
     <h2>Season player pool and current pick</h2>
     <div class="current-pick" id="current-pick"></div>
     <div class="search-row">
@@ -72,9 +87,11 @@
       </select>
       <input type="text" id="pick-reason" placeholder="Reason (optional)">
     </div>
-    <p class="muted">Canonical IDs are shown for verification. Availability is refreshed from the ownership ledger; every pick is revalidated by the draft service.</p>
+    <p class="muted">Availability is refreshed from the authoritative ownership ledger. Every selection is revalidated when submitted.</p>
     <div id="player-results"></div>
   </div>
+
+  <div class="block"><h2>Team progress</h2><div class="progress-grid" id="progress-grid"></div></div>
 
   <div class="block">
     <h2>Upcoming picks</h2>
@@ -87,7 +104,7 @@
   <div class="block">
     <h2>Completed picks</h2>
     <table>
-      <thead><tr><th>#</th><th>Round</th><th>Team</th><th>Player</th><th></th></tr></thead>
+      <thead><tr><th>#</th><th>Round</th><th>BBBFFL team</th><th>AFL player</th><th>Proxy provenance</th><th></th></tr></thead>
       <tbody id="completed-body"></tbody>
     </table>
     <div class="corrections-list" id="corrections-list"></div>
@@ -107,6 +124,7 @@
     <p class="muted">Only possible once every configured pick is completed. This locks ordinary draft controls.</p>
     <input type="text" id="finalize-note" placeholder="Optional sign-off note">
     <button class="danger" id="finalize-btn">Finalise draft</button>
+    <div id="completion-summary"></div>
   </div>
 
   <details class="danger-zone">
@@ -144,8 +162,16 @@ async function api(path, body) {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
-    alert('Error: ' + (err.detail || res.statusText));
-    throw new Error(err.detail);
+    const messages = {
+      'player is not available': 'That player has just been selected. Refresh the available players and choose again.',
+      'requested pick is not the next executable pick': 'The draft turn changed before this selection was submitted. The board has been refreshed.',
+      'selecting entry does not own the current pick': 'The represented team is not the current pick owner. Switch the shared acting context to the team shown on the board.',
+      'draft is currently paused': 'The draft is paused. Resume it before making another selection.',
+      'draft is not complete': 'The draft cannot be finalised until every required pick and squad target is complete.',
+    };
+    const detail = err.detail || res.statusText;
+    const friendly = Object.entries(messages).find(([key]) => String(detail).toLowerCase().includes(key));
+    throw new Error(friendly ? friendly[1] : detail);
   }
   return res.json();
 }
@@ -177,10 +203,18 @@ function renderStatus(board) {
     (board.status.finalized_note ? `<span class="muted">— ${escapeHtml(board.status.finalized_note)}</span>` : '');
 }
 
+function renderReadiness(readiness) {
+  document.getElementById('readiness-grid').innerHTML = readiness.checks.map(check => `
+    <div class="readiness-item ${check.ready ? 'ready' : ''}">
+      <strong>${check.ready ? 'Ready' : 'Needs attention'} — ${escapeHtml(check.label)}</strong>
+      <div class="muted">${escapeHtml(check.detail)}</div>
+    </div>`).join('');
+}
+
 function renderOrder(board) {
   const currentEntry = board.current_pick ? board.current_pick.current_season_entry_id : null;
   document.getElementById('order-list').innerHTML = board.order.map(o =>
-    `<span class="${o.season_entry_id === currentEntry ? 'current' : ''}">${o.position}. ${escapeHtml(o.team_name)}</span>`
+    `<span class="${o.season_entry_id === currentEntry ? 'current' : ''}">${o.position}. ${escapeHtml(o.team_name)} — ${escapeHtml(o.coach_display_name)}</span>`
   ).join('');
 }
 
@@ -195,21 +229,29 @@ function renderCurrentPick(board) {
   document.getElementById('current-pick-block').style.display = pick ? '' : 'none';
   document.getElementById('player-search').disabled = !searchable;
   if (!pick) { el.textContent = 'No pick outstanding.'; return; }
-  el.innerHTML = `Round ${pick.round}, Pick ${pick.overall_number} — <strong>${escapeHtml(pick.current_team_name)}</strong> ${tradedPill(pick)}`;
+  el.innerHTML = `Overall pick ${pick.overall_number} · Round ${pick.round}, turn ${pick.round_position}<br><strong>${escapeHtml(pick.current_team_name)}</strong> — ${escapeHtml(pick.current_coach_display_name)} ${tradedPill(pick)}`;
   if (board.status.paused_at) el.innerHTML += ' <span class="muted">(draft is paused)</span>';
 }
 
 function renderUpcoming(board) {
-  document.getElementById('upcoming-body').innerHTML = board.upcoming_picks.map(p => `
-    <tr><td>${p.overall_number}</td><td>${p.round}</td><td>${escapeHtml(p.current_team_name)} ${tradedPill(p)}</td></tr>
+  document.getElementById('upcoming-body').innerHTML = board.upcoming_picks.slice(0, 8).map((p, index, picks) => `
+    ${(index === 0 || p.round !== picks[index - 1].round) ? `<tr><td colspan="3"><strong>Round ${p.round}${p.round % 2 === 0 ? ' — order reverses' : ''}</strong></td></tr>` : ''}
+    <tr><td>${p.overall_number}</td><td>${p.round} · turn ${p.round_position}</td><td>${escapeHtml(p.current_team_name)} — ${escapeHtml(p.current_coach_display_name)} ${tradedPill(p)}</td></tr>
   `).join('');
+}
+
+function renderProgress(board) {
+  document.getElementById('progress-grid').innerHTML = board.team_progress.map(team => `
+    <div class="progress-item"><strong>${escapeHtml(team.team_name)}</strong><br>
+      <span>${team.drafted_count} / ${team.target_count} drafted</span><br><span class="muted">${escapeHtml(team.coach_display_name)}</span></div>`).join('');
 }
 
 function renderCompleted(board) {
   document.getElementById('completed-body').innerHTML = board.completed_picks.map(p => `
     <tr>
       <td>${p.overall_number}</td><td>${p.round}</td><td>${escapeHtml(p.current_team_name)} ${tradedPill(p)}</td>
-      <td>${escapeHtml(p.selected_player_name || '')}</td>
+      <td><strong>${escapeHtml(p.selected_player_name || '')}</strong><br><span class="muted">${escapeHtml(p.selected_player_afl_team_name || 'AFL club unavailable')}</span></td>
+      <td>${p.proxy ? `${escapeHtml(p.proxy.operator_name)} (${escapeHtml(p.proxy.operator_role)})<br><span class="muted">for ${escapeHtml(p.proxy.on_behalf_of_team)}${p.proxy.reason ? ` — ${escapeHtml(p.proxy.reason)}` : ''}</span>` : ''}</td>
       <td>${p.draft_pick_id === board.correctable_draft_pick_id
         ? `<button class="correct-btn" data-pick="${p.draft_pick_id}">Correct this pick</button>`
         : ''}</td>
@@ -219,7 +261,8 @@ function renderCompleted(board) {
     btn.onclick = () => {
       const reason = prompt('Reason for correcting this pick?');
       if (reason === null) return;
-      api(`${API}/correct`, { draft_pick_id: btn.dataset.pick, reason }).then(refresh);
+      if (!confirm('This audited correction reopens the latest pick and releases its player. Later picks are not deleted. Continue?')) return;
+      api(`${API}/correct`, { draft_pick_id: btn.dataset.pick, reason }).then(() => refresh('Pick corrected; select a replacement.'));
     };
   });
   document.getElementById('corrections-list').innerHTML = board.corrections.length
@@ -251,8 +294,9 @@ async function renderPlayers(query) {
       api(`${API}/pick`, {
         season_entry_id: board.current_pick.current_season_entry_id,
         season_player_id: btn.dataset.player,
+        draft_pick_id: board.current_pick.draft_pick_id,
         reason: document.getElementById('pick-reason').value || null,
-      }).then(refresh);
+      }).then(() => refresh(`${p.display_name} drafted for ${board.current_pick.current_team_name}.`)).catch(handleError);
     };
   });
 }
@@ -267,14 +311,14 @@ document.getElementById('availability-filter').onchange = () => {
 };
 
 document.getElementById('pause-btn').onclick = () => {
-  api(`${API}/pause`, { reason: document.getElementById('pause-reason').value || null }).then(refresh);
+  api(`${API}/pause`, { reason: document.getElementById('pause-reason').value || null }).then(() => refresh('Draft paused.')).catch(handleError);
 };
 document.getElementById('resume-btn').onclick = () => {
-  api(`${API}/resume`, { reason: document.getElementById('pause-reason').value || null }).then(refresh);
+  api(`${API}/resume`, { reason: document.getElementById('pause-reason').value || null }).then(() => refresh('Draft resumed at the authoritative current turn.')).catch(handleError);
 };
 document.getElementById('finalize-btn').onclick = () => {
   if (!confirm('Finalise the draft? Ordinary draft controls will stop mutating it.')) return;
-  api(`${API}/finalize`, { note: document.getElementById('finalize-note').value || null }).then(refresh);
+  api(`${API}/finalize`, { note: document.getElementById('finalize-note').value || null }).then(() => refresh('Draft finalised.')).catch(handleError);
 };
 document.getElementById('reopen-btn').onclick = () => {
   const reason = document.getElementById('reopen-reason').value;
@@ -283,8 +327,20 @@ document.getElementById('reopen-btn').onclick = () => {
   api(`${API}/reopen`, { reason, confirm: confirmText }).then(refresh);
 };
 
-async function refresh() {
+function say(text, kind='error') {
+  const message = document.getElementById('message'); message.textContent = text || ''; message.className = text ? `message ${kind}` : 'message';
+}
+function handleError(error) { say(error.message); refresh(); }
+
+async function refresh(successMessage) {
   try {
+    const readiness = await api(`${API}/readiness`);
+    renderReadiness(readiness);
+    if (!readiness.ready || !readiness.checks.find(c => c.key === 'order').ready) {
+      document.getElementById('status-line').textContent = 'Draft setup is not ready yet.';
+      if (successMessage) say(successMessage, 'success');
+      return;
+    }
     const board = await api(`${API}/board`);
     window._lastBoard = board;
     renderStatus(board);
@@ -292,9 +348,15 @@ async function refresh() {
     renderCurrentPick(board);
     renderUpcoming(board);
     renderCompleted(board);
+    renderProgress(board);
+    document.getElementById('completion-summary').innerHTML = board.status.finalized_at
+      ? `<p><strong>Draft finalised.</strong> All ${board.status.total_picks} required picks and team squad targets are satisfied.</p><p><a href="${escapeHtml(board.preseason_url)}">Continue to preseason and opening-squad management →</a></p>`
+      : (board.status.completed_picks === board.status.total_picks ? '<p><strong>Every required pick and squad target is complete.</strong> Review the board, then finalise.</p>' : '');
     renderPlayers(document.getElementById('player-search').value);
+    if (successMessage) say(successMessage, 'success'); else say('');
   } catch (e) {
-    document.getElementById('status-line').textContent = 'Failed to load draft board — check admin token and season ID.';
+    document.getElementById('status-line').textContent = 'The draft board could not be loaded.';
+    say(e.message || 'Check your signed-in role and selected season.');
   }
 }
 

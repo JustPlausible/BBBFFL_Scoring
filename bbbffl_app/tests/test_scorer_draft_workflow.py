@@ -76,6 +76,23 @@ def _seed_season(database):
     return season, entries, players, ineligible
 
 
+def test_readiness_explains_missing_authoritative_setup(synthetic_draft_client):
+    client = synthetic_draft_client
+    season = SeasonRepository(client.app.state.database).create_season(2096, "Not ready")
+    response = client.get(f"/api/admin/draft/{season.season_id}/readiness")
+    assert response.status_code == 200
+    readiness = response.json()
+    assert readiness["ready"] is False
+    assert {item["key"]: item["ready"] for item in readiness["checks"]} == {
+        "entries": False,
+        "order": False,
+        "players": False,
+        "squad": False,
+    }
+    assert "Accept and freeze" in next(item["detail"] for item in readiness["checks"] if item["key"] == "order")
+    assert "database" not in str(readiness).lower()
+
+
 def test_full_ten_entry_draft_runs_through_finalisation_via_the_admin_api(synthetic_draft_client):
     client = synthetic_draft_client
     database = client.app.state.database
@@ -111,6 +128,14 @@ def test_full_ten_entry_draft_runs_through_finalisation_via_the_admin_api(synthe
     assert initial["status"]["completed_picks"] == 0
     assert initial["current_pick"]["current_season_entry_id"] == entries[0].season_entry_id
     assert initial["order"][0]["season_entry_id"] == entries[0].season_entry_id
+    assert initial["order"][0]["team_name"] == "Synthetic Team 0"
+    assert initial["order"][0]["coach_display_name"] == "Synthetic Coach 0"
+    assert initial["current_pick"]["current_coach_display_name"] == "Synthetic Coach 0"
+    assert initial["upcoming_picks"][8]["round"] == 1
+    assert initial["upcoming_picks"][9]["round"] == 2
+    assert initial["upcoming_picks"][9]["current_season_entry_id"] == entries[-1].season_entry_id
+    assert initial["readiness"]["ready"] is True
+    assert initial["team_progress"][0]["drafted_count"] == 0
 
     # -- Issue #101's player-pool browser is a season-scoped joined view of
     # real player facts and ownership, not a second availability ledger.
@@ -176,7 +201,17 @@ def test_full_ten_entry_draft_runs_through_finalisation_via_the_admin_api(synthe
 
     # -- Pick #1, with proxy provenance recorded.
     first_pick, first_player = draft_next(scorer_name="Steve the Scorer")
-    assert board()["status"]["completed_picks"] == 1
+    after_first = board()
+    assert after_first["status"]["completed_picks"] == 1
+    assert after_first["team_progress"][0]["drafted_count"] == 1
+    completed_first = after_first["completed_picks"][0]
+    assert completed_first["selected_player_afl_team_name"] == first_player["afl_team_name"]
+    assert completed_first["proxy"] == {
+        "operator_name": "Steve the Scorer",
+        "operator_role": "scorer",
+        "reason": "draft selection",
+        "on_behalf_of_team": "Synthetic Team 0",
+    }
     events = AuditEventRepository(database).list_events(action="draft.pick.completed")
     assert events[-1].actor_role == "scorer" and events[-1].actor_id == "Steve the Scorer"
     claimed = client.get(f"{api}/players", params={"q": first_player["canonical_player_id"]}).json()[0]
@@ -194,6 +229,19 @@ def test_full_ten_entry_draft_runs_through_finalisation_via_the_admin_api(synthe
         },
     )
     assert reuse_response.status_code == 409
+    assert board()["status"]["completed_picks"] == completed_count
+
+    # A browser submitting a selection rendered for a previous turn sends
+    # that authoritative pick id; the repository rejects it as stale.
+    stale_turn = client.post(
+        f"{api}/pick",
+        json={
+            "draft_pick_id": first_pick["draft_pick_id"],
+            "season_entry_id": board()["current_pick"]["current_season_entry_id"],
+            "season_player_id": players[4].season_player_id,
+        },
+    )
+    assert stale_turn.status_code == 409
     assert board()["status"]["completed_picks"] == completed_count
 
     # -- Pick #2, #3: advance the snake order normally.
@@ -318,6 +366,7 @@ def test_full_ten_entry_draft_runs_through_finalisation_via_the_admin_api(synthe
     finalized_board = board()
     assert finalized_board["status"]["finalized_at"] is not None
     assert finalized_board["status"]["finalized_note"] == "synthetic ten-team draft complete"
+    assert finalized_board["preseason_url"] == f"/admin/season-centre/{season.season_id}"
 
     # -- Ordinary controls no longer mutate the finalised draft.
     post_finalize_pick = client.post(

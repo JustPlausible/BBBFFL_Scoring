@@ -30,7 +30,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from app.audit import ActorContext
+from app.audit import ActorContext, AuditEventRepository
 from app.authorization import (
     Principal,
     require_capability,
@@ -50,6 +50,7 @@ REOPEN_CONFIRMATION_PHRASE = "REOPEN FINALIZED DRAFT"
 class PickRequest(BaseModel):
     season_entry_id: str
     season_player_id: str
+    draft_pick_id: str | None = None
     scorer_name: str | None = None
     reason: str | None = None
 
@@ -93,6 +94,19 @@ def _team_name(request: Request, entry_id: str, cache: dict) -> str:
     return cache[entry_id]
 
 
+def _entry_view(request: Request, entry_id: str, cache: dict) -> dict:
+    """Resolve stable entry identity into public, human-facing labels."""
+    if entry_id not in cache:
+        team = request.app.state.identities.get_public_team(entry_id)
+        coach = request.app.state.identities.get_current_coach(entry_id)
+        cache[entry_id] = {
+            "season_entry_id": entry_id,
+            "team_name": team.team_name if team else "Unknown team",
+            "coach_display_name": coach.display_name if coach else "Coach not assigned",
+        }
+    return cache[entry_id]
+
+
 def _player_name(request: Request, season_player_id: str | None, cache: dict) -> str | None:
     if season_player_id is None:
         return None
@@ -102,21 +116,95 @@ def _player_name(request: Request, season_player_id: str | None, cache: dict) ->
     return cache[season_player_id]
 
 
-def _pick_view(request: Request, pick, cache: dict, player_cache: dict) -> dict:
+def _pick_view(request: Request, pick, cache: dict, player_cache: dict, event_cache: dict) -> dict:
+    current_identity = _entry_view(request, pick.current_season_entry_id, cache)
+    original_identity = _entry_view(request, pick.original_season_entry_id, cache)
+    player = (
+        request.app.state.player_pool.get_by_id(pick.selected_season_player_id)
+        if pick.selected_season_player_id
+        else None
+    )
+    if pick.draft_pick_id not in event_cache:
+        events = AuditEventRepository(request.app.state.database).list_events(
+            action="draft.pick.completed", entity_type="draft.pick", entity_id=pick.draft_pick_id
+        )
+        event_cache[pick.draft_pick_id] = events[-1] if events else None
+    event = event_cache[pick.draft_pick_id]
+    actor_name = None
+    if event and event.actor_id:
+        actor = request.app.state.identities.get_coach(event.actor_id)
+        actor_name = actor.display_name if actor else event.actor_id
     return {
         "draft_pick_id": pick.draft_pick_id,
         "overall_number": pick.overall_number,
         "round": pick.draft_round,
         "round_position": pick.round_position,
         "original_season_entry_id": pick.original_season_entry_id,
-        "original_team_name": _team_name(request, pick.original_season_entry_id, cache),
+        "original_team_name": original_identity["team_name"],
         "current_season_entry_id": pick.current_season_entry_id,
-        "current_team_name": _team_name(request, pick.current_season_entry_id, cache),
+        "current_team_name": current_identity["team_name"],
+        "current_coach_display_name": current_identity["coach_display_name"],
         "traded": pick.original_season_entry_id != pick.current_season_entry_id,
         "selected_season_player_id": pick.selected_season_player_id,
         "selected_player_name": _player_name(request, pick.selected_season_player_id, player_cache),
+        "selected_player_afl_team_name": player.afl_team_name if player else None,
         "completed_at": pick.completed_at,
+        "proxy": (
+            {
+                "operator_name": actor_name or "Scorer",
+                "operator_role": event.actor_role,
+                "reason": event.reason,
+                "on_behalf_of_team": current_identity["team_name"],
+            }
+            if event
+            else None
+        ),
     }
+
+
+def _readiness(request: Request, season_id: str) -> dict:
+    database = request.app.state.database
+    entries = request.app.state.identities.list_entries(season_id)
+    status = request.app.state.draft.status(season_id)
+    config = database.execute(
+        "SELECT squad_limit FROM season_squad_configuration WHERE season_id=?", (season_id,)
+    ).fetchone()
+    player_count = database.execute(
+        "SELECT COUNT(*) AS count FROM season_player_pool WHERE season_id=? AND eligible=TRUE", (season_id,)
+    ).fetchone()["count"]
+    checks = [
+        {
+            "key": "entries",
+            "ready": len(entries) == 10,
+            "label": "Ten BBBFFL teams",
+            "detail": f"{len(entries)} of 10 season entries are present.",
+        },
+        {
+            "key": "order",
+            "ready": status is not None,
+            "label": "Draft order accepted",
+            "detail": "The frozen draft order is ready."
+            if status
+            else "Accept and freeze the draft order in season setup.",
+        },
+        {
+            "key": "players",
+            "ready": player_count > 0,
+            "label": "Season player pool",
+            "detail": f"{player_count} eligible AFL players are loaded."
+            if player_count
+            else "Load the season's AFL player pool before drafting.",
+        },
+        {
+            "key": "squad",
+            "ready": config is not None and config["squad_limit"] > 0,
+            "label": "Target squad size",
+            "detail": f"Target: {config['squad_limit']} players per team."
+            if config
+            else "Configure the target squad size.",
+        },
+    ]
+    return {"ready": all(item["ready"] for item in checks), "checks": checks}
 
 
 def _board(request: Request, season_id: str) -> dict:
@@ -126,9 +214,9 @@ def _board(request: Request, season_id: str) -> dict:
         raise KeyError(season_id)
     cache: dict = {}
     player_cache: dict = {}
+    event_cache: dict = {}
     order = [
-        {"position": position, "season_entry_id": entry_id, "team_name": _team_name(request, entry_id, cache)}
-        for position, entry_id in draft.order(season_id)
+        {"position": position, **_entry_view(request, entry_id, cache)} for position, entry_id in draft.order(season_id)
     ]
     all_picks = draft.picks(season_id)
     completed = [pick for pick in all_picks if pick.completed_at is not None]
@@ -138,17 +226,41 @@ def _board(request: Request, season_id: str) -> dict:
     return {
         "season_id": season_id,
         "status": dataclasses.asdict(status),
+        "readiness": _readiness(request, season_id),
         "order": order,
-        "current_pick": _pick_view(request, current, cache, player_cache) if current else None,
-        "upcoming_picks": [_pick_view(request, pick, cache, player_cache) for pick in remaining[1:]],
-        "completed_picks": [_pick_view(request, pick, cache, player_cache) for pick in reversed(completed)],
+        "current_pick": _pick_view(request, current, cache, player_cache, event_cache) if current else None,
+        "upcoming_picks": [_pick_view(request, pick, cache, player_cache, event_cache) for pick in remaining[1:]],
+        "completed_picks": [
+            _pick_view(request, pick, cache, player_cache, event_cache) for pick in reversed(completed)
+        ],
+        "team_progress": [
+            {
+                **identity,
+                "drafted_count": sum(
+                    1 for pick in completed if pick.current_season_entry_id == identity["season_entry_id"]
+                ),
+                "target_count": status.target_squad_size,
+            }
+            for identity in (_entry_view(request, entry_id, cache) for _, entry_id in draft.order(season_id))
+        ],
         "correctable_draft_pick_id": latest_completed.draft_pick_id if latest_completed else None,
         "corrections": [dataclasses.asdict(item) for item in draft.corrections(season_id)],
+        "preseason_url": f"/admin/season-centre/{season_id}",
     }
 
 
 def _authorise_season(request: Request, principal: Principal, season_id: str):
     require_role_covers_season(request, principal, season_id)
+
+
+@router.get("/{season_id}/readiness")
+def readiness(
+    season_id: str,
+    request: Request,
+    principal: Principal = Depends(require_capability("draft.participate")),
+):
+    _authorise_season(request, principal, season_id)
+    return _readiness(request, season_id)
 
 
 @router.get("/{season_id}/board")
@@ -209,6 +321,7 @@ def submit_pick(
         season_id,
         payload.season_entry_id,
         payload.season_player_id,
+        pick_id=payload.draft_pick_id,
         actor=_pick_actor(principal, payload.scorer_name),
         reason=payload.reason or "draft selection",
     )

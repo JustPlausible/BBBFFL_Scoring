@@ -55,6 +55,7 @@ documented BBBFFL requirement yet).
 | `GET /api/v1` | Potentially useful, non-contractual | Not called by the app. Useful as a cheap connectivity/auth smoke check (used by the diagnostic). |
 | `GET /api/v1/seasons` | **Required now** | `seasons[].season_id`, `.is_current`, `.current_round_number`, `.year`. BBBFFL selects the single `is_current: true` entry ([`app/afl_client.py:get_current_season`](../bbbffl_app/app/afl_client.py)). |
 | `GET /api/v1/seasons/{season_id}/rounds` | **Required now** | `rounds[].round_id`, `.round_number` (matched against a caller-supplied round number), and `.byes` for package 24's advisory lineup warnings. `null`, an empty list, and a populated list remain distinct evidence states. |
+| `GET /api/v1/seasons/{season_id}/players` | **Required for the supported 2026 historical replay** | Complete season-scoped canonical player pool, including `canonical_player_id`, `display_name`, season team identity, provider identifiers and eligibility where supplied. The replay exporter must not infer this pool from match participants. |
 | `GET /api/v1/rounds/{round_id}` | Potentially useful, non-contractual | Not called; BBBFFL currently reaches a round only via the season-scoped list. |
 | `GET /api/v1/rounds/{round_id}/matches` | **Required now** | `matches[].match_id`, `.status`, `.home_team{team_id,name}`, `.away_team{team_id,name}`, `.start_time_utc` (consumed by issue #34/package 23's lockout boundary — `app/afl_client.py`'s `Match.start_time_utc`). `.score_home`/`.score_away` are **not yet consumed** — committed future dependency for Round Centre presentation. |
 | `GET /api/v1/matches/{match_id}` | Potentially useful, non-contractual | Not called; BBBFFL currently reaches match identity only via the round-scoped list. |
@@ -315,16 +316,13 @@ not this contract-validation issue, per its explicit non-goals.
 
 ## 3. Known upstream gaps and unresolved semantics
 
-1. **No bulk season player-list endpoint.** `GET /api/v1/players?search=`
-   requires a non-blank name and caps results at 100; `GET
-   /api/v1/players/{id}/seasons` is per-player, not per-season. There is no
-   `GET /api/v1/seasons/{id}/players`-shaped resource. Package 11 (season
-   player pool) needs to enumerate an entire season's eligible player list
-   to build the draft pool — this is not currently satisfiable through
-   `/api/v1` without either an unbounded/expensive search-by-letter sweep
-   (rejected — that is exactly the private-collector-style workaround this
-   issue prohibits) or a new upstream endpoint. **This blocks package 11**
-   and should be raised upstream before that package starts.
+1. **Bulk season player-list dependency is now consumed by replay.** The
+   supported first-half exporter requires `GET
+   /api/v1/seasons/{season_id}/players`; it deliberately fails closed if the
+   deployed consumer API does not provide the complete season-scoped pool.
+   This endpoint supersedes the earlier gap recorded below and prevents
+   injured, suspended, or pre-debut eligible players being omitted merely
+   because they have no first-half stat row.
 2. **Historical season data presence is unverified.** The contract
    structurally supports historical access (any persisted season/round/
    match/player-stats resource is reachable by ID with no time-window
@@ -345,7 +343,7 @@ not this contract-validation issue, per its explicit non-goals.
    [1.5 Timing](#15-timing)) — not a defect, but a real design boundary
    package 23/25 must plan around (client-side timezone conversion).
 
-### Proposed upstream follow-up (not filed; for maintainer review)
+### Historical proposed upstream follow-up (now satisfied)
 
 > **Title:** Expose a bulk season-scoped canonical player list
 >

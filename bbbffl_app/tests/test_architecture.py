@@ -170,7 +170,7 @@ AFL_EVIDENCE = {"app.participation"}
 # `app.replay_checkpoint` (issue #67) is its sibling: pure checkpoint-report
 # assembly for the staged-lockout/bye/carry-forward/proxy/Opening-Round
 # scenarios, with no imports of its own beyond the standard library.
-REPLAY = {"app.replay", "app.replay_checkpoint"}
+REPLAY = {"app.replay", "app.replay_checkpoint", "app.replay_acquisition"}
 
 # Scorer/admin Season Centre application service (issue #100): the operator
 # surface over `app.season`/`app.identity` -- season identity/lifecycle and

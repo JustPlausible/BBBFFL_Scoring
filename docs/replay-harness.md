@@ -137,3 +137,5 @@ report/provenance conventions via `app.replay_checkpoint`
 (`build_checkpoint_scenario`/`build_checkpoint_suite`/
 `write_checkpoint_suite_report`) rather than replacing them -- read that
 document first if you are preparing the real Rounds 1-9 replay.
+
+> **Operational scope:** For the authoritative 2026 historical first-half operational replay, use [`2026-first-half-replay-playbook.md`](2026-first-half-replay-playbook.md). This document remains replay-harness reference material.

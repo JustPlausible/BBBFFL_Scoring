@@ -62,7 +62,13 @@ class ReplayAflDataSource:
 
     SCHEMA = "bbbffl.replay-evidence/v1"
 
-    def __init__(self, path: str | Path, *, clock: ReplayClock | None = None):
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        clock: ReplayClock | None = None,
+        checkpoint_path: str | Path | None = None,
+    ):
         self.path = Path(path)
         self.clock = clock
         if not self.path.is_file():
@@ -73,7 +79,31 @@ class ReplayAflDataSource:
             raise ReplayEvidenceError(f"malformed replay evidence at {self.path}: {exc}") from exc
         if not isinstance(payload, dict):
             raise ReplayEvidenceError("replay evidence root must be an object")
+        self.stage: str | None = None
+        self.finalised_round_ids: frozenset[int] = frozenset()
+        if checkpoint_path is not None:
+            self._load_checkpoint(Path(checkpoint_path))
         self._load(payload)
+
+    def _load_checkpoint(self, path: Path) -> None:
+        if not path.is_file():
+            raise ReplayEvidenceError(f"replay checkpoint file does not exist: {path}")
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+            if state.get("schema") != "bbbffl.replay-checkpoint/v1":
+                raise ReplayEvidenceError(f"unsupported replay checkpoint schema: {state.get('schema')!r}")
+            if state.get("stage") not in ("scheduled", "final-results"):
+                raise ReplayEvidenceError(f"unsupported replay checkpoint stage: {state.get('stage')!r}")
+            self.clock = ReplayClock.from_iso(state["effective_at"])
+            self.stage = state["stage"]
+            finalised = state.get("finalised_round_ids", [])
+            if not isinstance(finalised, list):
+                raise ReplayEvidenceError("replay checkpoint finalised_round_ids must be a list")
+            self.finalised_round_ids = frozenset(int(round_id) for round_id in finalised)
+        except ReplayEvidenceError:
+            raise
+        except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise ReplayEvidenceError(f"malformed replay checkpoint at {path}: {exc}") from exc
 
     @staticmethod
     def _list(payload: dict, key: str) -> list[dict]:
@@ -95,6 +125,9 @@ class ReplayAflDataSource:
         except (KeyError, ValueError) as exc:
             raise ReplayEvidenceError("manifest.evidence_class is missing or unknown") from exc
         self.manifest = dict(manifest)
+        historical = manifest.get("lifecycle_semantics") == "scheduled-start-plus-final-results-checkpoint"
+        if historical and (self.clock is None or self.stage is None):
+            raise ReplayEvidenceError("historical replay package requires an explicit persisted replay checkpoint")
         # A replay may carry its own explicit effective instant so an
         # interactive application process uses the same deterministic clock
         # as a repository-level replay. A caller-supplied clock remains the
@@ -175,6 +208,11 @@ class ReplayAflDataSource:
                 raise ReplayEvidenceError(f"match {match_id} references missing round {round_id}")
             if match_id not in self._stats:
                 raise ReplayEvidenceError(f"required player_stats evidence missing for match {match_id}")
+        unknown_finalised = self.finalised_round_ids - set(self._rounds)
+        if unknown_finalised:
+            raise ReplayEvidenceError(
+                f"replay checkpoint references unknown finalised AFL rounds {sorted(unknown_finalised)}"
+            )
         for match_id, rows in self._stats.items():
             if match_id not in self._matches:
                 raise ReplayEvidenceError(f"player_stats references missing match {match_id}")
@@ -273,6 +311,18 @@ class ReplayAflDataSource:
 
     def _at_effective_time(self, match: Match) -> Match:
         timeline = self._match_records[match.match_id].get("status_timeline")
+        if self.manifest.get("lifecycle_semantics") == "scheduled-start-plus-final-results-checkpoint":
+            # A historical export contains the final status physically, but no
+            # invented LIVE/POSTGAME transition. Scheduled time drives lockout;
+            # finality is exposed only at the explicit operator checkpoint.
+            released = self._match_rounds[match.match_id] in self.finalised_round_ids
+            started = (
+                self.clock is not None
+                and match.start_time_utc is not None
+                and self.clock.now() >= ReplayClock.from_iso(match.start_time_utc).now()
+            )
+            status = "CONCLUDED" if released and started else "UPCOMING"
+            return Match(match.match_id, match.home_team, match.away_team, status, match.start_time_utc)
         if self.clock is None or timeline is None:
             return match
         status = None
@@ -298,6 +348,19 @@ class ReplayAflDataSource:
             raise ReplayEvidenceError(f"required player identity is missing: {canonical_player_id}") from exc
 
     def get_match_player_stats(self, match_id: int) -> dict[int, PlayerStatLine]:
+        if self.manifest.get("lifecycle_semantics") == "scheduled-start-plus-final-results-checkpoint":
+            round_id = self._match_rounds.get(match_id)
+            match = self._matches.get(match_id)
+            started = (
+                match is not None
+                and self.clock is not None
+                and match.start_time_utc is not None
+                and self.clock.now() >= ReplayClock.from_iso(match.start_time_utc).now()
+            )
+            if round_id not in self.finalised_round_ids or not started:
+                raise ReplayEvidenceError(
+                    f"final player stats for match {match_id} are unavailable before its final-results checkpoint"
+                )
         try:
             return dict(self._stats[match_id])
         except KeyError as exc:

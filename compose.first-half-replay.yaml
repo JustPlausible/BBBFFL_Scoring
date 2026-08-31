@@ -1,0 +1,27 @@
+services:
+  database:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: bbbffl_2026_first_half
+      POSTGRES_USER: bbbffl
+      POSTGRES_PASSWORD: first-half-only
+    volumes: [first-half-database:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bbbffl -d bbbffl_2026_first_half"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+  app:
+    build: {context: ./bbbffl_app}
+    env_file: [./bbbffl_app/.env.first-half-replay]
+    ports: ["8018:8000"]
+    volumes:
+      - ./replay/2026-first-half/evidence:/replay/evidence:ro
+      - ./replay/2026-first-half/state:/replay/state:ro
+      - ./replay/2026-first-half/logs:/replay/logs
+      - ./replay/2026-first-half/backups:/replay/backups
+      - ./replay/2026-first-half/config:/secure:ro
+    depends_on:
+      database: {condition: service_healthy}
+volumes:
+  first-half-database:

@@ -281,3 +281,5 @@ actual evidence base for deciding whether the 2026 season is ready to be
 treated as replay-validated. This procedure, and the checkpoint scenarios
 above, do not themselves constitute that full replay; they are what must
 pass before it is attempted.
+
+> **Operational scope:** For the authoritative 2026 historical first-half operational replay, use [`2026-first-half-replay-playbook.md`](2026-first-half-replay-playbook.md). This document remains replay-checkpoint-2026 reference material.

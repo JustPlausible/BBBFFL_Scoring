@@ -38,6 +38,19 @@ def preseason_client(monkeypatch):
     db_path.unlink(missing_ok=True)
 
 
+@pytest.fixture
+def token_protected_preseason_client(monkeypatch):
+    db_path = Path(tempfile.mkstemp(suffix=".db")[1])
+    monkeypatch.setenv("BBBFFL_DATABASE_URL", f"sqlite:///{db_path}")
+    monkeypatch.setenv("BBBFFL_ENVIRONMENT", "test")
+    monkeypatch.setenv("BBBFFL_ADMIN_TOKEN", "preseason-secret")
+    from app.main import app
+
+    with TestClient(app) as client:
+        yield client
+    db_path.unlink(missing_ok=True)
+
+
 def _seed_finalized_draft(database):
     season = SeasonRepository(database).create_season(2097, "Preseason API season")
     identities = IdentityRepository(database)
@@ -75,6 +88,7 @@ def test_preseason_window_workflow_end_to_end_via_the_admin_api(preseason_client
     opened = client.post(f"{api}/open", json={"reason": "start trading"})
     assert opened.status_code == 200
     assert opened.json()["window"]["closed_at"] is None
+    assert opened.json()["window"]["is_open"] is True
     assert len(opened.json()["teams"]) == ENTRIES
     assert {team["team_name"] for team in opened.json()["teams"]} == {f"Team {n}" for n in range(ENTRIES)}
     assert {team["coach_display_name"] for team in opened.json()["teams"]} == {f"Coach {n}" for n in range(ENTRIES)}
@@ -130,6 +144,7 @@ def test_preseason_window_workflow_end_to_end_via_the_admin_api(preseason_client
     close = client.post(f"{api}/close", json={"reason": "opening squads locked"})
     assert close.status_code == 200
     assert close.json()["window"]["closed_at"] is not None
+    assert close.json()["window"]["is_open"] is False
 
     # Closing again is a clear, distinct-status conflict (locked), not a
     # silent no-op or a generic 409.
@@ -227,3 +242,22 @@ def test_human_preseason_page_is_part_of_season_operations(preseason_client):
     assert "Accept &amp; freeze opening squads" in response.text
     assert "Transaction history &amp; provenance" in response.text
     assert f"/admin/season-centre/{season.season_id}" in response.text
+
+
+def test_shared_token_shell_loads_but_api_remains_protected(token_protected_preseason_client):
+    client = token_protected_preseason_client
+    season, _entries, _players = _seed_finalized_draft(client.app.state.database)
+    api = f"/api/admin/preseason/{season.season_id}"
+
+    # Navigation cannot attach the token header; the shell must load so its
+    # token input can authenticate subsequent protected API requests.
+    shell = client.get(f"/admin/preseason/{season.season_id}")
+    assert shell.status_code == 200
+    assert "Admin token (if required)" in shell.text
+    assert client.get(f"{api}/status").status_code == 401
+
+    headers = {"X-Admin-Token": "preseason-secret"}
+    assert client.get(f"{api}/status", headers=headers).status_code == 200
+    opened = client.post(f"{api}/open", json={"reason": "authenticated operator"}, headers=headers)
+    assert opened.status_code == 200
+    assert opened.json()["window"]["is_open"] is True

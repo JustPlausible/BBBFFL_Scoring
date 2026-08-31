@@ -140,9 +140,13 @@ def _status(request: Request, season_id: str) -> dict:
             }
         )
     snapshot = preseason.current_snapshot(season_id) if window else None
+    # ``is_open`` is authoritative domain state exposed by a property and
+    # therefore is not included by dataclasses.asdict(). Expose it once at
+    # the API boundary instead of duplicating lifecycle logic in JavaScript.
+    window_view = {**dataclasses.asdict(window), "is_open": window.is_open} if window else None
     return {
         "season_id": season_id,
-        "window": dataclasses.asdict(window) if window else None,
+        "window": window_view,
         "squad_limit": squad_limit,
         "squad_issues": issues,
         "all_squads_ready": not issues and bool(teams),
@@ -224,6 +228,6 @@ def correct_opening_squad(season_id: str, payload: CorrectSnapshotRequest, reque
 
 
 @page_router.get("/admin/preseason/{season_id}", response_class=HTMLResponse)
-def preseason_page(season_id: str, request: Request, principal: Principal = Depends(manage)):
-    _authorise(request, principal, season_id)
+def preseason_page(season_id: str, request: Request):
+    """Non-sensitive token-entry shell; every data/command API is protected."""
     return templates.TemplateResponse(request, "preseason.html", {"season_id": season_id})

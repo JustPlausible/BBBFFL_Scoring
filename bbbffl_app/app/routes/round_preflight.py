@@ -7,9 +7,12 @@ from app.audit import ActorContext
 from app.authorization import Principal, require_capability, require_role_covers_season
 from app.config import BASE_DIR
 from app.csrf import issue_token, verify_token
-from app.lockouts import LockoutTriggerRepository
-from app.round_mapping import AflApiReferenceValidator, RoundMappingRepository
-from app.round_preflight import build_round_preflight
+from app.round_preflight import (
+    accept_preflight_mapping,
+    build_round_preflight,
+    configure_preflight_trigger,
+    open_preflight_round,
+)
 
 router = APIRouter(prefix="/api/admin/round-preflight")
 page_router = APIRouter()
@@ -50,6 +53,32 @@ def _view(request, round_id):
     return build_round_preflight(state.database, state.lifecycle, state.identities, state.afl_client, round_id)
 
 
+def _available_rounds(request, principal):
+    """Recognisable, active-context-filtered navigation into preflight."""
+    rows = request.app.state.database.execute(
+        "SELECT r.bbbffl_round_id, r.label round_label, r.sequence, c.label competition_label, "
+        "c.stream_key, c.season_id, s.year, s.label season_label "
+        "FROM bbbffl_round r JOIN competition_stream c ON c.competition_id=r.competition_id "
+        "JOIN bbbffl_season s ON s.season_id=c.season_id WHERE c.stream_type='ordinary' "
+        "ORDER BY s.year DESC, c.stream_key, r.sequence"
+    ).fetchall()
+    available = []
+    for row in rows:
+        try:
+            require_role_covers_season(request, principal, row["season_id"])
+        except HTTPException as exc:
+            if exc.status_code == 403:
+                continue
+            raise
+        available.append({**dict(row), "preflight_url": f"/admin/round-preflight/{row['bbbffl_round_id']}"})
+    return available
+
+
+@router.get("")
+def round_index(request: Request, principal: Principal = Depends(require_round_operator)):
+    return {"rounds": _available_rounds(request, principal)}
+
+
 @router.get("/{round_id}")
 def view(round_id: str, request: Request, principal: Principal = Depends(require_round_operator)):
     _authorise(request, principal, round_id)
@@ -62,26 +91,19 @@ def accept_mapping(
 ):
     _authorise(request, principal, round_id)
     _csrf(request, principal)
-    repo = RoundMappingRepository(request.app.state.database)
-    existing = repo.resolve(round_id)
-    if existing:
-        repo.correct(
+    try:
+        accept_preflight_mapping(
+            request.app.state.database,
+            request.app.state.lifecycle,
+            request.app.state.afl_client,
             round_id,
             payload.afl_season_id,
             payload.afl_round_id,
-            AflApiReferenceValidator(request.app.state.afl_client),
-            reason=payload.reason or "Mapping corrected in round preflight",
-            actor=_actor(principal),
-        )
-    else:
-        repo.accept(
-            round_id,
-            payload.afl_season_id,
-            payload.afl_round_id,
-            AflApiReferenceValidator(request.app.state.afl_client),
             reason=payload.reason or "Mapping accepted in round preflight",
             actor=_actor(principal),
         )
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
     return _view(request, round_id)
 
 
@@ -91,28 +113,13 @@ def configure_trigger(
 ):
     _authorise(request, principal, round_id)
     _csrf(request, principal)
-    repo = LockoutTriggerRepository(request.app.state.database)
-    existing = repo.get(round_id, payload.trigger_key)
-    if existing:
-        repo.replace(
-            round_id,
-            payload.trigger_key,
-            trigger_type=payload.trigger_type,
-            sequence=payload.sequence,
-            afl_match_ids=payload.afl_match_ids,
-            reason=payload.reason or "Lockout plan revised in preflight",
-            actor=_actor(principal),
-        )
-    else:
-        repo.create(
-            round_id,
-            payload.trigger_key,
-            payload.trigger_type,
-            payload.sequence,
-            payload.afl_match_ids,
-            reason=payload.reason or "Lockout plan configured in preflight",
-            actor=_actor(principal),
-        )
+    configure_preflight_trigger(
+        request.app.state.database,
+        round_id,
+        payload,
+        reason=payload.reason or "Lockout plan configured in preflight",
+        actor=_actor(principal),
+    )
     return _view(request, round_id)
 
 
@@ -128,14 +135,7 @@ def open_round(round_id: str, request: Request, principal: Principal = Depends(r
             {"message": "Round failed preflight and was not opened", "blockers": preflight["readiness"]["blockers"]},
         )
     actor = _actor(principal)
-    persisted = state.lifecycle.get_round(round_id)
-    if persisted is None:
-        state.lifecycle.create_ordinary_round(
-            round_id, actor=actor, reason="Round context frozen after successful operator preflight"
-        )
-    state.lifecycle.transition(
-        round_id, "open", actor=actor, reason="Explicit Open Round action after successful preflight"
-    )
+    open_preflight_round(state.lifecycle, round_id, actor=actor)
     return _view(request, round_id)
 
 
@@ -143,6 +143,21 @@ def open_round(round_id: str, request: Request, principal: Principal = Depends(r
 def page(round_id: str, request: Request):
     token = issue_token(request.app.state.settings.session_secret)
     response = templates.TemplateResponse(request, "round_preflight.html", {"round_id": round_id, "csrf_token": token})
+    response.set_cookie(
+        "bbbffl_csrf",
+        token,
+        max_age=3600,
+        httponly=True,
+        secure=request.app.state.settings.is_production,
+        samesite="lax",
+    )
+    return response
+
+
+@page_router.get("/admin/round-preflight", response_class=HTMLResponse)
+def index_page(request: Request):
+    token = issue_token(request.app.state.settings.session_secret)
+    response = templates.TemplateResponse(request, "round_preflight_index.html", {"csrf_token": token})
     response.set_cookie(
         "bbbffl_csrf",
         token,

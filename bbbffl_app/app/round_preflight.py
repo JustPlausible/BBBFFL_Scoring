@@ -1,9 +1,59 @@
 """Human-facing, fail-closed read model for opening an ordinary BBBFFL round."""
 
+from contextlib import nullcontext
+
 from app.afl_client import is_recognized_match_status
 from app.lockouts import LockoutTriggerRepository
 from app.opening_round import OpeningRoundNominationRepository
-from app.round_mapping import RoundMappingRepository
+from app.round_mapping import AflApiReferenceValidator, RoundMappingRepository
+
+
+def accept_preflight_mapping(database, lifecycle, afl_client, round_id, season_id, afl_round_id, *, actor, reason):
+    """Mutate mapping only before lifecycle has frozen its revision."""
+    if lifecycle.get_round(round_id) is not None:
+        raise RuntimeError(
+            "The round lifecycle has already frozen its AFL mapping. A lifecycle-level recovery is required; "
+            "the mapping cannot be changed underneath it."
+        )
+    repo = RoundMappingRepository(database)
+    validator = AflApiReferenceValidator(afl_client)
+    existing = repo.resolve(round_id)
+    if existing:
+        return repo.correct(round_id, season_id, afl_round_id, validator, reason=reason, actor=actor)
+    return repo.accept(round_id, season_id, afl_round_id, validator, reason=reason, actor=actor)
+
+
+def configure_preflight_trigger(database, round_id, payload, *, actor, reason):
+    repo = LockoutTriggerRepository(database)
+    existing = repo.get(round_id, payload.trigger_key)
+    kwargs = {
+        "trigger_type": payload.trigger_type,
+        "sequence": payload.sequence,
+        "afl_match_ids": payload.afl_match_ids,
+        "actor": actor,
+        "reason": reason,
+    }
+    if existing:
+        return repo.replace(round_id, payload.trigger_key, **kwargs)
+    return repo.create(
+        round_id,
+        payload.trigger_key,
+        payload.trigger_type,
+        payload.sequence,
+        payload.afl_match_ids,
+        actor=actor,
+        reason=reason,
+    )
+
+
+def open_preflight_round(lifecycle, round_id, *, actor):
+    if lifecycle.get_round(round_id) is None:
+        lifecycle.create_ordinary_round(
+            round_id, actor=actor, reason="Round context frozen after successful operator preflight"
+        )
+    return lifecycle.transition(
+        round_id, "open", actor=actor, reason="Explicit Open Round action after successful preflight"
+    )
 
 
 def build_round_preflight(database, lifecycle, identities, afl_client, round_id: str) -> dict:
@@ -38,26 +88,48 @@ def build_round_preflight(database, lifecycle, identities, afl_client, round_id:
     pairs = []
     if draw and draw["state"] == "frozen":
         rows = database.execute(
-            "SELECT f.*, h.team_name home_team_name, a.team_name away_team_name "
-            "FROM season_fixture_matchup f JOIN season_entry h ON h.season_entry_id=f.home_season_entry_id "
-            "JOIN season_entry a ON a.season_entry_id=f.away_season_entry_id "
-            "WHERE f.fixture_draw_id=? AND f.bbbffl_round_number=? ORDER BY f.matchup_order",
+            "SELECT * FROM season_fixture_matchup "
+            "WHERE fixture_draw_id=? AND bbbffl_round_number=? ORDER BY matchup_order",
             (draw["fixture_draw_id"], logical["sequence"]),
         ).fetchall()
-        pairs = [dict(row) for row in rows]
+        names = {entry.season_entry_id: entry.team_name for entry in identities.list_entries(logical["season_id"])}
+        pairs = [
+            {
+                **dict(row),
+                "home_team_name": names.get(row["home_season_entry_id"], "Unknown team"),
+                "away_team_name": names.get(row["away_season_entry_id"], "Unknown team"),
+            }
+            for row in rows
+        ]
     if len(pairs) != 5:
         blockers.append(
             {"code": "fixture_invalid", "message": "A frozen fixture with exactly five matchups is required."}
         )
 
     afl_matches, evidence_error = [], None
+    evidence_fresh = True
     if mapping:
-        try:
-            afl_matches = afl_client.get_matches(mapping.afl_round_id)
-        except Exception as exc:  # evidence failure is operationally meaningful
-            evidence_error = str(exc)
+        evidence_batch = getattr(afl_client, "evidence_batch", None)
+        scope = evidence_batch() if callable(evidence_batch) else nullcontext(afl_client)
+        with scope as evidence:
+            try:
+                afl_matches = afl_client.get_matches(mapping.afl_round_id)
+            except Exception as exc:  # evidence failure is operationally meaningful
+                evidence_error = str(exc)
+                blockers.append(
+                    {
+                        "code": "afl_evidence_unavailable",
+                        "message": f"Mapped AFL match evidence is unavailable: {exc}",
+                    }
+                )
+            freshness = getattr(evidence, "is_evidence_fresh", None)
+            evidence_fresh = freshness() if callable(freshness) else True
+        if not evidence_fresh:
             blockers.append(
-                {"code": "afl_evidence_unavailable", "message": f"Mapped AFL match evidence is unavailable: {exc}"}
+                {
+                    "code": "afl_evidence_stale",
+                    "message": "AFL match evidence is being served from a stale cache; refresh live evidence before opening.",
+                }
             )
     if mapping and not afl_matches and evidence_error is None:
         blockers.append(
@@ -134,15 +206,17 @@ def build_round_preflight(database, lifecycle, identities, afl_client, round_id:
 
     nominations = OpeningRoundNominationRepository(database).list_for_round(round_id)
     opening = []
+    entry_names = {entry.season_entry_id: entry.team_name for entry in identities.list_entries(logical["season_id"])}
     for nomination in nominations:
-        entry = database.execute(
-            "SELECT team_name FROM season_entry WHERE season_entry_id=?", (nomination.season_entry_id,)
-        ).fetchone()
         context = OpeningRoundNominationRepository(database).deferred_context(
             round_id, nomination.season_entry_id, nomination.position
         )
         opening.append(
-            {**nomination.__dict__, "team_name": entry["team_name"] if entry else "Unknown team", **(context or {})}
+            {
+                **nomination.__dict__,
+                "team_name": entry_names.get(nomination.season_entry_id, "Unknown team"),
+                **(context or {}),
+            }
         )
 
     persisted = lifecycle.get_round(round_id)
@@ -160,6 +234,7 @@ def build_round_preflight(database, lifecycle, identities, afl_client, round_id:
         "mapping_history": [item.__dict__ for item in history],
         "fixture_matchups": pairs,
         "afl_matches": match_views,
+        "afl_evidence_fresh": evidence_fresh,
         "lockout_triggers": trigger_views,
         "opening_round": {"applies": bool(opening), "deferred_selections": opening},
         "readiness": {

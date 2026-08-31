@@ -184,6 +184,12 @@ REPLAY = {"app.replay", "app.replay_checkpoint"}
 # routes or the composition root.
 SEASON_CENTRE = {"app.season_centre"}
 
+# Round-opening preflight (#105): an application read model over the
+# persisted mapping/lifecycle, lockout and Opening Round boundaries.  Like
+# ROUND_REVIEW it is intentionally imported by its thin route, but has no
+# dependency on HTTP or the composition root.
+ROUND_PREFLIGHT = {"app.round_preflight"}
+
 ROUTES = {
     "app.routes",
     "app.routes.admin",
@@ -200,6 +206,7 @@ ROUTES = {
     "app.routes.season_centre",
     "app.routes.context",
     "app.routes.fixture_setup",
+    "app.routes.round_preflight",
 }
 
 COMPOSITION_ROOT = {"app.main"}
@@ -220,6 +227,7 @@ ALL_GROUPS = (
     | COACH_LINEUP
     | GRAND_FINAL_VERTICAL
     | SEASON_CENTRE
+    | ROUND_PREFLIGHT
     | ROUTES
     | COMPOSITION_ROOT
 )

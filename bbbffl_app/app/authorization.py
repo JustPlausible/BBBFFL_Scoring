@@ -176,7 +176,9 @@ _WILDCARD_CAPABILITY = "*"
 CAPABILITIES: dict[Role, frozenset[str]] = {
     Role.SPECTATOR: frozenset(),
     Role.COACH: frozenset({"own_team.manage"}),
-    Role.SCORER: frozenset({"scoring.manage", "lineup.proxy", "draft.participate", "round.review", "player_pool.read"}),
+    Role.SCORER: frozenset(
+        {"scoring.manage", "lineup.proxy", "draft.participate", "round.review", "player_pool.read", "preseason.manage"}
+    ),
     Role.SECRETARY: frozenset(
         {
             "season.manage",
@@ -185,9 +187,10 @@ CAPABILITIES: dict[Role, frozenset[str]] = {
             "roundsetup.manage",
             "player_pool.read",
             "player_pool.manage",
+            "preseason.manage",
         }
     ),
-    Role.REPLAY_OPERATOR: frozenset({"draft.participate", "player_pool.read"}),
+    Role.REPLAY_OPERATOR: frozenset({"draft.participate", "player_pool.read", "preseason.manage"}),
     Role.ADMIN: frozenset({_WILDCARD_CAPABILITY}),
 }
 

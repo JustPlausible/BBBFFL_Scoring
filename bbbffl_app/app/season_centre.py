@@ -209,6 +209,7 @@ def _links(season_id: str, draft_started: bool, ordinary_rounds_created: bool) -
     template renders that honestly rather than inventing a destination)."""
     return {
         "draft": f"/admin/draft/{season_id}" if draft_started else None,
+        "preseason": f"/admin/preseason/{season_id}" if draft_started else None,
         "round_centre": "/scorer/round-centre" if ordinary_rounds_created else None,
     }
 

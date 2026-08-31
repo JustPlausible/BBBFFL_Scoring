@@ -254,7 +254,7 @@ def _board(request: Request, season_id: str) -> dict:
         ],
         "correctable_draft_pick_id": latest_completed.draft_pick_id if latest_completed else None,
         "corrections": [dataclasses.asdict(item) for item in draft.corrections(season_id)],
-        "preseason_url": f"/admin/season-centre/{season_id}",
+        "preseason_url": f"/admin/preseason/{season_id}",
     }
 
 

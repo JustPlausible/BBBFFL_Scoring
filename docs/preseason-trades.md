@@ -21,6 +21,29 @@ overlapping ownership, season match, eligibility, squad capacity) is
 enforced exactly once, by the same ledger a draft pick or an ordinary
 transfer already uses.
 
+## Operator workflow (issue #103)
+
+`GET /admin/preseason/{season_id}` is the human scorer/admin surface for
+this boundary. It resolves season entries through the identity service, AFL
+player labels and stable IDs through the season player pool, and current
+squads through `OwnershipRepository.current_squad`; the page persists no
+roster of its own. It presents all teams together, domain validation, an
+atomic multi-leg trade form, append-only trade provenance, and an explicit
+**Accept and freeze** action. After freeze ordinary controls disappear, but
+the repository and ownership ledger also reject mutations. The next-step
+link returns to Season Centre for fixture/round setup.
+
+The routes consume issue #107's shared `Principal`: the active role must
+carry `preseason.manage`, a season-scoped grant must cover the requested
+season, and an authenticated operator's coach ID is recorded as provenance.
+There is no page-local role or represented-team switcher.
+
+Only the already documented multi-leg trade is offered. The UI does not
+invent delisting, free-agent addition, replacement-player, or unbalanced-
+transfer policy. Replay operators can make realistic agreed test trades
+after a mock draft, but no invented 2026 transaction is seeded or described
+as historical fact.
+
 ## Lifecycle
 
 ```

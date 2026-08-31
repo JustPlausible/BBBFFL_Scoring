@@ -199,6 +199,7 @@ ROUTES = {
     "app.routes.public_rounds",
     "app.routes.season_centre",
     "app.routes.context",
+    "app.routes.fixture_setup",
 }
 
 COMPOSITION_ROOT = {"app.main"}

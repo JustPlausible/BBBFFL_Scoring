@@ -55,6 +55,10 @@ class FixtureMatchup:
     away_season_entry_id: str
 
 
+class FixtureVersionConflictError(ValueError):
+    """The operator tried to freeze a proposal other than the current draft."""
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -147,6 +151,7 @@ class FixtureRepository:
         self,
         season_id: str,
         *,
+        expected_version: int | None = None,
         actor: ActorContext = ActorContext.anonymous_operator("admin"),
         reason: str | None = None,
     ) -> FixtureDraw | None:
@@ -158,6 +163,10 @@ class FixtureRepository:
                 raise KeyError(season_id)
             if row["state"] == "frozen":
                 raise ValueError("fixture draw is already frozen")
+            if expected_version is not None and row["version"] != expected_version:
+                raise FixtureVersionConflictError(
+                    "fixture proposal changed after it was reviewed; review the current proposal before freezing"
+                )
             assignments = conn.execute(
                 "SELECT COUNT(*) assignments FROM season_fixture_number WHERE fixture_draw_id=?",
                 (row["fixture_draw_id"],),

@@ -184,6 +184,13 @@ REPLAY = {"app.replay", "app.replay_checkpoint"}
 # routes or the composition root.
 SEASON_CENTRE = {"app.season_centre"}
 
+# Operator/application orchestration for the Draft Board and the explicit
+# replay bootstrap. Routes may import the repository-agnostic board read
+# service; replay bootstrap itself composes season/auth repositories but is
+# never an HTTP or lower-domain dependency.
+DRAFT_BOARD = {"app.draft_board"}
+REPLAY_BOOTSTRAP = {"app.replay_bootstrap"}
+
 # Round-opening preflight (#105): an application read model over the
 # persisted mapping/lifecycle, lockout and Opening Round boundaries.  Like
 # ROUND_REVIEW it is intentionally imported by its thin route, but has no
@@ -227,6 +234,8 @@ ALL_GROUPS = (
     | COACH_LINEUP
     | GRAND_FINAL_VERTICAL
     | SEASON_CENTRE
+    | DRAFT_BOARD
+    | REPLAY_BOOTSTRAP
     | ROUND_PREFLIGHT
     | ROUTES
     | COMPOSITION_ROOT
@@ -555,6 +564,17 @@ def test_season_model_and_lockouts_do_not_depend_on_season_centre(graph):
     a dependency of them."""
     for module in sorted(SEASON_MODEL | LOCKOUTS | WEEKLY_SUBMISSION_SOURCES):
         assert "app.season_centre" not in graph[module], f"{module} must not depend on app.season_centre"
+
+
+def test_draft_board_and_replay_bootstrap_are_application_services(graph):
+    forbidden = GRAND_FINAL_VERTICAL | LOCKOUTS | ROUTES | COMPOSITION_ROOT
+    for module in sorted(DRAFT_BOARD | REPLAY_BOOTSTRAP):
+        offending = graph[module] & forbidden
+        assert not offending, f"{module} must not depend on {sorted(offending)}"
+
+    for module in sorted(SEASON_MODEL | LOCKOUTS | WEEKLY_SUBMISSION_SOURCES):
+        offending = graph[module] & (DRAFT_BOARD | REPLAY_BOOTSTRAP)
+        assert not offending, f"{module} must not depend on application orchestration {sorted(offending)}"
 
 
 def test_scorer_decisions_stays_repository_agnostic(graph):

@@ -16,14 +16,17 @@ from typing import Any
 from uuid import uuid4
 
 from app.audit import ActorContext, append_event
+from app.auth import CredentialRepository, RoleGrantRepository
 from app.db import transaction
-from app.draft import DraftRepository, draft_board_readiness
+from app.draft import DraftRepository
+from app.draft_board import draft_board_readiness
 from app.identity import IdentityRepository
 from app.player_pool import PlayerPoolRepository
 from app.season import SeasonRepository
 
 TEAM_COUNT = 10
 FIRST_HALF_ROUNDS = tuple(range(1, 10))
+REPLAY_YEAR = 2026
 
 
 class ReplayBootstrapError(ValueError):
@@ -59,6 +62,7 @@ class ReplayConfig:
     competition_key: str
     competition_label: str
     squad_limit: int
+    operator_email: str
     source_provider: str
     source_season_year: int
     players: tuple[ReplayPlayer, ...]
@@ -153,8 +157,8 @@ def load_replay_config(path: str | Path) -> ReplayConfig:
     source_year = source.get("season_year")
     squad_limit = raw.get("squad_limit")
     rules_version = rules.get("version")
-    if not isinstance(year, int) or year <= 0 or source_year != year:
-        raise ReplayBootstrapError("season.year must be positive and equal player source.season_year")
+    if year != REPLAY_YEAR or source_year != REPLAY_YEAR:
+        raise ReplayBootstrapError("this command only supports the 2026 replay; season and player source must be 2026")
     if not isinstance(squad_limit, int) or squad_limit <= 0:
         raise ReplayBootstrapError("squad_limit must be a positive integer")
     if not isinstance(rules_version, int) or rules_version <= 0:
@@ -164,6 +168,9 @@ def load_replay_config(path: str | Path) -> ReplayConfig:
     provider = _text(source.get("provider"), "source.provider")
     if not provider.startswith("afl-api-"):
         raise ReplayBootstrapError("player pool source.provider must identify a supported afl-api capture")
+    operator_email = _text(raw.get("operator_email"), "operator_email").casefold()
+    if operator_email not in {entry.coach_email for entry in entries}:
+        raise ReplayBootstrapError("operator_email must identify one of the ten configured coaches")
     return ReplayConfig(
         year,
         _text(season.get("label"), "season.label"),
@@ -173,6 +180,7 @@ def load_replay_config(path: str | Path) -> ReplayConfig:
         _text(competition.get("key"), "competition.key"),
         _text(competition.get("label"), "competition.label"),
         squad_limit,
+        operator_email,
         provider,
         source_year,
         players,
@@ -217,7 +225,10 @@ def bootstrap_first_half(database, config: ReplayConfig) -> dict:
         wanted_rules = [
             r for r in rules_rows if r["rules_key"] == config.rules_key and r["version_number"] == config.rules_version
         ]
-        _conflict(bool(rules_rows) and len(wanted_rules) != 1, "existing rules versions conflict with replay rules")
+        _conflict(
+            bool(rules_rows) and (len(rules_rows) != 1 or len(wanted_rules) != 1),
+            "existing rules versions conflict; exactly the configured replay rules version is required",
+        )
         if wanted_rules:
             rules = wanted_rules[0]
             _conflict(rules["name"] != config.rules_name, "existing replay rules name conflicts with configuration")
@@ -378,6 +389,10 @@ def bootstrap_first_half(database, config: ReplayConfig) -> dict:
                 or [(r["position"], r["season_entry_id"]) for r in order] != list(enumerate(ordered_ids, 1)),
                 "existing accepted draft order conflicts with replay configuration",
             )
+            _conflict(
+                draft["paused_at"] is not None or draft["finalized_at"] is not None,
+                "existing draft operational state conflicts: draft must be unpaused and unfinalized for Pick 1",
+            )
         else:
             draft_id = _id()
             conn.execute(
@@ -405,15 +420,29 @@ def bootstrap_first_half(database, config: ReplayConfig) -> dict:
                 entity_id=season_id,
                 after_state={"year": config.year, "entries": TEAM_COUNT, "rounds": list(FIRST_HALF_ROUNDS)},
             )
-    return replay_readiness(database, config.year)
+    return replay_readiness(database, config)
 
 
-def replay_readiness(database, year: int) -> dict:
+def provision_replay_operator(database, config: ReplayConfig, password: str) -> None:
+    """Provision the one session-native Administrator needed by the runbook."""
+    coach = IdentityRepository(database).get_coach_by_email(config.operator_email)
+    if coach is None:
+        raise ReplayBootstrapError("configured operator_email does not identify a bootstrapped coach")
+    actor = ActorContext("anonymous_operator", "replay-bootstrap", "admin")
+    CredentialRepository(database).set_password(
+        coach.coach_id, password, actor=actor, reason="2026 replay operator credential provisioning"
+    )
+    grants = RoleGrantRepository(database)
+    if not grants.is_role_granted(coach.coach_id, "admin"):
+        grants.grant(coach.coach_id, "admin", actor=actor, reason="2026 replay browser operator")
+
+
+def replay_readiness(database, config: ReplayConfig) -> dict:
     """Derive an operator report from persisted state and Draft Board checks."""
     seasons = SeasonRepository(database)
-    season = seasons.get_season_by_year(year)
+    season = seasons.get_season_by_year(config.year)
     if not season:
-        return {"season": year, "overall": "NOT READY", "messages": ["target season does not exist"]}
+        return {"season": config.year, "overall": "NOT READY", "messages": ["target season does not exist"]}
     identities = IdentityRepository(database)
     draft = DraftRepository(database)
     pool = PlayerPoolRepository(database)
@@ -428,6 +457,22 @@ def replay_readiness(database, year: int) -> dict:
     ).fetchone()
     completed = status.completed_picks if status else 0
     board = draft_board_readiness(database, identities, draft, pool, season.season_id)
+    rules = seasons.list_rules_versions(season.season_id)
+    rules_valid = (
+        len(rules) == 1
+        and rules[0].rules_key == config.rules_key
+        and rules[0].version_number == config.rules_version
+        and rules[0].name == config.rules_name
+    )
+    operator = identities.get_coach_by_email(config.operator_email)
+    credential = (
+        database.execute("SELECT 1 FROM coach_credential WHERE coach_id=?", (operator.coach_id,)).fetchone()
+        if operator
+        else None
+    )
+    operator_access = bool(
+        operator and credential and RoleGrantRepository(database).is_role_granted(operator.coach_id, "admin")
+    )
     messages = []
     checks = {
         "one_ordinary_competition": len(competitions) == 1 and len(ordinary) == 1,
@@ -437,12 +482,13 @@ def replay_readiness(database, year: int) -> dict:
         "eligible_player_pool": len(pool.list_selectable(season.season_id)) > 0,
         "zero_completed_picks": completed == 0,
         "draft_board_prerequisites": board["ready"],
+        "exact_rules_version": rules_valid,
+        "operator_authentication_provisioned": operator_access,
     }
     messages.extend(label.replace("_", " ") for label, ready in checks.items() if not ready)
-    rules = seasons.list_rules_versions(season.season_id)
     return {
         "season": asdict(season),
-        "rules_version": asdict(rules[0]) if len(rules) == 1 else None,
+        "rules_version": asdict(rules[0]) if rules_valid else None,
         "competition": asdict(ordinary[0]) if len(ordinary) == 1 else None,
         "logical_rounds": [r.sequence for r in rounds],
         "season_entry_count": len(entries),
@@ -450,7 +496,9 @@ def replay_readiness(database, year: int) -> dict:
         "player_pool_count": len(pool.list_selectable(season.season_id)),
         "squad_size_limit": squad["squad_limit"] if squad else None,
         "completed_draft_picks_exist": completed > 0,
-        "next_human_action": "Pick 1" if draft.next_pick(season.season_id) and completed == 0 else None,
+        "operator_email": config.operator_email,
+        "operator_authentication_provisioned": operator_access,
+        "next_human_action": "Pick 1" if board["ready"] and operator_access and completed == 0 else None,
         "draft_board": board,
         "checks": checks,
         "messages": messages,

@@ -88,6 +88,8 @@ def test_readiness_explains_missing_authoritative_setup(synthetic_draft_client):
         "order": False,
         "players": False,
         "squad": False,
+        "draft_not_paused": False,
+        "draft_not_finalized": False,
     }
     assert "Accept and freeze" in next(item["detail"] for item in readiness["checks"] if item["key"] == "order")
     assert "database" not in str(readiness).lower()

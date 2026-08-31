@@ -9,7 +9,12 @@ import sys
 
 from app.config import BASE_DIR
 from app.db import connect
-from app.replay_bootstrap import bootstrap_first_half, load_replay_config, replay_readiness
+from app.replay_bootstrap import (
+    bootstrap_first_half,
+    load_replay_config,
+    provision_replay_operator,
+    replay_readiness,
+)
 
 
 def main() -> int:
@@ -19,14 +24,28 @@ def main() -> int:
         "--database-url", default=os.getenv("BBBFFL_DATABASE_URL", f"sqlite:///{BASE_DIR / 'data/scorer_decisions.db'}")
     )
     parser.add_argument("--readiness-only", action="store_true", help="make no writes; report current state")
+    parser.add_argument(
+        "--provision-operator",
+        action="store_true",
+        help="provision the configured Administrator using BBBFFL_REPLAY_OPERATOR_PASSWORD",
+    )
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     args = parser.parse_args()
     database = connect(args.database_url)
     try:
         config = load_replay_config(args.config)
-        report = (
-            replay_readiness(database, config.year) if args.readiness_only else bootstrap_first_half(database, config)
-        )
+        if args.readiness_only and args.provision_operator:
+            parser.error("--readiness-only and --provision-operator cannot be combined")
+        if args.provision_operator:
+            password = os.getenv("BBBFFL_REPLAY_OPERATOR_PASSWORD")
+            if not password:
+                raise ValueError("BBBFFL_REPLAY_OPERATOR_PASSWORD is required for --provision-operator")
+            provision_replay_operator(database, config, password)
+            report = replay_readiness(database, config)
+        else:
+            report = (
+                replay_readiness(database, config) if args.readiness_only else bootstrap_first_half(database, config)
+            )
     except Exception as exc:
         # A single operator boundary owns error presentation; transactions have
         # already rolled back. Never include credentials or player payloads.
@@ -46,6 +65,7 @@ def main() -> int:
             "squad_size_limit",
             "completed_draft_picks_exist",
             "next_human_action",
+            "operator_authentication_provisioned",
         ):
             print(f"  {key}: {report.get(key)}")
         for message in report.get("messages", []):

@@ -38,7 +38,7 @@ from app.authorization import (
     require_role_covers_season,
 )
 from app.config import BASE_DIR
-from app.draft import draft_board_readiness
+from app.draft_board import draft_board_readiness
 from app.routes.admin import require_admin
 
 router = APIRouter(prefix="/api/admin/draft")
@@ -213,6 +213,22 @@ def _readiness(request: Request, season_id: str) -> dict:
             "detail": f"Target: {config['squad_limit']} players per team."
             if config
             else "Configure the target squad size.",
+        },
+        {
+            "key": "draft_not_paused",
+            "ready": shared["checks"]["draft_not_paused"],
+            "label": "Draft is operational",
+            "detail": "The draft is not paused."
+            if shared["checks"]["draft_not_paused"]
+            else "The draft is paused; an operator must explicitly resume it before the next pick.",
+        },
+        {
+            "key": "draft_not_finalized",
+            "ready": shared["checks"]["draft_not_finalized"],
+            "label": "Draft is not finalized",
+            "detail": "The draft remains open for selections."
+            if shared["checks"]["draft_not_finalized"]
+            else "The draft is finalized and cannot accept a selection.",
         },
     ]
     return {"ready": shared["ready"], "checks": checks}

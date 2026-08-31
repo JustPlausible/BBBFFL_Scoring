@@ -14,6 +14,7 @@
     "label": "2026 BBBFFL Ordinary Competition"
   },
   "squad_limit": 20,
+  "operator_email": "replace-coach-1@example.invalid",
   "player_pool_file": "players-2026.afl-api-v1.json",
   "entries": [
     {

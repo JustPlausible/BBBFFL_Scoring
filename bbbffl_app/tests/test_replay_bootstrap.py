@@ -2,10 +2,19 @@ import json
 
 import pytest
 
-from app.draft import DraftRepository, draft_board_readiness
+from app.auth import AuthenticationService, CredentialRepository, SessionRepository
+from app.auth_rate_limit import LoginRateLimiter
+from app.draft import DraftRepository
+from app.draft_board import draft_board_readiness
 from app.identity import IdentityRepository
 from app.player_pool import PlayerPoolRepository
-from app.replay_bootstrap import ReplayBootstrapError, bootstrap_first_half, load_replay_config
+from app.replay_bootstrap import (
+    ReplayBootstrapError,
+    bootstrap_first_half,
+    load_replay_config,
+    provision_replay_operator,
+    replay_readiness,
+)
 from app.season import SeasonRepository
 from tests.db_helpers import migrated_connection
 
@@ -45,6 +54,7 @@ def _files(tmp_path, *, entry_count=10, mutate_entry=None, mutate_player=None):
         "rules": {"key": "ordinary", "version": 1, "name": "2026 Rules"},
         "competition": {"key": "ordinary", "label": "BBBFFL Ordinary"},
         "squad_limit": 3,
+        "operator_email": "coach1@replay.example",
         "player_pool_file": "players.json",
         "entries": entries,
     }
@@ -55,7 +65,12 @@ def _files(tmp_path, *, entry_count=10, mutate_entry=None, mutate_player=None):
 
 def test_clean_bootstrap_is_ready_for_human_pick_one_and_season_centre_state(tmp_path):
     database = migrated_connection()
-    report = bootstrap_first_half(database, load_replay_config(_files(tmp_path)))
+    config = load_replay_config(_files(tmp_path))
+    initial = bootstrap_first_half(database, config)
+    assert initial["overall"] == "NOT READY"
+    assert initial["checks"]["operator_authentication_provisioned"] is False
+    provision_replay_operator(database, config, "correct horse battery staple")
+    report = replay_readiness(database, config)
     season = SeasonRepository(database).get_season_by_year(2026)
     competitions = SeasonRepository(database).list_competitions(season.season_id)
 
@@ -66,6 +81,8 @@ def test_clean_bootstrap_is_ready_for_human_pick_one_and_season_centre_state(tmp
     assert report["squad_size_limit"] == 3
     assert report["completed_draft_picks_exist"] is False
     assert report["next_human_action"] == "Pick 1"
+    assert report["operator_authentication_provisioned"] is True
+    assert report["checks"]["exact_rules_version"] is True
     assert len(competitions) == 1 and competitions[0].stream_type == "ordinary"
     assert len(SeasonRepository(database).list_rounds(competitions[0].competition_id)) == 9
     assert len(IdentityRepository(database).list_entries(season.season_id)) == 10
@@ -80,6 +97,13 @@ def test_clean_bootstrap_is_ready_for_human_pick_one_and_season_centre_state(tmp
         )["next_pick_overall"]
         == 1
     )
+    auth = AuthenticationService(
+        IdentityRepository(database),
+        CredentialRepository(database),
+        SessionRepository(database),
+        LoginRateLimiter(max_attempts=5, lockout_seconds=300),
+    )
+    assert auth.login(config.operator_email, "correct horse battery staple", remote_addr="127.0.0.1").token
 
 
 @pytest.mark.parametrize(
@@ -118,6 +142,8 @@ def test_bootstrap_is_idempotent_and_preserves_provider_identity(tmp_path):
     database = migrated_connection()
     config = load_replay_config(_files(tmp_path))
     first = bootstrap_first_half(database, config)
+    provision_replay_operator(database, config, "correct horse battery staple")
+    first = replay_readiness(database, config)
     second = bootstrap_first_half(database, config)
     season_id = first["season"]["season_id"]
     player = PlayerPoolRepository(database).get(season_id, 2026001)
@@ -127,6 +153,58 @@ def test_bootstrap_is_idempotent_and_preserves_provider_identity(tmp_path):
     assert player.afl_team_id == 1001
     assert database.execute("SELECT COUNT(*) n FROM draft_pick WHERE season_id=?", (season_id,)).fetchone()["n"] == 30
     assert DraftRepository(database).status(season_id).completed_picks == 0
+
+
+def test_paused_draft_blocks_pick_one_and_rerun_does_not_resume(tmp_path):
+    database = migrated_connection()
+    config = load_replay_config(_files(tmp_path))
+    report = bootstrap_first_half(database, config)
+    season_id = report["season"]["season_id"]
+    draft = DraftRepository(database)
+    draft.pause(season_id, reason="operator investigation")
+
+    blocked = replay_readiness(database, config)
+    assert blocked["overall"] == "NOT READY"
+    assert blocked["draft_board"]["checks"]["draft_not_paused"] is False
+    assert blocked["next_human_action"] is None
+    with pytest.raises(ReplayBootstrapError, match="operational state conflicts"):
+        bootstrap_first_half(database, config)
+    assert draft.status(season_id).is_paused is True
+
+
+def test_non_2026_config_is_rejected_before_writes(tmp_path):
+    database = migrated_connection()
+    path = _files(tmp_path)
+    raw = json.loads(path.read_text())
+    raw["season"]["year"] = 2027
+    path.write_text(json.dumps(raw))
+    pool_path = tmp_path / "players.json"
+    pool = json.loads(pool_path.read_text())
+    pool["source"]["season_year"] = 2027
+    pool_path.write_text(json.dumps(pool))
+
+    with pytest.raises(ReplayBootstrapError, match="only supports the 2026 replay"):
+        load_replay_config(path)
+    assert SeasonRepository(database).list_seasons() == []
+
+
+def test_extra_rules_version_conflicts_without_mutating_existing_state(tmp_path):
+    database = migrated_connection()
+    config = load_replay_config(_files(tmp_path))
+    report = bootstrap_first_half(database, config)
+    season_id = report["season"]["season_id"]
+    seasons = SeasonRepository(database)
+    seasons.create_rules_version(season_id, "unexpected", 2, "Unexpected Rules")
+
+    blocked = replay_readiness(database, config)
+    assert blocked["overall"] == "NOT READY"
+    assert blocked["checks"]["exact_rules_version"] is False
+    with pytest.raises(ReplayBootstrapError, match="exactly the configured"):
+        bootstrap_first_half(database, config)
+    assert [(r.rules_key, r.version_number) for r in seasons.list_rules_versions(season_id)] == [
+        ("ordinary", 1),
+        ("unexpected", 2),
+    ]
 
 
 def test_conflicting_rerun_rolls_back_without_changing_valid_state(tmp_path):

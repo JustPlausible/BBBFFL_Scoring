@@ -33,6 +33,11 @@
   .search-row { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
   .search-row input[type=text] { flex: 1; min-width: 160px; }
   .player-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; border-bottom: 1px solid #2a2f3a; }
+  .player-details { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(120px, .5fr) minmax(150px, .7fr); gap: 8px; align-items: center; flex: 1; }
+  .state-available { color: #75d384; }
+  .state-owned { color: #f0c36a; }
+  .state-unresolved { color: #ff8080; font-weight: 600; }
+  .diagnostic { color: #ff9c9c; font-size: .75rem; }
   .danger-zone { margin-top: 24px; padding: 12px; border: 1px solid #a53a3a; border-radius: 10px; }
   .danger-zone summary { cursor: pointer; color: #e07a3f; }
   .muted { color: #9aa3b2; font-size: 0.8rem; }
@@ -46,8 +51,6 @@
   <div class="token-bar">
     <input type="password" id="token" placeholder="Admin token (if required)">
     <button id="save-token">Save token</button>
-    <input type="text" id="scorer-name" placeholder="Your name (recorded as the entering scorer)">
-    <button id="save-scorer">Save name</button>
   </div>
   <div id="status-line">Loading…</div>
 
@@ -57,12 +60,19 @@
   </div>
 
   <div class="block" id="current-pick-block">
-    <h2>Current pick</h2>
+    <h2>Season player pool and current pick</h2>
     <div class="current-pick" id="current-pick"></div>
     <div class="search-row">
-      <input type="text" id="player-search" placeholder="Search available players…">
+      <input type="text" id="player-search" placeholder="Search player name, AFL club, or canonical ID…" aria-label="Search season player pool">
+      <select id="availability-filter" aria-label="Filter by ownership state">
+        <option value="">All players</option>
+        <option value="available">Available</option>
+        <option value="owned">Owned</option>
+        <option value="unresolved">Unresolved / ineligible</option>
+      </select>
       <input type="text" id="pick-reason" placeholder="Reason (optional)">
     </div>
+    <p class="muted">Canonical IDs are shown for verification. Availability is refreshed from the ownership ledger; every pick is revalidated by the draft service.</p>
     <div id="player-results"></div>
   </div>
 
@@ -114,16 +124,11 @@ const SEASON_ID = {{ season_id | tojson }};
 const API = `/api/admin/draft/${SEASON_ID}`;
 
 function getToken() { return localStorage.getItem('bbbffl_admin_token') || ''; }
-function getScorerName() { return localStorage.getItem('bbbffl_scorer_name') || ''; }
 
 document.getElementById('token').value = getToken();
 document.getElementById('save-token').onclick = () => {
   localStorage.setItem('bbbffl_admin_token', document.getElementById('token').value);
   refresh();
-};
-document.getElementById('scorer-name').value = getScorerName();
-document.getElementById('save-scorer').onclick = () => {
-  localStorage.setItem('bbbffl_scorer_name', document.getElementById('scorer-name').value);
 };
 
 async function api(path, body) {
@@ -224,19 +229,23 @@ async function renderPlayers(query) {
     results.innerHTML = '';
     return;
   }
-  const players = await api(`${API}/available-players?q=${encodeURIComponent(query || '')}`);
+  const filter = document.getElementById('availability-filter').value;
+  const players = await api(`${API}/players?q=${encodeURIComponent(query || '')}&availability=${encodeURIComponent(filter)}`);
   results.innerHTML = players.map(p => `
     <div class="player-row">
-      <span>${escapeHtml(p.display_name)}${p.afl_team_name ? ` <span class="muted">(${escapeHtml(p.afl_team_name)})</span>` : ''}</span>
-      <button class="primary pick-btn" data-player="${p.season_player_id}">Draft for ${escapeHtml(board.current_pick.current_team_name)}</button>
+      <div class="player-details">
+        <span><strong>${escapeHtml(p.display_name || 'Name unavailable')}</strong><br><span class="muted">Canonical AFL ID ${escapeHtml(p.canonical_player_id)}</span></span>
+        <span>${p.afl_team_name ? escapeHtml(p.afl_team_name) : '<span class="diagnostic">AFL club unavailable</span>'}</span>
+        <span class="state-${escapeHtml(p.availability)}">${p.availability === 'owned' ? `Owned — ${escapeHtml(p.owner_team_name || p.owner_season_entry_id)}` : p.availability === 'available' ? 'Available' : 'Unresolved / not selectable'}${p.diagnostic ? `<br><span class="diagnostic">${escapeHtml(p.diagnostic)}</span>` : ''}</span>
+      </div>
+      ${p.availability === 'available' ? `<button class="primary pick-btn" data-player="${escapeHtml(p.season_player_id)}">Draft for ${escapeHtml(board.current_pick.current_team_name)}</button>` : ''}
     </div>
-  `).join('') || '<p class="muted">No matching available players.</p>';
+  `).join('') || '<p class="muted">No matching season players.</p>';
   document.querySelectorAll('.pick-btn').forEach(btn => {
     btn.onclick = () => {
       api(`${API}/pick`, {
         season_entry_id: board.current_pick.current_season_entry_id,
         season_player_id: btn.dataset.player,
-        scorer_name: getScorerName() || null,
         reason: document.getElementById('pick-reason').value || null,
       }).then(refresh);
     };
@@ -247,6 +256,9 @@ let searchTimer = null;
 document.getElementById('player-search').oninput = (e) => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => renderPlayers(e.target.value), 200);
+};
+document.getElementById('availability-filter').onchange = () => {
+  renderPlayers(document.getElementById('player-search').value);
 };
 
 document.getElementById('pause-btn').onclick = () => {

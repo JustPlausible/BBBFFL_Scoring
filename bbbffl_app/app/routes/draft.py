@@ -11,12 +11,10 @@ mutating endpoint here is a thin translation from an HTTP request to one
 response from the database on every request -- a browser reload always
 reflects authoritative persisted state, never reconstructed client state.
 
-Scorer proxy entry: `PickRequest.scorer_name` (optional, free text) is
-recorded as the audited actor's `actor_id` with `actor_role="scorer"` --
-*never* as the receiving `season_entry_id`, which is a separate, always-
-required field. This is what lets the audit trail distinguish "which
-BBBFFL entry received the player" from "which human scorer entered the
-selection" (see docs/scorer-draft-workflow.md's "Proxy picks" section).
+Authenticated operators use issue #107's active role and represented-entry
+context, with their stable coach identity recorded as the audit actor.  The
+older shared-token API may still supply `PickRequest.scorer_name` as its
+transitional audit label; it is never an entry or ownership identifier.
 
 Reopening a finalized draft is deliberately not an ordinary one-click
 control (see `DraftRepository.reopen`'s docstring): `/reopen` requires the
@@ -33,6 +31,12 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from app.audit import ActorContext
+from app.authorization import (
+    Principal,
+    require_capability,
+    require_entry_context,
+    require_role_covers_season,
+)
 from app.config import BASE_DIR
 from app.routes.admin import require_admin
 
@@ -70,6 +74,16 @@ class ReopenRequest(BaseModel):
 
 def _scorer_actor(scorer_name: str | None) -> ActorContext:
     return ActorContext(actor_type="anonymous_operator", actor_id=scorer_name, actor_role="scorer")
+
+
+def _pick_actor(principal: Principal, legacy_scorer_name: str | None) -> ActorContext:
+    if principal.coach_id is not None:
+        return ActorContext(
+            actor_type="coach_identity",
+            actor_id=principal.coach_id,
+            actor_role=principal.role.value,
+        )
+    return _scorer_actor(legacy_scorer_name)
 
 
 def _team_name(request: Request, entry_id: str, cache: dict) -> str:
@@ -133,24 +147,69 @@ def _board(request: Request, season_id: str) -> dict:
     }
 
 
-@router.get("/{season_id}/board", dependencies=[Depends(require_admin)])
-def board(season_id: str, request: Request):
+def _authorise_season(request: Request, principal: Principal, season_id: str):
+    require_role_covers_season(request, principal, season_id)
+
+
+@router.get("/{season_id}/board")
+def board(
+    season_id: str,
+    request: Request,
+    principal: Principal = Depends(require_capability("draft.participate")),
+):
+    _authorise_season(request, principal, season_id)
     return _board(request, season_id)
 
 
-@router.get("/{season_id}/available-players", dependencies=[Depends(require_admin)])
-def available_players(season_id: str, request: Request, q: str | None = None, limit: int = 50):
+@router.get("/{season_id}/available-players")
+def available_players(
+    season_id: str,
+    request: Request,
+    q: str | None = None,
+    limit: int = 50,
+    principal: Principal = Depends(require_capability("player_pool.read")),
+):
+    _authorise_season(request, principal, season_id)
     players = request.app.state.player_pool.search_available(season_id, q, limit)
     return [dataclasses.asdict(player) for player in players]
 
 
-@router.post("/{season_id}/pick", dependencies=[Depends(require_admin)])
-def submit_pick(season_id: str, payload: PickRequest, request: Request):
+@router.get("/{season_id}/players")
+def player_pool(
+    season_id: str,
+    request: Request,
+    q: str | None = None,
+    availability: str | None = None,
+    limit: int = 200,
+    principal: Principal = Depends(require_capability("player_pool.read")),
+):
+    _authorise_season(request, principal, season_id)
+    availability = availability or None
+    if availability not in (None, "available", "owned", "unresolved"):
+        raise HTTPException(status_code=400, detail="availability must be available, owned, or unresolved")
+    return [
+        dataclasses.asdict(item)
+        for item in request.app.state.player_pool.browse(season_id, q, availability, min(limit, 500))
+    ]
+
+
+@router.post("/{season_id}/pick")
+def submit_pick(
+    season_id: str,
+    payload: PickRequest,
+    request: Request,
+    principal: Principal = Depends(require_capability("draft.participate")),
+):
+    _authorise_season(request, principal, season_id)
+    # Authenticated #107 sessions must use their represented entry. Keep the
+    # established shared-token compatibility path, which has no coach/session.
+    if principal.coach_id is not None:
+        require_entry_context(request, principal, payload.season_entry_id)
     request.app.state.draft.execute_pick(
         season_id,
         payload.season_entry_id,
         payload.season_player_id,
-        actor=_scorer_actor(payload.scorer_name),
+        actor=_pick_actor(principal, payload.scorer_name),
         reason=payload.reason or "draft selection",
     )
     return _board(request, season_id)
@@ -194,5 +253,10 @@ def reopen(season_id: str, payload: ReopenRequest, request: Request):
 
 
 @page_router.get("/admin/draft/{season_id}", response_class=HTMLResponse)
-def draft_page(season_id: str, request: Request):
+def draft_page(
+    season_id: str,
+    request: Request,
+    principal: Principal = Depends(require_capability("player_pool.read")),
+):
+    _authorise_season(request, principal, season_id)
     return templates.TemplateResponse(request, "draft.html", {"season_id": season_id})

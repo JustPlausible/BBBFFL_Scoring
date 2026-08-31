@@ -123,6 +123,23 @@ class OwnershipPeriod:
     created_at: str
 
 
+@dataclass(frozen=True)
+class SeasonPlayerPoolItem:
+    """Read model for the operational browser; never an ownership authority."""
+
+    season_player_id: str
+    season_id: str
+    canonical_player_id: int
+    display_name: str
+    afl_team_id: int | None
+    afl_team_name: str | None
+    eligible: bool
+    availability: str
+    owner_season_entry_id: str | None
+    owner_team_name: str | None
+    diagnostic: str | None
+
+
 def _player(row):
     values = dict(row)
     values["eligible"] = bool(values["eligible"])
@@ -253,6 +270,59 @@ class PlayerPoolRepository:
             needle = query.strip().lower()
             available = [player for player in available if needle in player.display_name.lower()]
         return available[: max(limit, 0)]
+
+    def browse(self, season_id, query=None, availability=None, limit=200):
+        """Return the season pool plus current authoritative ownership.
+
+        This is intentionally a joined, request-time read model.  It does not
+        cache availability and cannot be used to acquire a player; draft
+        writes still go through :class:`DraftRepository` and its locked
+        ownership transaction.
+        """
+        rows = self.database.execute(
+            "SELECT p.*, o.season_entry_id AS owner_season_entry_id, "
+            "n.team_name AS owner_team_name FROM season_player_pool p "
+            "LEFT JOIN player_ownership_period o ON o.season_player_id=p.season_player_id "
+            "AND o.released_at IS NULL "
+            "LEFT JOIN season_entry_team_name_history n ON n.season_entry_id=o.season_entry_id "
+            "AND n.ended_at IS NULL "
+            "WHERE p.season_id=? ORDER BY p.display_name, p.canonical_player_id",
+            (season_id,),
+        ).fetchall()
+        needles = [part.casefold() for part in (query or "").split() if part]
+        items = []
+        for row in rows:
+            state = "owned" if row["owner_season_entry_id"] else ("available" if row["eligible"] else "unresolved")
+            if availability and state != availability:
+                continue
+            searchable = " ".join(
+                str(value or "") for value in (row["display_name"], row["afl_team_name"], row["canonical_player_id"])
+            ).casefold()
+            if needles and not all(needle in searchable for needle in needles):
+                continue
+            diagnostic = None
+            if not row["eligible"]:
+                diagnostic = "Not selectable: season player identity or eligibility requires investigation"
+            elif not row["display_name"].strip():
+                diagnostic = "Missing AFL player display name"
+            elif row["afl_team_id"] is None or not row["afl_team_name"]:
+                diagnostic = "AFL club data unavailable"
+            items.append(
+                SeasonPlayerPoolItem(
+                    season_player_id=row["season_player_id"],
+                    season_id=row["season_id"],
+                    canonical_player_id=row["canonical_player_id"],
+                    display_name=row["display_name"],
+                    afl_team_id=row["afl_team_id"],
+                    afl_team_name=row["afl_team_name"],
+                    eligible=bool(row["eligible"]),
+                    availability=state,
+                    owner_season_entry_id=row["owner_season_entry_id"],
+                    owner_team_name=row["owner_team_name"],
+                    diagnostic=diagnostic,
+                )
+            )
+        return items[: max(limit, 0)]
 
 
 class OwnershipRepository:

@@ -14,6 +14,14 @@ administrator credential by default for compatibility.  Supplying
 `X-Authority-Role: scorer` explicitly narrows that credential to scorer
 capabilities.  It never creates a coach identity.
 
+Ordinary browser operation is session-native: a signed-in operator uses the
+session cookie and assigned active role without entering the shared token.
+`BBBFFL_ADMIN_TOKEN` is an explicit bootstrap/emergency compatibility path,
+not the normal long-term administration workflow. Browser clients only send
+`X-Admin-Token` after an operator deliberately supplies a non-empty value;
+an explicitly supplied invalid value fails authentication and never falls
+back to a simultaneously valid session.
+
 A coach session's active role is no longer fixed at "coach": roadmap
 package #107 (issue #107, see [acting-context](acting-context.md)) lets a
 signed-in coach identity hold additional granted roles (Scorer, Secretary/
@@ -29,7 +37,7 @@ When the token is unset in the supported development/test configuration, the
 historic open operator mode is preserved as an explicit administrator
 principal. Production configuration already refuses to start without a token.
 
-Scorers may use delegated scoring, review, sign-off, and proxy domain
+Scorers and replay operators may use delegated scoring, review, sign-off, and proxy domain
 operations.  Administrative configuration, credential recovery, audit access,
 corrections, and administrative pages require administrator authority where
 the existing API distinguishes them.  Operator actions continue to pass their

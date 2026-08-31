@@ -28,7 +28,7 @@ from app.authorization import (
         (Principal(Role.SCORER), 403, None, 403, 403),
         (Principal(Role.ADMIN), 403, None, None, None),
         (Principal(Role.SECRETARY), 403, 403, 403, None),
-        (Principal(Role.REPLAY_OPERATOR), 403, 403, 403, 403),
+        (Principal(Role.REPLAY_OPERATOR), 403, None, 403, 403),
     ],
 )
 def test_permission_matrix(principal, coach, scorer, admin, secretary):
@@ -231,6 +231,17 @@ def test_configured_operator_token_is_required_and_can_be_narrowed_to_scorer():
     assert resolve_principal(request, "secret", "scorer") == Principal(
         Role.SCORER, granted_roles=frozenset({Role.SCORER})
     )
+    with pytest.raises(HTTPException) as exc:
+        resolve_principal(request, "wrong", None)
+    assert exc.value.status_code == 401
+
+
+def test_explicit_bad_operator_token_never_falls_back_to_a_valid_session():
+    coach = SimpleNamespace(coach_id="coach-a", display_name="Coach A")
+    session = SimpleNamespace(
+        session_id="session-1", coach_id="coach-a", active_role="scorer", represented_season_entry_id=None
+    )
+    request = _request(admin_token="secret", cookies={"bbbffl_session": "valid-session"}, session=session, coach=coach)
     with pytest.raises(HTTPException) as exc:
         resolve_principal(request, "wrong", None)
     assert exc.value.status_code == 401

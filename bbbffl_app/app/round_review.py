@@ -58,7 +58,7 @@ from app.lineups import POSITIONS as SLOTS
 from app.season import _now
 
 OVERRIDE_POSITIONS = tuple(slot for slot in SLOTS if slot != "Interchange")
-AUTHORISED_OVERRIDE_ROLES = frozenset({"scorer", "admin"})
+AUTHORISED_OVERRIDE_ROLES = frozenset({"scorer", "replay_operator", "admin"})
 _AMBIGUOUS_RECOMMENDATIONS = frozenset({"review_required", "recommend_dnp"})
 
 SLOT_RULING_RECORDED = "review.dnp_ruling.recorded"

@@ -16,8 +16,11 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from app.audit import ActorContext
+from app.authorization import Principal, Role
 from app.calculations import MatchupCalculationService
 from app.db import transaction
+from app.routes.admin import require_scorer
 from tests.round_review_helpers import Facts, full_round, progress_to_review
 
 
@@ -523,6 +526,41 @@ def test_round_centre_api_rejects_stale_browser_ruling_and_returns_current_state
     assert "not the expected" in conflict.json()["detail"]
     current = client.get(api).json()["matchups"][0]
     assert current["review_version"] == matchup["review_version"] + 1
+
+
+def test_round_review_mutations_enforce_target_round_season_and_preserve_session_actor(review_client):
+    client = review_client
+    round_a, _, _, _ = _seed(client, 8831)
+    round_b, _, _, _ = _seed(client, 8832)
+    season_a = client.app.state.lifecycle.get_round(round_a.bbbffl_round_id).season_id
+    operator = client.app.state.identities.create_coach("Scoped Scorer", email="scoped@example.com")
+    client.app.state.role_grants.grant(
+        operator.coach_id, "scorer", season_id=season_a, actor=ActorContext.anonymous_operator("admin")
+    )
+    principal = Principal(Role.SCORER, operator.coach_id, "Scoped Scorer", session_id="session-test")
+    client.app.dependency_overrides[require_scorer] = lambda: principal
+    try:
+        assert client.get(f"/api/admin/round-review/{round_a.bbbffl_round_id}").status_code == 200
+        denied = client.post(f"/api/admin/round-review/{round_b.bbbffl_round_id}/calculate")
+        assert denied.status_code == 403
+        matchup = client.get(f"/api/admin/round-review/{round_a.bbbffl_round_id}").json()["matchups"][0]
+        changed = client.post(
+            f"/api/admin/round-review/{round_a.bbbffl_round_id}/dnp",
+            json={
+                "matchup_id": matchup["matchup_id"],
+                "season_entry_id": matchup["home"]["season_entry_id"],
+                "slot": "F1",
+                "dnp": False,
+                "expected_review_version": matchup["review_version"],
+                "scorer_name": "untrusted payload name",
+            },
+        )
+        assert changed.status_code == 200, changed.text
+        event = client.app.state.audit_events.list_events(entity_type="scoring.slot")[-1]
+        assert event.actor_id == operator.coach_id
+        assert event.actor_role == "scorer"
+    finally:
+        client.app.dependency_overrides.pop(require_scorer, None)
 
 
 def test_round_centre_resolves_ambiguous_interchange_dnp_through_existing_ruling_api(review_client):

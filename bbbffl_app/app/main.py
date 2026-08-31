@@ -68,6 +68,7 @@ from app.routes import fixture_setup as fixture_setup_routes
 from app.routes import lineups as lineup_routes
 from app.routes import preseason as preseason_routes
 from app.routes import public_rounds as public_round_routes
+from app.routes import round_preflight as round_preflight_routes
 from app.routes import round_review as round_review_routes
 from app.routes import season_centre as season_centre_routes
 from app.routes import superscore as superscore_routes
@@ -253,6 +254,8 @@ app.include_router(preseason_routes.router)
 app.include_router(preseason_routes.page_router)
 app.include_router(round_review_routes.router)
 app.include_router(round_review_routes.page_router)
+app.include_router(round_preflight_routes.router)
+app.include_router(round_preflight_routes.page_router)
 app.include_router(season_centre_routes.router)
 app.include_router(season_centre_routes.page_router)
 app.include_router(fixture_setup_routes.router)

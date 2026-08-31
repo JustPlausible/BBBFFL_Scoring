@@ -193,6 +193,7 @@ function linksHtml(links) {
       <span class="pill off">Player pool: not yet available in UI</span>
       <span class="pill off">Opening squads: not yet available in UI</span>
       ${SEASON_ID ? item('Fixture setup', `/admin/fixture-setup/${SEASON_ID}`) : ''}
+      ${item('Prepare / open a round', '/admin/round-preflight')}
     </div>`;
 }
 

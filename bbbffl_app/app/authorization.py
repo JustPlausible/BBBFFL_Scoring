@@ -183,6 +183,7 @@ CAPABILITIES: dict[Role, frozenset[str]] = {
             "draft.participate",
             "fixture.manage",
             "round.review",
+            "roundsetup.manage",
             "player_pool.read",
             "preseason.manage",
         }

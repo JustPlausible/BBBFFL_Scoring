@@ -180,6 +180,7 @@ CAPABILITIES: dict[Role, frozenset[str]] = {
         {
             "scoring.manage",
             "lineup.proxy",
+            "opening_round.nominate",
             "draft.participate",
             "fixture.manage",
             "round.review",
@@ -200,7 +201,15 @@ CAPABILITIES: dict[Role, frozenset[str]] = {
         }
     ),
     Role.REPLAY_OPERATOR: frozenset(
-        {"draft.participate", "player_pool.read", "preseason.manage", "scoring.manage", "round.review"}
+        {
+            "draft.participate",
+            "player_pool.read",
+            "preseason.manage",
+            "scoring.manage",
+            "round.review",
+            "lineup.proxy",
+            "opening_round.nominate",
+        }
     ),
     Role.ADMIN: frozenset({_WILDCARD_CAPABILITY}),
 }

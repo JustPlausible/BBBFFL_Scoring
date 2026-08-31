@@ -13,14 +13,18 @@ section).
 """
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
+from app import opening_round as opening_round_module
 from app.afl_client import Match, PlayerStatLine, Team
 from app.audit import ActorContext, AuditEventRepository
 from app.calculations import MatchupCalculationService
 from app.carry_forward import CarryForwardService
+from app.db import transaction as database_transaction
 from app.lineups import WeeklyLineupRepository
 from app.opening_round import (
     DeferredSlotLockedError,
@@ -993,6 +997,124 @@ def test_correction_preserves_original_state_actor_reason_in_audit_history():
     assert event.after_state == {"position": "M1", "season_player_id": other_player.season_player_id}
     assert event.reason == "original nomination was a data-entry error"
     assert event.actor_role == "admin"
+
+
+def test_correction_reconciles_preloaded_slot_without_leaving_stale_assignment():
+    from app.lineup_validation import LineupValidationService
+
+    db = migrated_connection()
+    _, round_, entries, scope = setup_scope(db, 2024, 956)
+    _, player, nomination = nominate_bl_2024(db, scope["season_id"], round_.bbbffl_round_id, entries[0], position="F1")
+    nominations = OpeningRoundNominationRepository(db)
+    lineups = WeeklyLineupRepository(db)
+    nominations.preload_target_lineup(
+        lineups, scope["season_id"], scope["competition_id"], round_.bbbffl_round_id, entries[0].season_entry_id
+    )
+
+    corrected = nominations.correct(
+        nomination.nomination_id, position="M1", actor=ADMIN, reason="correct deferred target position"
+    )
+    draft = lineups.get_draft(
+        scope["season_id"], scope["competition_id"], round_.bbbffl_round_id, entries[0].season_entry_id
+    )
+    assert corrected.position == "M1"
+    assert draft.positions["F1"] is None
+    assert draft.positions["M1"] == player.season_player_id
+    assert list(draft.positions.values()).count(player.season_player_id) == 1
+    assert LineupValidationService(db).validate_submission(draft.lineup_id, draft.positions).valid
+
+
+def test_correction_reconciles_both_player_and_position_in_preloaded_draft():
+    db = migrated_connection()
+    _, round_, entries, scope = setup_scope(db, 2024, 956)
+    _, original, nomination = nominate_bl_2024(
+        db, scope["season_id"], round_.bbbffl_round_id, entries[0], position="F1"
+    )
+    replacement = own_player(db, scope["season_id"], entries[0], 910601, "Replacement BL", afl_team_id=2)
+    nominations = OpeningRoundNominationRepository(db)
+    lineups = WeeklyLineupRepository(db)
+    nominations.preload_target_lineup(
+        lineups, scope["season_id"], scope["competition_id"], round_.bbbffl_round_id, entries[0].season_entry_id
+    )
+
+    nominations.correct(
+        nomination.nomination_id,
+        position="M1",
+        season_player_id=replacement.season_player_id,
+        actor=ADMIN,
+        reason="correct player and target",
+    )
+    draft = lineups.get_draft(
+        scope["season_id"], scope["competition_id"], round_.bbbffl_round_id, entries[0].season_entry_id
+    )
+    assert draft.positions["F1"] is None
+    assert draft.positions["M1"] == replacement.season_player_id
+    assert original.season_player_id not in draft.positions.values()
+
+
+def test_correction_conflicts_are_domain_errors_and_leave_nominations_unchanged():
+    db = migrated_connection()
+    _, round_, entries, scope = setup_scope(db, 2024, 956)
+    ev = evidence.EVIDENCE_2024
+    bl_rule = accept_rule(db, scope["season_id"], 2, ev, ev.compensating_bye_round["BL"], round_.bbbffl_round_id)
+    carl_rule = accept_rule(db, scope["season_id"], 5, ev, ev.compensating_bye_round["CARL"], round_.bbbffl_round_id)
+    bl = own_player(db, scope["season_id"], entries[0], 910610, "BL conflict player", afl_team_id=2)
+    carl = own_player(db, scope["season_id"], entries[0], 910611, "CARL conflict player", afl_team_id=5)
+    client = MultiRoundMatchClient(
+        {ev.afl_opening_round_id: [Match(8001, Team(2, "BL"), Team(5, "CARL"), "CONCLUDED")]}
+    )
+    nominations = OpeningRoundNominationRepository(db)
+    first = nominations.nominate(
+        bl_rule.rule_id, entries[0].season_entry_id, "F1", bl.season_player_id, client, actor=SCORER
+    )
+    second = nominations.nominate(
+        carl_rule.rule_id, entries[0].season_entry_id, "M1", carl.season_player_id, client, actor=SCORER
+    )
+
+    with pytest.raises(OpeningRoundError, match="target slot M1"):
+        nominations.correct(first.nomination_id, position="M1", actor=ADMIN, reason="conflicting slot")
+    assert nominations.get(first.nomination_id).position == "F1"
+
+    # Under valid domain state, a player already nominated under a different
+    # club-specific rule is ineligible for this rule first. Preserve that
+    # eligibility ordering rather than corrupting cached club facts merely to
+    # force the defensive duplicate-player branch.
+    with pytest.raises(IneligiblePlayerError, match="does not match rule club"):
+        nominations.correct(
+            first.nomination_id,
+            season_player_id=carl.season_player_id,
+            actor=ADMIN,
+            reason="conflicting player",
+        )
+    assert nominations.get(first.nomination_id).season_player_id == bl.season_player_id
+    assert nominations.get(second.nomination_id).season_player_id == carl.season_player_id
+
+
+def test_correction_translates_a_database_uniqueness_race_without_partial_mutation(monkeypatch):
+    db = migrated_connection()
+    _, round_, entries, scope = setup_scope(db, 2024, 956)
+    _, player, nomination = nominate_bl_2024(db, scope["season_id"], round_.bbbffl_round_id, entries[0], position="F1")
+
+    @contextmanager
+    def uniqueness_race(database):
+        with database_transaction(database) as connection:
+
+            class RacingConnection:
+                def execute(self, statement, parameters=()):
+                    if statement.startswith("UPDATE opening_round_nomination SET"):
+                        raise IntegrityError(statement, parameters, RuntimeError("simulated uniqueness race"))
+                    return connection.execute(statement, parameters)
+
+            yield RacingConnection()
+
+    monkeypatch.setattr(opening_round_module, "transaction", uniqueness_race)
+    nominations = OpeningRoundNominationRepository(db)
+    with pytest.raises(OpeningRoundError, match="conflicts with an existing target slot or nominated player"):
+        nominations.correct(nomination.nomination_id, position="M1", actor=ADMIN, reason="race with another correction")
+
+    unchanged = nominations.get(nomination.nomination_id)
+    assert unchanged.position == "F1"
+    assert unchanged.season_player_id == player.season_player_id
 
 
 def test_correction_requires_a_reason_and_an_operator_actor():

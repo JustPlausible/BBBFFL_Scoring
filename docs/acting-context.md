@@ -267,3 +267,24 @@ Two related gaps were found and closed in code review:
   focused" instruction); any #101-#105 route that accepts a coach-session
   principal should include the check from the start, following
   `app.routes.context`'s pattern.
+## First-half replay: delegated weekly lineups
+
+The browser replay workflow is deliberately separate from coach self-service:
+
+1. Sign in as the replay administrator/operator and activate the granted
+   **Replay Operator**, **Scorer**, or **Administrator** role through the shared
+   acting-context controls.
+2. Select an authorised represented team. This updates the session's shared
+   represented-entry context; it is not a page-local impersonation setting.
+3. Open `/operations/rounds/<bbbffl-round-id>/lineup`. The amber banner repeats
+   the authenticated human, active role, represented team, season, and round.
+4. Save and explicitly submit a proxy draft, or inspect and explicitly carry
+   forward the previous submitted lineup position-for-position. A missing source
+   never fabricates a team. Deliberate vacancies remain vacancies.
+5. Switch the represented team in the banner and repeat without logging out,
+   then return to Round Preflight or scorer/round review using the page links.
+
+The authenticated person remains the audit actor and the represented entry is
+only the target. The ordinary `/coach/.../lineup` page still resolves the
+signed-in coach's own assignment and does **not** consume represented-entry
+context, so this feature does not turn it into silent impersonation.

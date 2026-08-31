@@ -126,12 +126,19 @@ def test_mapping_endpoint_refuses_to_change_context_frozen_by_lifecycle(prefligh
     assert RoundMappingRepository(db).resolve(round_.bbbffl_round_id).afl_round_id == 100
 
 
-def test_open_endpoint_refuses_stale_cached_afl_evidence(preflight_client):
+def test_open_endpoint_refuses_stale_cached_afl_evidence(preflight_client, monkeypatch):
     db = preflight_client.app.state.database
     round_, _ = configured(db, 2026, 100)
     LockoutTriggerRepository(db).create(round_.bbbffl_round_id, "main", "main", 1, [9001])
-    preflight_client.app.state.afl_client = StaleEvidence([_match()])
-    response = preflight_client.post(f"/api/admin/round-preflight/{round_.bbbffl_round_id}/open", json={})
+    # The FastAPI app is a module-level singleton shared by the full Python
+    # suite.  Patch through pytest so the real client is restored after this
+    # assertion; assigning app.state directly leaked the stale double into
+    # follow-on replay/checkpoint tests in the same worker.
+    real_client = preflight_client.app.state.afl_client
+    with monkeypatch.context() as patch:
+        patch.setattr(preflight_client.app.state, "afl_client", StaleEvidence([_match()]))
+        response = preflight_client.post(f"/api/admin/round-preflight/{round_.bbbffl_round_id}/open", json={})
+    assert preflight_client.app.state.afl_client is real_client
     assert response.status_code == 409
     assert preflight_client.app.state.lifecycle.get_round(round_.bbbffl_round_id) is None
     assert response.json()["detail"]["blockers"][0]["code"] == "afl_evidence_stale"

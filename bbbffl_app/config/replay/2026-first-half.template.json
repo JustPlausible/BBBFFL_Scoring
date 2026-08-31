@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "season": {
+    "year": 2026,
+    "label": "2026 BBBFFL First Half Replay"
+  },
+  "rules": {
+    "key": "ordinary",
+    "version": 1,
+    "name": "2026 BBBFFL First-Half Rules"
+  },
+  "competition": {
+    "key": "ordinary",
+    "label": "2026 BBBFFL Ordinary Competition"
+  },
+  "squad_limit": 20,
+  "player_pool_file": "players-2026.afl-api-v1.json",
+  "entries": [
+    {
+      "coach_display_name": "REPLACE_WITH_HISTORICAL_COACH_1",
+      "coach_email": "replace-coach-1@example.invalid",
+      "team_name": "REPLACE_WITH_HISTORICAL_TEAM_1",
+      "licence_key": "replace-historical-licence-1",
+      "draft_position": 1
+    },
+    {
+      "coach_display_name": "REPLACE_WITH_HISTORICAL_COACH_2",
+      "coach_email": "replace-coach-2@example.invalid",
+      "team_name": "REPLACE_WITH_HISTORICAL_TEAM_2",
+      "licence_key": "replace-historical-licence-2",
+      "draft_position": 2
+    },
+    {
+      "coach_display_name": "REPLACE_WITH_HISTORICAL_COACH_3",
+      "coach_email": "replace-coach-3@example.invalid",
+      "team_name": "REPLACE_WITH_HISTORICAL_TEAM_3",
+      "licence_key": "replace-historical-licence-3",
+      "draft_position": 3
+    },
+    {
+      "coach_display_name": "REPLACE_WITH_HISTORICAL_COACH_4",
+      "coach_email": "replace-coach-4@example.invalid",
+      "team_name": "REPLACE_WITH_HISTORICAL_TEAM_4",
+      "licence_key": "replace-historical-licence-4",
+      "draft_position": 4
+    },
+    {
+      "coach_display_name": "REPLACE_WITH_HISTORICAL_COACH_5",
+      "coach_email": "replace-coach-5@example.invalid",
+      "team_name": "REPLACE_WITH_HISTORICAL_TEAM_5",
+      "licence_key": "replace-historical-licence-5",
+      "draft_position": 5
+    },
+    {
+      "coach_display_name": "REPLACE_WITH_HISTORICAL_COACH_6",
+      "coach_email": "replace-coach-6@example.invalid",
+      "team_name": "REPLACE_WITH_HISTORICAL_TEAM_6",
+      "licence_key": "replace-historical-licence-6",
+      "draft_position": 6
+    },
+    {
+      "coach_display_name": "REPLACE_WITH_HISTORICAL_COACH_7",
+      "coach_email": "replace-coach-7@example.invalid",
+      "team_name": "REPLACE_WITH_HISTORICAL_TEAM_7",
+      "licence_key": "replace-historical-licence-7",
+      "draft_position": 7
+    },
+    {
+      "coach_display_name": "REPLACE_WITH_HISTORICAL_COACH_8",
+      "coach_email": "replace-coach-8@example.invalid",
+      "team_name": "REPLACE_WITH_HISTORICAL_TEAM_8",
+      "licence_key": "replace-historical-licence-8",
+      "draft_position": 8
+    },
+    {
+      "coach_display_name": "REPLACE_WITH_HISTORICAL_COACH_9",
+      "coach_email": "replace-coach-9@example.invalid",
+      "team_name": "REPLACE_WITH_HISTORICAL_TEAM_9",
+      "licence_key": "replace-historical-licence-9",
+      "draft_position": 9
+    },
+    {
+      "coach_display_name": "REPLACE_WITH_HISTORICAL_COACH_10",
+      "coach_email": "replace-coach-10@example.invalid",
+      "team_name": "REPLACE_WITH_HISTORICAL_TEAM_10",
+      "licence_key": "replace-historical-licence-10",
+      "draft_position": 10
+    }
+  ]
+}

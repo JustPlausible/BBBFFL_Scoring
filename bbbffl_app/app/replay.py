@@ -62,7 +62,13 @@ class ReplayAflDataSource:
 
     SCHEMA = "bbbffl.replay-evidence/v1"
 
-    def __init__(self, path: str | Path, *, clock: ReplayClock | None = None):
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        clock: ReplayClock | None = None,
+        checkpoint_path: str | Path | None = None,
+    ):
         self.path = Path(path)
         self.clock = clock
         if not self.path.is_file():
@@ -73,7 +79,26 @@ class ReplayAflDataSource:
             raise ReplayEvidenceError(f"malformed replay evidence at {self.path}: {exc}") from exc
         if not isinstance(payload, dict):
             raise ReplayEvidenceError("replay evidence root must be an object")
+        self.stage: str | None = None
+        if checkpoint_path is not None:
+            self._load_checkpoint(Path(checkpoint_path))
         self._load(payload)
+
+    def _load_checkpoint(self, path: Path) -> None:
+        if not path.is_file():
+            raise ReplayEvidenceError(f"replay checkpoint file does not exist: {path}")
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+            if state.get("schema") != "bbbffl.replay-checkpoint/v1":
+                raise ReplayEvidenceError(f"unsupported replay checkpoint schema: {state.get('schema')!r}")
+            if state.get("stage") not in ("scheduled", "final-results"):
+                raise ReplayEvidenceError(f"unsupported replay checkpoint stage: {state.get('stage')!r}")
+            self.clock = ReplayClock.from_iso(state["effective_at"])
+            self.stage = state["stage"]
+        except ReplayEvidenceError:
+            raise
+        except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise ReplayEvidenceError(f"malformed replay checkpoint at {path}: {exc}") from exc
 
     @staticmethod
     def _list(payload: dict, key: str) -> list[dict]:
@@ -95,6 +120,9 @@ class ReplayAflDataSource:
         except (KeyError, ValueError) as exc:
             raise ReplayEvidenceError("manifest.evidence_class is missing or unknown") from exc
         self.manifest = dict(manifest)
+        historical = manifest.get("lifecycle_semantics") == "scheduled-start-plus-final-results-checkpoint"
+        if historical and (self.clock is None or self.stage is None):
+            raise ReplayEvidenceError("historical replay package requires an explicit persisted replay checkpoint")
         # A replay may carry its own explicit effective instant so an
         # interactive application process uses the same deterministic clock
         # as a repository-level replay. A caller-supplied clock remains the
@@ -273,6 +301,12 @@ class ReplayAflDataSource:
 
     def _at_effective_time(self, match: Match) -> Match:
         timeline = self._match_records[match.match_id].get("status_timeline")
+        if self.manifest.get("lifecycle_semantics") == "scheduled-start-plus-final-results-checkpoint":
+            # A historical export contains the final status physically, but no
+            # invented LIVE/POSTGAME transition. Scheduled time drives lockout;
+            # finality is exposed only at the explicit operator checkpoint.
+            status = "CONCLUDED" if self.stage == "final-results" else "UPCOMING"
+            return Match(match.match_id, match.home_team, match.away_team, status, match.start_time_utc)
         if self.clock is None or timeline is None:
             return match
         status = None
@@ -298,6 +332,13 @@ class ReplayAflDataSource:
             raise ReplayEvidenceError(f"required player identity is missing: {canonical_player_id}") from exc
 
     def get_match_player_stats(self, match_id: int) -> dict[int, PlayerStatLine]:
+        if (
+            self.manifest.get("lifecycle_semantics") == "scheduled-start-plus-final-results-checkpoint"
+            and self.stage != "final-results"
+        ):
+            raise ReplayEvidenceError(
+                f"final player stats for match {match_id} are unavailable before final-results checkpoint"
+            )
         try:
             return dict(self._stats[match_id])
         except KeyError as exc:

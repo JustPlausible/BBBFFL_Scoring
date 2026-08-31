@@ -172,6 +172,7 @@ class Settings:
     # "live" talks to afl-api; "replay" selects strict controlled evidence.
     afl_mode: str
     afl_replay_evidence_path: str | None
+    afl_replay_checkpoint_path: str | None
     database_path: str
     database_url: str
     teams_config_path: str
@@ -268,6 +269,7 @@ def get_settings() -> Settings:
 
     afl_mode = os.getenv("BBBFFL_AFL_MODE", "live").strip().lower()
     afl_replay_evidence_path = os.getenv("BBBFFL_AFL_REPLAY_EVIDENCE_PATH") or None
+    afl_replay_checkpoint_path = os.getenv("BBBFFL_AFL_REPLAY_CHECKPOINT_PATH") or None
     if afl_mode not in AFL_MODES:
         errors.append(f"BBBFFL_AFL_MODE: must be one of {', '.join(AFL_MODES)} (got '{afl_mode}')")
     elif afl_mode == "replay":
@@ -330,6 +332,7 @@ def get_settings() -> Settings:
         afl_api_retry_max_delay_seconds=float(os.getenv("AFL_API_RETRY_MAX_DELAY_SECONDS", "2.0")),
         afl_mode=afl_mode,
         afl_replay_evidence_path=afl_replay_evidence_path,
+        afl_replay_checkpoint_path=afl_replay_checkpoint_path,
         database_path=database_path,
         database_url=database_url,
         teams_config_path=os.getenv("BBBFFL_TEAMS_CONFIG_PATH", str(BASE_DIR / "data" / "grand_final_teams.json")),

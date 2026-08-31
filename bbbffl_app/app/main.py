@@ -110,7 +110,10 @@ async def lifespan(app: FastAPI):
     database = connect(settings.database_url)
 
     afl_transport = (
-        ReplayAflDataSource(settings.afl_replay_evidence_path)
+        ReplayAflDataSource(
+            settings.afl_replay_evidence_path,
+            checkpoint_path=settings.afl_replay_checkpoint_path,
+        )
         if settings.afl_mode == "replay"
         else AflApiClient(
             base_url=settings.afl_api_base_url,

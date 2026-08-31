@@ -125,3 +125,5 @@ docker compose -p bbbffl-round1-rehearsal up -d database
 
 Never substitute broad `docker system prune`, unscoped volume deletion, or a
 historical BBBFFL project name on a shared server.
+
+> **Operational scope:** For the authoritative 2026 historical first-half operational replay, use [`2026-first-half-replay-playbook.md`](2026-first-half-replay-playbook.md). This document remains round1-rehearsal reference material.

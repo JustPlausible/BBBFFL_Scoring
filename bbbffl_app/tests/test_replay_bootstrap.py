@@ -516,7 +516,22 @@ def test_malformed_evidence_classification_rejected(tmp_path):
     def mutate(rows):
         rows[0]["evidence_classification"] = "definitely_not_a_real_classification"
 
-    with pytest.raises(ReplayBootstrapError, match="evidence_classification must be one of"):
+    with pytest.raises(ReplayBootstrapError, match="evidence_classification must be 'reconstructable_behaviour'"):
+        load_replay_config(_files(tmp_path, mutate_opening_round=mutate))
+
+
+def test_valid_but_wrong_evidence_classification_rejected(tmp_path):
+    """`known_fact` and `synthetic_scenario` are themselves legal
+    classifications in the general Opening Round domain, but overstating
+    (or understating) this replay's reconstructed BBBFFL target-round
+    mapping as either would contradict the documented evidence boundary
+    (Codex review, PR #127) -- this fixed 2026 bootstrap requires exactly
+    `reconstructable_behaviour` for every rule."""
+
+    def mutate(rows):
+        rows[0]["evidence_classification"] = "known_fact"
+
+    with pytest.raises(ReplayBootstrapError, match="evidence_classification must be 'reconstructable_behaviour'"):
         load_replay_config(_files(tmp_path, mutate_opening_round=mutate))
 
 
@@ -611,6 +626,39 @@ def test_replay_opening_round_evidence_validator_rejects_malformed_evidence(tmp_
     )
     with pytest.raises(ReplayBootstrapError, match="provenance.source is required"):
         ReplayOpeningRoundEvidenceValidator(tmp_path / "no-provenance.json")
+
+
+def test_replay_opening_round_evidence_validator_rejects_ambiguous_season_records(tmp_path):
+    """Two season records sharing the same year (or the same season_id)
+    must be rejected as ambiguous evidence, never silently resolved to
+    whichever record happens to appear last in the JSON (Codex review,
+    PR #127) -- the supported acquisition path always yields exactly one
+    season record per identity/year."""
+    duplicate_year_payload = {
+        "schema": "bbbffl.replay-evidence/v1",
+        "manifest": {"id": "x", "version": "1", "evidence_class": "known_fact"},
+        "seasons": [
+            {"season_id": 712, "year": 2026, "provenance": PROVENANCE},
+            {"season_id": 999, "year": 2026, "provenance": PROVENANCE},
+        ],
+        "rounds": [{"round_id": r, "season_id": 712, "provenance": PROVENANCE} for r in (1343, 1345, 1346, 1347)],
+    }
+    (tmp_path / "duplicate-year.json").write_text(json.dumps(duplicate_year_payload))
+    with pytest.raises(ReplayBootstrapError, match="multiple season records for"):
+        ReplayOpeningRoundEvidenceValidator(tmp_path / "duplicate-year.json")
+
+    duplicate_season_id_payload = {
+        "schema": "bbbffl.replay-evidence/v1",
+        "manifest": {"id": "x", "version": "1", "evidence_class": "known_fact"},
+        "seasons": [
+            {"season_id": 712, "year": 2025, "provenance": PROVENANCE},
+            {"season_id": 712, "year": 2026, "provenance": PROVENANCE},
+        ],
+        "rounds": [{"round_id": r, "season_id": 712, "provenance": PROVENANCE} for r in (1343, 1345, 1346, 1347)],
+    }
+    (tmp_path / "duplicate-season-id.json").write_text(json.dumps(duplicate_season_id_payload))
+    with pytest.raises(ReplayBootstrapError, match="duplicate season_id"):
+        ReplayOpeningRoundEvidenceValidator(tmp_path / "duplicate-season-id.json")
 
 
 def test_replay_opening_round_evidence_validator_rejects_hand_authored_evidence_without_provenance(tmp_path):

@@ -75,6 +75,14 @@ EXPECTED_CLUB_NAME_BY_ID = {
 # behaviour -- see this module's `_opening_round_config` and issue #126).
 EXPECTED_TARGET_ROUND_BY_BYE_ROUND_ID = {1345: 2, 1346: 3, 1347: 4}
 EXPECTED_TARGET_ROUND_DISTRIBUTION = {2: 4, 3: 4, 4: 2}
+# The BBBFFL-side target-round mapping this replay operationalises is
+# explicitly replay/reconstructed behaviour, never a historical known_fact
+# (this repository holds no historical BBBFFL nomination record) and never
+# a synthetic_scenario/unresolved_scorer_input either -- see this module's
+# docstring and docs/opening-round-deferred-selection.md's evidence-
+# boundary section. Fixed to this one value for the 2026 bootstrap so a
+# config can't overstate (or understate) the evidence behind it.
+EXPECTED_EVIDENCE_CLASSIFICATION = "reconstructable_behaviour"
 
 
 class ReplayBootstrapError(ValueError):
@@ -202,10 +210,10 @@ def _opening_round_config(raw: dict, config_path: Path) -> OpeningRoundReplayCon
         if not isinstance(bbbffl_round_number, int) or isinstance(bbbffl_round_number, bool):
             raise ReplayBootstrapError(f"opening_round.rules[{index}].bbbffl_round_number must be an integer")
         evidence_classification = row.get("evidence_classification")
-        if evidence_classification not in EVIDENCE_CLASSIFICATIONS:
+        if evidence_classification != EXPECTED_EVIDENCE_CLASSIFICATION:
             raise ReplayBootstrapError(
-                f"opening_round.rules[{index}].evidence_classification must be one of "
-                f"{sorted(EVIDENCE_CLASSIFICATIONS)}"
+                f"opening_round.rules[{index}].evidence_classification must be "
+                f"{EXPECTED_EVIDENCE_CLASSIFICATION!r} for this 2026 replay"
             )
         rules.append(
             OpeningRoundRuleConfig(
@@ -442,14 +450,8 @@ class ReplayOpeningRoundEvidenceValidator:
             rounds = payload["rounds"]
             if not isinstance(seasons, list) or not isinstance(rounds, list):
                 raise TypeError("seasons and rounds must be lists")
-            rounds_by_season: dict[int, set[int]] = {int(season["season_id"]): set() for season in seasons}
-            # AFL-api's season_id is an opaque identifier (see
-            # tests/test_replay_acquisition.py's fake API, which models the
-            # genuine 2026 season as season_id 712, not the literal year) --
-            # `season_id_for_year` lets a caller resolve/cross-check the
-            # actual acquired identity for a calendar year instead of
-            # assuming any particular numeric value.
-            season_id_by_year: dict[int, int] = {int(season["year"]): int(season["season_id"]) for season in seasons}
+            season_ids = [int(season["season_id"]) for season in seasons]
+            season_years = [int(season["year"]) for season in seasons]
             round_entries = [(int(round_["round_id"]), int(round_["season_id"])) for round_ in rounds]
         except (KeyError, TypeError, ValueError) as exc:
             raise ReplayBootstrapError(f"malformed Opening Round replay evidence at {self.path}: {exc}") from exc
@@ -457,6 +459,32 @@ class ReplayOpeningRoundEvidenceValidator:
             self._require_provenance(record, f"seasons[{index}]")
         for index, record in enumerate(rounds):
             self._require_provenance(record, f"rounds[{index}]")
+        # Reject ambiguous evidence rather than silently resolving a
+        # duplicate season_id or year to whichever record happens to appear
+        # last in the JSON (the dict-comprehension overwrite this replaces)
+        # -- the supported acquisition path always yields exactly one
+        # season record per identity/year (see
+        # app.replay.ReplayAflDataSource.get_current_season's identical
+        # "expected exactly one" requirement).
+        duplicate_season_ids = sorted({sid for sid in season_ids if season_ids.count(sid) > 1})
+        if duplicate_season_ids:
+            raise ReplayBootstrapError(
+                f"Opening Round replay evidence at {self.path} declares duplicate season_id(s) {duplicate_season_ids}"
+            )
+        duplicate_years = sorted({year for year in season_years if season_years.count(year) > 1})
+        if duplicate_years:
+            raise ReplayBootstrapError(
+                f"Opening Round replay evidence at {self.path} declares multiple season records for "
+                f"year(s) {duplicate_years}; exactly one season record per year is required"
+            )
+        rounds_by_season: dict[int, set[int]] = {sid: set() for sid in season_ids}
+        # AFL-api's season_id is an opaque identifier (see
+        # tests/test_replay_acquisition.py's fake API, which models the
+        # genuine 2026 season as season_id 712, not the literal year) --
+        # `season_id_for_year` lets a caller resolve/cross-check the
+        # actual acquired identity for a calendar year instead of
+        # assuming any particular numeric value.
+        season_id_by_year: dict[int, int] = dict(zip(season_years, season_ids))
         # Mirrors app.replay.ReplayAflDataSource's own cross-reference check
         # (app/replay.py's round->season validation): a round referencing a
         # season missing from `seasons` is malformed evidence and must be

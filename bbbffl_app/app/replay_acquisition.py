@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from app.replay import EvidenceClass, ReplayAflDataSource, ReplayEvidenceError
 
@@ -294,17 +295,40 @@ def write_json_pair_atomic(items: list[tuple[dict, str | Path]]) -> None:
     accidentally given the same path) would otherwise share one temp file:
     the second item's write clobbers the first item's staged content before
     either replace runs, so the destination ends up holding the wrong
-    payload -- rejected up front instead."""
+    payload -- rejected up front instead.
+
+    Every target that already exists must be a regular file. `replace()`
+    on an existing directory raises, and since the replace loop below runs
+    after every item is staged, an earlier target could already have been
+    replaced by the time a later one fails that way -- rejected up front,
+    before any target is touched, rather than partway through the loop.
+
+    Temp filenames are randomised (not a deterministic `.tmp` suffix): a
+    deterministic name derived from one target could otherwise collide with
+    another item's *actual* requested target (e.g. `--output pool.json.tmp
+    --player-pool-output pool.json`), which would silently corrupt that
+    target during staging -- before either item's replace even runs."""
     resolved_targets = [Path(path).resolve() for _, path in items]
     if len(set(resolved_targets)) != len(resolved_targets):
         raise ValueError(
             "write_json_pair_atomic requires distinct output paths, got duplicates among: "
             f"{[str(target) for target in resolved_targets]}"
         )
+    non_regular = [target for target in resolved_targets if target.exists() and not target.is_file()]
+    if non_regular:
+        raise ValueError(
+            f"write_json_pair_atomic targets must be regular files, not directories: "
+            f"{[str(target) for target in non_regular]}"
+        )
+    target_set = set(resolved_targets)
     staged: list[tuple[Path, Path]] = []
     for (payload, _path), target in zip(items, resolved_targets):
         target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_suffix(target.suffix + ".tmp")
+        temporary = target.with_name(f"{target.name}.{uuid4().hex}.tmp")
+        if temporary in target_set:
+            # Astronomically unlikely (a 128-bit random collision), but fail
+            # closed rather than silently overwriting another item's target.
+            raise ValueError(f"write_json_pair_atomic temp path collides with an output target: {temporary}")
         temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         staged.append((temporary, target))
     for temporary, target in staged:

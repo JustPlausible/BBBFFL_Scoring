@@ -1,6 +1,7 @@
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -624,3 +625,36 @@ def test_write_json_pair_atomic_rejects_symlink_aliased_destinations(tmp_path):
         write_json_pair_atomic([({"a": 1}, good_target), ({"b": 2}, alias)])
 
     assert good_target.read_text() == "PREVIOUS-GOOD-EVIDENCE"
+
+
+def test_write_json_pair_atomic_rejects_directory_as_output_target(tmp_path):
+    good_target = tmp_path / "evidence.json"
+    good_target.write_text("PREVIOUS-GOOD-EVIDENCE")
+    # A pre-existing directory at the second target would make its
+    # replace() raise mid-loop, after the first target has already been
+    # replaced -- reject it up front instead, before either target is
+    # touched.
+    directory_target = tmp_path / "pool_dir"
+    directory_target.mkdir()
+
+    with pytest.raises(ValueError, match="must be regular files"):
+        write_json_pair_atomic([({"a": 1}, good_target), ({"b": 2}, directory_target)])
+
+    assert good_target.read_text() == "PREVIOUS-GOOD-EVIDENCE"
+
+
+def test_write_json_pair_atomic_rejects_temp_path_colliding_with_another_target(tmp_path, monkeypatch):
+    import app.replay_acquisition as replay_acquisition
+
+    # A deterministic `.tmp`-suffix temp name derived from one target could
+    # collide with another item's *actual* requested target path (e.g.
+    # `--output pool.json.tmp --player-pool-output pool.json`). Force that
+    # collision deterministically by pinning the random component.
+    fixed_hex = "deadbeefdeadbeefdeadbeefdeadbeef"
+    monkeypatch.setattr(replay_acquisition, "uuid4", lambda: SimpleNamespace(hex=fixed_hex))
+
+    target_a = tmp_path / "evidence.json"
+    target_b = tmp_path / f"evidence.json.{fixed_hex}.tmp"
+
+    with pytest.raises(ValueError, match="temp path collides with an output target"):
+        write_json_pair_atomic([({"a": 1}, target_a), ({"b": 2}, target_b)])

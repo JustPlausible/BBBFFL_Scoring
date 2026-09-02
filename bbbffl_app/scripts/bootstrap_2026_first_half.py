@@ -68,6 +68,13 @@ def main() -> int:
             "operator_authentication_provisioned",
         ):
             print(f"  {key}: {report.get(key)}")
+        opening_round = report.get("opening_round") or {}
+        print(
+            "  opening_round: "
+            f"accepted={opening_round.get('accepted_rule_count')}/{opening_round.get('expected_rule_count')} "
+            f"complete={opening_round.get('complete')} targets={opening_round.get('targets')} "
+            f"nominations={opening_round.get('nomination_count')}"
+        )
         for message in report.get("messages", []):
             print(f"  missing/conflicting: {message}")
     return 0 if report["overall"] == "READY" else 1

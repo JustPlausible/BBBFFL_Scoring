@@ -95,7 +95,7 @@ Destructive reset is intentionally explicit and project-scoped: back up, run `$C
 
 ## E. Supported first-half bootstrap
 
-Copy `config/replay/2026-first-half.template.json` to `replay/2026-first-half/config/2026-first-half.json`, enter genuine accepted identities/rules/order, and point `player_pool_file` at `/replay/evidence/2026-player-pool.json`. This directory is mounted read-only at `/secure`. Do not invent coach facts or use SQL. Then:
+Copy `config/replay/2026-first-half.template.json` to `replay/2026-first-half/config/2026-first-half.json`, enter genuine accepted identities/rules/order, and point `player_pool_file` at `/replay/evidence/2026-player-pool.json`. Also point the config's `opening_round.evidence_file` at the acquired `/replay/evidence/2026-first-half.json` package from step C -- the template already carries the genuine ten-club 2026 Opening Round rule set (issue #126); it is configured/supplied here, never invented, and player nominations are deliberately **not** part of this file. This directory is mounted read-only at `/secure`. Do not invent coach facts or use SQL. Then:
 
 ```bash
 $COMPOSE run --rm -v "$PWD/bbbffl_app:/app" app \
@@ -109,7 +109,9 @@ $COMPOSE run --rm -v "$PWD/bbbffl_app:/app" app python -m scripts.bootstrap_2026
   --config /secure/2026-first-half.json --readiness-only --json
 ```
 
-Require `READY` and verify 2026 rules, ordinary competition, ten genuine coach/team identities, Administrator grant/acting contexts, BBBFFL rounds 1–9, provider/year/player count, squad limit, accepted ten-position draft order, no completed pick, and Draft Board next action **Pick 1**. See `2026-first-half-replay-bootstrap.md` for conflict diagnostics.
+Require `READY` and verify 2026 rules, ordinary competition, ten genuine coach/team identities, Administrator grant/acting contexts, BBBFFL rounds 1–9, provider/year/player count, squad limit, accepted ten-position draft order, no completed pick, Draft Board next action **Pick 1**, and the report's `opening_round` section showing `accepted_rule_count: 10`, `complete: true`, and `targets: {"2": 4, "3": 4, "4": 2}` with `nomination_count: 0`. This Opening Round activation is established from the local acquired evidence acquired in step C; AFL-api remains disconnected throughout. See `2026-first-half-replay-bootstrap.md` for conflict diagnostics.
+
+Then, in the browser: sign in as the provisioned Administrator, open **Draft Board** and confirm the next action is **Pick 1**, then open **Opening Round Operations** for the 2026 season and confirm all ten accepted rules are visible with zero nominations. Player nominations are entered later, through that same Opening Round Operations workflow, only after the draft has produced actual owned players -- never during bootstrap and never inferred from later results.
 
 ## F. Preseason browser workflow
 
@@ -145,7 +147,7 @@ For each round:
 
 ## H. Round-specific notes
 
-* **Opening Round / Round 1:** Opening Round club participation is acquired AFL fact. Coach deferred nominations are operator/competition state and must be entered through **Opening Round Operations** with provenance; never infer them from player scores.
+* **Opening Round / Round 1:** Opening Round club participation is acquired AFL fact. The ten accepted 2026 Opening Round rules are already established by bootstrap (issue #126) and visible in **Opening Round Operations** before the draft. Coach deferred nominations remain separate operator/competition state and must be entered through **Opening Round Operations** with provenance only after the draft has produced owned players; never infer them from player scores.
 * **Compensating byes:** use the accepted Opening Round rules and acquired round `byes`/identities. A deferred slot uses the existing Opening Round domain and ordinary scoring service.
 * **Selective/early lockout:** use the accepted Round Preflight trigger plan and exact acquired starts. Do not assume all players lock at the first match.
 * For rounds without richer genuine snapshots, scheduled boundaries plus `final-results` are complete and expected.

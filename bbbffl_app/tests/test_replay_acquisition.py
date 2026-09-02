@@ -599,6 +599,10 @@ def test_write_json_pair_atomic_stages_every_output_before_replacing_any(tmp_pat
     # The first item must not have been replaced just because it was staged
     # before the second item's failure was discovered.
     assert good_target.read_text() == "PREVIOUS-GOOD-EVIDENCE"
+    # The first item's temp file must not be left behind as orphaned debris
+    # just because a later item failed to stage.
+    leftover_tmp_files = [p for p in tmp_path.iterdir() if p.is_file() and p.suffix == ".tmp"]
+    assert leftover_tmp_files == []
 
 
 def test_write_json_pair_atomic_rejects_aliased_output_destinations(tmp_path):

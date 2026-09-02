@@ -307,7 +307,14 @@ def write_json_pair_atomic(items: list[tuple[dict, str | Path]]) -> None:
     deterministic name derived from one target could otherwise collide with
     another item's *actual* requested target (e.g. `--output pool.json.tmp
     --player-pool-output pool.json`), which would silently corrupt that
-    target during staging -- before either item's replace even runs."""
+    target during staging -- before either item's replace even runs.
+
+    Any temp file this call created but did not end up moving into its
+    target (staging failed partway, or a target's replace itself failed) is
+    removed before the exception propagates, so a caller retrying a failed
+    acquisition against a bad destination never accumulates orphaned
+    (potentially large, since these mirror the evidence payload) temp files
+    on disk."""
     resolved_targets = [Path(path).resolve() for _, path in items]
     if len(set(resolved_targets)) != len(resolved_targets):
         raise ValueError(
@@ -322,17 +329,23 @@ def write_json_pair_atomic(items: list[tuple[dict, str | Path]]) -> None:
         )
     target_set = set(resolved_targets)
     staged: list[tuple[Path, Path]] = []
-    for (payload, _path), target in zip(items, resolved_targets):
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_name(f"{target.name}.{uuid4().hex}.tmp")
-        if temporary in target_set:
-            # Astronomically unlikely (a 128-bit random collision), but fail
-            # closed rather than silently overwriting another item's target.
-            raise ValueError(f"write_json_pair_atomic temp path collides with an output target: {temporary}")
-        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        staged.append((temporary, target))
-    for temporary, target in staged:
-        temporary.replace(target)
+    try:
+        for (payload, _path), target in zip(items, resolved_targets):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f"{target.name}.{uuid4().hex}.tmp")
+            if temporary in target_set:
+                # Astronomically unlikely (a 128-bit random collision), but
+                # fail closed rather than silently overwriting another
+                # item's target.
+                raise ValueError(f"write_json_pair_atomic temp path collides with an output target: {temporary}")
+            temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            staged.append((temporary, target))
+        for temporary, target in staged:
+            temporary.replace(target)
+    except BaseException:
+        for temporary, _target in staged:
+            temporary.unlink(missing_ok=True)
+        raise
 
 
 def write_json_atomic(payload: dict, path: str | Path) -> None:

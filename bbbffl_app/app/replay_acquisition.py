@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from app.replay import EvidenceClass, ReplayAflDataSource, ReplayEvidenceError
 
@@ -27,6 +28,107 @@ def _prov(path: str) -> dict[str, str]:
     return {"source": f"afl-api-v1:{path}", "evidence_class": EvidenceClass.KNOWN_FACT.value}
 
 
+SEASON_PLAYERS_PAGE_LIMIT = 250
+
+
+def _is_positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _acquire_season_players(api: ConsumerApi, players_path: str) -> tuple[dict[int, dict], int]:
+    """Follow the AFL-api #248 season-player collection to exhaustion.
+
+    ``_rows`` intentionally strips the response envelope, which is exactly
+    the information (``offset``, page size) pagination progress needs to be
+    validated, so this is a dedicated paginator rather than a generic-helper
+    workaround. Each page is requested at ``limit=250`` starting at
+    ``offset=0``; a page shorter than the requested limit (including an
+    empty page) is the valid terminal condition. The requested offset is
+    advanced by this function itself rather than trusted from the response,
+    so a page reporting an unexpected offset fails closed instead of looping
+    or silently skipping/repeating rows, and a canonical_player_id repeated
+    across pages fails closed rather than being silently merged.
+    """
+    limit = SEASON_PLAYERS_PAGE_LIMIT
+    offset = 0
+    page_count = 0
+    players: dict[int, dict] = {}
+    while True:
+        page_path = f"{players_path}?limit={limit}&offset={offset}"
+        payload = api.get(page_path)
+        if not isinstance(payload, dict):
+            raise ReplayEvidenceError(f"malformed consumer API response at {page_path}: expected an object envelope")
+        rows = payload.get("players")
+        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+            raise ReplayEvidenceError(f"malformed consumer API response at {page_path}: expected a players list")
+        returned_offset = payload.get("offset")
+        if returned_offset != offset:
+            raise ReplayEvidenceError(
+                f"AFL season-player page at {page_path} reports offset {returned_offset!r}, expected {offset}"
+            )
+        returned_limit = payload.get("limit")
+        if returned_limit != limit:
+            # A page shorter than `limit` is only a valid terminal page when
+            # the envelope confirms `limit` is what we actually asked for --
+            # otherwise a server-side clamp (e.g. limit: 100) would look
+            # identical to a genuine final page and silently truncate the
+            # pool.
+            raise ReplayEvidenceError(
+                f"AFL season-player page at {page_path} reports limit {returned_limit!r}, expected {limit}"
+            )
+        page_count += 1
+        for row in rows:
+            player_id = row.get("canonical_player_id")
+            if not _is_positive_int(player_id):
+                raise ReplayEvidenceError(
+                    f"AFL season-player page at {page_path} has a malformed canonical_player_id: {player_id!r}"
+                )
+            if player_id in players:
+                raise ReplayEvidenceError(
+                    f"AFL season {players_path} contains duplicate canonical player {player_id} "
+                    f"(seen again at {page_path})"
+                )
+            display_name = row.get("display_name")
+            if not isinstance(display_name, str) or not display_name.strip():
+                raise ReplayEvidenceError(
+                    f"AFL season-player {player_id} at {page_path} has a blank or missing display_name"
+                )
+            # BBBFFL requires a resolved requested-season team even though
+            # AFL-api permits team: null for unresolved membership; never
+            # fall back to current_team, another season, or match-stat team
+            # identity -- an unresolved team blocks acquisition instead of
+            # being guessed.
+            team = row.get("team")
+            if not isinstance(team, dict):
+                raise ReplayEvidenceError(
+                    f"AFL season-player {player_id} at {page_path} has no resolved requested-season team"
+                )
+            team_id = team.get("team_id")
+            if not _is_positive_int(team_id):
+                raise ReplayEvidenceError(
+                    f"AFL season-player {player_id} at {page_path} has a malformed team.team_id: {team_id!r}"
+                )
+            team_name = team.get("name")
+            if not isinstance(team_name, str) or not team_name.strip():
+                raise ReplayEvidenceError(
+                    f"AFL season-player {player_id} at {page_path} has a blank or missing team.name"
+                )
+            players[player_id] = {
+                "canonical_player_id": player_id,
+                "display_name": display_name,
+                "team_id": team_id,
+                "team_name": team_name,
+                "identifiers": row.get("identifiers", {}),
+                "provenance": _prov(players_path),
+            }
+        if len(rows) < limit:
+            break
+        offset += limit
+    if not players:
+        raise ReplayEvidenceError(f"authoritative AFL season-player pool is empty at {players_path}")
+    return players, page_count
+
+
 def acquire_first_half_2026(api: ConsumerApi, *, source_base_url: str, acquired_at: datetime | None = None) -> dict:
     """Acquire Opening Round and rounds 1--9; fail before returning partial evidence."""
     acquired_at = acquired_at or datetime.now(timezone.utc)
@@ -43,28 +145,7 @@ def acquire_first_half_2026(api: ConsumerApi, *, source_base_url: str, acquired_
     rounds_path = f"/api/v1/seasons/{season_id}/rounds"
     all_rounds = _rows(api.get(rounds_path), "rounds", path=rounds_path)
     players_path = f"/api/v1/seasons/{season_id}/players"
-    season_players = _rows(api.get(players_path), "players", path=players_path)
-    players: dict[int, dict] = {}
-    for row in season_players:
-        player_id = row.get("canonical_player_id")
-        team = row.get("team") or row.get("current_team")
-        if player_id is None or not isinstance(team, dict) or team.get("team_id") is None:
-            raise ReplayEvidenceError(
-                f"AFL season {season_id} has malformed season-player identity for player {player_id}"
-            )
-        if player_id in players:
-            raise ReplayEvidenceError(f"AFL season {season_id} contains duplicate canonical player {player_id}")
-        players[player_id] = {
-            "canonical_player_id": player_id,
-            "display_name": row.get("display_name", f"Player {player_id}"),
-            "team_id": team["team_id"],
-            "team_name": team.get("name", ""),
-            "identifiers": row.get("identifiers", {}),
-            "eligible": bool(row.get("eligible", True)),
-            "provenance": _prov(players_path),
-        }
-    if not players:
-        raise ReplayEvidenceError(f"authoritative AFL season-player pool is empty for season {season_id}")
+    players, player_page_count = _acquire_season_players(api, players_path)
 
     def wanted(row: dict) -> bool:
         number = row.get("round_number")
@@ -176,6 +257,8 @@ def acquire_first_half_2026(api: ConsumerApi, *, source_base_url: str, acquired_
             "match_count": len(matches_out),
             "player_stat_match_count": len(stats_out),
             "roster_coverage": {"available": len(matches_out) - len(roster_missing), "unavailable": roster_missing},
+            "player_pool_count": len(players),
+            "player_pool_page_count": player_page_count,
             "lifecycle_semantics": "scheduled-start-plus-final-results-checkpoint",
         },
         "seasons": [
@@ -197,10 +280,86 @@ def acquire_first_half_2026(api: ConsumerApi, *, source_base_url: str, acquired_
     }
 
 
+def write_json_pair_atomic(items: list[tuple[dict, str | Path]]) -> None:
+    """Write every ``(payload, path)`` pair via temp-file + replace, staging
+    *all* temp files before replacing *any* target.
+
+    A reader never observes a partially-written file, and a failure while
+    staging any item (e.g. a read-only directory) leaves every target
+    untouched -- so writing the acquisition CLI's evidence and player-pool
+    files as one call here never replaces one of the pair while leaving the
+    other stale, which a naive write-one-then-the-other sequence could.
+
+    Every target must resolve to a distinct path. Two items sharing a
+    destination (most plausibly `--output` and `--player-pool-output`
+    accidentally given the same path) would otherwise share one temp file:
+    the second item's write clobbers the first item's staged content before
+    either replace runs, so the destination ends up holding the wrong
+    payload -- rejected up front instead.
+
+    Every target that already exists must be a regular file. `replace()`
+    on an existing directory raises, and since the replace loop below runs
+    after every item is staged, an earlier target could already have been
+    replaced by the time a later one fails that way -- rejected up front,
+    before any target is touched, rather than partway through the loop.
+
+    Temp filenames are randomised (not a deterministic `.tmp` suffix): a
+    deterministic name derived from one target could otherwise collide with
+    another item's *actual* requested target (e.g. `--output pool.json.tmp
+    --player-pool-output pool.json`), which would silently corrupt that
+    target during staging -- before either item's replace even runs.
+
+    Any temp file this call created but did not end up moving into its
+    target (staging failed partway, or a target's replace itself failed) is
+    removed before the exception propagates, so a caller retrying a failed
+    acquisition against a bad destination never accumulates orphaned
+    (potentially large, since these mirror the evidence payload) temp files
+    on disk."""
+    resolved_targets = [Path(path).resolve() for _, path in items]
+    if len(set(resolved_targets)) != len(resolved_targets):
+        raise ValueError(
+            "write_json_pair_atomic requires distinct output paths, got duplicates among: "
+            f"{[str(target) for target in resolved_targets]}"
+        )
+    non_regular = [target for target in resolved_targets if target.exists() and not target.is_file()]
+    if non_regular:
+        raise ValueError(
+            f"write_json_pair_atomic targets must be regular files, not directories: "
+            f"{[str(target) for target in non_regular]}"
+        )
+    target_set = set(resolved_targets)
+    created: list[Path] = []
+    staged: list[tuple[Path, Path]] = []
+    try:
+        for (payload, _path), target in zip(items, resolved_targets):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f"{target.name}.{uuid4().hex}.tmp")
+            if temporary in target_set:
+                # Astronomically unlikely (a 128-bit random collision), but
+                # fail closed rather than silently overwriting another
+                # item's target.
+                raise ValueError(f"write_json_pair_atomic temp path collides with an output target: {temporary}")
+            # Tracked before write_text runs: a write that fails partway
+            # (e.g. ENOSPC) can still leave a partial file at `temporary`,
+            # and it must be cleaned up too, not just a fully-written one.
+            created.append(temporary)
+            temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            staged.append((temporary, target))
+        for temporary, target in staged:
+            temporary.replace(target)
+    except BaseException:
+        for temporary in created:
+            temporary.unlink(missing_ok=True)
+        raise
+
+
+def write_json_atomic(payload: dict, path: str | Path) -> None:
+    """Write a single ``payload`` as JSON via temp-file + replace."""
+    write_json_pair_atomic([(payload, path)])
+
+
 def write_package(payload: dict, path: str | Path) -> None:
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_json_atomic(payload, path)
 
 
 def package_summary(source: ReplayAflDataSource) -> str:

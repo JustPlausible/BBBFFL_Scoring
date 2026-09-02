@@ -24,6 +24,21 @@ Record the actual commit and built image digest in the replay log; never substit
 
 Acquisition is the only phase requiring the configured consumer API and `AFL_API_KEY`. It automatically finds the year (not a database ID), Opening Round and rounds 1–9, all matches, final statistics, identifiers, byes, and optional rosters. Do not prepare Bruno files.
 
+Player-pool population comes from AFL-api's season-player collection, which is a distinct step from the round/match/stats evidence above:
+
+```
+GET /api/v1/seasons
+  -> resolve the single season whose year == 2026
+  -> GET /api/v1/seasons/{season_id}/players?limit=250&offset=0
+  -> GET /api/v1/seasons/{season_id}/players?limit=250&offset=250
+  -> ... continues automatically until a page shorter than the requested
+     limit (including an empty page) is returned
+```
+
+The acquisition command follows every page itself; the operator never manually concatenates pages or prepares a Bruno-captured player file. Every acquired player must carry a resolved requested-season team (AFL-api's `current_team` and any other-season/match-stat team identity are never substituted) and a non-empty `display_name`; an unresolved name or team blocks acquisition instead of being guessed. The captured population is exactly whatever AFL-api has actually persisted into its canonical `competition_season_players` membership at acquisition time -- it is not being claimed as a historically versioned February-2026 snapshot, and membership completeness is bounded by what AFL-api has persisted, not by anything BBBFFL infers.
+
+This player pool requires **no** 2026 Home & Away summary and **no** 2026 StatsPro summary -- a genuine preseason 2026 season member with zero match appearances still belongs in the pool. Do not run a `--build-player-stat-summaries 2026` step before acquisition; none is a prerequisite. (Previous-season H&A statistics may later support a 2027 draft UI/reference workflow; they are out of scope here and are never a prerequisite for this replay.)
+
 ```bash
 mkdir -p replay/2026-first-half/{evidence,state,logs,backups,config}
 cd bbbffl_app
@@ -44,9 +59,9 @@ python -m scripts.first_half_replay validate \
 cd ..
 ```
 
-Expect validation `PASS`, season 2026, ten included AFL round identities, every enumerated match with stat coverage, and explicit available/unavailable roster coverage. Inspect `manifest` for package/schema, UTC acquisition time, source host (never credentials), API/exporter versions and identifiers. A missing optional roster is diagnostic, not fabricated. Missing stats, identifiers, malformed time, inconsistent round/match, or unsupported schema is fatal.
+Expect validation `PASS`, season 2026, ten included AFL round identities, every enumerated match with stat coverage, and explicit available/unavailable roster coverage. Inspect `manifest` for package/schema, UTC acquisition time, source host (never credentials), API/exporter versions and identifiers, plus `player_pool_count`/`player_pool_page_count` for the acquired season-player population and how many pages it took. A missing optional roster is diagnostic, not fabricated. Missing stats, identifiers, malformed time, inconsistent round/match, or unsupported schema is fatal.
 
-**Hermetic proof:** now stop/disconnect `afl-api` (or firewall the host). Leave it unavailable for every remaining step. Replay never falls back to it.
+**Hermetic proof:** now stop/disconnect `afl-api` (or firewall the host). Leave it unavailable for every remaining step. Replay never falls back to it -- once acquisition has written both output files, nothing later in this playbook depends on AFL-api being reachable.
 
 ## D. Dedicated installation, lifecycle and safety
 

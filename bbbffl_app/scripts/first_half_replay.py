@@ -10,7 +10,7 @@ from pathlib import Path
 
 from app.afl_client import AflApiClient
 from app.replay import ReplayAflDataSource, ReplayClock
-from app.replay_acquisition import acquire_first_half_2026, package_summary, write_package
+from app.replay_acquisition import acquire_first_half_2026, package_summary, write_json_pair_atomic
 
 
 class Api:
@@ -47,7 +47,7 @@ def main() -> int:
                 payload = acquire_first_half_2026(Api(client), source_base_url=args.base_url)
             finally:
                 client.close()
-            write_package(payload, args.output)
+            pool = None
             if args.player_pool_output:
                 pool = {
                     "source": {"provider": "afl-api-v1", "season_year": 2026},
@@ -57,13 +57,27 @@ def main() -> int:
                             "display_name": x["display_name"],
                             "afl_team_id": x["team_id"],
                             "afl_team_name": x["team_name"],
-                            "eligible": x.get("eligible", True),
+                            # BBBFFL replay output policy, not an AFL-api field: every
+                            # acquired 2026 season member is treated as eligible for
+                            # this historical replay. Eligibility is BBBFFL policy,
+                            # never inferred from or attributed to afl-api.
+                            "eligible": True,
                             "source_updated_at": None,
                         }
                         for x in payload["players"]
                     ],
                 }
-                Path(args.player_pool_output).write_text(json.dumps(pool, indent=2, sort_keys=True) + "\n")
+            # Both outputs are fully built and validated above before either is
+            # written, and both are staged (temp file) before either target is
+            # replaced: a failure here never reports PASS, and it never leaves
+            # one output replaced while the other stays stale -- staging both
+            # first means a late failure (e.g. the pool destination being
+            # read-only) leaves every previously completed, known-good output
+            # untouched rather than replacing only the evidence file.
+            outputs = [(payload, args.output)]
+            if args.player_pool_output:
+                outputs.append((pool, args.player_pool_output))
+            write_json_pair_atomic(outputs)
             # Historical packages deliberately require checkpoint state; acquisition
             # validation here validates the package shape with a temporary logical state.
             print(

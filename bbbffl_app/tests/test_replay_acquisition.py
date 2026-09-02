@@ -598,3 +598,29 @@ def test_write_json_pair_atomic_stages_every_output_before_replacing_any(tmp_pat
     # The first item must not have been replaced just because it was staged
     # before the second item's failure was discovered.
     assert good_target.read_text() == "PREVIOUS-GOOD-EVIDENCE"
+
+
+def test_write_json_pair_atomic_rejects_aliased_output_destinations(tmp_path):
+    good_target = tmp_path / "evidence.json"
+    good_target.write_text("PREVIOUS-GOOD-EVIDENCE")
+    same_target_again = tmp_path / "evidence.json"
+
+    with pytest.raises(ValueError, match="distinct output paths"):
+        write_json_pair_atomic([({"a": 1}, good_target), ({"b": 2}, same_target_again)])
+
+    # Rejected before any staging/replace happens -- the previously
+    # completed, known-good output must be left untouched, not clobbered
+    # with whichever of the two aliased payloads staged last.
+    assert good_target.read_text() == "PREVIOUS-GOOD-EVIDENCE"
+
+
+def test_write_json_pair_atomic_rejects_symlink_aliased_destinations(tmp_path):
+    good_target = tmp_path / "evidence.json"
+    good_target.write_text("PREVIOUS-GOOD-EVIDENCE")
+    alias = tmp_path / "evidence-alias.json"
+    alias.symlink_to(good_target)
+
+    with pytest.raises(ValueError, match="distinct output paths"):
+        write_json_pair_atomic([({"a": 1}, good_target), ({"b": 2}, alias)])
+
+    assert good_target.read_text() == "PREVIOUS-GOOD-EVIDENCE"

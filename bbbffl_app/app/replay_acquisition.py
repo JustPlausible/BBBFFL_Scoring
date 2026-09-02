@@ -287,10 +287,22 @@ def write_json_pair_atomic(items: list[tuple[dict, str | Path]]) -> None:
     staging any item (e.g. a read-only directory) leaves every target
     untouched -- so writing the acquisition CLI's evidence and player-pool
     files as one call here never replaces one of the pair while leaving the
-    other stale, which a naive write-one-then-the-other sequence could."""
+    other stale, which a naive write-one-then-the-other sequence could.
+
+    Every target must resolve to a distinct path. Two items sharing a
+    destination (most plausibly `--output` and `--player-pool-output`
+    accidentally given the same path) would otherwise share one temp file:
+    the second item's write clobbers the first item's staged content before
+    either replace runs, so the destination ends up holding the wrong
+    payload -- rejected up front instead."""
+    resolved_targets = [Path(path).resolve() for _, path in items]
+    if len(set(resolved_targets)) != len(resolved_targets):
+        raise ValueError(
+            "write_json_pair_atomic requires distinct output paths, got duplicates among: "
+            f"{[str(target) for target in resolved_targets]}"
+        )
     staged: list[tuple[Path, Path]] = []
-    for payload, path in items:
-        target = Path(path)
+    for (payload, _path), target in zip(items, resolved_targets):
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_suffix(target.suffix + ".tmp")
         temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")

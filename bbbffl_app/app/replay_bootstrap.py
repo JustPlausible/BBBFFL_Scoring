@@ -40,7 +40,6 @@ REPLAY_YEAR = 2026
 # app.opening_round itself never infers activation from a season year (see
 # that module's docstring).
 OPENING_ROUND_RULE_COUNT = 10
-EXPECTED_OPENING_ROUND_AFL_SEASON_ID = REPLAY_YEAR
 EXPECTED_OPENING_ROUND_ID = 1343
 # afl_club_id -> the AFL round ID carrying that club's compensating bye.
 EXPECTED_BYE_ROUND_BY_CLUB_ID = {
@@ -177,10 +176,14 @@ def _opening_round_config(raw: dict, config_path: Path) -> OpeningRoundReplayCon
             raise TypeError("opening_round.rules must be a list")
     except (KeyError, TypeError) as exc:
         raise ReplayBootstrapError(f"invalid or missing opening_round configuration: {exc}") from exc
-    if afl_season_id != EXPECTED_OPENING_ROUND_AFL_SEASON_ID:
-        raise ReplayBootstrapError(
-            f"opening_round.afl_season_id must be {EXPECTED_OPENING_ROUND_AFL_SEASON_ID} for this 2026 replay"
-        )
+    afl_season_id = _positive_int(afl_season_id, "opening_round.afl_season_id")
+    # AFL-api's season_id is an opaque identifier, not necessarily equal to
+    # the calendar year (see tests/test_replay_acquisition.py's fake API,
+    # which deliberately models the genuine 2026 season as season_id 712)
+    # -- so this cannot be checked against a hardcoded literal here. It is
+    # instead cross-referenced against the acquired evidence's own
+    # year-tagged season record in `_reconcile_opening_round_rules`, before
+    # any Opening Round rule is accepted.
     evidence_path = Path(evidence_file_value)
     if not evidence_path.is_absolute():
         evidence_path = config_path.parent / evidence_path
@@ -425,6 +428,13 @@ class ReplayOpeningRoundEvidenceValidator:
             if not isinstance(seasons, list) or not isinstance(rounds, list):
                 raise TypeError("seasons and rounds must be lists")
             rounds_by_season: dict[int, set[int]] = {int(season["season_id"]): set() for season in seasons}
+            # AFL-api's season_id is an opaque identifier (see
+            # tests/test_replay_acquisition.py's fake API, which models the
+            # genuine 2026 season as season_id 712, not the literal year) --
+            # `season_id_for_year` lets a caller resolve/cross-check the
+            # actual acquired identity for a calendar year instead of
+            # assuming any particular numeric value.
+            season_id_by_year: dict[int, int] = {int(season["year"]): int(season["season_id"]) for season in seasons}
             round_entries = [(int(round_["round_id"]), int(round_["season_id"])) for round_ in rounds]
         except (KeyError, TypeError, ValueError) as exc:
             raise ReplayBootstrapError(f"malformed Opening Round replay evidence at {self.path}: {exc}") from exc
@@ -443,9 +453,18 @@ class ReplayOpeningRoundEvidenceValidator:
         for round_id, season_id in round_entries:
             rounds_by_season[season_id].add(round_id)
         self._rounds_by_season = rounds_by_season
+        self._season_id_by_year = season_id_by_year
 
     def round_exists(self, afl_season_id: int, afl_round_id: int) -> bool:
         return afl_round_id in self._rounds_by_season.get(afl_season_id, set())
+
+    def season_id_for_year(self, year: int) -> int | None:
+        """The acquired AFL `season_id` declared for `year` in this
+        evidence, or `None` if no season record declares that year --
+        lets a caller cross-check a configured `afl_season_id` against the
+        genuinely acquired identity rather than assuming it equals the
+        calendar year."""
+        return self._season_id_by_year.get(year)
 
 
 def _resolve_opening_round_targets(conn, competition_id: str, config: ReplayConfig) -> dict[int, str]:
@@ -510,6 +529,17 @@ def _reconcile_opening_round_rules(
     rule_repo = OpeningRoundRuleRepository(database)
     target_round_ids = _resolve_opening_round_targets(conn, competition_id, config)
     validator = ReplayOpeningRoundEvidenceValidator(config.opening_round.evidence_file)
+    resolved_season_id = validator.season_id_for_year(REPLAY_YEAR)
+    _conflict(
+        resolved_season_id is None,
+        f"Opening Round replay evidence at {config.opening_round.evidence_file} does not declare a season "
+        f"for year {REPLAY_YEAR}",
+    )
+    _conflict(
+        resolved_season_id != config.opening_round.afl_season_id,
+        f"opening_round.afl_season_id ({config.opening_round.afl_season_id}) does not match the acquired "
+        f"{REPLAY_YEAR} season identity ({resolved_season_id}) in the replay evidence",
+    )
     expected_club_ids = {rule_cfg.afl_club_id for rule_cfg in config.opening_round.rules}
     existing_accepted = rule_repo.list_accepted_for_season_locked(conn, season_id)
     unexpected = sorted(rule.afl_club_id for rule in existing_accepted if rule.afl_club_id not in expected_club_ids)

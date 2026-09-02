@@ -42,12 +42,12 @@ OPENING_ROUND_ALL_AFL_ROUND_IDS = (1343, 1345, 1346, 1347)
 
 
 def _opening_round_evidence(
-    tmp_path, filename="opening-round-evidence.json", round_ids=OPENING_ROUND_ALL_AFL_ROUND_IDS
+    tmp_path, filename="opening-round-evidence.json", round_ids=OPENING_ROUND_ALL_AFL_ROUND_IDS, season_id=2026
 ):
     payload = {
         "schema": "bbbffl.replay-evidence/v1",
-        "seasons": [{"season_id": 2026, "year": 2026}],
-        "rounds": [{"round_id": round_id, "season_id": 2026} for round_id in round_ids],
+        "seasons": [{"season_id": season_id, "year": 2026}],
+        "rounds": [{"round_id": round_id, "season_id": season_id} for round_id in round_ids],
     }
     (tmp_path / filename).write_text(json.dumps(payload))
     return filename
@@ -106,7 +106,9 @@ def _files(
     (tmp_path / "players.json").write_text(
         json.dumps({"source": {"provider": "afl-api-v1", "season_year": 2026}, "players": players})
     )
-    evidence_filename = _opening_round_evidence(tmp_path, round_ids=opening_round_round_ids)
+    evidence_filename = _opening_round_evidence(
+        tmp_path, round_ids=opening_round_round_ids, season_id=opening_round_season_id
+    )
     opening_round_rules = _opening_round_rules()
     if mutate_opening_round:
         mutate_opening_round(opening_round_rules)
@@ -584,10 +586,11 @@ def test_missing_required_round_evidence_fails_bootstrap(tmp_path, missing_round
 
 
 def test_wrong_afl_season_identity_in_evidence_fails_bootstrap(tmp_path):
+    """Evidence that declares no 2026 season at all (only a 2025 one) must
+    fail closed before any write, rather than resolving Opening Round
+    references against the wrong season."""
     database = migrated_connection()
     tmp_path.mkdir(parents=True, exist_ok=True)
-    # Evidence file genuinely carries a different AFL season identity (2025)
-    # than the configured/expected 2026 replay season.
     payload = {
         "schema": "bbbffl.replay-evidence/v1",
         "seasons": [{"season_id": 2025, "year": 2025}],
@@ -601,9 +604,59 @@ def test_wrong_afl_season_identity_in_evidence_fails_bootstrap(tmp_path):
     config_path.write_text(json.dumps(raw))
 
     config = load_replay_config(config_path)
-    with pytest.raises(ValueError, match="does not exist"):
+    with pytest.raises(ReplayBootstrapError, match="does not declare a season for year 2026"):
         bootstrap_first_half(database, config)
     assert SeasonRepository(database).list_seasons() == []
+
+
+def test_configured_season_id_mismatched_with_acquired_opaque_season_id_fails_bootstrap(tmp_path):
+    """AFL-api's `season_id` is an opaque identifier, not necessarily the
+    calendar year (see tests/test_replay_acquisition.py's fake API, which
+    models the genuine 2026 season as `season_id: 712`). A config whose
+    `opening_round.afl_season_id` does not match the season the evidence
+    actually declares for year 2026 must fail closed -- even though the
+    evidence otherwise genuinely contains a 2026 season and all required
+    rounds."""
+    database = migrated_connection()
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema": "bbbffl.replay-evidence/v1",
+        "seasons": [{"season_id": 712, "year": 2026}],
+        "rounds": [{"round_id": r, "season_id": 712} for r in OPENING_ROUND_ALL_AFL_ROUND_IDS],
+    }
+    (tmp_path / "opaque-season-evidence.json").write_text(json.dumps(payload))
+
+    config_path = _files(tmp_path)
+    raw = json.loads(config_path.read_text())
+    raw["opening_round"]["evidence_file"] = "opaque-season-evidence.json"
+    # Configured afl_season_id (2026) does not match the evidence's genuine
+    # opaque identity (712) for that same year.
+    config_path.write_text(json.dumps(raw))
+
+    config = load_replay_config(config_path)
+    with pytest.raises(ReplayBootstrapError, match="does not match the acquired 2026 season identity"):
+        bootstrap_first_half(database, config)
+    assert SeasonRepository(database).list_seasons() == []
+
+
+def test_opaque_afl_season_id_accepted_when_configured_correctly(tmp_path):
+    """The bootstrap must not assume AFL season_id equals the calendar
+    year: an evidence package using a genuinely opaque season_id (e.g.
+    712 for 2026, as AFL-api's real acquisition contract can produce)
+    succeeds once `opening_round.afl_season_id` is configured to match it."""
+    database = migrated_connection()
+    config = load_replay_config(
+        _files(
+            tmp_path,
+            opening_round_round_ids=OPENING_ROUND_ALL_AFL_ROUND_IDS,
+            opening_round_season_id=712,
+        )
+    )
+    report = bootstrap_first_half(database, config)
+    season_id = report["season"]["season_id"]
+    rules = OpeningRoundRuleRepository(database).list_accepted_for_season(season_id)
+    assert len(rules) == 10
+    assert all(r.afl_season_id == 712 for r in rules)
 
 
 def test_no_live_afl_client_involved_in_local_evidence_validation(tmp_path):

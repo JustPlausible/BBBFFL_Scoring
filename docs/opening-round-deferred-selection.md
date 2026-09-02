@@ -337,6 +337,10 @@ guessed, and remains open input for #66/#67's replay work: any 2026 replay
 that needs a specific historical nomination must supply it as
 scorer-confirmed evidence (`known_fact`) or explicitly flag it
 `unresolved_scorer_input`, never infer it from the CFS fixture alone.
+## 2026 first-half replay bootstrap activation
+
+The 2026 first-half replay bootstrap (issue #126, `bbbffl_app/app/replay_bootstrap.py`) establishes the ten accepted 2026 Opening Round rules -- one per participating club -- through this module's ordinary `OpeningRoundRuleRepository.accept()` before the draft, using an explicit `opening_round` replay-config section and a local-evidence-backed validator (never a live AFL-api client, never ad-hoc SQL). It creates no nominations: those remain later, session-native operator input entered through the workflow below only once the draft has produced owned players. See `docs/2026-first-half-replay-bootstrap.md`'s "Opening Round rule activation" section for the full contract.
+
 ## Replay operator browser workflow
 
 After selecting an authorised represented entry in shared acting context, open

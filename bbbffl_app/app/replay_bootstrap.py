@@ -17,16 +17,72 @@ from uuid import uuid4
 
 from app.audit import ActorContext, append_event
 from app.auth import CredentialRepository, RoleGrantRepository
-from app.db import transaction
+from app.db import _for_update_suffix, transaction
 from app.draft import DraftRepository
 from app.draft_board import draft_board_readiness
 from app.identity import IdentityRepository
+from app.opening_round import EVIDENCE_CLASSIFICATIONS, OpeningRoundRule, OpeningRoundRuleRepository
 from app.player_pool import PlayerPoolRepository
-from app.season import SeasonRepository
+from app.season import BBBFFLRound, SeasonRepository
 
 TEAM_COUNT = 10
 FIRST_HALF_ROUNDS = tuple(range(1, 10))
 REPLAY_YEAR = 2026
+
+# -- 2026 Opening Round rule facts -------------------------------------------
+#
+# Transcribed from docs/opening-round-deferred-selection.md's 2026 evidence
+# row / tests/opening_round_evidence.py's EVIDENCE_2026 -- genuine AFL-side
+# facts (Opening Round participation and compensating-bye placement), never
+# invented. This bootstrap command is explicitly restricted to the 2026
+# first-half replay (see REPLAY_YEAR above), so it is acceptable for *this*
+# validator -- and only this validator -- to know the intended 2026 shape;
+# app.opening_round itself never infers activation from a season year (see
+# that module's docstring).
+OPENING_ROUND_RULE_COUNT = 10
+EXPECTED_OPENING_ROUND_ID = 1343
+# afl_club_id -> the AFL round ID carrying that club's compensating bye.
+EXPECTED_BYE_ROUND_BY_CLUB_ID = {
+    2: 1345,  # BL
+    5: 1345,  # CARL
+    3: 1345,  # COLL
+    10: 1345,  # GEEL
+    4: 1346,  # GCFC
+    8: 1346,  # WB
+    9: 1346,  # HAW
+    13: 1346,  # SYD
+    11: 1347,  # STK
+    15: 1347,  # GWS
+}
+# afl_club_id -> the one canonical name this validator accepts, so a
+# config typo/swap that keeps a valid club ID but names the wrong club is
+# still caught, rather than `afl_club_name` being a purely decorative,
+# unvalidated inspectability field.
+EXPECTED_CLUB_NAME_BY_ID = {
+    2: "Brisbane Lions",
+    5: "Carlton",
+    3: "Collingwood",
+    10: "Geelong Cats",
+    4: "Gold Coast Suns",
+    8: "Western Bulldogs",
+    9: "Hawthorn",
+    13: "Sydney Swans",
+    11: "St Kilda",
+    15: "GWS Giants",
+}
+# compensating-bye AFL round ID -> the BBBFFL logical round number that
+# operationalises it for this replay (explicit replay/reconstructed
+# behaviour -- see this module's `_opening_round_config` and issue #126).
+EXPECTED_TARGET_ROUND_BY_BYE_ROUND_ID = {1345: 2, 1346: 3, 1347: 4}
+EXPECTED_TARGET_ROUND_DISTRIBUTION = {2: 4, 3: 4, 4: 2}
+# The BBBFFL-side target-round mapping this replay operationalises is
+# explicitly replay/reconstructed behaviour, never a historical known_fact
+# (this repository holds no historical BBBFFL nomination record) and never
+# a synthetic_scenario/unresolved_scorer_input either -- see this module's
+# docstring and docs/opening-round-deferred-selection.md's evidence-
+# boundary section. Fixed to this one value for the 2026 bootstrap so a
+# config can't overstate (or understate) the evidence behind it.
+EXPECTED_EVIDENCE_CLASSIFICATION = "reconstructable_behaviour"
 
 
 class ReplayBootstrapError(ValueError):
@@ -53,6 +109,34 @@ class ReplayEntry:
 
 
 @dataclass(frozen=True)
+class OpeningRoundRuleConfig:
+    """One inspectable, human-facing configured 2026 Opening Round rule.
+
+    `bbbffl_round_number` is the stable logical round number (matching
+    `bbbffl_round.sequence`); the bootstrap resolves it against the actual
+    persisted `bbbffl_round_id` once the ordinary rounds are known -- the
+    operator never supplies a generated round UUID (see issue #126)."""
+
+    afl_club_id: int
+    afl_club_name: str
+    afl_opening_round_id: int
+    afl_bye_round_id: int
+    bbbffl_round_number: int
+    evidence_classification: str
+
+
+@dataclass(frozen=True)
+class OpeningRoundReplayConfig:
+    """The complete, validated 2026 Opening Round rule set plus the local
+    replay evidence used to validate acceptance (see
+    `ReplayOpeningRoundEvidenceValidator`) -- never a live AFL-api client."""
+
+    afl_season_id: int
+    evidence_file: Path
+    rules: tuple[OpeningRoundRuleConfig, ...]
+
+
+@dataclass(frozen=True)
 class ReplayConfig:
     year: int
     season_label: str
@@ -67,12 +151,126 @@ class ReplayConfig:
     source_season_year: int
     players: tuple[ReplayPlayer, ...]
     entries: tuple[ReplayEntry, ...]
+    opening_round: OpeningRoundReplayConfig
 
 
 def _text(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ReplayBootstrapError(f"{field} must be a non-empty string")
     return value.strip()
+
+
+def _positive_int(value: Any, field: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ReplayBootstrapError(f"{field} must be a positive integer")
+    return value
+
+
+def _opening_round_config(raw: dict, config_path: Path) -> OpeningRoundReplayConfig:
+    """Parse and fully validate the `opening_round` replay config section
+    (issue #126) before any bootstrap write is attempted. Every 2026-shape
+    fact validated here (club identity, Opening Round ID, bye/target
+    pairing, R2/R3/R4 distribution) is transcribed from
+    docs/opening-round-deferred-selection.md's 2026 evidence row -- see the
+    module-level constants above."""
+    try:
+        section = raw["opening_round"]
+        if not isinstance(section, dict):
+            raise TypeError("opening_round must be an object")
+        afl_season_id = section["afl_season_id"]
+        evidence_file_value = _text(section.get("evidence_file"), "opening_round.evidence_file")
+        rule_rows = section["rules"]
+        if not isinstance(rule_rows, list):
+            raise TypeError("opening_round.rules must be a list")
+    except (KeyError, TypeError) as exc:
+        raise ReplayBootstrapError(f"invalid or missing opening_round configuration: {exc}") from exc
+    afl_season_id = _positive_int(afl_season_id, "opening_round.afl_season_id")
+    # AFL-api's season_id is an opaque identifier, not necessarily equal to
+    # the calendar year (see tests/test_replay_acquisition.py's fake API,
+    # which deliberately models the genuine 2026 season as season_id 712)
+    # -- so this cannot be checked against a hardcoded literal here. It is
+    # instead cross-referenced against the acquired evidence's own
+    # year-tagged season record in `_reconcile_opening_round_rules`, before
+    # any Opening Round rule is accepted.
+    evidence_path = Path(evidence_file_value)
+    if not evidence_path.is_absolute():
+        evidence_path = config_path.parent / evidence_path
+
+    rules = []
+    for index, row in enumerate(rule_rows):
+        if not isinstance(row, dict):
+            raise ReplayBootstrapError(f"opening_round.rules[{index}] must be an object")
+        afl_club_id = _positive_int(row.get("afl_club_id"), f"opening_round.rules[{index}].afl_club_id")
+        afl_club_name = _text(row.get("afl_club_name"), f"opening_round.rules[{index}].afl_club_name")
+        afl_opening_round_id = _positive_int(
+            row.get("afl_opening_round_id"), f"opening_round.rules[{index}].afl_opening_round_id"
+        )
+        afl_bye_round_id = _positive_int(row.get("afl_bye_round_id"), f"opening_round.rules[{index}].afl_bye_round_id")
+        bbbffl_round_number = row.get("bbbffl_round_number")
+        if not isinstance(bbbffl_round_number, int) or isinstance(bbbffl_round_number, bool):
+            raise ReplayBootstrapError(f"opening_round.rules[{index}].bbbffl_round_number must be an integer")
+        evidence_classification = row.get("evidence_classification")
+        if evidence_classification != EXPECTED_EVIDENCE_CLASSIFICATION:
+            raise ReplayBootstrapError(
+                f"opening_round.rules[{index}].evidence_classification must be "
+                f"{EXPECTED_EVIDENCE_CLASSIFICATION!r} for this 2026 replay"
+            )
+        rules.append(
+            OpeningRoundRuleConfig(
+                afl_club_id,
+                afl_club_name,
+                afl_opening_round_id,
+                afl_bye_round_id,
+                bbbffl_round_number,
+                evidence_classification,
+            )
+        )
+
+    if len(rules) != OPENING_ROUND_RULE_COUNT:
+        raise ReplayBootstrapError(
+            f"opening_round.rules must contain exactly {OPENING_ROUND_RULE_COUNT} rules (received {len(rules)})"
+        )
+    club_ids = [rule.afl_club_id for rule in rules]
+    if len(club_ids) != len(set(club_ids)):
+        raise ReplayBootstrapError("opening_round.rules contains a duplicate afl_club_id")
+    expected_club_ids = set(EXPECTED_BYE_ROUND_BY_CLUB_ID)
+    if set(club_ids) != expected_club_ids:
+        missing = sorted(expected_club_ids - set(club_ids))
+        extra = sorted(set(club_ids) - expected_club_ids)
+        raise ReplayBootstrapError(
+            "opening_round.rules must cover exactly the 2026 Opening Round participating clubs; "
+            f"missing={missing} extra={extra}"
+        )
+    for rule in rules:
+        expected_name = EXPECTED_CLUB_NAME_BY_ID[rule.afl_club_id]
+        if rule.afl_club_name != expected_name:
+            raise ReplayBootstrapError(
+                f"opening_round.rules afl_club_id={rule.afl_club_id} afl_club_name must be {expected_name!r}"
+            )
+        if rule.afl_opening_round_id != EXPECTED_OPENING_ROUND_ID:
+            raise ReplayBootstrapError(
+                f"opening_round.rules afl_club_id={rule.afl_club_id} afl_opening_round_id must be "
+                f"{EXPECTED_OPENING_ROUND_ID}"
+            )
+        expected_bye = EXPECTED_BYE_ROUND_BY_CLUB_ID[rule.afl_club_id]
+        if rule.afl_bye_round_id != expected_bye:
+            raise ReplayBootstrapError(
+                f"opening_round.rules afl_club_id={rule.afl_club_id} afl_bye_round_id must be {expected_bye}"
+            )
+        expected_target = EXPECTED_TARGET_ROUND_BY_BYE_ROUND_ID[expected_bye]
+        if rule.bbbffl_round_number != expected_target:
+            raise ReplayBootstrapError(
+                f"opening_round.rules afl_club_id={rule.afl_club_id} bbbffl_round_number must be {expected_target}"
+            )
+    distribution: dict[int, int] = {}
+    for rule in rules:
+        distribution[rule.bbbffl_round_number] = distribution.get(rule.bbbffl_round_number, 0) + 1
+    if distribution != EXPECTED_TARGET_ROUND_DISTRIBUTION:
+        raise ReplayBootstrapError(
+            f"opening_round.rules target-round distribution must be {EXPECTED_TARGET_ROUND_DISTRIBUTION}, "
+            f"got {distribution}"
+        )
+    return OpeningRoundReplayConfig(afl_season_id, evidence_path, tuple(rules))
 
 
 def load_replay_config(path: str | Path) -> ReplayConfig:
@@ -171,6 +369,7 @@ def load_replay_config(path: str | Path) -> ReplayConfig:
     operator_email = _text(raw.get("operator_email"), "operator_email").casefold()
     if operator_email not in {entry.coach_email for entry in entries}:
         raise ReplayBootstrapError("operator_email must identify one of the ten configured coaches")
+    opening_round_config = _opening_round_config(raw, config_path)
     return ReplayConfig(
         year,
         _text(season.get("label"), "season.label"),
@@ -185,6 +384,7 @@ def load_replay_config(path: str | Path) -> ReplayConfig:
         source_year,
         players,
         entries,
+        opening_round_config,
     )
 
 
@@ -199,6 +399,282 @@ def _now() -> str:
 def _conflict(condition: bool, message: str) -> None:
     if condition:
         raise ReplayBootstrapError(message)
+
+
+class ReplayOpeningRoundEvidenceValidator:
+    """`app.round_mapping.AflReferenceValidator` backed only by the season
+    and round *identity* facts (`seasons`/`rounds` sections) of a local
+    acquired replay evidence file -- the same `bbbffl.replay-evidence/v1`
+    schema `app.replay.ReplayAflDataSource` reads (see
+    `app.replay_acquisition.acquire_first_half_2026`), so an operator can
+    point `opening_round.evidence_file` at the exact evidence already
+    acquired for the whole first-half replay.
+
+    This intentionally does not construct a full `ReplayAflDataSource`:
+    that class also demands complete match/player-stat coverage and, for a
+    historical-checkpoint package (as first-half acquisition produces), an
+    explicit persisted replay checkpoint -- none of which
+    `OpeningRoundRuleRepository.accept()`'s round-existence check needs.
+    Reading only season/round identity keeps Opening Round rule acceptance
+    independent of whether match/stat evidence or a checkpoint exists yet,
+    while still requiring genuine local evidence and never a live AFL-api
+    client (`round_exists` never makes a network call). It does, however,
+    apply the same manifest/record provenance checks `ReplayAflDataSource._
+    load`/`_validate_provenance` require, so a truncated or hand-authored
+    file that merely happens to contain matching season/round IDs is not
+    mistaken for genuine acquired evidence."""
+
+    SCHEMA = "bbbffl.replay-evidence/v1"
+
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ReplayBootstrapError(f"could not read Opening Round replay evidence {self.path}: {exc}") from exc
+        if not isinstance(payload, dict) or payload.get("schema") != self.SCHEMA:
+            raise ReplayBootstrapError(f"unsupported Opening Round replay evidence schema at {self.path}")
+        manifest = payload.get("manifest")
+        if (
+            not isinstance(manifest, dict)
+            or not manifest.get("id")
+            or not manifest.get("version")
+            or manifest.get("evidence_class") not in EVIDENCE_CLASSIFICATIONS
+        ):
+            raise ReplayBootstrapError(
+                f"Opening Round replay evidence at {self.path} has a missing/invalid manifest "
+                "(id, version and evidence_class are required)"
+            )
+        try:
+            seasons = payload["seasons"]
+            rounds = payload["rounds"]
+            if not isinstance(seasons, list) or not isinstance(rounds, list):
+                raise TypeError("seasons and rounds must be lists")
+            season_ids = [int(season["season_id"]) for season in seasons]
+            season_years = [int(season["year"]) for season in seasons]
+            round_entries = [(int(round_["round_id"]), int(round_["season_id"])) for round_ in rounds]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ReplayBootstrapError(f"malformed Opening Round replay evidence at {self.path}: {exc}") from exc
+        for index, record in enumerate(seasons):
+            self._require_provenance(record, f"seasons[{index}]")
+        for index, record in enumerate(rounds):
+            self._require_provenance(record, f"rounds[{index}]")
+        # Reject ambiguous evidence rather than silently resolving a
+        # duplicate season_id or year to whichever record happens to appear
+        # last in the JSON (the dict-comprehension overwrite this replaces)
+        # -- the supported acquisition path always yields exactly one
+        # season record per identity/year (see
+        # app.replay.ReplayAflDataSource.get_current_season's identical
+        # "expected exactly one" requirement).
+        duplicate_season_ids = sorted({sid for sid in season_ids if season_ids.count(sid) > 1})
+        if duplicate_season_ids:
+            raise ReplayBootstrapError(
+                f"Opening Round replay evidence at {self.path} declares duplicate season_id(s) {duplicate_season_ids}"
+            )
+        duplicate_years = sorted({year for year in season_years if season_years.count(year) > 1})
+        if duplicate_years:
+            raise ReplayBootstrapError(
+                f"Opening Round replay evidence at {self.path} declares multiple season records for "
+                f"year(s) {duplicate_years}; exactly one season record per year is required"
+            )
+        # A genuinely acquired round is globally unique (app.replay_acquisition
+        # emits each AFL round exactly once); a repeated round_id -- especially
+        # under conflicting season assignments -- would otherwise let both of
+        # its season entries silently claim it via `rounds_by_season[season_id]
+        # .add(round_id)` below, leaving the evidence ambiguous about which
+        # season actually owns it.
+        round_ids = [round_id for round_id, _ in round_entries]
+        duplicate_round_ids = sorted({rid for rid in round_ids if round_ids.count(rid) > 1})
+        if duplicate_round_ids:
+            raise ReplayBootstrapError(
+                f"Opening Round replay evidence at {self.path} declares duplicate round_id(s) {duplicate_round_ids}"
+            )
+        rounds_by_season: dict[int, set[int]] = {sid: set() for sid in season_ids}
+        # AFL-api's season_id is an opaque identifier (see
+        # tests/test_replay_acquisition.py's fake API, which models the
+        # genuine 2026 season as season_id 712, not the literal year) --
+        # `season_id_for_year` lets a caller resolve/cross-check the
+        # actual acquired identity for a calendar year instead of
+        # assuming any particular numeric value.
+        season_id_by_year: dict[int, int] = dict(zip(season_years, season_ids))
+        # Mirrors app.replay.ReplayAflDataSource's own cross-reference check
+        # (app/replay.py's round->season validation): a round referencing a
+        # season missing from `seasons` is malformed evidence and must be
+        # rejected outright, never silently admitted via `dict.setdefault`
+        # -- which would let an internally inconsistent package validate a
+        # round that no genuinely declared season actually carries.
+        undeclared = sorted({season_id for _, season_id in round_entries if season_id not in rounds_by_season})
+        if undeclared:
+            raise ReplayBootstrapError(
+                f"Opening Round replay evidence at {self.path} has rounds referencing "
+                f"season(s) {undeclared} absent from its seasons list"
+            )
+        for round_id, season_id in round_entries:
+            rounds_by_season[season_id].add(round_id)
+        self._rounds_by_season = rounds_by_season
+        self._season_id_by_year = season_id_by_year
+
+    def _require_provenance(self, record, location: str) -> None:
+        provenance = record.get("provenance") if isinstance(record, dict) else None
+        if not isinstance(provenance, dict) or not provenance.get("source"):
+            raise ReplayBootstrapError(f"Opening Round replay evidence {location}.provenance.source is required")
+        # The AFL-side season/Opening Round/compensating-bye identities this
+        # validator reads are documented known_fact evidence (see
+        # docs/opening-round-deferred-selection.md's evidence table) -- not
+        # merely one of the four general classifications. A season/round
+        # record classified synthetic_scenario or unresolved_scorer_input
+        # must never be used to establish these "authoritative" rules,
+        # unlike a rule's own evidence_classification (reconstructable_
+        # behaviour), which describes the separate BBBFFL-side mapping.
+        if provenance.get("evidence_class") != "known_fact":
+            raise ReplayBootstrapError(
+                f"Opening Round replay evidence {location}.provenance.evidence_class must be 'known_fact'"
+            )
+
+    def round_exists(self, afl_season_id: int, afl_round_id: int) -> bool:
+        return afl_round_id in self._rounds_by_season.get(afl_season_id, set())
+
+    def season_id_for_year(self, year: int) -> int | None:
+        """The acquired AFL `season_id` declared for `year` in this
+        evidence, or `None` if no season record declares that year --
+        lets a caller cross-check a configured `afl_season_id` against the
+        genuinely acquired identity rather than assuming it equals the
+        calendar year."""
+        return self._season_id_by_year.get(year)
+
+
+def _resolve_opening_round_targets(conn, competition_id: str, config: ReplayConfig) -> dict[int, str]:
+    """Resolve every configured `bbbffl_round_number` to the persisted
+    `bbbffl_round_id` created/reconciled earlier in this same transaction --
+    the operator config never supplies a generated round UUID (issue #126).
+    Fails if a configured target round cannot be uniquely resolved."""
+    round_id_by_sequence = {
+        row["sequence"]: row["bbbffl_round_id"]
+        for row in conn.execute(
+            "SELECT bbbffl_round_id, sequence FROM bbbffl_round WHERE competition_id=?", (competition_id,)
+        ).fetchall()
+    }
+    targets: dict[int, str] = {}
+    for rule_cfg in config.opening_round.rules:
+        number = rule_cfg.bbbffl_round_number
+        if number in targets:
+            continue
+        round_id = round_id_by_sequence.get(number)
+        _conflict(round_id is None, f"expected BBBFFL round {number} to be uniquely resolved for Opening Round targets")
+        targets[number] = round_id
+    return targets
+
+
+def _lock_season_for_opening_round_reconciliation(database, conn, season_id: str) -> None:
+    """Serialize concurrent Opening Round reconciliation for one season on
+    PostgreSQL (Codex review, PR #127): an ordinary row lock cannot prevent
+    a second, fully independent writer from inserting a *new*
+    `opening_round_rule` row this transaction's read snapshot never saw
+    (a phantom read under READ COMMITTED) -- neither
+    `list_accepted_for_season_locked`'s read nor per-club `INSERT`s for
+    distinct clubs contend for a shared row. A transaction-scoped advisory
+    lock, released automatically at commit/rollback, closes this for two
+    concurrent invocations of this bootstrap against the same season --
+    the realistic risk today, since no other caller in this codebase
+    currently accepts/proposes/corrects an Opening Round rule (delegated
+    operations only ever reads them). Fully serializing against a future
+    independent writer as well would require this same lock inside
+    `OpeningRoundRuleRepository.accept()`/`propose()`/`correct()` itself,
+    which is out of this bootstrap's scope to add pre-emptively. A no-op
+    on SQLite, which has no comparable primitive and no concurrent-writer
+    scenario in the single-process test/CLI use this command supports."""
+    if database.engine.dialect.name == "postgresql":
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext(?))", (season_id,))
+
+
+def _opening_round_rule_conflicts(
+    existing: OpeningRoundRule, rule_cfg: OpeningRoundRuleConfig, config: ReplayConfig, bbbffl_round_id: str
+) -> bool:
+    return (
+        existing.afl_season_id != config.opening_round.afl_season_id
+        or existing.afl_opening_round_id != rule_cfg.afl_opening_round_id
+        or existing.afl_bye_round_id != rule_cfg.afl_bye_round_id
+        or existing.bbbffl_round_id != bbbffl_round_id
+        or existing.evidence_classification != rule_cfg.evidence_classification
+    )
+
+
+def _reconcile_opening_round_rules(
+    database, conn, season_id: str, competition_id: str, config: ReplayConfig, completed_picks: int
+) -> None:
+    """Accept the configured 2026 Opening Round rules through the ordinary
+    `OpeningRoundRuleRepository` domain semantics, inside the caller's
+    already-open bootstrap transaction (see `OpeningRoundRuleRepository.
+    accept_locked` -- this never opens a second, independent transaction,
+    which would let Opening Round rules commit even if the rest of
+    bootstrap later rolls back). Conservative like #116: an identical
+    accepted rule is a no-op, a materially different one fails closed, and
+    an unexpected extra accepted rule for this season fails closed rather
+    than being silently ignored.
+
+    Establishing a *new* accepted rule (one with no existing accepted
+    revision yet) is refused once any draft pick has completed: Opening
+    Round configuration is a before-Pick-1 prerequisite, so a rerun against
+    a season where drafting has already begun must never newly mutate that
+    prerequisite state, even though the rest of this reconciliation is
+    otherwise idempotent. An already-correct accepted rule remains a
+    harmless no-op regardless of draft progress.
+
+    `database` (the plain `DatabaseConnection`, distinct from the open
+    transaction `conn`) is only used for `OpeningRoundRuleRepository`'s
+    dialect-aware `FOR UPDATE` suffix -- every actual read/write below goes
+    through `conn`, inside the caller's transaction."""
+    _lock_season_for_opening_round_reconciliation(database, conn, season_id)
+    rule_repo = OpeningRoundRuleRepository(database)
+    target_round_ids = _resolve_opening_round_targets(conn, competition_id, config)
+    validator = ReplayOpeningRoundEvidenceValidator(config.opening_round.evidence_file)
+    resolved_season_id = validator.season_id_for_year(REPLAY_YEAR)
+    _conflict(
+        resolved_season_id is None,
+        f"Opening Round replay evidence at {config.opening_round.evidence_file} does not declare a season "
+        f"for year {REPLAY_YEAR}",
+    )
+    _conflict(
+        resolved_season_id != config.opening_round.afl_season_id,
+        f"opening_round.afl_season_id ({config.opening_round.afl_season_id}) does not match the acquired "
+        f"{REPLAY_YEAR} season identity ({resolved_season_id}) in the replay evidence",
+    )
+    expected_club_ids = {rule_cfg.afl_club_id for rule_cfg in config.opening_round.rules}
+    existing_accepted = rule_repo.list_accepted_for_season_locked(conn, season_id)
+    unexpected = sorted(rule.afl_club_id for rule in existing_accepted if rule.afl_club_id not in expected_club_ids)
+    _conflict(
+        bool(unexpected),
+        f"unexpected accepted Opening Round rule(s) for club(s) {unexpected} not present in replay configuration",
+    )
+    actor = ActorContext("anonymous_operator", "replay-bootstrap", "admin")
+    for rule_cfg in config.opening_round.rules:
+        bbbffl_round_id = target_round_ids[rule_cfg.bbbffl_round_number]
+        existing = rule_repo.resolve_locked(conn, season_id, rule_cfg.afl_club_id)
+        if existing is not None:
+            _conflict(
+                _opening_round_rule_conflicts(existing, rule_cfg, config, bbbffl_round_id),
+                f"existing accepted Opening Round rule for club {rule_cfg.afl_club_id} conflicts with replay configuration",
+            )
+            continue
+        _conflict(
+            completed_picks > 0,
+            f"cannot establish a new Opening Round rule for club {rule_cfg.afl_club_id}: "
+            f"{completed_picks} draft pick(s) already completed; Opening Round configuration "
+            "is a before-Pick-1 prerequisite",
+        )
+        rule_repo.accept_locked(
+            conn,
+            season_id,
+            rule_cfg.afl_club_id,
+            config.opening_round.afl_season_id,
+            rule_cfg.afl_opening_round_id,
+            rule_cfg.afl_bye_round_id,
+            bbbffl_round_id,
+            validator,
+            evidence_classification=rule_cfg.evidence_classification,
+            actor=actor,
+            reason="2026 first-half replay bootstrap: accepted Opening Round rule",
+        )
 
 
 def bootstrap_first_half(database, config: ReplayConfig) -> dict:
@@ -377,12 +853,22 @@ def bootstrap_first_half(database, config: ReplayConfig) -> dict:
                     ),
                 )
 
-        draft = conn.execute("SELECT * FROM season_draft WHERE season_id=?", (season_id,)).fetchone()
+        # FOR UPDATE (a no-op suffix on SQLite): the same row lock
+        # app.draft.DraftRepository._locked_draft acquires before
+        # execute_pick/correct_pick, so this bootstrap's completed_picks
+        # read below (and the Opening Round reconciliation gated on it)
+        # cannot race a concurrent pick completing or being corrected --
+        # either serializes behind the other instead of both observing a
+        # stale "zero completed picks" snapshot.
+        draft = conn.execute(
+            "SELECT * FROM season_draft WHERE season_id=?" + _for_update_suffix(database), (season_id,)
+        ).fetchone()
         ordered_ids = [entry_ids[n] for n in range(1, TEAM_COUNT + 1)]
         if draft:
+            draft_id = draft["draft_id"]
             order = conn.execute(
                 "SELECT position, season_entry_id FROM draft_order_position WHERE draft_id=? ORDER BY position",
-                (draft["draft_id"],),
+                (draft_id,),
             ).fetchall()
             _conflict(
                 draft["target_squad_size"] != config.squad_limit
@@ -420,6 +906,21 @@ def bootstrap_first_half(database, config: ReplayConfig) -> dict:
                 entity_id=season_id,
                 after_state={"year": config.year, "entries": TEAM_COUNT, "rounds": list(FIRST_HALF_ROUNDS)},
             )
+
+        # Deliberately counts every row ever completed, including one since
+        # superseded by DraftRepository.correct_pick (which preserves the
+        # original completed row -- see app/draft.py -- and inserts a fresh
+        # uncompleted replacement). Unlike app.draft.DraftStatus.
+        # completed_picks (which answers "how many active picks are
+        # currently completed" for board state), this answers "has this
+        # draft ever had any pick activity at all" -- undoing the sole
+        # completed pick must not make a since-corrected draft look as
+        # though it never started.
+        completed_picks = conn.execute(
+            "SELECT COUNT(*) n FROM draft_pick WHERE draft_id=? AND completed_at IS NOT NULL",
+            (draft_id,),
+        ).fetchone()["n"]
+        _reconcile_opening_round_rules(database, conn, season_id, competition_id, config, completed_picks)
     return replay_readiness(database, config)
 
 
@@ -435,6 +936,43 @@ def provision_replay_operator(database, config: ReplayConfig, password: str) -> 
     grants = RoleGrantRepository(database)
     if not grants.is_role_granted(coach.coach_id, "admin"):
         grants.grant(coach.coach_id, "admin", actor=actor, reason="2026 replay browser operator")
+
+
+def _opening_round_status(database, config: ReplayConfig, season_id: str, rounds: list[BBBFFLRound]) -> dict:
+    """Structured Opening Round readiness (issue #126): how many of the
+    configured 2026 rules are accepted *and* exactly match configuration,
+    the resulting R2/R3/R4 target distribution, and the current (always
+    expected to be zero pre-draft) nomination count. Never a prerequisite
+    on any nomination or completed draft pick."""
+    accepted_rules = OpeningRoundRuleRepository(database).list_accepted_for_season(season_id)
+    accepted_by_club = {rule.afl_club_id: rule for rule in accepted_rules}
+    round_id_by_sequence = {round_.sequence: round_.bbbffl_round_id for round_ in rounds}
+    expected_rules = config.opening_round.rules
+    expected_by_club = {rule_cfg.afl_club_id: rule_cfg for rule_cfg in expected_rules}
+    verified = 0
+    targets: dict[int, int] = {}
+    for rule_cfg in expected_rules:
+        existing = accepted_by_club.get(rule_cfg.afl_club_id)
+        if existing is None:
+            continue
+        bbbffl_round_id = round_id_by_sequence.get(rule_cfg.bbbffl_round_number)
+        if _opening_round_rule_conflicts(existing, rule_cfg, config, bbbffl_round_id):
+            continue
+        verified += 1
+        targets[rule_cfg.bbbffl_round_number] = targets.get(rule_cfg.bbbffl_round_number, 0) + 1
+    unexpected_extra = [rule for rule in accepted_rules if rule.afl_club_id not in expected_by_club]
+    nomination_count = database.execute(
+        "SELECT COUNT(*) n FROM opening_round_nomination WHERE season_id=?", (season_id,)
+    ).fetchone()["n"]
+    return {
+        "expected_rule_count": len(expected_rules),
+        "accepted_rule_count": verified,
+        "complete": verified == len(expected_rules) and not unexpected_extra,
+        "opening_round_id": expected_rules[0].afl_opening_round_id if expected_rules else None,
+        "targets": {str(number): count for number, count in sorted(targets.items())},
+        "nomination_count": nomination_count,
+        "nominations_required_pre_draft": False,
+    }
 
 
 def replay_readiness(database, config: ReplayConfig) -> dict:
@@ -473,6 +1011,7 @@ def replay_readiness(database, config: ReplayConfig) -> dict:
     operator_access = bool(
         operator and credential and RoleGrantRepository(database).is_role_granted(operator.coach_id, "admin")
     )
+    opening_round_status = _opening_round_status(database, config, season.season_id, rounds)
     messages = []
     checks = {
         "one_ordinary_competition": len(competitions) == 1 and len(ordinary) == 1,
@@ -484,6 +1023,7 @@ def replay_readiness(database, config: ReplayConfig) -> dict:
         "draft_board_prerequisites": board["ready"],
         "exact_rules_version": rules_valid,
         "operator_authentication_provisioned": operator_access,
+        "opening_round_configuration_complete": opening_round_status["complete"],
     }
     messages.extend(label.replace("_", " ") for label, ready in checks.items() if not ready)
     return {
@@ -500,6 +1040,7 @@ def replay_readiness(database, config: ReplayConfig) -> dict:
         "operator_authentication_provisioned": operator_access,
         "next_human_action": "Pick 1" if board["ready"] and operator_access and completed == 0 else None,
         "draft_board": board,
+        "opening_round": opening_round_status,
         "checks": checks,
         "messages": messages,
         "overall": "READY" if all(checks.values()) else "NOT READY",

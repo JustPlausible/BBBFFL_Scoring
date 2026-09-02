@@ -332,12 +332,74 @@ class OpeningRoundRuleRepository:
         ).fetchall()
         return [_rule(row) for row in rows]
 
+    def list_accepted_for_season_locked(self, conn: ConnectionLike, season_id: str) -> list[OpeningRoundRule]:
+        """Same as `list_accepted_for_season`, but read via an already-open
+        transaction connection -- for a caller (e.g. the 2026 replay
+        bootstrap) that must reconcile accepted rules alongside other writes
+        in one transaction. See `OpeningRoundNominationRepository.
+        active_positions_locked` for the identical pattern."""
+        rows = conn.execute(
+            self._select() + " WHERE m.season_id=? AND r.state='accepted' ORDER BY m.afl_club_id", (season_id,)
+        ).fetchall()
+        return [_rule(row) for row in rows]
+
+    def resolve_locked(self, conn: ConnectionLike, season_id: str, afl_club_id: int) -> OpeningRoundRule | None:
+        """Same as `resolve`, but read via an already-open transaction
+        connection -- see `list_accepted_for_season_locked`."""
+        row = conn.execute(
+            self._select() + " WHERE m.season_id=? AND m.afl_club_id=? AND r.state='accepted'",
+            (season_id, afl_club_id),
+        ).fetchone()
+        return _rule(row) if row else None
+
     def history(self, season_id: str, afl_club_id: int) -> list[OpeningRoundRule]:
         rows = self.database.execute(
             self._select(False) + " WHERE m.season_id=? AND m.afl_club_id=? ORDER BY r.revision",
             (season_id, afl_club_id),
         ).fetchall()
         return [_rule(row) for row in rows]
+
+    def accept_locked(
+        self,
+        conn: ConnectionLike,
+        season_id: str,
+        afl_club_id: int,
+        afl_season_id: int,
+        afl_opening_round_id: int,
+        afl_bye_round_id: int,
+        bbbffl_round_id: str,
+        validator: AflReferenceValidator,
+        *,
+        evidence_classification: str | None = "known_fact",
+        actor: ActorContext = ActorContext.anonymous_operator("admin"),
+        reason: str | None = None,
+    ) -> OpeningRoundRule:
+        """Same activation semantics as `accept`, but participates in an
+        already-open transaction/connection instead of opening its own --
+        for a caller (e.g. the 2026 replay bootstrap) that must accept
+        several rules atomically alongside other writes in one outer
+        transaction. `accept`/`correct` themselves open a fresh connection
+        per call (see `app.db.transaction`), so calling them from inside
+        another already-open transaction would silently run against a
+        second, independent connection/transaction -- exactly the nested-
+        transaction hazard this method exists to avoid."""
+        if not validator.round_exists(afl_season_id, afl_opening_round_id):
+            raise ValueError("AFL Opening Round reference does not exist")
+        if not validator.round_exists(afl_season_id, afl_bye_round_id):
+            raise ValueError("AFL compensating bye round reference does not exist")
+        return self._activate_on_conn(
+            conn,
+            season_id,
+            afl_club_id,
+            afl_season_id,
+            afl_opening_round_id,
+            afl_bye_round_id,
+            bbbffl_round_id,
+            evidence_classification,
+            actor,
+            reason,
+            correction=False,
+        )
 
     def _activate(
         self,
@@ -352,57 +414,11 @@ class OpeningRoundRuleRepository:
         reason,
         correction,
     ) -> OpeningRoundRule:
-        self._validate_evidence_classification(evidence_classification)
         with transaction(self.database) as conn:
-            head = conn.execute(
-                "SELECT * FROM opening_round_rule WHERE season_id=? AND afl_club_id=?"
-                + _for_update_suffix(self.database),
-                (season_id, afl_club_id),
-            ).fetchone()
-            if not head:
-                if correction:
-                    raise ValueError("correction requires an accepted rule")
-                rule_id, revision = _id(), 1
-                conn.execute(
-                    "INSERT INTO opening_round_rule VALUES (?, ?, ?, ?, ?)",
-                    (rule_id, season_id, afl_club_id, revision, _now()),
-                )
-            else:
-                rule_id = head["rule_id"]
-                old = self._current(conn, rule_id)
-                if correction != (old["state"] == "accepted"):
-                    raise ValueError(
-                        "use correction for an accepted rule"
-                        if old["state"] == "accepted"
-                        else "correction requires an accepted rule"
-                    )
-                if (
-                    correction
-                    and conn.execute("SELECT 1 FROM opening_round_nomination WHERE rule_id=?", (rule_id,)).fetchone()
-                ):
-                    # Every nomination denormalizes this rule's target round
-                    # and resolves its source match against this rule's
-                    # Opening Round at nomination time (see
-                    # `OpeningRoundNominationRepository.nominate`); neither
-                    # is updated by a later rule correction. Rather than
-                    # leave those nominations pointing at a now-superseded
-                    # AFL Opening Round/target round -- a hybrid
-                    # configuration `app.calculations` could silently score
-                    # against the wrong fixture -- refuse outright. An
-                    # operator must correct/reassign the affected
-                    # nominations (see `OpeningRoundNominationRepository.
-                    # correct`) before this rule itself can be corrected.
-                    raise OpeningRoundRuleHasNominationsError(
-                        f"rule {rule_id} has existing nominations; correct or reassign them "
-                        "before correcting the rule itself"
-                    )
-                revision = head["current_revision"] + 1
-                conn.execute("UPDATE opening_round_rule SET current_revision=? WHERE rule_id=?", (revision, rule_id))
-            self._insert_revision(
+            return self._activate_on_conn(
                 conn,
-                rule_id,
-                revision,
-                "accepted",
+                season_id,
+                afl_club_id,
                 afl_season_id,
                 afl_opening_round_id,
                 afl_bye_round_id,
@@ -410,24 +426,97 @@ class OpeningRoundRuleRepository:
                 evidence_classification,
                 actor,
                 reason,
+                correction,
             )
-            append_event(
-                conn,
-                actor=actor,
-                action=RULE_CORRECTED if correction else RULE_ACCEPTED,
-                entity_type=ENTITY_TYPE_RULE,
-                entity_id=rule_id,
-                entity_version=str(revision),
-                reason=reason,
-                after_state={
-                    "state": "accepted",
-                    "afl_season_id": afl_season_id,
-                    "afl_opening_round_id": afl_opening_round_id,
-                    "afl_bye_round_id": afl_bye_round_id,
-                    "bbbffl_round_id": bbbffl_round_id,
-                },
+
+    def _activate_on_conn(
+        self,
+        conn: ConnectionLike,
+        season_id,
+        afl_club_id,
+        afl_season_id,
+        afl_opening_round_id,
+        afl_bye_round_id,
+        bbbffl_round_id,
+        evidence_classification,
+        actor,
+        reason,
+        correction,
+    ) -> OpeningRoundRule:
+        self._validate_evidence_classification(evidence_classification)
+        head = conn.execute(
+            "SELECT * FROM opening_round_rule WHERE season_id=? AND afl_club_id=?" + _for_update_suffix(self.database),
+            (season_id, afl_club_id),
+        ).fetchone()
+        if not head:
+            if correction:
+                raise ValueError("correction requires an accepted rule")
+            rule_id, revision = _id(), 1
+            conn.execute(
+                "INSERT INTO opening_round_rule VALUES (?, ?, ?, ?, ?)",
+                (rule_id, season_id, afl_club_id, revision, _now()),
             )
-            return self._get(conn, rule_id)
+        else:
+            rule_id = head["rule_id"]
+            old = self._current(conn, rule_id)
+            if correction != (old["state"] == "accepted"):
+                raise ValueError(
+                    "use correction for an accepted rule"
+                    if old["state"] == "accepted"
+                    else "correction requires an accepted rule"
+                )
+            if (
+                correction
+                and conn.execute("SELECT 1 FROM opening_round_nomination WHERE rule_id=?", (rule_id,)).fetchone()
+            ):
+                # Every nomination denormalizes this rule's target round
+                # and resolves its source match against this rule's
+                # Opening Round at nomination time (see
+                # `OpeningRoundNominationRepository.nominate`); neither
+                # is updated by a later rule correction. Rather than
+                # leave those nominations pointing at a now-superseded
+                # AFL Opening Round/target round -- a hybrid
+                # configuration `app.calculations` could silently score
+                # against the wrong fixture -- refuse outright. An
+                # operator must correct/reassign the affected
+                # nominations (see `OpeningRoundNominationRepository.
+                # correct`) before this rule itself can be corrected.
+                raise OpeningRoundRuleHasNominationsError(
+                    f"rule {rule_id} has existing nominations; correct or reassign them "
+                    "before correcting the rule itself"
+                )
+            revision = head["current_revision"] + 1
+            conn.execute("UPDATE opening_round_rule SET current_revision=? WHERE rule_id=?", (revision, rule_id))
+        self._insert_revision(
+            conn,
+            rule_id,
+            revision,
+            "accepted",
+            afl_season_id,
+            afl_opening_round_id,
+            afl_bye_round_id,
+            bbbffl_round_id,
+            evidence_classification,
+            actor,
+            reason,
+        )
+        append_event(
+            conn,
+            actor=actor,
+            action=RULE_CORRECTED if correction else RULE_ACCEPTED,
+            entity_type=ENTITY_TYPE_RULE,
+            entity_id=rule_id,
+            entity_version=str(revision),
+            reason=reason,
+            after_state={
+                "state": "accepted",
+                "afl_season_id": afl_season_id,
+                "afl_opening_round_id": afl_opening_round_id,
+                "afl_bye_round_id": afl_bye_round_id,
+                "bbbffl_round_id": bbbffl_round_id,
+            },
+        )
+        return self._get(conn, rule_id)
 
     @staticmethod
     def _validate_evidence_classification(value):

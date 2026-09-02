@@ -16,6 +16,93 @@
   "squad_limit": 20,
   "operator_email": "replace-coach-1@example.invalid",
   "player_pool_file": "players-2026.afl-api-v1.json",
+  "opening_round": {
+    "_comment": "Configured/accepted 2026 Opening Round rules (issue #126) -- OR structure is supplied here; player nominations are NOT and are entered later through Opening Round Operations after the draft, once actual owned players exist. REPLACE_WITH_ACQUIRED_AFL_SEASON_ID (afl_season_id below) is AFL-api's own opaque season identifier for 2026 -- it is NOT necessarily 2026 itself. The placeholder 0 below is deliberately invalid and must be replaced with the season_id the acquired evidence_file's seasons list actually declares for year 2026; leaving 0 (or guessing 2026) fails bootstrap's season-identity cross-check.",
+    "afl_season_id": 0,
+    "evidence_file": "2026-first-half.json",
+    "rules": [
+      {
+        "afl_club_id": 2,
+        "afl_club_name": "Brisbane Lions",
+        "afl_opening_round_id": 1343,
+        "afl_bye_round_id": 1345,
+        "bbbffl_round_number": 2,
+        "evidence_classification": "reconstructable_behaviour"
+      },
+      {
+        "afl_club_id": 5,
+        "afl_club_name": "Carlton",
+        "afl_opening_round_id": 1343,
+        "afl_bye_round_id": 1345,
+        "bbbffl_round_number": 2,
+        "evidence_classification": "reconstructable_behaviour"
+      },
+      {
+        "afl_club_id": 3,
+        "afl_club_name": "Collingwood",
+        "afl_opening_round_id": 1343,
+        "afl_bye_round_id": 1345,
+        "bbbffl_round_number": 2,
+        "evidence_classification": "reconstructable_behaviour"
+      },
+      {
+        "afl_club_id": 10,
+        "afl_club_name": "Geelong Cats",
+        "afl_opening_round_id": 1343,
+        "afl_bye_round_id": 1345,
+        "bbbffl_round_number": 2,
+        "evidence_classification": "reconstructable_behaviour"
+      },
+      {
+        "afl_club_id": 4,
+        "afl_club_name": "Gold Coast Suns",
+        "afl_opening_round_id": 1343,
+        "afl_bye_round_id": 1346,
+        "bbbffl_round_number": 3,
+        "evidence_classification": "reconstructable_behaviour"
+      },
+      {
+        "afl_club_id": 8,
+        "afl_club_name": "Western Bulldogs",
+        "afl_opening_round_id": 1343,
+        "afl_bye_round_id": 1346,
+        "bbbffl_round_number": 3,
+        "evidence_classification": "reconstructable_behaviour"
+      },
+      {
+        "afl_club_id": 9,
+        "afl_club_name": "Hawthorn",
+        "afl_opening_round_id": 1343,
+        "afl_bye_round_id": 1346,
+        "bbbffl_round_number": 3,
+        "evidence_classification": "reconstructable_behaviour"
+      },
+      {
+        "afl_club_id": 13,
+        "afl_club_name": "Sydney Swans",
+        "afl_opening_round_id": 1343,
+        "afl_bye_round_id": 1346,
+        "bbbffl_round_number": 3,
+        "evidence_classification": "reconstructable_behaviour"
+      },
+      {
+        "afl_club_id": 11,
+        "afl_club_name": "St Kilda",
+        "afl_opening_round_id": 1343,
+        "afl_bye_round_id": 1347,
+        "bbbffl_round_number": 4,
+        "evidence_classification": "reconstructable_behaviour"
+      },
+      {
+        "afl_club_id": 15,
+        "afl_club_name": "GWS Giants",
+        "afl_opening_round_id": 1343,
+        "afl_bye_round_id": 1347,
+        "bbbffl_round_number": 4,
+        "evidence_classification": "reconstructable_behaviour"
+      }
+    ]
+  },
   "entries": [
     {
       "coach_display_name": "REPLACE_WITH_HISTORICAL_COACH_1",

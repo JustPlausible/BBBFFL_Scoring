@@ -661,6 +661,28 @@ def test_replay_opening_round_evidence_validator_rejects_ambiguous_season_record
         ReplayOpeningRoundEvidenceValidator(tmp_path / "duplicate-season-id.json")
 
 
+def test_replay_opening_round_evidence_validator_rejects_duplicate_round_ids(tmp_path):
+    """A repeated `round_id` -- especially one claimed by two different
+    seasons -- is internally ambiguous evidence about which season
+    actually owns it and must be rejected outright (Codex review,
+    PR #127), never silently admitted into both seasons' round sets."""
+    payload = {
+        "schema": "bbbffl.replay-evidence/v1",
+        "manifest": {"id": "x", "version": "1", "evidence_class": "known_fact"},
+        "seasons": [
+            {"season_id": 712, "year": 2026, "provenance": PROVENANCE},
+            {"season_id": 999, "year": 2027, "provenance": PROVENANCE},
+        ],
+        "rounds": [
+            {"round_id": 1343, "season_id": 712, "provenance": PROVENANCE},
+            {"round_id": 1343, "season_id": 999, "provenance": PROVENANCE},
+        ],
+    }
+    (tmp_path / "duplicate-round.json").write_text(json.dumps(payload))
+    with pytest.raises(ReplayBootstrapError, match="duplicate round_id"):
+        ReplayOpeningRoundEvidenceValidator(tmp_path / "duplicate-round.json")
+
+
 def test_replay_opening_round_evidence_validator_rejects_hand_authored_evidence_without_provenance(tmp_path):
     """A truncated or hand-authored file that merely contains the right
     schema plus matching season/round IDs must not be mistaken for

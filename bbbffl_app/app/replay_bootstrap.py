@@ -477,6 +477,18 @@ class ReplayOpeningRoundEvidenceValidator:
                 f"Opening Round replay evidence at {self.path} declares multiple season records for "
                 f"year(s) {duplicate_years}; exactly one season record per year is required"
             )
+        # A genuinely acquired round is globally unique (app.replay_acquisition
+        # emits each AFL round exactly once); a repeated round_id -- especially
+        # under conflicting season assignments -- would otherwise let both of
+        # its season entries silently claim it via `rounds_by_season[season_id]
+        # .add(round_id)` below, leaving the evidence ambiguous about which
+        # season actually owns it.
+        round_ids = [round_id for round_id, _ in round_entries]
+        duplicate_round_ids = sorted({rid for rid in round_ids if round_ids.count(rid) > 1})
+        if duplicate_round_ids:
+            raise ReplayBootstrapError(
+                f"Opening Round replay evidence at {self.path} declares duplicate round_id(s) {duplicate_round_ids}"
+            )
         rounds_by_season: dict[int, set[int]] = {sid: set() for sid in season_ids}
         # AFL-api's season_id is an opaque identifier (see
         # tests/test_replay_acquisition.py's fake API, which models the
@@ -545,6 +557,28 @@ def _resolve_opening_round_targets(conn, competition_id: str, config: ReplayConf
     return targets
 
 
+def _lock_season_for_opening_round_reconciliation(database, conn, season_id: str) -> None:
+    """Serialize concurrent Opening Round reconciliation for one season on
+    PostgreSQL (Codex review, PR #127): an ordinary row lock cannot prevent
+    a second, fully independent writer from inserting a *new*
+    `opening_round_rule` row this transaction's read snapshot never saw
+    (a phantom read under READ COMMITTED) -- neither
+    `list_accepted_for_season_locked`'s read nor per-club `INSERT`s for
+    distinct clubs contend for a shared row. A transaction-scoped advisory
+    lock, released automatically at commit/rollback, closes this for two
+    concurrent invocations of this bootstrap against the same season --
+    the realistic risk today, since no other caller in this codebase
+    currently accepts/proposes/corrects an Opening Round rule (delegated
+    operations only ever reads them). Fully serializing against a future
+    independent writer as well would require this same lock inside
+    `OpeningRoundRuleRepository.accept()`/`propose()`/`correct()` itself,
+    which is out of this bootstrap's scope to add pre-emptively. A no-op
+    on SQLite, which has no comparable primitive and no concurrent-writer
+    scenario in the single-process test/CLI use this command supports."""
+    if database.engine.dialect.name == "postgresql":
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext(?))", (season_id,))
+
+
 def _opening_round_rule_conflicts(
     existing: OpeningRoundRule, rule_cfg: OpeningRoundRuleConfig, config: ReplayConfig, bbbffl_round_id: str
 ) -> bool:
@@ -582,6 +616,7 @@ def _reconcile_opening_round_rules(
     transaction `conn`) is only used for `OpeningRoundRuleRepository`'s
     dialect-aware `FOR UPDATE` suffix -- every actual read/write below goes
     through `conn`, inside the caller's transaction."""
+    _lock_season_for_opening_round_reconciliation(database, conn, season_id)
     rule_repo = OpeningRoundRuleRepository(database)
     target_round_ids = _resolve_opening_round_targets(conn, competition_id, config)
     validator = ReplayOpeningRoundEvidenceValidator(config.opening_round.evidence_file)

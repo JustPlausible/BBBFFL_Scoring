@@ -12,9 +12,14 @@ response from the database on every request -- a browser reload always
 reflects authoritative persisted state, never reconstructed client state.
 
 Authenticated operators use issue #107's active role and represented-entry
-context, with their stable coach identity recorded as the audit actor.  The
-older shared-token API may still supply `PickRequest.scorer_name` as its
-transitional audit label; it is never an entry or ownership identifier.
+context; the represented season entry is the domain target (`execute_pick`'s
+owner-of-the-pick identity), never the operator. The audit actor for such a
+pick stays `anonymous_operator` -- the same delegated-write convention every
+other proxy/domain write in this module uses -- with the authenticated
+operator's stable `coach_id` carried in `actor_id` purely as provenance, and
+the active delegated role in `actor_role`. The older shared-token API may
+still supply `PickRequest.scorer_name` as its transitional audit label; it is
+never an entry or ownership identifier.
 
 Reopening a finalized draft is deliberately not an ordinary one-click
 control (see `DraftRepository.reopen`'s docstring): `/reopen` requires the
@@ -81,7 +86,7 @@ def _scorer_actor(scorer_name: str | None) -> ActorContext:
 def _pick_actor(principal: Principal, legacy_scorer_name: str | None) -> ActorContext:
     if principal.coach_id is not None:
         return ActorContext(
-            actor_type="coach_identity",
+            actor_type="anonymous_operator",
             actor_id=principal.coach_id,
             actor_role=principal.role.value,
         )

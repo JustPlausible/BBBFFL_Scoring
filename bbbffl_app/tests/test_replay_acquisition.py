@@ -7,7 +7,7 @@ import pytest
 
 from app.lockouts import LockState, evaluate_match_lock
 from app.replay import ReplayAflDataSource, ReplayEvidenceError
-from app.replay_acquisition import acquire_first_half_2026, write_package
+from app.replay_acquisition import acquire_first_half_2026, write_json_pair_atomic, write_package
 from scripts import first_half_replay
 
 DEFAULT_PLAYERS = [
@@ -351,6 +351,31 @@ def test_non_advancing_offset_fails_closed_instead_of_looping_or_truncating():
     assert len(player_calls) == 2
 
 
+class ClampedLimitApi(Api):
+    """Broken/incompatible upstream pagination: a deployment-side clamp
+    serves fewer rows per page than requested, but the envelope honestly
+    reports the clamped limit -- this must not be mistaken for a genuine
+    short/terminal page, or the pool silently truncates."""
+
+    CLAMPED_LIMIT = 100
+
+    def _players_page(self, path):
+        query = parse_qs(urlsplit(path).query)
+        offset = int(query.get("offset", ["0"])[0])
+        page = self.players[offset : offset + self.CLAMPED_LIMIT]
+        return {"players": page, "limit": self.CLAMPED_LIMIT, "offset": offset}
+
+
+def test_clamped_page_limit_fails_closed_instead_of_looking_terminal():
+    api = ClampedLimitApi(players=make_players(300))
+    with pytest.raises(ReplayEvidenceError, match="reports limit 100, expected 250"):
+        acquire_first_half_2026(api, source_base_url="http://api")
+    # Must fail on the very first page rather than silently accepting a
+    # short/clamped page as the valid final page.
+    player_calls = [c for c in api.calls if c.startswith("/api/v1/seasons/712/players")]
+    assert len(player_calls) == 1
+
+
 def test_malformed_players_envelope_fails_closed():
     class NotAnObjectApi(Api):
         def _players_page(self, path):
@@ -555,3 +580,21 @@ def test_successful_acquisition_writes_bootstrap_compatible_player_pool(tmp_path
     assert pool["source"] == {"provider": "afl-api-v1", "season_year": 2026}
     assert {p["canonical_player_id"] for p in pool["players"]} == {44, 99}
     assert all(p["eligible"] is True for p in pool["players"])
+
+
+def test_write_json_pair_atomic_stages_every_output_before_replacing_any(tmp_path):
+    good_target = tmp_path / "evidence.json"
+    good_target.write_text("PREVIOUS-GOOD-EVIDENCE")
+    # Force staging the second item to fail: its parent path is a plain file,
+    # not a directory, so `target.parent.mkdir(parents=True, exist_ok=True)`
+    # raises before any write for that item happens.
+    blocker = tmp_path / "blocked"
+    blocker.write_text("not a directory")
+    bad_target = blocker / "pool.json"
+
+    with pytest.raises(OSError):
+        write_json_pair_atomic([({"a": 1}, good_target), ({"b": 2}, bad_target)])
+
+    # The first item must not have been replaced just because it was staged
+    # before the second item's failure was discovered.
+    assert good_target.read_text() == "PREVIOUS-GOOD-EVIDENCE"

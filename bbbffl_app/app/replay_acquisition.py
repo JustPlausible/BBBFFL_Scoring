@@ -65,6 +65,16 @@ def _acquire_season_players(api: ConsumerApi, players_path: str) -> tuple[dict[i
             raise ReplayEvidenceError(
                 f"AFL season-player page at {page_path} reports offset {returned_offset!r}, expected {offset}"
             )
+        returned_limit = payload.get("limit")
+        if returned_limit != limit:
+            # A page shorter than `limit` is only a valid terminal page when
+            # the envelope confirms `limit` is what we actually asked for --
+            # otherwise a server-side clamp (e.g. limit: 100) would look
+            # identical to a genuine final page and silently truncate the
+            # pool.
+            raise ReplayEvidenceError(
+                f"AFL season-player page at {page_path} reports limit {returned_limit!r}, expected {limit}"
+            )
         page_count += 1
         for row in rows:
             player_id = row.get("canonical_player_id")
@@ -269,15 +279,29 @@ def acquire_first_half_2026(api: ConsumerApi, *, source_base_url: str, acquired_
     }
 
 
+def write_json_pair_atomic(items: list[tuple[dict, str | Path]]) -> None:
+    """Write every ``(payload, path)`` pair via temp-file + replace, staging
+    *all* temp files before replacing *any* target.
+
+    A reader never observes a partially-written file, and a failure while
+    staging any item (e.g. a read-only directory) leaves every target
+    untouched -- so writing the acquisition CLI's evidence and player-pool
+    files as one call here never replaces one of the pair while leaving the
+    other stale, which a naive write-one-then-the-other sequence could."""
+    staged: list[tuple[Path, Path]] = []
+    for payload, path in items:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_suffix(target.suffix + ".tmp")
+        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        staged.append((temporary, target))
+    for temporary, target in staged:
+        temporary.replace(target)
+
+
 def write_json_atomic(payload: dict, path: str | Path) -> None:
-    """Write ``payload`` as JSON via temp-file + replace so a reader never
-    observes a partially-written file, and a failed write leaves any
-    previous known-good file at ``path`` untouched."""
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix(target.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(target)
+    """Write a single ``payload`` as JSON via temp-file + replace."""
+    write_json_pair_atomic([(payload, path)])
 
 
 def write_package(payload: dict, path: str | Path) -> None:

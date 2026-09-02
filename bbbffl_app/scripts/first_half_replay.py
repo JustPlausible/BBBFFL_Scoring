@@ -10,7 +10,7 @@ from pathlib import Path
 
 from app.afl_client import AflApiClient
 from app.replay import ReplayAflDataSource, ReplayClock
-from app.replay_acquisition import acquire_first_half_2026, package_summary, write_json_atomic, write_package
+from app.replay_acquisition import acquire_first_half_2026, package_summary, write_json_pair_atomic
 
 
 class Api:
@@ -68,12 +68,16 @@ def main() -> int:
                     ],
                 }
             # Both outputs are fully built and validated above before either is
-            # written, and each write is atomic (temp file + replace), so a
-            # failure here never reports PASS and never leaves a half-generated
-            # file in place of a previously completed, known-good one.
-            write_package(payload, args.output)
+            # written, and both are staged (temp file) before either target is
+            # replaced: a failure here never reports PASS, and it never leaves
+            # one output replaced while the other stays stale -- staging both
+            # first means a late failure (e.g. the pool destination being
+            # read-only) leaves every previously completed, known-good output
+            # untouched rather than replacing only the evidence file.
+            outputs = [(payload, args.output)]
             if args.player_pool_output:
-                write_json_atomic(pool, args.player_pool_output)
+                outputs.append((pool, args.player_pool_output))
+            write_json_pair_atomic(outputs)
             # Historical packages deliberately require checkpoint state; acquisition
             # validation here validates the package shape with a temporary logical state.
             print(

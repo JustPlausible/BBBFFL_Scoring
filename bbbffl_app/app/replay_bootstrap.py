@@ -410,7 +410,11 @@ class ReplayOpeningRoundEvidenceValidator:
     Reading only season/round identity keeps Opening Round rule acceptance
     independent of whether match/stat evidence or a checkpoint exists yet,
     while still requiring genuine local evidence and never a live AFL-api
-    client (`round_exists` never makes a network call)."""
+    client (`round_exists` never makes a network call). It does, however,
+    apply the same manifest/record provenance checks `ReplayAflDataSource._
+    load`/`_validate_provenance` require, so a truncated or hand-authored
+    file that merely happens to contain matching season/round IDs is not
+    mistaken for genuine acquired evidence."""
 
     SCHEMA = "bbbffl.replay-evidence/v1"
 
@@ -422,6 +426,17 @@ class ReplayOpeningRoundEvidenceValidator:
             raise ReplayBootstrapError(f"could not read Opening Round replay evidence {self.path}: {exc}") from exc
         if not isinstance(payload, dict) or payload.get("schema") != self.SCHEMA:
             raise ReplayBootstrapError(f"unsupported Opening Round replay evidence schema at {self.path}")
+        manifest = payload.get("manifest")
+        if (
+            not isinstance(manifest, dict)
+            or not manifest.get("id")
+            or not manifest.get("version")
+            or manifest.get("evidence_class") not in EVIDENCE_CLASSIFICATIONS
+        ):
+            raise ReplayBootstrapError(
+                f"Opening Round replay evidence at {self.path} has a missing/invalid manifest "
+                "(id, version and evidence_class are required)"
+            )
         try:
             seasons = payload["seasons"]
             rounds = payload["rounds"]
@@ -438,6 +453,10 @@ class ReplayOpeningRoundEvidenceValidator:
             round_entries = [(int(round_["round_id"]), int(round_["season_id"])) for round_ in rounds]
         except (KeyError, TypeError, ValueError) as exc:
             raise ReplayBootstrapError(f"malformed Opening Round replay evidence at {self.path}: {exc}") from exc
+        for index, record in enumerate(seasons):
+            self._require_provenance(record, f"seasons[{index}]")
+        for index, record in enumerate(rounds):
+            self._require_provenance(record, f"rounds[{index}]")
         # Mirrors app.replay.ReplayAflDataSource's own cross-reference check
         # (app/replay.py's round->season validation): a round referencing a
         # season missing from `seasons` is malformed evidence and must be
@@ -454,6 +473,15 @@ class ReplayOpeningRoundEvidenceValidator:
             rounds_by_season[season_id].add(round_id)
         self._rounds_by_season = rounds_by_season
         self._season_id_by_year = season_id_by_year
+
+    def _require_provenance(self, record, location: str) -> None:
+        provenance = record.get("provenance") if isinstance(record, dict) else None
+        if not isinstance(provenance, dict) or not provenance.get("source"):
+            raise ReplayBootstrapError(f"Opening Round replay evidence {location}.provenance.source is required")
+        if provenance.get("evidence_class") not in EVIDENCE_CLASSIFICATIONS:
+            raise ReplayBootstrapError(
+                f"Opening Round replay evidence {location}.provenance.evidence_class is missing or unknown"
+            )
 
     def round_exists(self, afl_season_id: int, afl_round_id: int) -> bool:
         return afl_round_id in self._rounds_by_season.get(afl_season_id, set())

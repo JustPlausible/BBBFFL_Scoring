@@ -45,13 +45,17 @@ OPENING_ROUND_CLUBS_2026 = [
 OPENING_ROUND_ALL_AFL_ROUND_IDS = (1343, 1345, 1346, 1347)
 
 
+PROVENANCE = {"source": "test evidence", "evidence_class": "known_fact"}
+
+
 def _opening_round_evidence(
     tmp_path, filename="opening-round-evidence.json", round_ids=OPENING_ROUND_ALL_AFL_ROUND_IDS, season_id=2026
 ):
     payload = {
         "schema": "bbbffl.replay-evidence/v1",
-        "seasons": [{"season_id": season_id, "year": 2026}],
-        "rounds": [{"round_id": round_id, "season_id": season_id} for round_id in round_ids],
+        "manifest": {"id": "test-evidence", "version": "1", "evidence_class": "known_fact"},
+        "seasons": [{"season_id": season_id, "year": 2026, "provenance": PROVENANCE}],
+        "rounds": [{"round_id": round_id, "season_id": season_id, "provenance": PROVENANCE} for round_id in round_ids],
     }
     (tmp_path / filename).write_text(json.dumps(payload))
     return filename
@@ -576,11 +580,94 @@ def test_replay_opening_round_evidence_validator_rejects_malformed_evidence(tmp_
     with pytest.raises(ReplayBootstrapError, match="unsupported"):
         ReplayOpeningRoundEvidenceValidator(tmp_path / "wrong-schema.json")
 
+    (tmp_path / "no-manifest.json").write_text(
+        json.dumps({"schema": "bbbffl.replay-evidence/v1", "seasons": [], "rounds": []})
+    )
+    with pytest.raises(ReplayBootstrapError, match="manifest"):
+        ReplayOpeningRoundEvidenceValidator(tmp_path / "no-manifest.json")
+
     (tmp_path / "no-rounds.json").write_text(
-        json.dumps({"schema": "bbbffl.replay-evidence/v1", "seasons": [{"season_id": 2026}], "rounds": "nope"})
+        json.dumps(
+            {
+                "schema": "bbbffl.replay-evidence/v1",
+                "manifest": {"id": "x", "version": "1", "evidence_class": "known_fact"},
+                "seasons": [{"season_id": 2026, "provenance": PROVENANCE}],
+                "rounds": "nope",
+            }
+        )
     )
     with pytest.raises(ReplayBootstrapError, match="malformed"):
         ReplayOpeningRoundEvidenceValidator(tmp_path / "no-rounds.json")
+
+    (tmp_path / "no-provenance.json").write_text(
+        json.dumps(
+            {
+                "schema": "bbbffl.replay-evidence/v1",
+                "manifest": {"id": "x", "version": "1", "evidence_class": "known_fact"},
+                "seasons": [{"season_id": 2026, "year": 2026}],
+                "rounds": [],
+            }
+        )
+    )
+    with pytest.raises(ReplayBootstrapError, match="provenance.source is required"):
+        ReplayOpeningRoundEvidenceValidator(tmp_path / "no-provenance.json")
+
+
+def test_replay_opening_round_evidence_validator_rejects_hand_authored_evidence_without_provenance(tmp_path):
+    """A truncated or hand-authored file that merely contains the right
+    schema plus matching season/round IDs must not be mistaken for
+    genuine acquired replay evidence (Codex review, PR #127): this
+    validator applies the same manifest.id/version/evidence_class and
+    per-record provenance.source/evidence_class checks
+    `app.replay.ReplayAflDataSource._load`/`_validate_provenance` require,
+    even though it otherwise omits unrelated match/stat/checkpoint
+    validation."""
+    # Missing manifest entirely.
+    (tmp_path / "no-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "bbbffl.replay-evidence/v1",
+                "seasons": [{"season_id": 2026, "year": 2026, "provenance": PROVENANCE}],
+                "rounds": [
+                    {"round_id": r, "season_id": 2026, "provenance": PROVENANCE} for r in (1343, 1345, 1346, 1347)
+                ],
+            }
+        )
+    )
+    with pytest.raises(ReplayBootstrapError, match="missing/invalid manifest"):
+        ReplayOpeningRoundEvidenceValidator(tmp_path / "no-manifest.json")
+
+    # Season record missing provenance.
+    (tmp_path / "season-no-provenance.json").write_text(
+        json.dumps(
+            {
+                "schema": "bbbffl.replay-evidence/v1",
+                "manifest": {"id": "x", "version": "1", "evidence_class": "known_fact"},
+                "seasons": [{"season_id": 2026, "year": 2026}],
+                "rounds": [
+                    {"round_id": r, "season_id": 2026, "provenance": PROVENANCE} for r in (1343, 1345, 1346, 1347)
+                ],
+            }
+        )
+    )
+    with pytest.raises(ReplayBootstrapError, match=r"seasons\[0\].provenance.source is required"):
+        ReplayOpeningRoundEvidenceValidator(tmp_path / "season-no-provenance.json")
+
+    # Round record with an unknown evidence_class.
+    (tmp_path / "round-bad-evidence-class.json").write_text(
+        json.dumps(
+            {
+                "schema": "bbbffl.replay-evidence/v1",
+                "manifest": {"id": "x", "version": "1", "evidence_class": "known_fact"},
+                "seasons": [{"season_id": 2026, "year": 2026, "provenance": PROVENANCE}],
+                "rounds": [
+                    {"round_id": 1343, "season_id": 2026, "provenance": {"source": "x", "evidence_class": "bogus"}}
+                ],
+            }
+        )
+    )
+    with pytest.raises(ReplayBootstrapError, match=r"rounds\[0\].provenance.evidence_class is missing or unknown"):
+        ReplayOpeningRoundEvidenceValidator(tmp_path / "round-bad-evidence-class.json")
 
 
 def test_replay_opening_round_evidence_validator_rejects_rounds_for_undeclared_season(tmp_path):
@@ -592,8 +679,9 @@ def test_replay_opening_round_evidence_validator_rejects_rounds_for_undeclared_s
     round-references-missing-season check)."""
     payload = {
         "schema": "bbbffl.replay-evidence/v1",
-        "seasons": [{"season_id": 2025, "year": 2025}],
-        "rounds": [{"round_id": 1343, "season_id": 2026}],
+        "manifest": {"id": "x", "version": "1", "evidence_class": "known_fact"},
+        "seasons": [{"season_id": 2025, "year": 2025, "provenance": PROVENANCE}],
+        "rounds": [{"round_id": 1343, "season_id": 2026, "provenance": PROVENANCE}],
     }
     (tmp_path / "undeclared-season.json").write_text(json.dumps(payload))
 
@@ -620,8 +708,11 @@ def test_wrong_afl_season_identity_in_evidence_fails_bootstrap(tmp_path):
     tmp_path.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema": "bbbffl.replay-evidence/v1",
-        "seasons": [{"season_id": 2025, "year": 2025}],
-        "rounds": [{"round_id": r, "season_id": 2025} for r in OPENING_ROUND_ALL_AFL_ROUND_IDS],
+        "manifest": {"id": "x", "version": "1", "evidence_class": "known_fact"},
+        "seasons": [{"season_id": 2025, "year": 2025, "provenance": PROVENANCE}],
+        "rounds": [
+            {"round_id": r, "season_id": 2025, "provenance": PROVENANCE} for r in OPENING_ROUND_ALL_AFL_ROUND_IDS
+        ],
     }
     (tmp_path / "wrong-season-evidence.json").write_text(json.dumps(payload))
 
@@ -648,8 +739,11 @@ def test_configured_season_id_mismatched_with_acquired_opaque_season_id_fails_bo
     tmp_path.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema": "bbbffl.replay-evidence/v1",
-        "seasons": [{"season_id": 712, "year": 2026}],
-        "rounds": [{"round_id": r, "season_id": 712} for r in OPENING_ROUND_ALL_AFL_ROUND_IDS],
+        "manifest": {"id": "x", "version": "1", "evidence_class": "known_fact"},
+        "seasons": [{"season_id": 712, "year": 2026, "provenance": PROVENANCE}],
+        "rounds": [
+            {"round_id": r, "season_id": 712, "provenance": PROVENANCE} for r in OPENING_ROUND_ALL_AFL_ROUND_IDS
+        ],
     }
     (tmp_path / "opaque-season-evidence.json").write_text(json.dumps(payload))
 

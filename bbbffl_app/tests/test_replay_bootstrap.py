@@ -683,6 +683,35 @@ def test_replay_opening_round_evidence_validator_rejects_duplicate_round_ids(tmp
         ReplayOpeningRoundEvidenceValidator(tmp_path / "duplicate-round.json")
 
 
+@pytest.mark.parametrize(
+    "weaker_classification", ["synthetic_scenario", "unresolved_scorer_input", "reconstructable_behaviour"]
+)
+def test_replay_opening_round_evidence_validator_requires_known_fact_identity_records(tmp_path, weaker_classification):
+    """The AFL-side season/Opening Round/compensating-bye identities this
+    validator reads are documented known_fact evidence (Codex review,
+    PR #127) -- a season or round record classified as any other
+    (otherwise legal) evidence classification must be rejected, not
+    merely accepted as "some recognized classification". This is
+    distinct from a rule's own evidence_classification
+    (reconstructable_behaviour), which describes the separate BBBFFL-side
+    target-round mapping, not the AFL identity facts themselves."""
+    payload = {
+        "schema": "bbbffl.replay-evidence/v1",
+        "manifest": {"id": "x", "version": "1", "evidence_class": "known_fact"},
+        "seasons": [{"season_id": 2026, "year": 2026, "provenance": PROVENANCE}],
+        "rounds": [
+            {
+                "round_id": 1343,
+                "season_id": 2026,
+                "provenance": {"source": "x", "evidence_class": weaker_classification},
+            }
+        ],
+    }
+    (tmp_path / "weaker-classification.json").write_text(json.dumps(payload))
+    with pytest.raises(ReplayBootstrapError, match=r"rounds\[0\].provenance.evidence_class must be 'known_fact'"):
+        ReplayOpeningRoundEvidenceValidator(tmp_path / "weaker-classification.json")
+
+
 def test_replay_opening_round_evidence_validator_rejects_hand_authored_evidence_without_provenance(tmp_path):
     """A truncated or hand-authored file that merely contains the right
     schema plus matching season/round IDs must not be mistaken for
@@ -736,7 +765,7 @@ def test_replay_opening_round_evidence_validator_rejects_hand_authored_evidence_
             }
         )
     )
-    with pytest.raises(ReplayBootstrapError, match=r"rounds\[0\].provenance.evidence_class is missing or unknown"):
+    with pytest.raises(ReplayBootstrapError, match=r"rounds\[0\].provenance.evidence_class must be 'known_fact'"):
         ReplayOpeningRoundEvidenceValidator(tmp_path / "round-bad-evidence-class.json")
 
 

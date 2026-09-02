@@ -518,9 +518,17 @@ class ReplayOpeningRoundEvidenceValidator:
         provenance = record.get("provenance") if isinstance(record, dict) else None
         if not isinstance(provenance, dict) or not provenance.get("source"):
             raise ReplayBootstrapError(f"Opening Round replay evidence {location}.provenance.source is required")
-        if provenance.get("evidence_class") not in EVIDENCE_CLASSIFICATIONS:
+        # The AFL-side season/Opening Round/compensating-bye identities this
+        # validator reads are documented known_fact evidence (see
+        # docs/opening-round-deferred-selection.md's evidence table) -- not
+        # merely one of the four general classifications. A season/round
+        # record classified synthetic_scenario or unresolved_scorer_input
+        # must never be used to establish these "authoritative" rules,
+        # unlike a rule's own evidence_classification (reconstructable_
+        # behaviour), which describes the separate BBBFFL-side mapping.
+        if provenance.get("evidence_class") != "known_fact":
             raise ReplayBootstrapError(
-                f"Opening Round replay evidence {location}.provenance.evidence_class is missing or unknown"
+                f"Opening Round replay evidence {location}.provenance.evidence_class must be 'known_fact'"
             )
 
     def round_exists(self, afl_season_id: int, afl_round_id: int) -> bool:

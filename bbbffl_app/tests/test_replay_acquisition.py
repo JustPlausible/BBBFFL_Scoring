@@ -605,6 +605,24 @@ def test_write_json_pair_atomic_stages_every_output_before_replacing_any(tmp_pat
     assert leftover_tmp_files == []
 
 
+def test_write_json_pair_atomic_cleans_up_partial_temp_file_when_write_fails(tmp_path, monkeypatch):
+    good_target = tmp_path / "evidence.json"
+
+    def failing_write_text(self, *args, **kwargs):
+        # A write that fails partway (e.g. ENOSPC) can still leave a
+        # partial file on disk before raising -- simulate that here.
+        self.write_bytes(b"partial")
+        raise OSError("simulated disk full")
+
+    monkeypatch.setattr(Path, "write_text", failing_write_text)
+
+    with pytest.raises(OSError):
+        write_json_pair_atomic([({"a": 1}, good_target)])
+
+    leftover_tmp_files = [p for p in tmp_path.iterdir() if p.is_file() and p.suffix == ".tmp"]
+    assert leftover_tmp_files == []
+
+
 def test_write_json_pair_atomic_rejects_aliased_output_destinations(tmp_path):
     good_target = tmp_path / "evidence.json"
     good_target.write_text("PREVIOUS-GOOD-EVIDENCE")

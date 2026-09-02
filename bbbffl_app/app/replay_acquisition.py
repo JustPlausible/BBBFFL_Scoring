@@ -328,6 +328,7 @@ def write_json_pair_atomic(items: list[tuple[dict, str | Path]]) -> None:
             f"{[str(target) for target in non_regular]}"
         )
     target_set = set(resolved_targets)
+    created: list[Path] = []
     staged: list[tuple[Path, Path]] = []
     try:
         for (payload, _path), target in zip(items, resolved_targets):
@@ -338,12 +339,16 @@ def write_json_pair_atomic(items: list[tuple[dict, str | Path]]) -> None:
                 # fail closed rather than silently overwriting another
                 # item's target.
                 raise ValueError(f"write_json_pair_atomic temp path collides with an output target: {temporary}")
+            # Tracked before write_text runs: a write that fails partway
+            # (e.g. ENOSPC) can still leave a partial file at `temporary`,
+            # and it must be cleaned up too, not just a fully-written one.
+            created.append(temporary)
             temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             staged.append((temporary, target))
         for temporary, target in staged:
             temporary.replace(target)
     except BaseException:
-        for temporary, _target in staged:
+        for temporary in created:
             temporary.unlink(missing_ok=True)
         raise
 

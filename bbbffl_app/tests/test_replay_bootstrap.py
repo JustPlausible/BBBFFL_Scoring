@@ -1,5 +1,6 @@
 import inspect
 import json
+from pathlib import Path
 
 import pytest
 
@@ -15,6 +16,7 @@ from app.replay_bootstrap import (
     OPENING_ROUND_RULE_COUNT,
     ReplayBootstrapError,
     ReplayOpeningRoundEvidenceValidator,
+    _opening_round_config,
     bootstrap_first_half,
     load_replay_config,
     provision_replay_operator,
@@ -22,6 +24,8 @@ from app.replay_bootstrap import (
 )
 from app.season import SeasonRepository
 from tests.db_helpers import migrated_connection
+
+TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "config" / "replay" / "2026-first-half.template.json"
 
 # The genuine 2026 Opening Round facts (docs/opening-round-deferred-selection.md's
 # 2026 evidence row / tests/opening_round_evidence.py's EVIDENCE_2026):
@@ -479,6 +483,29 @@ def test_wrong_opening_round_id_rejected(tmp_path):
 
     with pytest.raises(ReplayBootstrapError, match="afl_opening_round_id must be 1343"):
         load_replay_config(_files(tmp_path, mutate_opening_round=mutate))
+
+
+def test_shipped_template_rejects_unreplaced_afl_season_id_placeholder():
+    """`config/replay/2026-first-half.template.json`'s `afl_season_id` is a
+    deliberately invalid placeholder (`0`) an operator must replace with
+    the genuine AFL-api season identifier from their acquired evidence
+    (Codex review, PR #127) -- it must never look like a plausible,
+    silently-wrong default such as the calendar year."""
+    raw = json.loads(TEMPLATE_PATH.read_text())
+    assert raw["opening_round"]["afl_season_id"] == 0
+    with pytest.raises(ReplayBootstrapError, match="afl_season_id must be a positive integer"):
+        _opening_round_config(raw, TEMPLATE_PATH)
+
+
+def test_shipped_template_opening_round_rules_are_otherwise_genuinely_valid():
+    """Every other opening_round fact in the shipped template (club
+    identities, Opening Round ID, bye/target pairing, distribution) is
+    already genuine and valid -- only afl_season_id is an operator
+    placeholder."""
+    raw = json.loads(TEMPLATE_PATH.read_text())
+    raw = {**raw, "opening_round": {**raw["opening_round"], "afl_season_id": 2026}}
+    config = _opening_round_config(raw, TEMPLATE_PATH)
+    assert len(config.rules) == 10
 
 
 def test_malformed_evidence_classification_rejected(tmp_path):

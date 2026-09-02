@@ -17,8 +17,8 @@
   "operator_email": "replace-coach-1@example.invalid",
   "player_pool_file": "players-2026.afl-api-v1.json",
   "opening_round": {
-    "_comment": "Configured/accepted 2026 Opening Round rules (issue #126) -- OR structure is supplied here; player nominations are NOT and are entered later through Opening Round Operations after the draft, once actual owned players exist. afl_season_id is AFL-api's own opaque season identifier for 2026 (it is not necessarily the calendar year) -- read it from the acquired evidence_file's seasons list, never assume it equals 2026.",
-    "afl_season_id": 2026,
+    "_comment": "Configured/accepted 2026 Opening Round rules (issue #126) -- OR structure is supplied here; player nominations are NOT and are entered later through Opening Round Operations after the draft, once actual owned players exist. REPLACE_WITH_ACQUIRED_AFL_SEASON_ID (afl_season_id below) is AFL-api's own opaque season identifier for 2026 -- it is NOT necessarily 2026 itself. The placeholder 0 below is deliberately invalid and must be replaced with the season_id the acquired evidence_file's seasons list actually declares for year 2026; leaving 0 (or guessing 2026) fails bootstrap's season-identity cross-check.",
+    "afl_season_id": 0,
     "evidence_file": "2026-first-half.json",
     "rules": [
       {

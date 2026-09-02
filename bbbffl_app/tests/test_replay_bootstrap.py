@@ -823,6 +823,39 @@ def test_new_opening_round_rules_refused_once_a_draft_pick_has_completed(tmp_pat
     assert OpeningRoundRuleRepository(database).list_accepted_for_season(season_id) == []
 
 
+def test_new_opening_round_rules_refused_even_if_the_only_completed_pick_was_since_corrected(tmp_path):
+    """`DraftRepository.correct_pick` preserves the original completed pick
+    row (marking it superseded) and inserts a fresh, uncompleted
+    replacement -- undoing the sole completed pick must not make a
+    since-corrected draft look as though it never started (Codex review,
+    PR #127): counting only *active* completed picks would wrongly permit
+    establishing prerequisite rules after drafting had genuinely begun."""
+    from app.draft import DraftRepository
+    from app.player_pool import PlayerPoolRepository
+
+    database = migrated_connection()
+    config = load_replay_config(_files(tmp_path))
+    report = bootstrap_first_half(database, config)
+    season_id = report["season"]["season_id"]
+    draft = DraftRepository(database)
+    _, first_entry_id = draft.order(season_id)[0]
+    player = PlayerPoolRepository(database).list_selectable(season_id)[0]
+
+    pick = draft.execute_pick(season_id, first_entry_id, player.season_player_id)
+    draft.correct_pick(season_id, pick.draft_pick_id, reason="test-induced correction")
+    assert draft.status(season_id).completed_picks == 0  # the *active* count is back to zero
+
+    with transaction(database) as conn:
+        conn.execute("DELETE FROM opening_round_rule_revision")
+        conn.execute("DELETE FROM opening_round_rule")
+    assert OpeningRoundRuleRepository(database).list_accepted_for_season(season_id) == []
+
+    with pytest.raises(ReplayBootstrapError, match="draft pick"):
+        bootstrap_first_half(database, config)
+
+    assert OpeningRoundRuleRepository(database).list_accepted_for_season(season_id) == []
+
+
 # -- Opening Round: readiness --------------------------------------------------
 
 

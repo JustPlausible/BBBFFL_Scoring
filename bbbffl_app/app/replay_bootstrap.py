@@ -17,7 +17,7 @@ from uuid import uuid4
 
 from app.audit import ActorContext, append_event
 from app.auth import CredentialRepository, RoleGrantRepository
-from app.db import transaction
+from app.db import _for_update_suffix, transaction
 from app.draft import DraftRepository
 from app.draft_board import draft_board_readiness
 from app.identity import IdentityRepository
@@ -754,7 +754,16 @@ def bootstrap_first_half(database, config: ReplayConfig) -> dict:
                     ),
                 )
 
-        draft = conn.execute("SELECT * FROM season_draft WHERE season_id=?", (season_id,)).fetchone()
+        # FOR UPDATE (a no-op suffix on SQLite): the same row lock
+        # app.draft.DraftRepository._locked_draft acquires before
+        # execute_pick/correct_pick, so this bootstrap's completed_picks
+        # read below (and the Opening Round reconciliation gated on it)
+        # cannot race a concurrent pick completing or being corrected --
+        # either serializes behind the other instead of both observing a
+        # stale "zero completed picks" snapshot.
+        draft = conn.execute(
+            "SELECT * FROM season_draft WHERE season_id=?" + _for_update_suffix(database), (season_id,)
+        ).fetchone()
         ordered_ids = [entry_ids[n] for n in range(1, TEAM_COUNT + 1)]
         if draft:
             draft_id = draft["draft_id"]
@@ -799,9 +808,17 @@ def bootstrap_first_half(database, config: ReplayConfig) -> dict:
                 after_state={"year": config.year, "entries": TEAM_COUNT, "rounds": list(FIRST_HALF_ROUNDS)},
             )
 
+        # Deliberately counts every row ever completed, including one since
+        # superseded by DraftRepository.correct_pick (which preserves the
+        # original completed row -- see app/draft.py -- and inserts a fresh
+        # uncompleted replacement). Unlike app.draft.DraftStatus.
+        # completed_picks (which answers "how many active picks are
+        # currently completed" for board state), this answers "has this
+        # draft ever had any pick activity at all" -- undoing the sole
+        # completed pick must not make a since-corrected draft look as
+        # though it never started.
         completed_picks = conn.execute(
-            "SELECT COUNT(*) n FROM draft_pick WHERE draft_id=? AND superseded_by_draft_pick_id IS NULL "
-            "AND completed_at IS NOT NULL",
+            "SELECT COUNT(*) n FROM draft_pick WHERE draft_id=? AND completed_at IS NOT NULL",
             (draft_id,),
         ).fetchone()["n"]
         _reconcile_opening_round_rules(database, conn, season_id, competition_id, config, completed_picks)

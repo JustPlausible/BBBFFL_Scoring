@@ -404,10 +404,23 @@ class ReplayOpeningRoundEvidenceValidator:
             if not isinstance(seasons, list) or not isinstance(rounds, list):
                 raise TypeError("seasons and rounds must be lists")
             rounds_by_season: dict[int, set[int]] = {int(season["season_id"]): set() for season in seasons}
-            for round_ in rounds:
-                rounds_by_season.setdefault(int(round_["season_id"]), set()).add(int(round_["round_id"]))
+            round_entries = [(int(round_["round_id"]), int(round_["season_id"])) for round_ in rounds]
         except (KeyError, TypeError, ValueError) as exc:
             raise ReplayBootstrapError(f"malformed Opening Round replay evidence at {self.path}: {exc}") from exc
+        # Mirrors app.replay.ReplayAflDataSource's own cross-reference check
+        # (app/replay.py's round->season validation): a round referencing a
+        # season missing from `seasons` is malformed evidence and must be
+        # rejected outright, never silently admitted via `dict.setdefault`
+        # -- which would let an internally inconsistent package validate a
+        # round that no genuinely declared season actually carries.
+        undeclared = sorted({season_id for _, season_id in round_entries if season_id not in rounds_by_season})
+        if undeclared:
+            raise ReplayBootstrapError(
+                f"Opening Round replay evidence at {self.path} has rounds referencing "
+                f"season(s) {undeclared} absent from its seasons list"
+            )
+        for round_id, season_id in round_entries:
+            rounds_by_season[season_id].add(round_id)
         self._rounds_by_season = rounds_by_season
 
     def round_exists(self, afl_season_id: int, afl_round_id: int) -> bool:

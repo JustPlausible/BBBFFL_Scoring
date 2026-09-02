@@ -540,6 +540,24 @@ def test_replay_opening_round_evidence_validator_rejects_malformed_evidence(tmp_
         ReplayOpeningRoundEvidenceValidator(tmp_path / "no-rounds.json")
 
 
+def test_replay_opening_round_evidence_validator_rejects_rounds_for_undeclared_season(tmp_path):
+    """A round tagged with a season_id that never appears in `seasons` is
+    internally inconsistent evidence and must be rejected outright -- never
+    silently admitted (e.g. via `dict.setdefault`), which would let a
+    malformed/hand-edited package validate a round under a season it never
+    actually declares (mirrors app.replay.ReplayAflDataSource's own
+    round-references-missing-season check)."""
+    payload = {
+        "schema": "bbbffl.replay-evidence/v1",
+        "seasons": [{"season_id": 2025, "year": 2025}],
+        "rounds": [{"round_id": 1343, "season_id": 2026}],
+    }
+    (tmp_path / "undeclared-season.json").write_text(json.dumps(payload))
+
+    with pytest.raises(ReplayBootstrapError, match="absent from its seasons list"):
+        ReplayOpeningRoundEvidenceValidator(tmp_path / "undeclared-season.json")
+
+
 @pytest.mark.parametrize("missing_round_id", [1343, 1345, 1346, 1347])
 def test_missing_required_round_evidence_fails_bootstrap(tmp_path, missing_round_id):
     database = migrated_connection()

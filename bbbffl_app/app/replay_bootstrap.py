@@ -55,6 +55,22 @@ EXPECTED_BYE_ROUND_BY_CLUB_ID = {
     11: 1347,  # STK
     15: 1347,  # GWS
 }
+# afl_club_id -> the one canonical name this validator accepts, so a
+# config typo/swap that keeps a valid club ID but names the wrong club is
+# still caught, rather than `afl_club_name` being a purely decorative,
+# unvalidated inspectability field.
+EXPECTED_CLUB_NAME_BY_ID = {
+    2: "Brisbane Lions",
+    5: "Carlton",
+    3: "Collingwood",
+    10: "Geelong Cats",
+    4: "Gold Coast Suns",
+    8: "Western Bulldogs",
+    9: "Hawthorn",
+    13: "Sydney Swans",
+    11: "St Kilda",
+    15: "GWS Giants",
+}
 # compensating-bye AFL round ID -> the BBBFFL logical round number that
 # operationalises it for this replay (explicit replay/reconstructed
 # behaviour -- see this module's `_opening_round_config` and issue #126).
@@ -215,6 +231,11 @@ def _opening_round_config(raw: dict, config_path: Path) -> OpeningRoundReplayCon
             f"missing={missing} extra={extra}"
         )
     for rule in rules:
+        expected_name = EXPECTED_CLUB_NAME_BY_ID[rule.afl_club_id]
+        if rule.afl_club_name != expected_name:
+            raise ReplayBootstrapError(
+                f"opening_round.rules afl_club_id={rule.afl_club_id} afl_club_name must be {expected_name!r}"
+            )
         if rule.afl_opening_round_id != EXPECTED_OPENING_ROUND_ID:
             raise ReplayBootstrapError(
                 f"opening_round.rules afl_club_id={rule.afl_club_id} afl_opening_round_id must be "
@@ -461,7 +482,9 @@ def _opening_round_rule_conflicts(
     )
 
 
-def _reconcile_opening_round_rules(database, conn, season_id: str, competition_id: str, config: ReplayConfig) -> None:
+def _reconcile_opening_round_rules(
+    database, conn, season_id: str, competition_id: str, config: ReplayConfig, completed_picks: int
+) -> None:
     """Accept the configured 2026 Opening Round rules through the ordinary
     `OpeningRoundRuleRepository` domain semantics, inside the caller's
     already-open bootstrap transaction (see `OpeningRoundRuleRepository.
@@ -471,6 +494,14 @@ def _reconcile_opening_round_rules(database, conn, season_id: str, competition_i
     accepted rule is a no-op, a materially different one fails closed, and
     an unexpected extra accepted rule for this season fails closed rather
     than being silently ignored.
+
+    Establishing a *new* accepted rule (one with no existing accepted
+    revision yet) is refused once any draft pick has completed: Opening
+    Round configuration is a before-Pick-1 prerequisite, so a rerun against
+    a season where drafting has already begun must never newly mutate that
+    prerequisite state, even though the rest of this reconciliation is
+    otherwise idempotent. An already-correct accepted rule remains a
+    harmless no-op regardless of draft progress.
 
     `database` (the plain `DatabaseConnection`, distinct from the open
     transaction `conn`) is only used for `OpeningRoundRuleRepository`'s
@@ -496,6 +527,12 @@ def _reconcile_opening_round_rules(database, conn, season_id: str, competition_i
                 f"existing accepted Opening Round rule for club {rule_cfg.afl_club_id} conflicts with replay configuration",
             )
             continue
+        _conflict(
+            completed_picks > 0,
+            f"cannot establish a new Opening Round rule for club {rule_cfg.afl_club_id}: "
+            f"{completed_picks} draft pick(s) already completed; Opening Round configuration "
+            "is a before-Pick-1 prerequisite",
+        )
         rule_repo.accept_locked(
             conn,
             season_id,
@@ -690,9 +727,10 @@ def bootstrap_first_half(database, config: ReplayConfig) -> dict:
         draft = conn.execute("SELECT * FROM season_draft WHERE season_id=?", (season_id,)).fetchone()
         ordered_ids = [entry_ids[n] for n in range(1, TEAM_COUNT + 1)]
         if draft:
+            draft_id = draft["draft_id"]
             order = conn.execute(
                 "SELECT position, season_entry_id FROM draft_order_position WHERE draft_id=? ORDER BY position",
-                (draft["draft_id"],),
+                (draft_id,),
             ).fetchall()
             _conflict(
                 draft["target_squad_size"] != config.squad_limit
@@ -731,7 +769,12 @@ def bootstrap_first_half(database, config: ReplayConfig) -> dict:
                 after_state={"year": config.year, "entries": TEAM_COUNT, "rounds": list(FIRST_HALF_ROUNDS)},
             )
 
-        _reconcile_opening_round_rules(database, conn, season_id, competition_id, config)
+        completed_picks = conn.execute(
+            "SELECT COUNT(*) n FROM draft_pick WHERE draft_id=? AND superseded_by_draft_pick_id IS NULL "
+            "AND completed_at IS NOT NULL",
+            (draft_id,),
+        ).fetchone()["n"]
+        _reconcile_opening_round_rules(database, conn, season_id, competition_id, config, completed_picks)
     return replay_readiness(database, config)
 
 

@@ -5,6 +5,7 @@ import pytest
 
 from app.auth import AuthenticationService, CredentialRepository, SessionRepository
 from app.auth_rate_limit import LoginRateLimiter
+from app.db import transaction
 from app.draft import DraftRepository
 from app.draft_board import draft_board_readiness
 from app.identity import IdentityRepository
@@ -501,6 +502,19 @@ def test_wrong_bye_target_pairing_rejected(tmp_path):
         load_replay_config(_files(tmp_path, mutate_opening_round=mutate))
 
 
+def test_club_name_mismatched_with_its_id_rejected(tmp_path):
+    """A config keeping the correct `afl_club_id` (2, Brisbane Lions) but
+    naming the wrong club must fail -- `afl_club_name` is validated against
+    its ID, not merely required to be non-empty, so a typo/swap can't
+    silently misrepresent the human-inspectable rule set (issue #126)."""
+
+    def mutate(rows):
+        _mutate_rule(rows, 2, afl_club_name="Not Brisbane Lions FC")
+
+    with pytest.raises(ReplayBootstrapError, match="afl_club_name must be"):
+        load_replay_config(_files(tmp_path, mutate_opening_round=mutate))
+
+
 def test_wrong_target_round_distribution_rejected(tmp_path):
     def mutate(rows):
         _mutate_rule(rows, 2, bbbffl_round_number=3)  # BL's bye round (1345) stays R2's, but its target claims R3
@@ -717,6 +731,43 @@ def test_opening_round_rules_participate_in_bootstraps_single_transaction(tmp_pa
     # The prior successful bootstrap's ten rules remain exactly as they
     # were -- the second, failed attempt neither duplicated nor dropped any.
     assert len(OpeningRoundRuleRepository(database).list_accepted_for_season(season_id)) == 10
+
+
+def test_new_opening_round_rules_refused_once_a_draft_pick_has_completed(tmp_path):
+    """Opening Round configuration is a before-Pick-1 prerequisite. A rerun
+    against a season where a genuine season member never had accepted
+    Opening Round rules established (e.g. a database bootstrapped before
+    this feature existed) must refuse to newly create them once drafting
+    has already begun -- never mutate that prerequisite state after the
+    fact, even though bootstrap is otherwise idempotent/conflict-tolerant."""
+    database = migrated_connection()
+    config = load_replay_config(_files(tmp_path))
+    report = bootstrap_first_half(database, config)
+    season_id = report["season"]["season_id"]
+
+    with transaction(database) as conn:
+        conn.execute("DELETE FROM opening_round_rule_revision")
+        conn.execute("DELETE FROM opening_round_rule")
+        draft_id = conn.execute("SELECT draft_id FROM season_draft WHERE season_id=?", (season_id,)).fetchone()[
+            "draft_id"
+        ]
+        pick_id = conn.execute(
+            "SELECT draft_pick_id FROM draft_pick WHERE draft_id=? ORDER BY overall_number LIMIT 1", (draft_id,)
+        ).fetchone()["draft_pick_id"]
+        player_id = conn.execute(
+            "SELECT season_player_id FROM season_player_pool WHERE season_id=? LIMIT 1", (season_id,)
+        ).fetchone()["season_player_id"]
+        conn.execute(
+            "UPDATE draft_pick SET completed_at=?, selected_season_player_id=? WHERE draft_pick_id=?",
+            ("2026-03-01T00:00:00Z", player_id, pick_id),
+        )
+    assert OpeningRoundRuleRepository(database).list_accepted_for_season(season_id) == []
+
+    with pytest.raises(ReplayBootstrapError, match="draft pick"):
+        bootstrap_first_half(database, config)
+
+    # Refused, not partially applied: still zero accepted rules.
+    assert OpeningRoundRuleRepository(database).list_accepted_for_season(season_id) == []
 
 
 # -- Opening Round: readiness --------------------------------------------------

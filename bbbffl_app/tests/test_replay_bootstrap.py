@@ -219,3 +219,64 @@ def test_conflicting_rerun_rolls_back_without_changing_valid_state(tmp_path):
     assert IdentityRepository(database).list_entries(season_id)[0].team_name != "Different Club"
     assert len(DraftRepository(database).order(season_id)) == 10
     assert DraftRepository(database).status(season_id).completed_picks == 0
+
+
+def test_acquired_player_pool_output_shape_loads_through_bootstrap_config_without_a_mocked_seam(tmp_path):
+    """The AFL-api #248 season-player acquisition output and #116's bootstrap
+    player-pool input contract must meet without any translation seam beyond
+    the one small, explicit mapping scripts/first_half_replay.py performs."""
+    from app.replay_acquisition import acquire_first_half_2026
+    from tests.test_replay_acquisition import Api, make_players
+
+    payload = acquire_first_half_2026(
+        Api(players=make_players(40, start=20), no_roster=True), source_base_url="http://api"
+    )
+    pool = {
+        "source": {"provider": "afl-api-v1", "season_year": 2026},
+        "players": [
+            {
+                "canonical_player_id": x["canonical_player_id"],
+                "display_name": x["display_name"],
+                "afl_team_id": x["team_id"],
+                "afl_team_name": x["team_name"],
+                "eligible": True,
+                "source_updated_at": None,
+            }
+            for x in payload["players"]
+        ],
+    }
+    (tmp_path / "players.json").write_text(json.dumps(pool))
+    entries = [
+        {
+            "coach_display_name": f"Historical Coach {n}",
+            "coach_email": f"coach{n}@replay.example",
+            "team_name": f"Historical Club {n}",
+            "licence_key": f"historical-{n}",
+            "draft_position": n,
+        }
+        for n in range(1, 11)
+    ]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "season": {"year": 2026, "label": "2026 First Half Replay"},
+                "rules": {"key": "ordinary", "version": 1, "name": "2026 Rules"},
+                "competition": {"key": "ordinary", "label": "BBBFFL Ordinary"},
+                "squad_limit": 3,
+                "operator_email": "coach1@replay.example",
+                "player_pool_file": "players.json",
+                "entries": entries,
+            }
+        )
+    )
+
+    loaded = load_replay_config(config_path)
+    assert loaded.source_provider == "afl-api-v1"
+    assert loaded.source_season_year == 2026
+    assert {p.canonical_player_id for p in loaded.players} == {p["canonical_player_id"] for p in payload["players"]}
+    assert all(p.eligible for p in loaded.players)
+
+    database = migrated_connection()
+    report = bootstrap_first_half(database, loaded)
+    assert report["player_pool_count"] == 40

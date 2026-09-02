@@ -10,7 +10,7 @@ from pathlib import Path
 
 from app.afl_client import AflApiClient
 from app.replay import ReplayAflDataSource, ReplayClock
-from app.replay_acquisition import acquire_first_half_2026, package_summary, write_package
+from app.replay_acquisition import acquire_first_half_2026, package_summary, write_json_atomic, write_package
 
 
 class Api:
@@ -47,7 +47,7 @@ def main() -> int:
                 payload = acquire_first_half_2026(Api(client), source_base_url=args.base_url)
             finally:
                 client.close()
-            write_package(payload, args.output)
+            pool = None
             if args.player_pool_output:
                 pool = {
                     "source": {"provider": "afl-api-v1", "season_year": 2026},
@@ -57,13 +57,23 @@ def main() -> int:
                             "display_name": x["display_name"],
                             "afl_team_id": x["team_id"],
                             "afl_team_name": x["team_name"],
-                            "eligible": x.get("eligible", True),
+                            # BBBFFL replay output policy, not an AFL-api field: every
+                            # acquired 2026 season member is treated as eligible for
+                            # this historical replay. Eligibility is BBBFFL policy,
+                            # never inferred from or attributed to afl-api.
+                            "eligible": True,
                             "source_updated_at": None,
                         }
                         for x in payload["players"]
                     ],
                 }
-                Path(args.player_pool_output).write_text(json.dumps(pool, indent=2, sort_keys=True) + "\n")
+            # Both outputs are fully built and validated above before either is
+            # written, and each write is atomic (temp file + replace), so a
+            # failure here never reports PASS and never leaves a half-generated
+            # file in place of a previously completed, known-good one.
+            write_package(payload, args.output)
+            if args.player_pool_output:
+                write_json_atomic(pool, args.player_pool_output)
             # Historical packages deliberately require checkpoint state; acquisition
             # validation here validates the package shape with a temporary logical state.
             print(

@@ -55,7 +55,7 @@ documented BBBFFL requirement yet).
 | `GET /api/v1` | Potentially useful, non-contractual | Not called by the app. Useful as a cheap connectivity/auth smoke check (used by the diagnostic). |
 | `GET /api/v1/seasons` | **Required now** | `seasons[].season_id`, `.is_current`, `.current_round_number`, `.year`. BBBFFL selects the single `is_current: true` entry ([`app/afl_client.py:get_current_season`](../bbbffl_app/app/afl_client.py)). |
 | `GET /api/v1/seasons/{season_id}/rounds` | **Required now** | `rounds[].round_id`, `.round_number` (matched against a caller-supplied round number), and `.byes` for package 24's advisory lineup warnings. `null`, an empty list, and a populated list remain distinct evidence states. |
-| `GET /api/v1/seasons/{season_id}/players` | **Required for the supported 2026 historical replay** | Complete season-scoped canonical player pool, including `canonical_player_id`, `display_name`, season team identity, provider identifiers and eligibility where supplied. The replay exporter must not infer this pool from match participants. |
+| `GET /api/v1/seasons/{season_id}/players` | **Required for the supported 2026 historical replay** | Complete season-scoped canonical player pool backed by `competition_season_players`, ordered `canonical_player_id` ascending and paginated `limit`/`offset` (max/default page size 250) — the replay exporter follows every page automatically. Each row carries `canonical_player_id`, `display_name`, the requested season's `team` (not `current_team`; may be `null` if membership is unresolved, in which case BBBFFL fails acquisition rather than guessing) and provider `identifiers`. There is **no `eligible` field** — BBBFFL's replay output marks every acquired member eligible as its own policy, never as an afl-api fact. The replay exporter must not infer this pool from match participants. |
 | `GET /api/v1/rounds/{round_id}` | Potentially useful, non-contractual | Not called; BBBFFL currently reaches a round only via the season-scoped list. |
 | `GET /api/v1/rounds/{round_id}/matches` | **Required now** | `matches[].match_id`, `.status`, `.home_team{team_id,name}`, `.away_team{team_id,name}`, `.start_time_utc` (consumed by issue #34/package 23's lockout boundary — `app/afl_client.py`'s `Match.start_time_utc`). `.score_home`/`.score_away` are **not yet consumed** — committed future dependency for Round Centre presentation. |
 | `GET /api/v1/matches/{match_id}` | Potentially useful, non-contractual | Not called; BBBFFL currently reaches match identity only via the round-scoped list. |
@@ -318,11 +318,14 @@ not this contract-validation issue, per its explicit non-goals.
 
 1. **Bulk season player-list dependency is now consumed by replay.** The
    supported first-half exporter requires `GET
-   /api/v1/seasons/{season_id}/players`; it deliberately fails closed if the
-   deployed consumer API does not provide the complete season-scoped pool.
-   This endpoint supersedes the earlier gap recorded below and prevents
-   injured, suspended, or pre-debut eligible players being omitted merely
-   because they have no first-half stat row.
+   /api/v1/seasons/{season_id}/players?limit=250&offset=...`, following every
+   page (a page shorter than the requested limit, including an empty page,
+   terminates the collection); it deliberately fails closed if the deployed
+   consumer API does not provide the complete season-scoped pool, returns
+   mismatched pagination progress, or repeats a canonical player across
+   pages. This endpoint supersedes the earlier gap recorded below and
+   prevents injured, suspended, or pre-debut eligible players being omitted
+   merely because they have no first-half stat row.
 2. **Historical season data presence is unverified.** The contract
    structurally supports historical access (any persisted season/round/
    match/player-stats resource is reachable by ID with no time-window
@@ -354,19 +357,24 @@ not this contract-validation issue, per its explicit non-goals.
 > the full eligible player set without already knowing every player's name
 > or ID.
 >
-> **Suggested shape:** `GET /api/v1/seasons/{season_id}/players`, reusing
-> the existing `CanonicalPlayer` projection (`canonical_player_id`,
+> **Delivered shape (AFL-api issue #247 / PR #248):** `GET
+> /api/v1/seasons/{season_id}/players?limit=250&offset=0`, reusing the
+> existing `CanonicalPlayer` projection (`canonical_player_id`,
 > `display_name`, season-scoped `team`, `identifiers`), backed by
 > `competition_season_players` for that `season_id` the same way
-> `.../players/{id}/seasons` already reads that table per-player. Simple
-> `limit`/`offset` pagination would be consistent with the consumer API
-> design doc's stated approach to "potentially large detail/history
-> collections."
+> `.../players/{id}/seasons` already reads that table per-player. Ordering
+> is `canonical_player_id` ascending; pagination is `limit`/`offset` with a
+> max/default page size of 250. `team` is the requested season's membership
+> team (never `current_team`), and may be `null` when unresolved — a valid
+> upstream representation that BBBFFL's replay acquisition treats as fatal
+> rather than guessing. The endpoint does not depend on StatsPro, Home &
+> Away summaries, match appearances, rosters, or the legacy players table.
 >
-> **Why it matters:** this is the one remaining structural gap blocking a
+> **Why it matters:** this was the one remaining structural gap blocking a
 > documented downstream consumer requirement (BBBFFL roadmap package 11,
 > season player pool) from being satisfiable through the public consumer
-> contract, without resorting to a private/internal workaround.
+> contract, without resorting to a private/internal workaround. It is now
+> satisfied and consumed by `app/replay_acquisition.py`.
 
 ## 4. Future work belonging to package 05 or package 08
 

@@ -189,7 +189,11 @@ def _opening_round_readiness(database, season_id: str) -> dict | None:
         "total_completed": readiness.total_completed,
         "is_ready": readiness.is_ready,
         "entries_requiring_action": [
-            {"season_entry_id": entry.season_entry_id, "team_name": entry.team_name, "missing": len(entry.missing_rule_ids)}
+            {
+                "season_entry_id": entry.season_entry_id,
+                "team_name": entry.team_name,
+                "missing": len(entry.missing_rule_ids),
+            }
             for entry in readiness.entries
             if not entry.is_complete
         ],
@@ -248,7 +252,9 @@ def _links(season_id: str, draft_started: bool, ordinary_rounds_created: bool, o
     }
 
 
-def build_season_centre(seasons, identities, draft, preseason, player_pool, lifecycle, season_id: str, database) -> dict:
+def build_season_centre(
+    seasons, identities, draft, preseason, player_pool, lifecycle, season_id: str, database
+) -> dict:
     season = seasons.get_season(season_id)
     if season is None:
         raise KeyError(season_id)

@@ -96,7 +96,12 @@ def _afl_client(ev, bye_round_id, opening_match_home=GWS_CLUB_ID):
     return StaticAflClient(
         matches_by_round={
             ev.afl_opening_round_id: [
-                Match(match_id=7001, home_team=Team(opening_match_home, GWS_CLUB_NAME), away_team=Team(1, "Adelaide"), status="CONCLUDED")
+                Match(
+                    match_id=7001,
+                    home_team=Team(opening_match_home, GWS_CLUB_NAME),
+                    away_team=Team(1, "Adelaide"),
+                    status="CONCLUDED",
+                )
             ]
         },
         rounds_by_season={
@@ -212,6 +217,50 @@ def test_round_preparation_blocks_on_incomplete_opening_round_nominations_with_n
     assert OpeningRoundNominationRepository(db).list_for_round(round_.bbbffl_round_id) == []
 
 
+def test_round_preflight_blocks_when_a_nominated_player_is_traded_away_after_nomination(operations_client, monkeypatch):
+    """PR #132 review (P1): a nomination row existing under the rule is not
+    by itself enough to consider the round safe to open -- once the
+    nominated player is traded away, `build_opening_round_readiness` (fixed
+    to revalidate current ownership, not just cached club) must stop
+    counting it as complete, and round preflight must block again."""
+    client = operations_client
+    db = client.app.state.database
+    round_, entries = configured(db, 2026, evidence.EVIDENCE_2026.compensating_bye_round["GWS"])
+    season_id = db.execute(
+        "SELECT c.season_id FROM bbbffl_round r JOIN competition_stream c ON c.competition_id=r.competition_id "
+        "WHERE r.bbbffl_round_id=?",
+        (round_.bbbffl_round_id,),
+    ).fetchone()["season_id"]
+    OwnershipRepository(db).configure_squad_limit(season_id, 5)
+    rule, ev, bye_round_id = _accept_gws_2026_rule(db, season_id, round_.bbbffl_round_id)
+    nominated_player = _own(db, season_id, entries[0], 920009, "Nominated GWS Player", GWS_CLUB_ID, GWS_CLUB_NAME)
+    # A second owned GWS-eligible player keeps entries[0] "required" for
+    # this rule even after the nominated player is released below --
+    # otherwise this would only prove the entry vanished from tracking, not
+    # that the stale nomination itself was caught.
+    _own(db, season_id, entries[0], 920010, "Replacement GWS Player", GWS_CLUB_ID, GWS_CLUB_NAME)
+    monkeypatch.setattr(client.app.state, "afl_client", _afl_client(ev, bye_round_id))
+    OpeningRoundNominationRepository(db).nominate(
+        rule.rule_id,
+        entries[0].season_entry_id,
+        "M1",
+        nominated_player.season_player_id,
+        client.app.state.afl_client,
+        actor=ADMIN,
+        reason="synthetic",
+    )
+
+    ready = client.get(f"/api/admin/round-preflight/{round_.bbbffl_round_id}").json()
+    assert "opening_round_nominations_incomplete" not in {b["code"] for b in ready["readiness"]["blockers"]}
+
+    OwnershipRepository(db).release(nominated_player.season_player_id)
+
+    blocked = client.get(f"/api/admin/round-preflight/{round_.bbbffl_round_id}").json()
+    codes = {b["code"] for b in blocked["readiness"]["blockers"]}
+    assert "opening_round_nominations_incomplete" in codes
+    assert blocked["readiness"]["safe_to_open"] is False
+
+
 def test_represented_operator_workflow_end_to_end(operations_client, monkeypatch):
     """The full issue #131 acceptance path: structured owned-player data
     scoped to the represented entry only, human-readable rule/round/club
@@ -232,7 +281,9 @@ def test_represented_operator_workflow_end_to_end(operations_client, monkeypatch
     represented = entries[0]
     other_entry = entries[1]
     gws_player = _own(db, season_id, represented, 920003, "Represented GWS Player", GWS_CLUB_ID, GWS_CLUB_NAME)
-    off_club_player = _own(db, season_id, represented, 920004, "Represented Other Player", OTHER_CLUB_ID, OTHER_CLUB_NAME)
+    off_club_player = _own(
+        db, season_id, represented, 920004, "Represented Other Player", OTHER_CLUB_ID, OTHER_CLUB_NAME
+    )
     _own(db, season_id, other_entry, 920005, "Other Entry GWS Player", GWS_CLUB_ID, GWS_CLUB_NAME)
 
     operator, cookies, headers = _authenticate_replay_operator(client, season_id, represented.season_entry_id)
@@ -265,7 +316,12 @@ def test_represented_operator_workflow_end_to_end(operations_client, monkeypatch
     # #5/#6: a mismatched player/rule club combination is rejected server-side.
     mismatch = client.post(
         url + "/nominations",
-        json={"rule_id": rule.rule_id, "season_player_id": off_club_player.season_player_id, "position": "M1", "reason": "mismatch attempt"},
+        json={
+            "rule_id": rule.rule_id,
+            "season_player_id": off_club_player.season_player_id,
+            "position": "M1",
+            "reason": "mismatch attempt",
+        },
         cookies=cookies,
         headers=headers,
     )
@@ -275,7 +331,12 @@ def test_represented_operator_workflow_end_to_end(operations_client, monkeypatch
     # #6/#7: a valid nomination creates the existing locked deferred selection.
     created = client.post(
         url + "/nominations",
-        json={"rule_id": rule.rule_id, "season_player_id": gws_player.season_player_id, "position": "M1", "reason": "synthetic replay input"},
+        json={
+            "rule_id": rule.rule_id,
+            "season_player_id": gws_player.season_player_id,
+            "position": "M1",
+            "reason": "synthetic replay input",
+        },
         cookies=cookies,
         headers=headers,
     )
@@ -311,12 +372,20 @@ def test_represented_operator_workflow_end_to_end(operations_client, monkeypatch
     final_nomination = next(n for n in final["nominations"] if n["nomination_id"] == nomination_id)
     assert final_nomination["position"] == "M2"
     assert len(final_nomination["correction_history"]) == 1
-    assert final_nomination["correction_history"][0]["reason"] == "Replay/reconstructed input correction: audited replay correction"
+    assert (
+        final_nomination["correction_history"][0]["reason"]
+        == "Replay/reconstructed input correction: audited replay correction"
+    )
 
     # CSRF protection remains in force for the represented operator flow.
     unprotected = client.post(
         url + "/nominations",
-        json={"rule_id": rule.rule_id, "season_player_id": gws_player.season_player_id, "position": "M3", "reason": "no csrf"},
+        json={
+            "rule_id": rule.rule_id,
+            "season_player_id": gws_player.season_player_id,
+            "position": "M3",
+            "reason": "no csrf",
+        },
         cookies=cookies,
     )
     assert unprotected.status_code == 403
@@ -344,7 +413,12 @@ def test_cross_entry_and_cross_season_nomination_ids_are_not_found(operations_cl
 
     own_nomination = client.post(
         url_a + "/nominations",
-        json={"rule_id": rule_a.rule_id, "season_player_id": represented_player.season_player_id, "position": "M1", "reason": "synthetic"},
+        json={
+            "rule_id": rule_a.rule_id,
+            "season_player_id": represented_player.season_player_id,
+            "position": "M1",
+            "reason": "synthetic",
+        },
         cookies=cookies,
         headers=headers,
     ).json()["nomination"]

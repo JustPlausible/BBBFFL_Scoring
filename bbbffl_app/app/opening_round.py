@@ -1094,7 +1094,9 @@ def resolve_afl_club_name(database, season_id: str, afl_club_id: int | None) -> 
     return row["afl_team_name"] if row else None
 
 
-def describe_accepted_rule(rule: OpeningRoundRule, database, afl_client, *, round_number_cache: dict | None = None) -> dict:
+def describe_accepted_rule(
+    rule: OpeningRoundRule, database, afl_client, *, round_number_cache: dict | None = None
+) -> dict:
     """One accepted rule, plus resolved presentation fields, e.g. the
     primary operator-facing `display_label`:
     `"GWS Giants — Opening Round → compensating AFL Round 2 → BBBFFL Round 2"`.
@@ -1228,12 +1230,26 @@ def build_opening_round_readiness(database, season_id: str) -> OpeningRoundReadi
         by_entry: dict[str, list[OpeningRoundNomination]] = {}
         for nomination in nominations_by_rule[rule.rule_id]:
             by_entry.setdefault(nomination.season_entry_id, []).append(nomination)
-            nominated.setdefault(nomination.season_entry_id, set()).add(rule.rule_id)
+            # Checked against the player's *current* club and *current*
+            # owner, not merely the state true at nomination time: a trade
+            # or release after nomination must surface here too (a
+            # readiness "complete" must not rest on a slot whose nominated
+            # player the entry no longer owns).
             player = database.execute(
-                "SELECT afl_team_id FROM season_player_pool WHERE season_player_id=?",
+                "SELECT p.afl_team_id, o.season_entry_id AS current_owner_id "
+                "FROM season_player_pool p "
+                "LEFT JOIN player_ownership_period o "
+                "ON o.season_player_id=p.season_player_id AND o.released_at IS NULL "
+                "WHERE p.season_player_id=?",
                 (nomination.season_player_id,),
             ).fetchone()
-            if player is None or player["afl_team_id"] != rule.afl_club_id:
+            is_mismatched = (
+                player is None
+                or player["afl_team_id"] != rule.afl_club_id
+                or player["current_owner_id"] != nomination.season_entry_id
+            )
+            is_conflicting = nomination.bbbffl_round_id != rule.bbbffl_round_id
+            if is_mismatched:
                 mismatched.append(
                     {
                         "nomination_id": nomination.nomination_id,
@@ -1242,7 +1258,7 @@ def build_opening_round_readiness(database, season_id: str) -> OpeningRoundReadi
                         "season_player_id": nomination.season_player_id,
                     }
                 )
-            if nomination.bbbffl_round_id != rule.bbbffl_round_id:
+            if is_conflicting:
                 conflicting.append(
                     {
                         "nomination_id": nomination.nomination_id,
@@ -1250,6 +1266,17 @@ def build_opening_round_readiness(database, season_id: str) -> OpeningRoundReadi
                         "season_entry_id": nomination.season_entry_id,
                     }
                 )
+            # Only a nomination free of both integrity problems actually
+            # satisfies the rule's requirement -- a mismatched/conflicting
+            # nomination still occupies the (rule, entry) slot (so a fresh
+            # nominate() is rejected; an operator must correct it instead),
+            # but must not be counted as "complete" while its underlying
+            # data is inconsistent (issue #131 review: a round preflight or
+            # Season Centre readiness reading "complete" must never rest on
+            # a slot whose nominated player has since been traded/released,
+            # or whose target round has drifted from its rule).
+            if not is_mismatched and not is_conflicting:
+                nominated.setdefault(nomination.season_entry_id, set()).add(rule.rule_id)
         for entry_id, rows in by_entry.items():
             if len(rows) > 1:
                 duplicates.append(

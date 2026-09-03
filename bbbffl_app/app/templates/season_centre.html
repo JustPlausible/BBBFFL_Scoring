@@ -32,6 +32,8 @@
   .readiness-item .value { font-size: 1.3rem; font-weight: 700; }
   .readiness-item .label { color: #9aa3b2; font-size: 0.78rem; }
   .links-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .notice { margin-top: 10px; font-size: 0.85rem; background: #241f0d; border: 1px solid #a5823a; border-radius: 8px; padding: 8px 10px; }
+  .notice ul { margin: 4px 0 0 18px; padding: 0; }
   .form-row { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; align-items: center; }
   .form-row input { flex: 1; min-width: 140px; }
   .muted { color: #9aa3b2; font-size: 0.8rem; }
@@ -169,6 +171,9 @@ function readinessHtml(r) {
   const preseason = r.preseason_window
     ? (r.preseason_window.is_open ? 'Open' : 'Closed')
     : 'Not opened';
+  const openingRound = r.opening_round
+    ? `<div class="readiness-item"><div class="value">${r.opening_round.total_completed}/${r.opening_round.total_required}</div><div class="label">Opening Round nominations ${r.opening_round.is_ready ? '(ready)' : '(incomplete)'}</div></div>`
+    : '';
   return `
     <div class="readiness-grid">
       <div class="readiness-item"><div class="value">${r.entries_established}</div><div class="label">Season entries established</div></div>
@@ -178,7 +183,17 @@ function readinessHtml(r) {
       <div class="readiness-item"><div class="value">${draft}</div><div class="label">Draft</div></div>
       <div class="readiness-item"><div class="value">${preseason}</div><div class="label">Preseason window</div></div>
       <div class="readiness-item"><div class="value">${r.ordinary_rounds_created}</div><div class="label">Ordinary rounds created</div></div>
-    </div>`;
+      ${openingRound}
+    </div>
+    ${openingRoundActionHtml(r.opening_round)}`;
+}
+
+function openingRoundActionHtml(openingRound) {
+  if (!openingRound || openingRound.is_ready) return '';
+  const entries = openingRound.entries_requiring_action || [];
+  if (!entries.length) return '';
+  const items = entries.map(e => `<li>${esc(e.team_name)} — ${e.missing} nomination(s) missing</li>`).join('');
+  return `<div class="notice">Entries requiring action: <ul>${items}</ul></div>`;
 }
 
 function linksHtml(links) {
@@ -194,6 +209,7 @@ function linksHtml(links) {
       <span class="pill off">Opening squads: not yet available in UI</span>
       ${SEASON_ID ? item('Fixture setup', `/admin/fixture-setup/${SEASON_ID}`) : ''}
       ${item('Prepare / open a round', '/admin/round-preflight')}
+      ${links.opening_round ? item('Opening Round Operations', links.opening_round) : ''}
     </div>`;
 }
 

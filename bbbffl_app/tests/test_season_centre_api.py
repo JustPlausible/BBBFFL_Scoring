@@ -6,11 +6,23 @@ repositories do. Mirrors `tests/test_preseason_api.py`'s isolated-database
 fixture pattern.
 """
 
+import re
 import tempfile
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+
+from app.audit import ActorContext
+from app.opening_round import OpeningRoundRuleRepository
+from tests.test_competition_lifecycle import configured
+
+ADMIN = ActorContext.anonymous_operator("admin")
+
+
+class _AnyRoundExists:
+    def round_exists(self, season, round_):
+        return True
 
 
 @pytest.fixture
@@ -207,3 +219,54 @@ def test_create_and_update_coach_reject_duplicate_email_with_400_not_500(season_
         f"/api/admin/season-centre/coaches/{other['coach_id']}", json={"email": "dup@example.test"}
     )
     assert duplicate_update.status_code == 400
+
+
+def test_secretary_does_not_see_opening_round_link_but_admin_does(season_centre_client):
+    """PR #132 review: Opening Round Operations requires `opening_round.
+    nominate` (Scorer/Replay Operator/Admin), which a Secretary lacks --
+    Season Centre must hide the link for a Secretary even once rules are
+    accepted for the season, exactly like the existing `draft.participate`
+    filtering already applied to the `draft` link."""
+    client = season_centre_client
+    db = client.app.state.database
+    round_, _entries = configured(db, 2026, 1345)
+    season_id = db.execute(
+        "SELECT c.season_id FROM bbbffl_round r JOIN competition_stream c ON c.competition_id=r.competition_id "
+        "WHERE r.bbbffl_round_id=?",
+        (round_.bbbffl_round_id,),
+    ).fetchone()["season_id"]
+    OpeningRoundRuleRepository(db).accept(
+        season_id, 15, 2026, 1343, 1345, round_.bbbffl_round_id, _AnyRoundExists(), actor=ADMIN, reason="test"
+    )
+
+    admin_view = client.get(f"/api/admin/season-centre/{season_id}").json()
+    assert admin_view["links"]["opening_round"] == f"/operations/seasons/{season_id}/opening-round"
+
+    operator = client.app.state.identities.create_coach("Authenticated Secretary", email="secretary@example.test")
+    client.app.state.credentials.set_password(operator.coach_id, "correct horse battery staple", actor=ADMIN)
+    client.app.state.role_grants.grant(operator.coach_id, "secretary", season_id=season_id, actor=ADMIN)
+
+    login_page = client.get("/login")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text).group(1)
+    login = client.post(
+        "/login",
+        data={"email": "secretary@example.test", "password": "correct horse battery staple", "csrf_token": token},
+        cookies=login_page.cookies,
+        follow_redirects=False,
+    )
+    session = login.cookies["bbbffl_session"]
+    account = client.get("/account", cookies={"bbbffl_session": session})
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', account.text).group(1)
+    cookies = {"bbbffl_session": session, "bbbffl_csrf": account.cookies["bbbffl_csrf"]}
+    headers = {"X-CSRF-Token": csrf}
+    assert (
+        client.post("/api/context/role", json={"role": "secretary"}, cookies=cookies, headers=headers).status_code
+        == 200
+    )
+
+    secretary_view = client.get(f"/api/admin/season-centre/{season_id}", cookies=cookies).json()
+    assert secretary_view["links"]["opening_round"] is None
+    # The readiness summary itself (nomination progress counts) stays
+    # informational for a Secretary -- only the link into a page they
+    # cannot use is hidden.
+    assert secretary_view["readiness"]["opening_round"] is not None

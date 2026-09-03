@@ -74,10 +74,23 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
 
 def _season_view(state, season_id: str, principal: Principal):
     view = build_season_centre(
-        state.seasons, state.identities, state.draft, state.preseason, state.player_pool, state.lifecycle, season_id
+        state.seasons,
+        state.identities,
+        state.draft,
+        state.preseason,
+        state.player_pool,
+        state.lifecycle,
+        season_id,
+        state.database,
     )
     if not principal_has_capability(principal, "draft.participate"):
         view["links"]["draft"] = None
+    # Opening Round Operations requires `opening_round.nominate` (Scorer,
+    # Replay Operator, or Admin) -- a Secretary lacks it, so hide the link
+    # rather than send them to a page whose data request would 403 (issue
+    # #131 PR review finding), mirroring the `draft` filtering above.
+    if not principal_has_capability(principal, "opening_round.nominate"):
+        view["links"]["opening_round"] = None
     return view
 
 

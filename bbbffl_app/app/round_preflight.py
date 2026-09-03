@@ -4,7 +4,12 @@ from contextlib import nullcontext
 
 from app.afl_client import is_recognized_match_status
 from app.lockouts import LockoutTriggerRepository
-from app.opening_round import OpeningRoundNominationRepository
+from app.opening_round import (
+    OpeningRoundNominationRepository,
+    OpeningRoundRuleRepository,
+    build_opening_round_readiness,
+    describe_accepted_rules,
+)
 from app.round_mapping import AflApiReferenceValidator, RoundMappingRepository
 
 
@@ -204,17 +209,68 @@ def build_round_preflight(database, lifecycle, identities, afl_client, round_id:
             }
         )
 
+    # Issue #131: where an ordinary round depends on Opening Round deferred
+    # selections (an accepted rule targets this round), incomplete
+    # nominations are a readiness blocker, not a silent gap -- and never
+    # inferred/created here, only reported, with a direct navigation path
+    # back to the existing Opening Round Operations workflow.
+    rule_repo = OpeningRoundRuleRepository(database)
+    round_rules = [
+        rule for rule in rule_repo.list_accepted_for_season(logical["season_id"]) if rule.bbbffl_round_id == round_id
+    ]
+    if round_rules:
+        opening_round_readiness = build_opening_round_readiness(database, logical["season_id"])
+        target_rule_ids = {rule.rule_id for rule in round_rules}
+        incomplete_entries = [
+            {
+                "season_entry_id": entry.season_entry_id,
+                "team_name": entry.team_name,
+                "missing_count": len(set(entry.missing_rule_ids) & target_rule_ids),
+            }
+            for entry in opening_round_readiness.entries
+            if set(entry.missing_rule_ids) & target_rule_ids
+        ]
+        if incomplete_entries:
+            blockers.append(
+                {
+                    "code": "opening_round_nominations_incomplete",
+                    "message": (
+                        f"This round depends on Opening Round deferred selections; "
+                        f"{len(incomplete_entries)} entry/entries have an incomplete nomination. "
+                        "Complete nominations in Opening Round Operations before opening this round."
+                    ),
+                    "url": f"/operations/seasons/{logical['season_id']}/opening-round",
+                    "entries": incomplete_entries,
+                }
+            )
+
     nominations = OpeningRoundNominationRepository(database).list_for_round(round_id)
     opening = []
     entry_names = {entry.season_entry_id: entry.team_name for entry in identities.list_entries(logical["season_id"])}
+    described_rules = (
+        {rule["rule_id"]: rule for rule in describe_accepted_rules(database, afl_client, logical["season_id"])}
+        if nominations
+        else {}
+    )
     for nomination in nominations:
         context = OpeningRoundNominationRepository(database).deferred_context(
             round_id, nomination.season_entry_id, nomination.position
         )
+        player_row = database.execute(
+            "SELECT display_name, afl_team_name FROM season_player_pool WHERE season_player_id=?",
+            (nomination.season_player_id,),
+        ).fetchone()
+        rule_view = described_rules.get(nomination.rule_id)
         opening.append(
             {
                 **nomination.__dict__,
                 "team_name": entry_names.get(nomination.season_entry_id, "Unknown team"),
+                "player_display_name": player_row["display_name"] if player_row else None,
+                "afl_club_name": player_row["afl_team_name"] if player_row else None,
+                "rule_display_label": rule_view["display_label"] if rule_view else None,
+                "afl_opening_round_label": rule_view["afl_opening_round_label"] if rule_view else None,
+                "afl_bye_round_label": rule_view["afl_bye_round_label"] if rule_view else None,
+                "bbbffl_round_label": rule_view["bbbffl_round_label"] if rule_view else None,
                 **(context or {}),
             }
         )

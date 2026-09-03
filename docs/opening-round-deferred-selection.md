@@ -1,18 +1,27 @@
 # Opening Round deferred selection and compensating-bye scoring
 
-**Status:** implemented, issue [#69](https://github.com/JustPlausible/BBBFFL_Scoring/issues/69) (follow-up to #31's exceptional round mapping)<br>
-**Implementation:** `bbbffl_app/app/opening_round.py`, integrated into
-`bbbffl_app/app/calculations.py` (per-slot scoring-source resolution),
-`bbbffl_app/app/lineup_validation.py` (bye/DNP distinction) and
+**Status:** implemented, issue [#69](https://github.com/JustPlausible/BBBFFL_Scoring/issues/69) (follow-up to #31's exceptional round mapping); discoverability/presentation/readiness extended by issue [#131](https://github.com/JustPlausible/BBBFFL_Scoring/issues/131)<br>
+**Implementation:** `bbbffl_app/app/opening_round.py` (domain writes, plus
+issue #131's `describe_accepted_rule(s)`/`resolve_afl_club_name` presentation
+helpers and `build_opening_round_readiness` readiness read model), integrated
+into `bbbffl_app/app/calculations.py` (per-slot scoring-source resolution),
+`bbbffl_app/app/lineup_validation.py` (bye/DNP distinction),
 `bbbffl_app/app/lineups.py`'s `WeeklyLineupRepository.submit`/
 `submit_positions` (via the same optional `lock_guard` integration point
-`app/lockouts.py` uses)<br>
+`app/lockouts.py` uses), `bbbffl_app/app/routes/delegated_operations.py` (the
+represented-operator Opening Round Operations API/page),
+`bbbffl_app/app/season_centre.py`/`routes/season_centre.py` (discoverability
+and season-wide readiness), and `bbbffl_app/app/round_preflight.py`
+(incomplete-nomination readiness gate for a dependent ordinary round)<br>
 **Schema:** `bbbffl_app/migrations/versions/0020_opening_round_deferral.py`
 (`opening_round_rule`/`opening_round_rule_revision`, `opening_round_nomination`),
-see [`database-migrations.md`](database-migrations.md)<br>
+see [`database-migrations.md`](database-migrations.md) -- issue #131 added no
+schema, only read-model resolution over this existing storage<br>
 **Evidence:** [`docs/evidence/opening-round/`](evidence/opening-round/) (raw
 2024/2025/2026 captures), `bbbffl_app/tests/opening_round_evidence.py`
-(distilled facts), `bbbffl_app/tests/test_opening_round.py`<br>
+(distilled facts), `bbbffl_app/tests/test_opening_round.py`,
+`bbbffl_app/tests/test_opening_round_operations_api.py` (issue #131 HTTP
+coverage)<br>
 **Depends on:** the accepted BBBFFL-to-AFL round mapping
 ([`round-afl-mapping.md`](round-afl-mapping.md), issue #31), weekly lineup
 drafts/submissions ([`weekly-lineups.md`](weekly-lineups.md), issue #33),
@@ -344,18 +353,59 @@ The 2026 first-half replay bootstrap (issue #126, `bbbffl_app/app/replay_bootstr
 ## Replay operator browser workflow
 
 After selecting an authorised represented entry in shared acting context, open
-`/operations/seasons/<season-id>/opening-round`. The page lists only accepted
-Opening Round rule revisions; those rules, rather than browser calculations or
-hard-coded 2026 club lists, determine the compensating bye and target BBBFFL
-round. Choose an owned player and legal slot, enter the replay reason, and create
-the nomination. The existing nomination repository validates rule, club,
-ownership, slot, player and conflicts, and the existing preload operation places
-the selection in the target weekly draft. The delegated lineup displays it as
-**Opening Round deferred — locked** and submission remains protected by the
-server-side deferred-selection guard.
+**Opening Round Operations** from its **Season Centre** link (issue #131) --
+visible only once at least one Opening Round rule is accepted for the season,
+never before that, and never requiring the operator to know or type
+`/operations/seasons/<season-id>/opening-round` directly. Season Centre also
+shows nomination progress there (e.g. `7/10 complete`) and which entries still
+require action, driven by the same `app.opening_round.
+build_opening_round_readiness` read model the Opening Round Operations page
+and Round Preflight's incomplete-nomination blocker both reuse -- one
+readiness computation, not three.
 
-Corrections use the page's audited correction operation and require a reason.
-Browser-created records are labelled **replay/reconstructed input entered by the
-authenticated operator**. This wording is intentional: the available AFL
-evidence establishes the Opening Round structure, but does not establish that a
-historical BBBFFL coach made a particular nomination.
+The page lists only accepted Opening Round rule revisions, rendered with a
+human-readable primary label (`app.opening_round.describe_accepted_rule`),
+e.g. `GWS Giants — Opening Round → compensating AFL Round 4 → BBBFFL Round
+2`, resolved from the already-cached `season_player_pool.afl_team_name`, the
+persisted `bbbffl_round.label`, and `afl_client.get_rounds` -- never a raw AFL
+club ID or BBBFFL round UUID as the primary label (those remain visible as
+secondary diagnostics). The owned-player list is server-scoped to the
+represented entry's authoritative current squad only (`season_player_id`,
+display name, AFL club ID and name, canonical player ID) -- never an
+arbitrary player query filtered client-side. Choosing an owned player
+identifies the matching accepted club rule automatically and previews the
+compensating AFL round, target BBBFFL round and target position before
+confirmation; the browser still submits the resolved `rule_id`, and the
+server independently revalidates the player's club, ownership, season and
+slot -- the browser's preview is never trusted as the authority. Enter the
+replay reason and create the nomination: the existing nomination repository
+validates rule, club, ownership, slot, player and conflicts exactly as
+before, and the existing preload operation places the selection in the
+target weekly draft. The delegated lineup displays it as **Opening Round
+deferred — locked** and submission remains protected by the server-side
+deferred-selection guard.
+
+Corrections use the page's audited correction operation and require a
+reason. Recorded nominations render with the same human-readable player
+name/club, represented team, source Opening Round/compensating AFL
+round/target BBBFFL round, target position and correction history as the
+primary display; internal identifiers (nomination/rule/player IDs) remain
+available as secondary diagnostics only. Browser-created records are
+labelled **replay/reconstructed input entered by the authenticated
+operator**. This wording is intentional: the available AFL evidence
+establishes the Opening Round structure, but does not establish that a
+historical BBBFFL coach made a particular nomination -- and nominations must
+never be inferred, guessed, or backfilled from later AFL statistics or match
+results.
+
+## Where an ordinary round depends on Opening Round nominations (issue #131)
+
+`app.round_preflight.build_round_preflight` checks whether any accepted
+Opening Round rule targets the round being prepared. If so, and any eligible
+entry's nomination for that rule is still missing, opening is blocked with an
+`opening_round_nominations_incomplete` readiness blocker naming the affected
+entries and linking directly back to Opening Round Operations for that
+season -- never silently inferred or auto-created. The same preflight view's
+existing "Opening Round exceptions" section (already-locked deferred
+selections for this round) is rendered with the same human-readable
+player/club/round labels described above, not raw identifiers.

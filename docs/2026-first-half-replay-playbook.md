@@ -111,18 +111,28 @@ $COMPOSE run --rm -v "$PWD/bbbffl_app:/app" app python -m scripts.bootstrap_2026
 
 Require `READY` and verify 2026 rules, ordinary competition, ten genuine coach/team identities, Administrator grant/acting contexts, BBBFFL rounds 1–9, provider/year/player count, squad limit, accepted ten-position draft order, no completed pick, Draft Board next action **Pick 1**, and the report's `opening_round` section showing `accepted_rule_count: 10`, `complete: true`, and `targets: {"2": 4, "3": 4, "4": 2}` with `nomination_count: 0`. This Opening Round activation is established from the local acquired evidence acquired in step C; AFL-api remains disconnected throughout. See `2026-first-half-replay-bootstrap.md` for conflict diagnostics.
 
-Then, in the browser: sign in as the provisioned Administrator, open **Draft Board** and confirm the next action is **Pick 1**, then open **Opening Round Operations** for the 2026 season and confirm all ten accepted rules are visible with zero nominations. Player nominations are entered later, through that same Opening Round Operations workflow, only after the draft has produced actual owned players -- never during bootstrap and never inferred from later results.
+Then, in the browser: sign in as the provisioned Administrator, open **Draft Board** and confirm the next action is **Pick 1**. From **Season Centre**, the Opening Round Operations section is now visible (accepted rules exist); its nomination-progress indicator counts currently owned, rule-eligible players rather than accepted rules, so with no picks made yet it correctly reads `0/0` (reported ready -- there is nothing to complete before any club's player is owned), not `0/10`. Open it from that link and confirm all ten accepted rules are visible with zero nominations. Player nominations are entered later, through that same Opening Round Operations workflow reached from Season Centre, only after the draft has produced actual owned players (see section F, steps 6–7) -- never during bootstrap and never inferred from later results.
 
 ## F. Preseason browser workflow
+
+This section is the authoritative operator sequence for everything between
+bootstrap and the first round preparation: (1) bootstrap season/rules is
+section E, above; (2) complete the preseason draft is steps 1–2 below; (3)
+validate/freeze opening squads is steps 3–5; (4) complete Opening Round
+reconstructed nominations is step 6; (5) confirm Opening Round nomination
+readiness is step 7; (6) prepare/open applicable ordinary BBBFFL rounds is
+section G, next.
 
 1. Sign in at `/login` with the provisioned Administrator and verify the active Administrator role/acting context in **Season Centre**.
 2. Open **Draft Board**, make each genuine pick in order, and finalise the draft using its supported action.
 3. In Season Centre/Draft Board verify all ten squads and the configured squad limit.
 4. Exercise only historically required supported **Preseason Trades**; never reconstruct with SQL.
 5. Freeze opening squads through the existing season lifecycle control.
-6. Open **Fixture Draw**, conduct the fixture-number draw, and record its audit event.
-7. Preview all R1–R9 fixtures; require five matchups each.
-8. Explicitly accept/freeze the draw. Capture the UI/audit checkpoint and database backup.
+6. **Complete Opening Round reconstructed nominations.** From **Season Centre**, open the season, and once the draft has produced owned players use the **Opening Round Operations** action shown there (it links to `/operations/seasons/<season-id>/opening-round`; there is no need to know or type that URL directly). For every represented entry with an owned player from a club covered by an accepted Opening Round rule, choose that player -- the page resolves the matching club rule, compensating AFL round and target BBBFFL round automatically -- pick the target slot, and create the nomination with a replay/reconstructed reason. **Nominations are operator/replay evidence entered from the acquired Opening Round club/bye facts (section C) and the coach's actual drafted squad -- never inferred, guessed, or backfilled from any later AFL statistics or match results.**
+7. **Confirm Opening Round nomination readiness.** Still in Season Centre (or on the Opening Round Operations page itself), verify the nomination-progress indicator reads complete (e.g. `10/10`) and ready before continuing -- an incomplete state is a stop-and-fix condition, not a warning to note and proceed past.
+8. Open **Fixture Draw**, conduct the fixture-number draw, and record its audit event.
+9. Preview all R1–R9 fixtures; require five matchups each.
+10. Explicitly accept/freeze the draw. Capture the UI/audit checkpoint and database backup.
 
 ## G. Canonical procedure for each BBBFFL round 1–9
 
@@ -134,8 +144,8 @@ For each round:
 2. Stage a timezone-aware pre-lockout instant with `$COMPOSE run --rm -v "$PWD/bbbffl_app:/app" -v "$PWD/replay/2026-first-half/state:/replay/state" app python -m scripts.first_half_replay checkpoint --state /replay/state/checkpoint.json --effective-at <UTC-ISO> --stage scheduled`; restart app. The source mount supplies the intentionally image-excluded operator script, while the writable one-off state mount overrides the application's read-only state mount without changing the runtime container.
 3. Verify the persisted JSON and replay time/checkpoint shown in diagnostics/logging.
 4. Verify authenticated role and acting context.
-5. Open **Round Preflight**; verify five fixtures, accepted AFL mapping, and selective/main trigger configuration.
-6. Inspect **Opening Round Operations** deferred selections where applicable, pass readiness, then **Open Round**.
+5. Open **Round Preflight**; verify five fixtures, accepted AFL mapping, and selective/main trigger configuration. Where an accepted Opening Round rule targets this round, Round Preflight itself blocks opening and links back to **Opening Round Operations** if any entry's nomination is still incomplete (section F, steps 6–7 should already have completed this; treat a blocker here as a sign that step was missed, not something to work around).
+6. Review the readable locked deferred selections shown under **Opening Round exceptions** (player, club, source/compensating AFL round, target BBBFFL round) for provenance, then **Open Round**.
 7. Through **Weekly Lineup**, create, carry forward, or Administrator-proxy all ten lineups using only supported actions; record submission/proxy provenance.
 8. Repeat the checkpoint command at each relevant scheduled match start and main boundary, restarting app each time. Confirm later-club edits remain possible and started/triggered edits are rejected.
 9. Stage finality with the same source-mounted command plus `--effective-at <after-final-UTC> --stage final-results --round-id <mapped-AFL-round-id>`; restart. The command retains all previously released round IDs and refuses to move effective time backwards. Verify only the released round becomes `CONCLUDED` with final stats; future rounds remain hidden.
@@ -179,7 +189,7 @@ Do not declare B½ successful until all are checked:
 - [ ] Immutable result versions/correction histories remain accessible.
 - [ ] Ownership/squads and ten coach/team identities are correct.
 - [ ] Role grants and acting contexts remain correct.
-- [ ] Opening Round deferred-selection and compensating-bye provenance is complete.
+- [ ] Opening Round deferred-selection and compensating-bye provenance is complete, and Opening Round Operations' nomination readiness (Season Centre and Round Preflight) showed ready before every dependent round was opened.
 - [ ] Every DNP/interchange/manual ruling is resolved, or recorded as a blocking defect.
 - [ ] No unexpected draft is open and no unexpected lineup draft/submission remains.
 - [ ] Round 9 database backup/checkpoint exists.

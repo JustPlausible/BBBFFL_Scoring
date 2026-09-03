@@ -36,6 +36,7 @@ ACTOR = ActorContext.anonymous_operator("admin")
 def repos():
     db = migrated_connection()
     return {
+        "database": db,
         "seasons": SeasonRepository(db),
         "identities": IdentityRepository(db),
         "draft": DraftRepository(db),
@@ -54,6 +55,7 @@ def _build(repos, season_id):
         repos["player_pool"],
         repos["lifecycle"],
         season_id,
+        repos["database"],
     )
 
 

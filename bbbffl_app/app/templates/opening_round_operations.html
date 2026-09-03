@@ -1,6 +1,107 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Opening Round replay nominations · BBBFFL</title><style>
-:root{color-scheme:dark}body{font:15px system-ui;margin:auto;max-width:950px;padding:22px;background:#0f1115;color:#e7e9ee}a{color:#79c0ff}.card{background:#171a21;border:1px solid #303744;border-radius:11px;padding:17px;margin:14px 0}.banner{border:3px solid #d29922}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}label{display:grid;gap:4px}button,input,select{font:inherit;padding:8px;border:1px solid #596273;border-radius:6px;background:#222733;color:inherit}.muted{color:#aab2c0}.item{padding:10px;background:#11151b;border-radius:7px;margin:8px 0}
-</style></head><body><a href="/admin/round-preflight">← Round preflight</a><h1>Opening Round deferred-selection replay</h1><div id="message"></div><main id="app">Loading accepted rules…</main><script>
-const seasonId={{season_id|tojson}},csrf={{csrf_token|tojson}};let state;const e=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));async function api(path,method='GET',body){let r=await fetch(path,{method,headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:body?JSON.stringify(body):undefined}),d=await r.json();if(!r.ok)throw Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail));return d}function msg(x,ok=false){let n=document.querySelector('#message');n.className='card';n.style.borderColor=ok?'#3fb950':'#f85149';n.textContent=x}
-function render(d){state=d;document.querySelector('#app').innerHTML=`<section class="card banner"><strong>REPLAY / RECONSTRUCTED INPUT</strong><p><b>Representing:</b> ${e(d.represented_entry.team_name)}</p><p>${e(d.provenance_notice)}</p></section><section class="card"><h2>Accepted, authoritative rules</h2>${d.rules.map(r=>`<div class="item">Club ${e(r.afl_club_id)} · Opening Round ${e(r.afl_opening_round_id)} → compensating bye AFL round ${e(r.afl_bye_round_id)} → target BBBFFL round <b>${e(r.bbbffl_round_id)}</b><br><span class="muted">Accepted revision ${e(r.revision)} · ${e(r.evidence_classification)}</span></div>`).join('')||'<b>No accepted Opening Round rules exist for this season.</b>'}<form id="nominate"><div class="grid"><label>Accepted rule<select name="rule" required>${d.rules.map(r=>`<option value="${e(r.rule_id)}">Club ${e(r.afl_club_id)} → ${e(r.bbbffl_round_id)}</option>`).join('')}</select></label><label>Owned player<select name="player" required>${d.players.map(p=>`<option value="${e(p)}">${e(p)}</option>`).join('')}</select></label><label>Target position<select name="position">${['F1','F2','F3','M1','M2','M3','Ruck','Tackler','Interchange'].map(p=>`<option>${p}</option>`).join('')}</select></label><label>Replay reason<input name="reason" required value="Replay/reconstructed Opening Round nomination"></label></div><button>Create and preload locked nomination</button></form></section><section class="card"><h2>Current locked deferred selections</h2>${d.nominations.map(n=>`<div class="item"><b>${e(n.position)}</b> · player ${e(n.season_player_id)} · target ${e(n.bbbffl_round_id)}<br><span class="muted">Locked; source Opening Round match ${e(n.source_afl_match_id)}. Entered by ${e(n.actor_id)} (${e(n.actor_role)}), not attributed to the represented coach.</span><details><summary>Correct nomination</summary><form data-correct="${e(n.nomination_id)}"><input name="position" value="${e(n.position)}"><input name="player" value="${e(n.season_player_id)}"><input name="reason" required placeholder="Correction reason"><button>Apply audited correction</button></form></details></div>`).join('')||'<p>No replay nominations for this represented entry.</p>'}</section>`;document.querySelector('#nominate').onsubmit=nominate;document.querySelectorAll('[data-correct]').forEach(x=>x.onsubmit=correct)}async function nominate(x){x.preventDefault();let f=new FormData(x.target);try{await api(`/api/operations/seasons/${seasonId}/opening-round/nominations`,'POST',{rule_id:f.get('rule'),season_player_id:f.get('player'),position:f.get('position'),reason:f.get('reason')});await load();msg('Replay nomination created and target lineup preloaded.',true)}catch(e){msg(e.message)}}async function correct(x){x.preventDefault();let f=new FormData(x.target);try{await api(`/api/operations/seasons/${seasonId}/opening-round/nominations/${x.target.dataset.correct}`,'PATCH',{position:f.get('position'),season_player_id:f.get('player'),reason:f.get('reason')});await load();msg('Audited correction applied.',true)}catch(e){msg(e.message)}}async function load(){render(await api(`/api/operations/seasons/${seasonId}/opening-round`))}load().catch(e=>msg(e.message));
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Opening Round Operations · BBBFFL</title><style>
+:root{color-scheme:dark}body{font:15px system-ui;margin:auto;max-width:980px;padding:22px;background:#0f1115;color:#e7e9ee}a{color:#79c0ff}.card{background:#171a21;border:1px solid #303744;border-radius:11px;padding:17px;margin:14px 0}.banner{border:3px solid #d29922}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}label{display:grid;gap:4px}button,input,select{font:inherit;padding:8px;border:1px solid #596273;border-radius:6px;background:#222733;color:inherit}.muted{color:#aab2c0;font-size:13px}.item{padding:10px;background:#11151b;border-radius:7px;margin:8px 0}.ok{border-left:4px solid #3fb950}.bad{border-left:4px solid #f85149}.warn{border-left:4px solid #d29922}.pill{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px;font-weight:600}.pill.ok{background:#123822;color:#7ee2a8;border:none}.pill.bad{background:#3a1414;color:#ffb4ab;border:none}.preview{margin-top:8px}details summary{cursor:pointer}
+</style></head><body><a href="/admin/round-preflight">← Round preflight</a><h1>Opening Round Operations — deferred-selection replay</h1><div id="message"></div><main id="app">Loading accepted rules…</main><script>
+const seasonId={{season_id|tojson}},csrf={{csrf_token|tojson}};let state;const e=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));const POSITIONS=['F1','F2','F3','M1','M2','M3','Ruck','Tackler','Interchange'];
+async function api(path,method='GET',body){let r=await fetch(path,{method,headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:body?JSON.stringify(body):undefined}),d=await r.json();if(!r.ok)throw Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail));return d}
+function msg(x,ok=false){let n=document.querySelector('#message');n.className='card';n.style.borderColor=ok?'#3fb950':'#f85149';n.textContent=x}
+
+function ruleItem(r){
+  return `<div class="item"><strong>${e(r.display_label)}</strong><br>
+  <span class="muted">Accepted revision ${e(r.revision)} · evidence ${e(r.evidence_classification)}</span>
+  <details><summary class="muted">Internal identifiers</summary><span class="muted">rule ${e(r.rule_id)} · AFL club ${e(r.afl_club_id)} · AFL season ${e(r.afl_season_id)} ·
+  opening round ${e(r.afl_opening_round_id)} · bye round ${e(r.afl_bye_round_id)} · BBBFFL round ${e(r.bbbffl_round_id)}</span></details></div>`;
+}
+
+function readinessCard(d){
+  const r=d.readiness;
+  if(!r) return '';
+  const missing=r.missing_rule_ids.map(id=>(state.rulesById[id]||{}).display_label||id);
+  return `<section class="card ${r.is_complete?'ok':'warn'}"><h2>Nomination readiness for ${e(d.represented_entry.team_name)}</h2>
+  <p><span class="pill ${r.is_complete?'ok':'bad'}">${e(r.nominated_rule_ids.length)}/${e(r.required_rule_ids.length)} complete</span></p>
+  ${r.is_complete?'<p>All eligible Opening Round rules for this represented entry have a locked nomination.</p>'
+    :`<p>Missing nomination(s) for: ${missing.map(e).join(', ')}</p>`}
+  </section>`;
+}
+
+function nominationItem(n){
+  const corrections=(n.correction_history||[]);
+  return `<div class="item"><strong>${e(n.player_display_name)} — ${e(n.afl_club_name)}</strong> · slot <b>${e(n.position)}</b><br>
+  Represented team: ${e(state.represented_entry.team_name)}<br>
+  Source: ${e(n.afl_opening_round_label)} → compensating ${e(n.afl_bye_round_label)} → target ${e(n.bbbffl_round_label)}<br>
+  <span class="muted">Replay/reconstructed input entered by ${e(n.entered_by_display_name)} (${e(n.actor_role)}); not attributed to the represented coach.</span>
+  ${corrections.length?`<details><summary class="muted">Correction history (${corrections.length})</summary>${corrections.map(c=>`<div class="muted item">${e(c.occurred_at)} — ${e(c.reason)}<br>before: ${e(JSON.stringify(c.before_state))} → after: ${e(JSON.stringify(c.after_state))}</div>`).join('')}</details>`:''}
+  <details><summary class="muted">Internal identifiers</summary><span class="muted">nomination ${e(n.nomination_id)} · rule ${e(n.rule_id)} · player ${e(n.season_player_id)} · source AFL match ${e(n.source_afl_match_id)} · target round ${e(n.bbbffl_round_id)}</span></details>
+  <details><summary>Correct nomination</summary><form data-correct="${e(n.nomination_id)}"><div class="grid">
+  <label>Position<select name="position">${POSITIONS.map(p=>`<option ${p===n.position?'selected':''}>${p}</option>`).join('')}</select></label>
+  <label>Owned player<select name="player">${state.players.map(p=>`<option value="${e(p.season_player_id)}" ${p.season_player_id===n.season_player_id?'selected':''}>${e(p.display_name)} — ${e(p.afl_club_name)}</option>`).join('')}</select></label>
+  <label>Correction reason<input name="reason" required placeholder="Why this correction is necessary"></label></div>
+  <button>Apply audited correction</button></form></details></div>`;
+}
+
+function playerOption(p){return `<option value="${e(p.season_player_id)}" data-club="${e(p.afl_club_id)}">${e(p.display_name)} — ${e(p.afl_club_name)}</option>`;}
+
+function render(d){
+  state=d;
+  state.rulesById=Object.fromEntries(d.rules.map(r=>[r.rule_id,r]));
+  state.rulesByClub=Object.fromEntries(d.rules.map(r=>[r.afl_club_id,r]));
+  document.querySelector('#app').innerHTML=`
+  <section class="card banner"><strong>REPLAY / RECONSTRUCTED INPUT</strong><p><b>Representing:</b> ${e(d.represented_entry.team_name)}</p><p>${e(d.provenance_notice)}</p></section>
+  ${readinessCard(d)}
+  <section class="card"><h2>Accepted, authoritative rules</h2>${d.rules.map(ruleItem).join('')||'<b>No accepted Opening Round rules exist for this season.</b>'}</section>
+  <section class="card"><h2>Nominate an owned player</h2>
+  <form id="nominate"><div class="grid">
+  <label>Owned player<select name="player" id="player-select" required><option value="" disabled selected>Choose an owned player…</option>${d.players.map(playerOption).join('')}</select></label>
+  <label>Target position<select name="position">${POSITIONS.map(p=>`<option>${p}</option>`).join('')}</select></label>
+  <label>Replay reason<input name="reason" required value="Replay/reconstructed Opening Round nomination"></label>
+  </div>
+  <input type="hidden" name="rule" id="rule-value">
+  <div class="preview muted" id="rule-preview">Choose an owned player to identify the applicable Opening Round rule.</div>
+  <button id="nominate-submit" disabled>Create and preload locked nomination</button></form>
+  </section>
+  <section class="card"><h2>Current locked deferred selections</h2>${d.nominations.map(nominationItem).join('')||'<p>No replay nominations for this represented entry.</p>'}</section>`;
+  document.querySelector('#nominate').onsubmit=nominate;
+  document.querySelectorAll('[data-correct]').forEach(x=>x.onsubmit=correct);
+  document.querySelector('#player-select').onchange=updatePreview;
+  updatePreview();
+}
+
+function updatePreview(){
+  const select=document.querySelector('#player-select');
+  const preview=document.querySelector('#rule-preview');
+  const ruleField=document.querySelector('#rule-value');
+  const submit=document.querySelector('#nominate-submit');
+  const option=select.selectedOptions[0];
+  const clubId=option&&option.dataset.club?Number(option.dataset.club):null;
+  const rule=clubId!=null?state.rulesByClub[clubId]:null;
+  if(!option||!option.value){preview.textContent='Choose an owned player to identify the applicable Opening Round rule.';ruleField.value='';submit.disabled=true;return}
+  if(!rule){preview.textContent=`No accepted Opening Round rule covers this player's AFL club (club ${clubId}). This player cannot be nominated.`;ruleField.value='';submit.disabled=true;return}
+  ruleField.value=rule.rule_id;
+  submit.disabled=false;
+  preview.innerHTML=`Resolved rule: <b>${e(rule.display_label)}</b><br>Compensating AFL round: ${e(rule.afl_bye_round_label)} · Target BBBFFL round: ${e(rule.bbbffl_round_label)}`;
+}
+
+async function nominate(x){
+  x.preventDefault();
+  let f=new FormData(x.target);
+  const ruleId=f.get('rule');
+  if(!ruleId){msg('Choose an owned player whose AFL club matches an accepted Opening Round rule.');return}
+  try{
+    await api(`/api/operations/seasons/${seasonId}/opening-round/nominations`,'POST',{rule_id:ruleId,season_player_id:f.get('player'),position:f.get('position'),reason:f.get('reason')});
+    await load();
+    msg('Replay nomination created and target lineup preloaded.',true);
+  }catch(err){msg(err.message)}
+}
+
+async function correct(x){
+  x.preventDefault();
+  let f=new FormData(x.target);
+  try{
+    await api(`/api/operations/seasons/${seasonId}/opening-round/nominations/${x.target.dataset.correct}`,'PATCH',{position:f.get('position'),season_player_id:f.get('player'),reason:f.get('reason')});
+    await load();
+    msg('Audited correction applied.',true);
+  }catch(err){msg(err.message)}
+}
+
+async function load(){render(await api(`/api/operations/seasons/${seasonId}/opening-round`))}
+load().catch(err=>msg(err.message));
 </script></body></html>

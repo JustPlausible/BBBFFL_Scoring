@@ -64,6 +64,7 @@ repeatedly (e.g. from a round-open workflow or a replay operator), and never
 touches positions with no active nomination.
 """
 
+import dataclasses
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -1037,3 +1038,253 @@ class OpeningRoundSelectionGuard:
             remaining_previous = {p: v for p, v in previous_positions.items() if p not in deferred}
             remaining_proposed = {p: v for p, v in proposed_positions.items() if p not in deferred}
             self._inner(conn, lineup_row, remaining_previous, remaining_proposed)
+
+
+# -- Presentation: human-readable rule/round/club labels --------------------
+#
+# Issue #131: an accepted rule's `afl_club_id`/`afl_opening_round_id`/
+# `afl_bye_round_id`/`bbbffl_round_id` are internal identifiers a replay
+# operator should never have to read as the *primary* label. This never
+# mutates accepted-rule history (see `OpeningRoundRuleRepository`'s
+# docstring) -- it only joins already-cached AFL club facts
+# (`season_player_pool.afl_team_name`, populated by
+# `app.player_pool.PlayerPoolRepository.refresh_player`), the persisted
+# `bbbffl_round` label/sequence, and `afl_client.get_rounds` (the same
+# `AflDataSource` boundary `app.round_preflight`/`app.round_mapping` already
+# use) to *resolve* those identifiers for display. Internal IDs remain
+# present on the returned dict alongside the resolved labels -- never
+# replaced -- so an existing consumer that reads `rule_id`/`afl_club_id`/etc
+# keeps working unchanged.
+
+
+def _afl_round_label(round_number: int | None) -> str | None:
+    if round_number is None:
+        return None
+    return "Opening Round" if round_number == 0 else f"AFL Round {round_number}"
+
+
+def _resolve_afl_round_numbers(afl_client, afl_season_id: int) -> dict[int, int]:
+    """`{afl_round_id: round_number}` for one AFL season, or `{}` if the
+    evidence source cannot currently supply it -- a resolution failure must
+    never block the underlying accepted-rule/nomination data from being
+    returned, only fall back to showing the raw identifier (see
+    `describe_accepted_rules`)."""
+    try:
+        rounds = afl_client.get_rounds(afl_season_id)
+    except Exception:  # noqa: BLE001 -- presentation fallback only, never a domain failure
+        return {}
+    return {r.round_id: r.round_number for r in rounds}
+
+
+def resolve_afl_club_name(database, season_id: str, afl_club_id: int | None) -> str | None:
+    """Best-effort AFL club display name for one `(season_id, afl_club_id)`.
+
+    There is no standalone club-registry table; every eligible player of a
+    club carries the same cached `afl_team_name` in `season_player_pool`
+    (see `app.player_pool.PlayerPoolRepository.refresh_player`), so any one
+    row for that club in that season resolves the name. Returns `None`
+    (never a guess) if no cached player-pool row for that club exists yet."""
+    if afl_club_id is None:
+        return None
+    row = database.execute(
+        "SELECT afl_team_name FROM season_player_pool "
+        "WHERE season_id=? AND afl_team_id=? AND afl_team_name IS NOT NULL LIMIT 1",
+        (season_id, afl_club_id),
+    ).fetchone()
+    return row["afl_team_name"] if row else None
+
+
+def describe_accepted_rule(rule: OpeningRoundRule, database, afl_client, *, round_number_cache: dict | None = None) -> dict:
+    """One accepted rule, plus resolved presentation fields, e.g. the
+    primary operator-facing `display_label`:
+    `"GWS Giants — Opening Round → compensating AFL Round 2 → BBBFFL Round 2"`.
+    `round_number_cache` lets a caller resolving several rules for the same
+    AFL season share one `afl_client.get_rounds` call (see
+    `describe_accepted_rules`); a caller describing a single rule may omit
+    it."""
+    cache = round_number_cache if round_number_cache is not None else {}
+    club_name = resolve_afl_club_name(database, rule.season_id, rule.afl_club_id)
+    bbbffl_round = (
+        database.execute(
+            "SELECT label, sequence FROM bbbffl_round WHERE bbbffl_round_id=?", (rule.bbbffl_round_id,)
+        ).fetchone()
+        if rule.bbbffl_round_id
+        else None
+    )
+    numbers = {}
+    if rule.afl_season_id is not None:
+        if rule.afl_season_id not in cache:
+            cache[rule.afl_season_id] = _resolve_afl_round_numbers(afl_client, rule.afl_season_id)
+        numbers = cache[rule.afl_season_id]
+    opening_label = _afl_round_label(numbers.get(rule.afl_opening_round_id)) if rule.afl_opening_round_id else None
+    bye_label = _afl_round_label(numbers.get(rule.afl_bye_round_id)) if rule.afl_bye_round_id else None
+    bbbffl_label = bbbffl_round["label"] if bbbffl_round else None
+    club_display = club_name or (f"AFL club {rule.afl_club_id}" if rule.afl_club_id is not None else "Unknown AFL club")
+    display_label = (
+        f"{club_display} — {opening_label or 'Opening Round (unresolved)'} "
+        f"→ compensating {bye_label or 'AFL round (unresolved)'} "
+        f"→ {bbbffl_label or 'BBBFFL round (unresolved)'}"
+    )
+    return {
+        **dataclasses.asdict(rule),
+        "afl_club_name": club_name,
+        "afl_opening_round_label": opening_label,
+        "afl_bye_round_label": bye_label,
+        "bbbffl_round_label": bbbffl_label,
+        "bbbffl_round_sequence": bbbffl_round["sequence"] if bbbffl_round else None,
+        "display_label": display_label,
+    }
+
+
+def describe_accepted_rules(database, afl_client, season_id: str) -> list[dict]:
+    """`describe_accepted_rule` for every accepted rule in a season, sharing
+    one `afl_client.get_rounds` call per distinct AFL season across rules."""
+    rules = OpeningRoundRuleRepository(database).list_accepted_for_season(season_id)
+    round_number_cache: dict[int, dict[int, int]] = {}
+    return [describe_accepted_rule(rule, database, afl_client, round_number_cache=round_number_cache) for rule in rules]
+
+
+# -- Readiness: nomination completeness summary ------------------------------
+#
+# Issue #131: a coherent, reusable readiness summary -- how many accepted
+# Opening Round rules currently have an owned-player nomination from the
+# entry eligible for them, which entries are incomplete, and defensive
+# integrity checks (duplicate/mismatched/conflicting nominations) -- derived
+# entirely from already-persisted state (accepted rules, current ownership,
+# nominations). Never redefines what an accepted rule is and never mutates
+# rule/nomination history; this is a read model only. Intended to be shared,
+# not duplicated, by Season Centre and round-preparation readiness displays
+# (see `app.season_centre.build_season_centre` and
+# `app.round_preflight.build_round_preflight`).
+
+
+@dataclass(frozen=True)
+class OpeningRoundEntryReadiness:
+    season_entry_id: str
+    team_name: str
+    required_rule_ids: tuple[str, ...]
+    nominated_rule_ids: tuple[str, ...]
+    missing_rule_ids: tuple[str, ...]
+    is_complete: bool
+
+
+@dataclass(frozen=True)
+class OpeningRoundReadiness:
+    season_id: str
+    total_required: int
+    total_completed: int
+    entries: tuple[OpeningRoundEntryReadiness, ...]
+    duplicate_nominations: tuple[dict, ...]
+    mismatched_nominations: tuple[dict, ...]
+    conflicting_nominations: tuple[dict, ...]
+    is_ready: bool
+
+    def for_entry(self, season_entry_id: str) -> OpeningRoundEntryReadiness | None:
+        """This one entry's slice of a season-wide readiness result -- what
+        the represented-entry-scoped Opening Round Operations page shows,
+        without exposing any other entry's ownership/nomination state."""
+        return next((entry for entry in self.entries if entry.season_entry_id == season_entry_id), None)
+
+
+def build_opening_round_readiness(database, season_id: str) -> OpeningRoundReadiness:
+    rules = OpeningRoundRuleRepository(database).list_accepted_for_season(season_id)
+    entry_rows = database.execute(
+        "SELECT e.season_entry_id, n.team_name FROM season_entry e "
+        "JOIN season_entry_team_name_history n ON n.season_entry_id=e.season_entry_id AND n.ended_at IS NULL "
+        "WHERE e.season_id=?",
+        (season_id,),
+    ).fetchall()
+    team_names = {row["season_entry_id"]: row["team_name"] for row in entry_rows}
+
+    nominations_by_rule: dict[str, list[OpeningRoundNomination]] = {}
+    for rule in rules:
+        # Queried by `rule_id` directly, not by the rule's own current
+        # `bbbffl_round_id` -- a nomination whose persisted target round has
+        # drifted from its rule's target round must still be found here so
+        # `conflicting_nominations` below can actually detect it.
+        rows = database.execute(
+            "SELECT * FROM opening_round_nomination WHERE rule_id=? ORDER BY season_entry_id, position",
+            (rule.rule_id,),
+        ).fetchall()
+        nominations_by_rule[rule.rule_id] = [_nomination(row) for row in rows]
+
+    required: dict[str, set[str]] = {}
+    for rule in rules:
+        owners = database.execute(
+            "SELECT DISTINCT o.season_entry_id FROM player_ownership_period o "
+            "JOIN season_player_pool p ON p.season_player_id=o.season_player_id "
+            "WHERE o.released_at IS NULL AND p.season_id=? AND p.afl_team_id=?",
+            (season_id, rule.afl_club_id),
+        ).fetchall()
+        for owner in owners:
+            required.setdefault(owner["season_entry_id"], set()).add(rule.rule_id)
+            team_names.setdefault(owner["season_entry_id"], "Unknown team")
+
+    nominated: dict[str, set[str]] = {}
+    duplicates: list[dict] = []
+    mismatched: list[dict] = []
+    conflicting: list[dict] = []
+    for rule in rules:
+        by_entry: dict[str, list[OpeningRoundNomination]] = {}
+        for nomination in nominations_by_rule[rule.rule_id]:
+            by_entry.setdefault(nomination.season_entry_id, []).append(nomination)
+            nominated.setdefault(nomination.season_entry_id, set()).add(rule.rule_id)
+            player = database.execute(
+                "SELECT afl_team_id FROM season_player_pool WHERE season_player_id=?",
+                (nomination.season_player_id,),
+            ).fetchone()
+            if player is None or player["afl_team_id"] != rule.afl_club_id:
+                mismatched.append(
+                    {
+                        "nomination_id": nomination.nomination_id,
+                        "rule_id": rule.rule_id,
+                        "season_entry_id": nomination.season_entry_id,
+                        "season_player_id": nomination.season_player_id,
+                    }
+                )
+            if nomination.bbbffl_round_id != rule.bbbffl_round_id:
+                conflicting.append(
+                    {
+                        "nomination_id": nomination.nomination_id,
+                        "rule_id": rule.rule_id,
+                        "season_entry_id": nomination.season_entry_id,
+                    }
+                )
+        for entry_id, rows in by_entry.items():
+            if len(rows) > 1:
+                duplicates.append(
+                    {
+                        "rule_id": rule.rule_id,
+                        "season_entry_id": entry_id,
+                        "nomination_ids": [row.nomination_id for row in rows],
+                    }
+                )
+
+    entries = []
+    for entry_id in sorted(set(required) | set(nominated)):
+        entry_required = required.get(entry_id, set())
+        entry_done = nominated.get(entry_id, set()) & entry_required
+        entry_missing = entry_required - entry_done
+        entries.append(
+            OpeningRoundEntryReadiness(
+                season_entry_id=entry_id,
+                team_name=team_names.get(entry_id, "Unknown team"),
+                required_rule_ids=tuple(sorted(entry_required)),
+                nominated_rule_ids=tuple(sorted(entry_done)),
+                missing_rule_ids=tuple(sorted(entry_missing)),
+                is_complete=not entry_missing,
+            )
+        )
+    total_required = sum(len(entry.required_rule_ids) for entry in entries)
+    total_completed = sum(len(entry.nominated_rule_ids) for entry in entries)
+    is_ready = total_required == total_completed and not duplicates and not mismatched and not conflicting
+    return OpeningRoundReadiness(
+        season_id=season_id,
+        total_required=total_required,
+        total_completed=total_completed,
+        entries=tuple(entries),
+        duplicate_nominations=tuple(duplicates),
+        mismatched_nominations=tuple(mismatched),
+        conflicting_nominations=tuple(conflicting),
+        is_ready=is_ready,
+    )

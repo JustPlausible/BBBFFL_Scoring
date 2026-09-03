@@ -18,7 +18,15 @@ from app.coach_lineup import COACH_LINEUP_POSITIONS, CoachLineupService
 from app.config import BASE_DIR
 from app.csrf import issue_token, verify_token
 from app.lineup_proxy import LineupProxyService
-from app.opening_round import OpeningRoundNominationRepository, OpeningRoundRuleRepository, OpeningRoundSelectionGuard
+from app.opening_round import (
+    ENTITY_TYPE_NOMINATION,
+    NOMINATION_CORRECTED,
+    OpeningRoundNominationRepository,
+    OpeningRoundRuleRepository,
+    OpeningRoundSelectionGuard,
+    build_opening_round_readiness,
+    describe_accepted_rules,
+)
 
 router = APIRouter(prefix="/api/operations")
 page_router = APIRouter()
@@ -209,6 +217,69 @@ def carry_forward(
     return _lineup_view(request, principal, scope)
 
 
+def _describe_owned_players(request: Request, entry_id: str) -> list[dict]:
+    """Structured, server-scoped owned-player data for one represented
+    entry -- never an arbitrary player query filtered client-side (issue
+    #131 #4): `current_squad` is already authoritatively scoped to
+    `entry_id`, and every player is then resolved through the same
+    `PlayerPoolRepository.get_by_id` the delegated lineup view uses."""
+    ownership = CoachLineupService(request.app.state.database, request.app.state.afl_client).ownership
+    pool = request.app.state.player_pool
+    players = []
+    for period in ownership.current_squad(entry_id):
+        player = pool.get_by_id(period.season_player_id)
+        if player is None:
+            continue
+        players.append(
+            {
+                "season_player_id": player.season_player_id,
+                "display_name": player.display_name,
+                "afl_club_id": player.afl_team_id,
+                "afl_club_name": player.afl_team_name,
+                "canonical_player_id": player.canonical_player_id,
+            }
+        )
+    return players
+
+
+def _describe_nomination(request: Request, nomination, rules_by_id: dict[str, dict]) -> dict:
+    """Operator-readable presentation of one nomination -- player name/club,
+    the accepted rule's human-readable labels, and audited correction
+    history -- alongside every existing field (issue #131 #7). Never
+    mutates the nomination or its audit trail; this only reads and joins
+    already-persisted state."""
+    state = request.app.state
+    player = state.player_pool.get_by_id(nomination.season_player_id)
+    operator = state.identities.get_coach(nomination.actor_id) if nomination.actor_id else None
+    rule_view = rules_by_id.get(nomination.rule_id)
+    events = state.audit_events.list_events(entity_type=ENTITY_TYPE_NOMINATION, entity_id=nomination.nomination_id)
+    corrections = [
+        {
+            "occurred_at": event.occurred_at,
+            "reason": event.reason,
+            "before_state": event.before_state,
+            "after_state": event.after_state,
+            "actor_id": event.actor_id,
+            "actor_role": event.actor_role,
+        }
+        for event in events
+        if event.action == NOMINATION_CORRECTED
+    ]
+    return {
+        **asdict(nomination),
+        "player_display_name": player.display_name if player else None,
+        "afl_club_id": player.afl_team_id if player else None,
+        "afl_club_name": player.afl_team_name if player else None,
+        "rule_display_label": rule_view["display_label"] if rule_view else None,
+        "afl_opening_round_label": rule_view["afl_opening_round_label"] if rule_view else None,
+        "afl_bye_round_label": rule_view["afl_bye_round_label"] if rule_view else None,
+        "bbbffl_round_label": rule_view["bbbffl_round_label"] if rule_view else None,
+        "entered_by_display_name": operator.display_name if operator else nomination.actor_id,
+        "provenance": "replay/reconstructed",
+        "correction_history": corrections,
+    }
+
+
 @router.get("/seasons/{season_id}/opening-round")
 def opening_round(season_id: str, request: Request, principal: Principal = Depends(require_nomination)):
     require_role_covers_season(request, principal, season_id)
@@ -219,21 +290,23 @@ def opening_round(season_id: str, request: Request, principal: Principal = Depen
     entry = request.app.state.identities.get_public_team(entry_id)
     if entry is None or entry.season_id != season_id:
         raise HTTPException(404, "Private resource not found")
-    repo = OpeningRoundNominationRepository(request.app.state.database)
-    rules = OpeningRoundRuleRepository(request.app.state.database).list_accepted_for_season(season_id)
-    squad = CoachLineupService(request.app.state.database, request.app.state.afl_client).ownership.current_squad(
-        entry_id
-    )
+    database = request.app.state.database
+    repo = OpeningRoundNominationRepository(database)
+    rules = describe_accepted_rules(database, request.app.state.afl_client, season_id)
+    rules_by_id = {rule["rule_id"]: rule for rule in rules}
+    nominations = [
+        _describe_nomination(request, nomination, rules_by_id)
+        for rule in rules
+        for nomination in repo.list_for_round(rule["bbbffl_round_id"])
+        if nomination.season_entry_id == entry_id
+    ]
+    readiness = build_opening_round_readiness(database, season_id).for_entry(entry_id)
     return {
         "represented_entry": {"season_entry_id": entry_id, "team_name": entry.team_name},
-        "rules": [asdict(rule) for rule in rules],
-        "players": [p.season_player_id for p in squad],
-        "nominations": [
-            asdict(n)
-            for rule in rules
-            for n in repo.list_for_round(rule.bbbffl_round_id)
-            if n.season_entry_id == entry_id
-        ],
+        "rules": rules,
+        "players": _describe_owned_players(request, entry_id),
+        "nominations": nominations,
+        "readiness": asdict(readiness) if readiness else None,
         "provenance_notice": f"Replay/reconstructed nominations are entered by {principal.display_name}; they are not historical coach evidence.",
     }
 
@@ -264,8 +337,9 @@ def nominate(
     repo.preload_target_lineup(
         request.app.state.lineups, season_id, target["competition_id"], rule.bbbffl_round_id, entry_id
     )
+    rules_by_id = {r["rule_id"]: r for r in view["rules"]}
     return {
-        "nomination": asdict(nomination),
+        "nomination": _describe_nomination(request, nomination, rules_by_id),
         "provenance": "replay/reconstructed",
         "entered_by": principal.display_name,
     }
@@ -279,7 +353,7 @@ def correct(
     request: Request,
     principal: Principal = Depends(require_nomination),
 ):
-    opening_round(season_id, request, principal)
+    view = opening_round(season_id, request, principal)
     _csrf(request, principal)
     repo = OpeningRoundNominationRepository(request.app.state.database)
     existing = repo.get(nomination_id)
@@ -296,7 +370,12 @@ def correct(
         actor=_actor(principal),
         reason=f"Replay/reconstructed input correction: {payload.reason}",
     )
-    return {"nomination": asdict(corrected), "provenance": "replay/reconstructed", "entered_by": principal.display_name}
+    rules_by_id = {r["rule_id"]: r for r in view["rules"]}
+    return {
+        "nomination": _describe_nomination(request, corrected, rules_by_id),
+        "provenance": "replay/reconstructed",
+        "entered_by": principal.display_name,
+    }
 
 
 @page_router.get("/operations/rounds/{round_id}/lineup", response_class=HTMLResponse)

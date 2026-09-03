@@ -35,6 +35,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.audit import ActorContext
 from app.identity import UNSET, CoachEmailConflictError
+from app.opening_round import OpeningRoundRuleRepository, build_opening_round_readiness
 
 
 class SeasonCentreError(ValueError):
@@ -173,7 +174,32 @@ def transfer_entry(identities, entry_id: str, coach_id: str, *, actor: ActorCont
 # -- Season Centre read-model -----------------------------------------------
 
 
-def _readiness(seasons, draft, preseason, player_pool, lifecycle, season_id: str, entries) -> dict:
+def _opening_round_readiness(database, season_id: str) -> dict | None:
+    """`None` -- and therefore hidden entirely, per issue #131's "do not
+    expose the operation before it is meaningful" -- exactly while this
+    season has never accepted any Opening Round rule. A season that never
+    configures Opening Round (issue #69/#126's "explicit season
+    configuration" boundary) must show nothing here, not an empty/zero
+    readiness block that implies the capability exists."""
+    if not OpeningRoundRuleRepository(database).list_accepted_for_season(season_id):
+        return None
+    readiness = build_opening_round_readiness(database, season_id)
+    return {
+        "total_required": readiness.total_required,
+        "total_completed": readiness.total_completed,
+        "is_ready": readiness.is_ready,
+        "entries_requiring_action": [
+            {"season_entry_id": entry.season_entry_id, "team_name": entry.team_name, "missing": len(entry.missing_rule_ids)}
+            for entry in readiness.entries
+            if not entry.is_complete
+        ],
+        "has_integrity_issues": bool(
+            readiness.duplicate_nominations or readiness.mismatched_nominations or readiness.conflicting_nominations
+        ),
+    }
+
+
+def _readiness(seasons, draft, preseason, player_pool, lifecycle, database, season_id: str, entries) -> dict:
     draft_status = draft.status(season_id)
     window = preseason.get_window(season_id)
     competitions = seasons.list_competitions(season_id)
@@ -199,32 +225,45 @@ def _readiness(seasons, draft, preseason, player_pool, lifecycle, season_id: str
         if window is None
         else {"is_open": window.is_open, "opened_at": window.opened_at, "closed_at": window.closed_at},
         "ordinary_rounds_created": len(ordinary_rounds),
+        "opening_round": _opening_round_readiness(database, season_id),
     }
 
 
-def _links(season_id: str, draft_started: bool, ordinary_rounds_created: bool) -> dict:
+def _links(season_id: str, draft_started: bool, ordinary_rounds_created: bool, opening_round_configured: bool) -> dict:
     """Links to available subsequent workflows (issue #100's requirement).
     Only ever points at a page that actually exists and is reachable for
     this season -- an unavailable next step is represented as `None` (the
-    template renders that honestly rather than inventing a destination)."""
+    template renders that honestly rather than inventing a destination).
+
+    `opening_round` follows issue #131: only shown once at least one
+    accepted Opening Round rule exists for the season (the existing
+    lifecycle's own clean signal that the operation is meaningful) -- not
+    merely once the draft has started, since a season that never
+    configures Opening Round must never surface the link at all."""
     return {
         "draft": f"/admin/draft/{season_id}" if draft_started else None,
         "preseason": f"/admin/preseason/{season_id}" if draft_started else None,
         "round_centre": "/scorer/round-centre" if ordinary_rounds_created else None,
+        "opening_round": f"/operations/seasons/{season_id}/opening-round" if opening_round_configured else None,
     }
 
 
-def build_season_centre(seasons, identities, draft, preseason, player_pool, lifecycle, season_id: str) -> dict:
+def build_season_centre(seasons, identities, draft, preseason, player_pool, lifecycle, season_id: str, database) -> dict:
     season = seasons.get_season(season_id)
     if season is None:
         raise KeyError(season_id)
     entries = identities.list_entries(season_id)
     competitions = seasons.list_competitions(season_id)
-    readiness = _readiness(seasons, draft, preseason, player_pool, lifecycle, season_id, entries)
+    readiness = _readiness(seasons, draft, preseason, player_pool, lifecycle, database, season_id, entries)
     return {
         "season": dataclasses.asdict(season),
         "competitions": [dataclasses.asdict(competition) for competition in competitions],
         "entries": [dataclasses.asdict(entry) for entry in entries],
         "readiness": readiness,
-        "links": _links(season_id, readiness["draft"] is not None, readiness["ordinary_rounds_created"] > 0),
+        "links": _links(
+            season_id,
+            readiness["draft"] is not None,
+            readiness["ordinary_rounds_created"] > 0,
+            readiness["opening_round"] is not None,
+        ),
     }

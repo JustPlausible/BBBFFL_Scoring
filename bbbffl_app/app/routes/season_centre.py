@@ -74,7 +74,14 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
 
 def _season_view(state, season_id: str, principal: Principal):
     view = build_season_centre(
-        state.seasons, state.identities, state.draft, state.preseason, state.player_pool, state.lifecycle, season_id
+        state.seasons,
+        state.identities,
+        state.draft,
+        state.preseason,
+        state.player_pool,
+        state.lifecycle,
+        season_id,
+        state.database,
     )
     if not principal_has_capability(principal, "draft.participate"):
         view["links"]["draft"] = None

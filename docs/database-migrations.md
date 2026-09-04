@@ -124,6 +124,24 @@ written by an audited reopen of a previously confirmed submission. See
 [`opening-round-deferred-selection.md`](opening-round-deferred-selection.md).
 Downgrade refuses once the table holds any row.
 
+Revision `0024_opening_round_multi_player` (issue #135) removes
+`uq_opening_round_nomination_rule_entry` (`UNIQUE(rule_id, season_entry_id)`)
+from `opening_round_nomination`: an accepted rule scopes one AFL club's
+Opening Round mapping, not how many of that club's owned players a coach may
+nominate into a target round's distinct slots, so that constraint was an
+invalid cardinality limit -- see
+[`opening-round-deferred-selection.md`](opening-round-deferred-selection.md).
+`uq_opening_round_nomination_slot`/`uq_opening_round_nomination_player_once`
+(the actual target-slot and player-once invariants) are untouched. Uses
+`op.batch_alter_table` uniformly across both supported databases (the same
+pattern `0016_draft_ops` uses for `uq_draft_pick_sequence`), so the SQLite
+copy-and-move rebuild and PostgreSQL's plain `ALTER TABLE ... DROP
+CONSTRAINT` come from one call. Downgrade refuses only when data written
+while the constraint was absent (two nominations sharing one
+`(rule_id, season_entry_id)` pair) cannot be represented by the restored
+constraint; otherwise it recreates
+`uq_opening_round_nomination_rule_entry` exactly as before.
+
 ## Migration authoring and rollback
 
 Every relational change must be a new ordered revision. Do not add startup DDL

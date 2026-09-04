@@ -692,8 +692,9 @@ class OpeningRoundNominationRepository:
             ).fetchone()
             if not owner or owner["season_entry_id"] != season_entry_id:
                 raise IneligiblePlayerError("nominated player is not currently owned by the nominating entry")
-            # Explicit pre-checks for this module's three slot-uniqueness
-            # invariants (see migrations/versions/0020_opening_round_deferral.py),
+            # Explicit pre-checks for this module's two slot-uniqueness
+            # invariants (see
+            # migrations/versions/0024_opening_round_multi_player.py),
             # so a violation raises a clear, dialect-independent message
             # rather than parsing a database-specific constraint-violation
             # string (SQLite and PostgreSQL phrase the same violation
@@ -701,13 +702,14 @@ class OpeningRoundNominationRepository:
             # serialize this transaction against a concurrent nomination for
             # the same player/entry; a genuine race that still slips through
             # is caught by the database constraint itself, immediately below.
-            if conn.execute(
-                "SELECT 1 FROM opening_round_nomination WHERE rule_id=? AND season_entry_id=?",
-                (rule_id, season_entry_id),
-            ).fetchone():
-                raise OpeningRoundError(
-                    "this entry already has a nomination under this rule; use correct() to change it"
-                )
+            #
+            # Deliberately no check here against another nomination already
+            # existing for this `(rule_id, season_entry_id)` pair -- issue
+            # #135: an accepted rule maps one AFL club's Opening Round to its
+            # compensating-bye target round; it does not limit how many of
+            # that club's owned players a coach may nominate into that
+            # round's distinct slots, provided each nomination is still
+            # unique by target slot and by player below.
             if conn.execute(
                 "SELECT 1 FROM opening_round_nomination WHERE bbbffl_round_id=? AND season_entry_id=? AND position=?",
                 (rule.bbbffl_round_id, season_entry_id, position),
@@ -743,7 +745,7 @@ class OpeningRoundNominationRepository:
                 )
             except Exception as exc:  # noqa: BLE001 -- a genuine concurrent race past the checks above
                 raise OpeningRoundError(
-                    "nomination violates a slot/player/rule uniqueness invariant (concurrent write)"
+                    "nomination violates a slot/player uniqueness invariant (concurrent write)"
                 ) from exc
             append_event(
                 conn,
@@ -1498,6 +1500,57 @@ class OpeningRoundReadiness:
         return next((entry for entry in self.entries if entry.season_entry_id == season_entry_id), None)
 
 
+def _duplicate_nominations(database, season_id: str) -> list[dict]:
+    """Genuine duplicate-slot/duplicate-player integrity diagnostics
+    (issue #135), computed across every nomination in the season -- never
+    scoped to one rule, since a target-round slot/player conflict is a
+    property of the target round/entry, not of which rule(s) happen to
+    reference it. `uq_opening_round_nomination_slot`/
+    `_player_once` already make either row combination impossible through
+    any legitimate write path (see migrations/versions/
+    0020_opening_round_deferral.py), so this can only ever surface data
+    written outside `OpeningRoundNominationRepository.nominate`/`correct`
+    entirely -- a defensive re-check, not the primary enforcement."""
+    rows = database.execute(
+        "SELECT nomination_id, season_entry_id, bbbffl_round_id, position, season_player_id "
+        "FROM opening_round_nomination WHERE season_id=? ORDER BY season_entry_id, bbbffl_round_id, position",
+        (season_id,),
+    ).fetchall()
+    by_slot: dict[tuple[str, str, str], list[str]] = {}
+    by_player: dict[tuple[str, str, str], list[str]] = {}
+    for row in rows:
+        by_slot.setdefault((row["season_entry_id"], row["bbbffl_round_id"], row["position"]), []).append(
+            row["nomination_id"]
+        )
+        by_player.setdefault((row["season_entry_id"], row["bbbffl_round_id"], row["season_player_id"]), []).append(
+            row["nomination_id"]
+        )
+    duplicates: list[dict] = []
+    for (entry_id, round_id, position), nomination_ids in by_slot.items():
+        if len(nomination_ids) > 1:
+            duplicates.append(
+                {
+                    "type": "duplicate_slot",
+                    "season_entry_id": entry_id,
+                    "bbbffl_round_id": round_id,
+                    "position": position,
+                    "nomination_ids": nomination_ids,
+                }
+            )
+    for (entry_id, round_id, player_id), nomination_ids in by_player.items():
+        if len(nomination_ids) > 1:
+            duplicates.append(
+                {
+                    "type": "duplicate_player",
+                    "season_entry_id": entry_id,
+                    "bbbffl_round_id": round_id,
+                    "season_player_id": player_id,
+                    "nomination_ids": nomination_ids,
+                }
+            )
+    return duplicates
+
+
 def build_opening_round_readiness(database, season_id: str) -> OpeningRoundReadiness:
     rules = OpeningRoundRuleRepository(database).list_accepted_for_season(season_id)
     entry_rows = database.execute(
@@ -1513,7 +1566,19 @@ def build_opening_round_readiness(database, season_id: str) -> OpeningRoundReadi
     # Queried by `rule_id` directly, not by the rule's own current
     # `bbbffl_round_id`, so a nomination whose persisted target round has
     # drifted from its rule's target round is still found here.
-    duplicates: list[dict] = []
+    #
+    # Issue #135: multiple distinct nominations sharing one accepted rule
+    # for one season entry are *valid* -- an accepted rule scopes one AFL
+    # club's Opening Round mapping, not how many of that club's owned
+    # players may be nominated into distinct target-round slots -- so this
+    # no longer treats "more than one nomination under this rule/entry" as
+    # a duplicate. Genuine duplicate-slot/duplicate-player corruption is
+    # instead detected below, across every nomination in the season
+    # (`_duplicate_nominations`), independent of any rule grouping: the two
+    # remaining schema-level invariants
+    # (`uq_opening_round_nomination_slot`/`_player_once`) already make such
+    # a row impossible through any legitimate write path, so this is belt-
+    # and-braces re-verification, not the primary enforcement.
     mismatched: list[dict] = []
     conflicting: list[dict] = []
     for rule in rules:
@@ -1522,9 +1587,7 @@ def build_opening_round_readiness(database, season_id: str) -> OpeningRoundReadi
             (rule.rule_id,),
         ).fetchall()
         nominations = [_nomination(row) for row in rows]
-        by_entry: dict[str, list[OpeningRoundNomination]] = {}
         for nomination in nominations:
-            by_entry.setdefault(nomination.season_entry_id, []).append(nomination)
             # Checked against the player's *current* club and *current*
             # owner, not merely the state true at nomination time: a trade
             # or release after nomination must surface here too.
@@ -1571,16 +1634,8 @@ def build_opening_round_readiness(database, season_id: str) -> OpeningRoundReadi
                         "bbbffl_round_id": nomination.bbbffl_round_id,
                     }
                 )
-        for entry_id, entry_rows_ in by_entry.items():
-            if len(entry_rows_) > 1:
-                duplicates.append(
-                    {
-                        "rule_id": rule.rule_id,
-                        "season_entry_id": entry_id,
-                        "nomination_ids": [row.nomination_id for row in entry_rows_],
-                        "bbbffl_round_ids": [row.bbbffl_round_id for row in entry_rows_],
-                    }
-                )
+
+    duplicates = _duplicate_nominations(database, season_id)
 
     submissions = {
         submission.season_entry_id: submission

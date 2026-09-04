@@ -1235,7 +1235,6 @@ def test_duplicate_slot_and_duplicate_player_nominations_are_rejected():
     rule_carl = accept_rule(db, scope["season_id"], 5, ev, ev.compensating_bye_round["CARL"], round_.bbbffl_round_id)
     entry = entries[0]
     player = own_player(db, scope["season_id"], entry, 910700, "BL Player", afl_team_id=2)
-    other_bl_player = own_player(db, scope["season_id"], entry, 910701, "Second BL Player", afl_team_id=2)
     carl_player = own_player(db, scope["season_id"], entry, 910702, "CARL Player", afl_team_id=5)
     or_client = MultiRoundMatchClient(
         {
@@ -1259,42 +1258,407 @@ def test_duplicate_slot_and_duplicate_player_nominations_are_rejected():
             rule.rule_id, entry.season_entry_id, "M2", player.season_player_id, or_client, actor=SCORER
         )
 
-    # Same rule/entry pair nominated again (a second BL player) -- rejected;
-    # use correct() to change an existing nomination instead.
-    with pytest.raises(OpeningRoundError):
-        nominations.nominate(
-            rule.rule_id, entry.season_entry_id, "M2", other_bl_player.season_player_id, or_client, actor=SCORER
-        )
+
+def test_second_player_under_the_same_rule_is_permitted_in_a_distinct_position():
+    """Issue #135: the removed `uq_opening_round_nomination_rule_entry`
+    constraint used to reject a second player nominated under the same
+    accepted rule/entry pair. An accepted rule scopes one AFL club's Opening
+    Round mapping, not how many of that club's owned players may be
+    nominated into distinct target-round slots -- a second, distinct BL
+    player in a distinct slot must now succeed, and both nominations must
+    remain independently readable and independently player-unique."""
+    db = migrated_connection()
+    _, round_, entries, scope = setup_scope(db, 2024, 956)
+    ev = evidence.EVIDENCE_2024
+    rule = accept_rule(db, scope["season_id"], 2, ev, ev.compensating_bye_round["BL"], round_.bbbffl_round_id)
+    entry = entries[0]
+    player = own_player(db, scope["season_id"], entry, 910700, "BL Player", afl_team_id=2)
+    other_bl_player = own_player(db, scope["season_id"], entry, 910701, "Second BL Player", afl_team_id=2)
+    or_client = MultiRoundMatchClient({954: [Match(8001, Team(2, "BL"), Team(5, "CARL"), "CONCLUDED")]})
+    nominations = OpeningRoundNominationRepository(db)
+    first = nominations.nominate(
+        rule.rule_id, entry.season_entry_id, "M1", player.season_player_id, or_client, actor=SCORER
+    )
+    second = nominations.nominate(
+        rule.rule_id, entry.season_entry_id, "M2", other_bl_player.season_player_id, or_client, actor=SCORER
+    )
+    assert first.rule_id == second.rule_id == rule.rule_id
+    assert {first.season_player_id, second.season_player_id} == {
+        player.season_player_id,
+        other_bl_player.season_player_id,
+    }
+    results = nominations.list_for_season_entry(scope["season_id"], entry.season_entry_id)
+    assert {n.nomination_id for n in results} == {first.nomination_id, second.nomination_id}
+
     # This is also a schema-level guarantee, not merely an application-layer
-    # check -- a raw duplicate (rule_id, season_entry_id) row is impossible
-    # even bypassing `nominate()` entirely (see
-    # `migrations/versions/0020_opening_round_deferral.py`'s
-    # `uq_opening_round_nomination_rule_entry`). This is exactly why
-    # `OpeningRoundReadiness.duplicate_nominations` (issue #131 #8) can
-    # never be populated through any legitimate write path -- see
-    # `test_readiness_duplicate_nominations_are_structurally_impossible`
-    # below.
-    with pytest.raises(IntegrityError):
-        with database_transaction(db) as conn:
-            conn.execute(
-                "INSERT INTO opening_round_nomination VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    str(uuid4()),
-                    scope["season_id"],
-                    rule.rule_id,
-                    round_.bbbffl_round_id,
-                    entry.season_entry_id,
-                    "M3",
-                    other_bl_player.season_player_id,
-                    None,
-                    "anonymous_operator",
-                    "scorer",
-                    "scorer",
-                    "2024-01-01T00:00:00+00:00",
-                    "2024-01-01T00:00:00+00:00",
-                    "2024-01-01T00:00:00+00:00",
-                ),
+    # allowance -- a raw duplicate (rule_id, season_entry_id) row is no
+    # longer rejected by the database itself (see migrations/versions/
+    # 0024_opening_round_multi_player.py, which removed
+    # `uq_opening_round_nomination_rule_entry`); a third BL player at a
+    # third distinct slot, inserted directly, is accepted too.
+    third_bl_player = own_player(db, scope["season_id"], entry, 910703, "Third BL Player", afl_team_id=2)
+    with database_transaction(db) as conn:
+        conn.execute(
+            "INSERT INTO opening_round_nomination VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                str(uuid4()),
+                scope["season_id"],
+                rule.rule_id,
+                round_.bbbffl_round_id,
+                entry.season_entry_id,
+                "M3",
+                third_bl_player.season_player_id,
+                None,
+                "anonymous_operator",
+                "scorer",
+                "scorer",
+                "2024-01-01T00:00:00+00:00",
+                "2024-01-01T00:00:00+00:00",
+                "2024-01-01T00:00:00+00:00",
+            ),
+        )
+    results = nominations.list_for_season_entry(scope["season_id"], entry.season_entry_id)
+    assert len(results) == 3
+
+
+# -- Issue #135: multiple owned players from one AFL club -------------------
+#
+# The historical regression case from issue #135: one BBBFFL entry submits
+# nine Opening Round nominations across three target rounds, built entirely
+# from the real 2026 evidence (tests/opening_round_evidence.py's
+# EVIDENCE_2026 -- COLL/CARL/GEEL/BL share compensating bye AFL round 1345
+# (target Round 2), GCFC/WB/HAW/SYD share 1346 (target Round 3), STK/GWS
+# share 1347 (target Round 4)). Two target rounds each carry two nominated
+# players from the *same* AFL club under the *same* accepted rule -- exactly
+# what the removed `uq_opening_round_nomination_rule_entry` constraint used
+# to reject.
+
+
+def _issue_135_scope(db):
+    """Season/competition/entries with three target BBBFFL rounds mapped to
+    the real 2026 compensating-bye AFL rounds (R2=1345, R3=1346, R4=1347),
+    all open for lineup submission -- the scaffold the issue #135 nine-
+    player historical regression is built on."""
+    from app.round_mapping import RoundMappingRepository
+    from app.season import SeasonRepository
+
+    lifecycle, round2, entries, scope = setup_scope(db, 2026, 1345)
+    seasons = SeasonRepository(db)
+    round3 = seasons.create_round(scope["competition_id"], "round-3", "Round 3", 2)
+    RoundMappingRepository(db).accept(round3.bbbffl_round_id, 2026, 1346, KnownRounds((2026, 1346)))
+    lifecycle.create_ordinary_round(round3.bbbffl_round_id)
+    lifecycle.transition(round3.bbbffl_round_id, "open")
+    round4 = seasons.create_round(scope["competition_id"], "round-4", "Round 4", 3)
+    RoundMappingRepository(db).accept(round4.bbbffl_round_id, 2026, 1347, KnownRounds((2026, 1347)))
+    lifecycle.create_ordinary_round(round4.bbbffl_round_id)
+    lifecycle.transition(round4.bbbffl_round_id, "open")
+    return lifecycle, {"R2": round2, "R3": round3, "R4": round4}, entries, scope
+
+
+# (club code, afl_club_id, target round key, position, canonical_player_id, display name)
+_ISSUE_135_NOMINATIONS = (
+    ("COLL", 3, "R2", "F1", 930201, "Jamie Elliott"),
+    ("CARL", 5, "R2", "M1", 930202, "George Hewett"),
+    ("COLL", 3, "R2", "M2", 930203, "Josh Daicos"),
+    ("HAW", 9, "R3", "F1", 930204, "Jack Gunston"),
+    ("GCFC", 4, "R3", "M1", 930205, "Noah Anderson"),
+    ("WB", 8, "R3", "M2", 930206, "Ed Richards"),
+    ("GCFC", 4, "R3", "Interchange", 930207, "Touk Miller"),
+    ("GWS", 15, "R4", "F1", 930208, "Toby Greene"),
+    ("STK", 11, "R4", "Interchange", 930209, "Rowan Marshall"),
+)
+
+# Opening Round (AFL round 1343) matches pairing the seven clubs involved --
+# synthetic pairings, not a claimed real 2026 Opening Round draw (see this
+# module's docstring and docs/opening-round-deferred-selection.md's
+# evidence-boundary section).
+_ISSUE_135_OR_CLIENT = MultiRoundMatchClient(
+    {
+        1343: [
+            Match(9301, Team(3, "COLL"), Team(5, "CARL"), "CONCLUDED"),
+            Match(9302, Team(9, "HAW"), Team(4, "GCFC"), "CONCLUDED"),
+            Match(9303, Team(8, "WB"), Team(15, "GWS"), "CONCLUDED"),
+            Match(9304, Team(11, "STK"), Team(999, "Filler"), "CONCLUDED"),
+        ]
+    },
+    # `app.scoring.score_position` scores a Forward slot from goals/behinds
+    # and a Midfield slot from disposals (see `app.scoring.ScoringRules`'s
+    # default coefficients: forward_goal=6, forward_behind=1,
+    # midfield_disposal=1) -- each nominated player's stat line uses
+    # whichever fields their own target position actually scores from.
+    stats_by_match={
+        9301: {
+            930201: PlayerStatLine(930201, goals=4, behinds=1),  # Jamie Elliott (F1): 6*4+1 = 25
+            930203: PlayerStatLine(930203, disposals=22),  # Josh Daicos (M2): 22
+            930202: PlayerStatLine(930202, disposals=18),  # George Hewett (M1): 18
+        },
+        9302: {
+            930204: PlayerStatLine(930204, goals=3, behinds=2),  # Jack Gunston (F1): 6*3+2 = 20
+            930205: PlayerStatLine(930205, disposals=27),  # Noah Anderson (M1): 27
+            930207: PlayerStatLine(930207, disposals=24),  # Touk Miller (Interchange)
+        },
+        9303: {
+            930206: PlayerStatLine(930206, disposals=19),  # Ed Richards (M2): 19
+            930208: PlayerStatLine(930208, goals=2, behinds=4),  # Toby Greene (F1): 6*2+4 = 16
+        },
+        9304: {930209: PlayerStatLine(930209, disposals=15)},  # Rowan Marshall (Interchange)
+    },
+)
+
+
+def _build_issue_135_regression(db):
+    """Accept every rule, own every player and submit all nine historical
+    nominations for one entry. Returns
+    `(lifecycle, rounds, scope, entry, players, nominations)` where
+    `players`/`nominations` are keyed by display name."""
+    ev = evidence.EVIDENCE_2026
+    lifecycle, rounds, entries, scope = _issue_135_scope(db)
+    entry = entries[0]
+    accepted_clubs: dict[int, object] = {}
+    players: dict[str, object] = {}
+    nominations: dict[str, object] = {}
+    nomination_repo = OpeningRoundNominationRepository(db)
+    for code, club_id, round_key, position, canonical_id, name in _ISSUE_135_NOMINATIONS:
+        if club_id not in accepted_clubs:
+            accepted_clubs[club_id] = accept_rule(
+                db, scope["season_id"], club_id, ev, ev.compensating_bye_round[code], rounds[round_key].bbbffl_round_id
             )
+        rule = accepted_clubs[club_id]
+        player = own_named_player(
+            db, scope["season_id"], entry, canonical_id, name, afl_team_id=club_id, afl_team_name=code
+        )
+        players[name] = player
+        nominations[name] = nomination_repo.nominate(
+            rule.rule_id, entry.season_entry_id, position, player.season_player_id, _ISSUE_135_OR_CLIENT, actor=SCORER
+        )
+    return lifecycle, rounds, scope, entry, players, nominations
+
+
+def test_issue_135_historical_nine_player_submission_is_fully_accepted():
+    """Regression coverage items 1-4: two Collingwood players in distinct
+    Round 2 positions, two Gold Coast players in distinct Round 3
+    positions, the full nine-player historical submission, and F1/
+    Interchange each reused across different target rounds."""
+    db = migrated_connection()
+    _, rounds, scope, entry, players, nominations = _build_issue_135_regression(db)
+    assert len(nominations) == 9
+
+    coll_rule_id = nominations["Jamie Elliott"].rule_id
+    assert nominations["Josh Daicos"].rule_id == coll_rule_id  # same club, same rule, same entry
+    assert nominations["Jamie Elliott"].position != nominations["Josh Daicos"].position
+    assert (
+        nominations["Jamie Elliott"].bbbffl_round_id
+        == nominations["Josh Daicos"].bbbffl_round_id
+        == rounds["R2"].bbbffl_round_id
+    )
+
+    gcfc_rule_id = nominations["Noah Anderson"].rule_id
+    assert nominations["Touk Miller"].rule_id == gcfc_rule_id  # same club, same rule, same entry
+    assert nominations["Noah Anderson"].position != nominations["Touk Miller"].position
+    assert (
+        nominations["Noah Anderson"].bbbffl_round_id
+        == nominations["Touk Miller"].bbbffl_round_id
+        == rounds["R3"].bbbffl_round_id
+    )
+
+    # F1 is nominated once per target round -- reusing the same position
+    # label across three distinct target BBBFFL rounds is valid.
+    f1_rounds = {
+        nominations[name].bbbffl_round_id
+        for name in ("Jamie Elliott", "Jack Gunston", "Toby Greene")
+        if nominations[name].position == "F1"
+    }
+    assert f1_rounds == {rounds["R2"].bbbffl_round_id, rounds["R3"].bbbffl_round_id, rounds["R4"].bbbffl_round_id}
+    interchange_rounds = {
+        nominations[name].bbbffl_round_id
+        for name in ("Touk Miller", "Rowan Marshall")
+        if nominations[name].position == "Interchange"
+    }
+    assert interchange_rounds == {rounds["R3"].bbbffl_round_id, rounds["R4"].bbbffl_round_id}
+
+    results = OpeningRoundNominationRepository(db).list_for_season_entry(scope["season_id"], entry.season_entry_id)
+    assert {n.nomination_id for n in results} == {n.nomination_id for n in nominations.values()}
+    assert len(results) == 9  # every nomination returned exactly once
+
+
+def test_issue_135_historical_submission_readiness_has_no_conflicts_and_confirms():
+    """Regression coverage item 10: readiness must not label the nine valid
+    same-rule/multi-player nominations as duplicates, mismatches or
+    conflicts, and the entry must be able to confirm its submission."""
+    db = migrated_connection()
+    _, rounds, scope, entry, players, nominations = _build_issue_135_regression(db)
+
+    readiness = build_opening_round_readiness(db, scope["season_id"])
+    assert readiness.duplicate_nominations == ()
+    assert readiness.mismatched_nominations == ()
+    assert readiness.conflicting_nominations == ()
+    entry_readiness = readiness.for_entry(entry.season_entry_id)
+    assert entry_readiness.nomination_count == 9
+
+    confirmed = OpeningRoundSubmissionRepository(db).confirm(scope["season_id"], entry.season_entry_id, actor=ADMIN)
+    assert confirmed.state == "confirmed"
+    after_confirm = build_opening_round_readiness(db, scope["season_id"])
+    assert after_confirm.duplicate_nominations == ()
+    assert after_confirm.for_entry(entry.season_entry_id).is_confirmed is True
+
+
+def test_issue_135_historical_submission_preloads_and_locks_every_position_independently():
+    """Regression coverage item 11: every valid same-rule nomination
+    preloads into its own correct target-round position, is independently
+    locked, cannot be displaced by ordinary weekly lineup editing, does not
+    overwrite a sibling nomination sharing the same rule, does not affect
+    unused positions, and does not leak into other target rounds."""
+    db = migrated_connection()
+    _, rounds, scope, entry, players, nominations = _build_issue_135_regression(db)
+    lineups = WeeklyLineupRepository(db)
+    nomination_repo = OpeningRoundNominationRepository(db)
+
+    expected_by_round = {
+        "R2": {"F1": "Jamie Elliott", "M1": "George Hewett", "M2": "Josh Daicos"},
+        "R3": {"F1": "Jack Gunston", "M1": "Noah Anderson", "M2": "Ed Richards", "Interchange": "Touk Miller"},
+        "R4": {"F1": "Toby Greene", "Interchange": "Rowan Marshall"},
+    }
+    drafts = {}
+    for round_key, round_ in rounds.items():
+        nomination_repo.preload_target_lineup(
+            lineups, scope["season_id"], scope["competition_id"], round_.bbbffl_round_id, entry.season_entry_id
+        )
+        draft = lineups.get_draft(
+            scope["season_id"], scope["competition_id"], round_.bbbffl_round_id, entry.season_entry_id
+        )
+        drafts[round_key] = draft
+        for position, name in expected_by_round[round_key].items():
+            assert draft.positions[position] == players[name].season_player_id
+        # Positions with no nomination in this round remain untouched/empty.
+        untouched = set(draft.positions) - set(expected_by_round[round_key])
+        assert all(draft.positions[position] is None for position in untouched)
+        # No cross-round leakage: none of this round's players appear under
+        # another round's nominated names.
+        other_rounds_players = {
+            players[name].season_player_id
+            for key, mapping in expected_by_round.items()
+            if key != round_key
+            for name in mapping.values()
+        }
+        assert not (set(draft.positions.values()) & other_rounds_players)
+
+    # Every nominated position is independently locked: an attempt to move
+    # a different player into any one of them is rejected, while the
+    # sibling nominations sharing the same rule/round remain unaffected.
+    guard = OpeningRoundSelectionGuard(nomination_repo)
+    r2_draft = drafts["R2"]
+    full = complete_lineup(db, scope, entry, overrides=r2_draft.positions)
+    impostor = own_named_player(
+        db, scope["season_id"], entry, 930299, "F1 Impostor", afl_team_id=None, afl_team_name=None
+    )
+    with pytest.raises(DeferredSlotLockedError):
+        lineups.submit_positions(
+            r2_draft.lineup_id,
+            {**full, "F1": impostor.season_player_id},
+            expected_submission_version=0,
+            actor=SCORER,
+            source_type="scorer_proxy",
+            reason="attempt to displace Jamie Elliott with an unrelated player",
+            lock_guard=guard,
+        )
+    assert lineups.get_effective_submission(r2_draft.lineup_id) is None
+    submitted = lineups.submit_positions(
+        r2_draft.lineup_id,
+        full,
+        expected_submission_version=0,
+        actor=SCORER,
+        source_type="scorer_proxy",
+        reason="legitimate submission keeping both Collingwood nominations intact",
+        lock_guard=guard,
+    )
+    assert submitted.positions["F1"] == players["Jamie Elliott"].season_player_id
+    assert submitted.positions["M2"] == players["Josh Daicos"].season_player_id
+    assert submitted.positions["M1"] == players["George Hewett"].season_player_id
+
+
+def test_issue_135_two_players_sharing_one_rule_are_each_scored_from_their_own_correct_source():
+    """Regression coverage item 12: deferred scoring includes every valid
+    nomination, and two players sharing the same accepted rule (the two
+    Collingwood players in Round 2, and the two Gold Coast players in
+    Round 3) each independently score from the shared Opening Round source
+    match with their own statistics -- never each other's, never
+    collapsed."""
+    db = migrated_connection()
+    lifecycle, rounds, scope, entry, players, nominations = _build_issue_135_regression(db)
+    lineups = WeeklyLineupRepository(db)
+    nomination_repo = OpeningRoundNominationRepository(db)
+
+    def _submit_round(round_key):
+        round_ = rounds[round_key]
+        nomination_repo.preload_target_lineup(
+            lineups, scope["season_id"], scope["competition_id"], round_.bbbffl_round_id, entry.season_entry_id
+        )
+        draft = lineups.get_draft(
+            scope["season_id"], scope["competition_id"], round_.bbbffl_round_id, entry.season_entry_id
+        )
+        # Submitted exactly as preloaded (issue #98's valid-partial-lineup
+        # precedent -- unused positions are deliberate vacancies, not
+        # neutral fillers): only the nominated slots matter for this
+        # assertion.
+        lineups.submit(draft.lineup_id, expected_draft_revision=draft.revision, expected_submission_version=0)
+        matchup = next(
+            m
+            for m in lifecycle.list_matchups(round_.bbbffl_round_id)
+            if entry.season_entry_id in (m.home_season_entry_id, m.away_season_entry_id)
+        )
+        opponent_id = (
+            matchup.away_season_entry_id
+            if matchup.home_season_entry_id == entry.season_entry_id
+            else matchup.home_season_entry_id
+        )
+        away_positions = complete_lineup(db, scope, _entry_ref(opponent_id))
+        away_draft = lineups.save_draft(
+            scope["season_id"],
+            scope["competition_id"],
+            round_.bbbffl_round_id,
+            opponent_id,
+            away_positions,
+            expected_revision=0,
+        )
+        lineups.submit(away_draft.lineup_id, expected_draft_revision=away_draft.revision, expected_submission_version=0)
+        service = MatchupCalculationService(db, _ISSUE_135_OR_CLIENT)
+        calculated = service.calculate_matchup(matchup.matchup_id)
+        home_side = (
+            calculated.snapshot["home"]
+            if calculated.snapshot["home"]["season_entry_id"] == entry.season_entry_id
+            else calculated.snapshot["away"]
+        )
+        return {slot["position"]: slot for slot in home_side["slots"]}
+
+    r2_slots = _submit_round("R2")
+    assert r2_slots["F1"]["scoring_source"] == "opening_round_deferred"
+    assert r2_slots["F1"]["afl_match_id"] == 9301
+    assert r2_slots["F1"]["score"] == 25  # Jamie Elliott
+    assert r2_slots["M2"]["scoring_source"] == "opening_round_deferred"
+    assert r2_slots["M2"]["afl_match_id"] == 9301
+    assert r2_slots["M2"]["score"] == 22  # Josh Daicos -- distinct from Jamie Elliott's score above
+    assert r2_slots["M1"]["afl_match_id"] == 9301
+    assert r2_slots["M1"]["score"] == 18  # George Hewett, Carlton, same source match
+
+    r3_slots = _submit_round("R3")
+    assert r3_slots["M1"]["scoring_source"] == "opening_round_deferred"
+    assert r3_slots["M1"]["afl_match_id"] == 9302
+    assert r3_slots["M1"]["score"] == 27  # Noah Anderson
+    assert r3_slots["Interchange"]["scoring_source"] == "opening_round_deferred"
+    assert r3_slots["Interchange"]["afl_match_id"] == 9302
+    # Interchange never carries its own `score` (see
+    # `MatchupCalculationService._entry`'s Interchange handling) -- its raw
+    # stat line is what proves it independently resolved Touk Miller's own
+    # disposals, distinct from Noah Anderson's, from the same shared match.
+    assert r3_slots["Interchange"]["stats"]["disposals"] == 24  # Touk Miller
+
+
+def _entry_ref(season_entry_id):
+    """Adapts a bare `season_entry_id` to the `.season_entry_id`-only shape
+    `tests.lineup_helpers.complete_lineup` expects, for an opponent entry
+    this module otherwise only has an ID for (resolved from the round's own
+    frozen fixture pairing, not chosen arbitrarily)."""
+    return type("EntryRef", (), {"season_entry_id": season_entry_id})()
 
 
 # -- Presentation and readiness (issue #131) ---------------------------------

@@ -149,11 +149,23 @@ which accepted rule, resolved against which Opening Round AFL match. Unlike
 the rule table, a nomination is corrected **in place** (an audited UPDATE),
 because `app.audit`'s append-only event log already retains the
 before/after/actor/reason trail a correction needs -- a second parallel
-revision-history table would duplicate that. Three partial-unique
-invariants (mirroring `weekly_lineup_draft_slot`'s "a player cannot occupy
-multiple scoring positions") ensure at most one nomination per
-(rule, entry), one nomination per target slot, and one nomination per
-target player.
+revision-history table would duplicate that. Two partial-unique invariants
+(mirroring `weekly_lineup_draft_slot`'s "a player cannot occupy multiple
+scoring positions") ensure at most one nomination per target slot and one
+nomination per target player, both scoped to `(bbbffl_round_id,
+season_entry_id)`.
+
+A third invariant, `UNIQUE(rule_id, season_entry_id)`, existed from
+migration 0020 until migration 0024 (issue #135) removed it: an accepted
+rule maps one AFL club's Opening Round to its compensating-bye target
+round, but that says nothing about how many of that club's *owned* players
+a coach may nominate into that target round's distinct slots -- a genuine
+historical submission can and did nominate more than one same-club player
+in one target round (e.g. two Collingwood players in distinct Round 2
+slots), each still subject to the two slot/player invariants above.
+`OpeningRoundNominationRepository.nominate` no longer pre-checks
+`(rule_id, season_entry_id)` uniqueness either -- only the slot and player
+checks remain.
 
 ## Explicit season configuration
 
@@ -180,7 +192,9 @@ in order:
 5. the player's cached AFL club matches the rule's `afl_club_id`;
 6. the AFL Opening Round evidence actually resolves that club to exactly
    one match (`app.lockouts.resolve_match` -- reused, not reimplemented);
-7. the three slot-uniqueness invariants above.
+7. the two slot-uniqueness invariants above (target slot, target player) --
+   deliberately **not** a limit on how many nominations one entry may have
+   under the same rule (issue #135).
 
 Every write requires `actor.actor_type == "anonymous_operator"` with
 `actor_role` `scorer`/`admin` (`UnauthorizedNominationActorError`
@@ -405,7 +419,14 @@ a defensive check over persisted state, entirely independent of
 confirmation completeness: a confirmed entry whose nomination data is later
 corrupted (a trade-away, a rule correction race) still shows as confirmed,
 but the corruption is reported separately and still blocks the round
-(`opening_round_integrity_conflict`).
+(`opening_round_integrity_conflict`). Since issue #135, "duplicate" here
+means a genuine duplicate target slot or duplicate target player within one
+`(bbbffl_round_id, season_entry_id)` -- both already structurally
+impossible through `OpeningRoundNominationRepository.nominate`/`correct` by
+the two remaining schema-level unique constraints, so this is belt-and-
+braces re-verification, not primary enforcement. Multiple distinct
+nominations sharing one accepted rule for one entry are valid and are never
+reported as duplicates.
 
 If schema support was required for this boundary, it is a normal migration
 (`migrations/versions/0023_opening_round_submission.py`) adding

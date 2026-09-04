@@ -671,6 +671,228 @@ def test_opening_round_submission_downgrade_refused_when_data_exists(tmp_path):
         downgrade(url, "0022_acting_context")
 
 
+def test_opening_round_nomination_multiplicity_migration_removes_invalid_constraint_and_preserves_data(tmp_path):
+    """Issue #135: upgrading past 0023 to 0024 removes
+    `uq_opening_round_nomination_rule_entry` while preserving every
+    existing nomination/rule/submission row untouched, preserving the two
+    remaining schema-level invariants (slot, player-once) and every other
+    column/foreign key/index, and lifting the rule/entry cardinality limit
+    for subsequent writes."""
+    from app.afl_client import Match, Team
+    from app.audit import ActorContext
+    from app.opening_round import (
+        OpeningRoundNominationRepository,
+        OpeningRoundRuleRepository,
+        OpeningRoundSubmissionRepository,
+    )
+    from app.player_pool import OwnershipRepository, PlayerPoolRepository
+    from tests.test_competition_lifecycle import operational
+    from tests.test_opening_round import KnownRounds, MultiRoundMatchClient
+
+    url = _url(tmp_path / "nomination-multiplicity-upgrade.db")
+    migrate(url, "0023_opening_round_submission")
+    connection = connect(url)
+    _, round_, entries = operational(connection, 2026, 2)
+    season_id = connection.execute(
+        "SELECT c.season_id FROM bbbffl_round r JOIN competition_stream c ON c.competition_id=r.competition_id "
+        "WHERE r.bbbffl_round_id=?",
+        (round_.bbbffl_round_id,),
+    ).fetchone()["season_id"]
+    admin = ActorContext.anonymous_operator("admin")
+    scorer = ActorContext.anonymous_operator("scorer")
+    rule = OpeningRoundRuleRepository(connection).accept(
+        season_id,
+        2,
+        2026,
+        1,
+        2,
+        round_.bbbffl_round_id,
+        KnownRounds((2026, 1), (2026, 2)),
+        actor=admin,
+        reason="migration test fixture",
+    )
+    OwnershipRepository(connection).configure_squad_limit(season_id, 30)
+    entry = entries[0]
+    pool = PlayerPoolRepository(connection)
+    player = pool.refresh_player(season_id, 1, "Pre-migration Player", afl_team_id=2)
+    OwnershipRepository(connection).acquire(player.season_player_id, entry.season_entry_id)
+    client = MultiRoundMatchClient({1: [Match(1, Team(2, "A"), Team(3, "B"), "CONCLUDED")]})
+    nomination = OpeningRoundNominationRepository(connection).nominate(
+        rule.rule_id, entry.season_entry_id, "M1", player.season_player_id, client, actor=scorer
+    )
+    confirmed = OpeningRoundSubmissionRepository(connection).confirm(season_id, entry.season_entry_id, actor=admin)
+    connection.close()
+
+    engine = create_engine(url)
+    before = {c["name"] for c in inspect(engine).get_unique_constraints("opening_round_nomination")}
+    assert "uq_opening_round_nomination_rule_entry" in before
+    engine.dispose()
+
+    migrate(url)  # to head (0024_opening_round_multi_player)
+
+    engine = create_engine(url)
+    inspector = inspect(engine)
+    after = {c["name"] for c in inspector.get_unique_constraints("opening_round_nomination")}
+    assert "uq_opening_round_nomination_rule_entry" not in after
+    assert {"uq_opening_round_nomination_slot", "uq_opening_round_nomination_player_once"} <= after
+    referred_tables = {fk["referred_table"] for fk in inspector.get_foreign_keys("opening_round_nomination")}
+    assert referred_tables == {
+        "opening_round_rule",
+        "bbbffl_round",
+        "season_player_pool",
+        "season_entry",
+        "bbbffl_season",
+    }
+    index_names = {ix["name"] for ix in inspector.get_indexes("opening_round_nomination")}
+    assert "ix_opening_round_nomination_round" in index_names
+    columns = {c["name"] for c in inspector.get_columns("opening_round_nomination")}
+    assert columns == {
+        "nomination_id",
+        "season_id",
+        "rule_id",
+        "bbbffl_round_id",
+        "season_entry_id",
+        "position",
+        "season_player_id",
+        "source_afl_match_id",
+        "actor_type",
+        "actor_id",
+        "actor_role",
+        "effective_at",
+        "created_at",
+        "updated_at",
+    }
+    engine.dispose()
+
+    connection = connect(url)
+    persisted = OpeningRoundNominationRepository(connection).get(nomination.nomination_id)
+    assert persisted == nomination  # nomination row is byte-for-byte unchanged by the migration
+    submission = OpeningRoundSubmissionRepository(connection).get(season_id, entry.season_entry_id)
+    assert submission.state == "confirmed" and submission.confirmed_at == confirmed.confirmed_at
+
+    # The removed constraint is not merely absent from the schema
+    # inspection above -- a second, distinct player under the same rule can
+    # now actually be written (issue #135), which the pre-migration schema
+    # would have rejected outright (see
+    # test_duplicate_slot_and_duplicate_player_nominations_are_rejected's
+    # pre-0024 behaviour in tests/test_opening_round.py).
+    OpeningRoundSubmissionRepository(connection).reopen(
+        season_id, entry.season_entry_id, actor=admin, reason="reopen to add a second same-rule nomination"
+    )
+    second_player = pool.refresh_player(season_id, 2, "Post-migration Second Player", afl_team_id=2)
+    OwnershipRepository(connection).acquire(second_player.season_player_id, entry.season_entry_id)
+    second = OpeningRoundNominationRepository(connection).nominate(
+        rule.rule_id, entry.season_entry_id, "M2", second_player.season_player_id, client, actor=scorer
+    )
+    assert second.rule_id == nomination.rule_id
+    connection.close()
+
+
+def test_opening_round_nomination_multiplicity_downgrade_refused_when_multiple_nominations_share_a_rule(tmp_path):
+    """The downgrade cannot silently discard data the old schema cannot
+    represent: two nominations sharing one `(rule_id, season_entry_id)`
+    pair (valid since issue #135) must refuse the downgrade outright rather
+    than fail with an opaque database error or silently drop a row."""
+    from app.afl_client import Match, Team
+    from app.audit import ActorContext
+    from app.opening_round import OpeningRoundNominationRepository, OpeningRoundRuleRepository
+    from app.player_pool import OwnershipRepository, PlayerPoolRepository
+    from tests.test_competition_lifecycle import operational
+    from tests.test_opening_round import KnownRounds, MultiRoundMatchClient
+
+    url = _url(tmp_path / "nomination-multiplicity-downgrade-refused.db")
+    migrate(url)
+    connection = connect(url)
+    _, round_, entries = operational(connection, 2026, 2)
+    season_id = connection.execute(
+        "SELECT c.season_id FROM bbbffl_round r JOIN competition_stream c ON c.competition_id=r.competition_id "
+        "WHERE r.bbbffl_round_id=?",
+        (round_.bbbffl_round_id,),
+    ).fetchone()["season_id"]
+    admin = ActorContext.anonymous_operator("admin")
+    scorer = ActorContext.anonymous_operator("scorer")
+    rule = OpeningRoundRuleRepository(connection).accept(
+        season_id,
+        2,
+        2026,
+        1,
+        2,
+        round_.bbbffl_round_id,
+        KnownRounds((2026, 1), (2026, 2)),
+        actor=admin,
+        reason="migration test fixture",
+    )
+    OwnershipRepository(connection).configure_squad_limit(season_id, 30)
+    entry = entries[0]
+    pool = PlayerPoolRepository(connection)
+    ownership = OwnershipRepository(connection)
+    player_a = pool.refresh_player(season_id, 1, "Player A", afl_team_id=2)
+    player_b = pool.refresh_player(season_id, 2, "Player B", afl_team_id=2)
+    ownership.acquire(player_a.season_player_id, entry.season_entry_id)
+    ownership.acquire(player_b.season_player_id, entry.season_entry_id)
+    client = MultiRoundMatchClient({1: [Match(1, Team(2, "A"), Team(3, "B"), "CONCLUDED")]})
+    nominations = OpeningRoundNominationRepository(connection)
+    nominations.nominate(rule.rule_id, entry.season_entry_id, "M1", player_a.season_player_id, client, actor=scorer)
+    nominations.nominate(rule.rule_id, entry.season_entry_id, "M2", player_b.season_player_id, client, actor=scorer)
+    connection.close()
+
+    with pytest.raises(RuntimeError, match="opening_round_nomination has multiple nominations sharing"):
+        downgrade(url, "0023_opening_round_submission")
+
+
+def test_opening_round_nomination_multiplicity_downgrade_succeeds_when_data_is_compatible(tmp_path):
+    """When every entry still has at most one nomination per rule, the
+    downgrade is safe and actually restores the old constraint (never a
+    downgrade that is syntactically reversible but leaves the schema
+    unprotected)."""
+    from app.afl_client import Match, Team
+    from app.audit import ActorContext
+    from app.opening_round import OpeningRoundNominationRepository, OpeningRoundRuleRepository
+    from app.player_pool import OwnershipRepository, PlayerPoolRepository
+    from tests.test_competition_lifecycle import operational
+    from tests.test_opening_round import KnownRounds, MultiRoundMatchClient
+
+    url = _url(tmp_path / "nomination-multiplicity-downgrade-ok.db")
+    migrate(url)
+    connection = connect(url)
+    _, round_, entries = operational(connection, 2026, 2)
+    season_id = connection.execute(
+        "SELECT c.season_id FROM bbbffl_round r JOIN competition_stream c ON c.competition_id=r.competition_id "
+        "WHERE r.bbbffl_round_id=?",
+        (round_.bbbffl_round_id,),
+    ).fetchone()["season_id"]
+    admin = ActorContext.anonymous_operator("admin")
+    scorer = ActorContext.anonymous_operator("scorer")
+    rule = OpeningRoundRuleRepository(connection).accept(
+        season_id,
+        2,
+        2026,
+        1,
+        2,
+        round_.bbbffl_round_id,
+        KnownRounds((2026, 1), (2026, 2)),
+        actor=admin,
+        reason="migration test fixture",
+    )
+    OwnershipRepository(connection).configure_squad_limit(season_id, 30)
+    entry = entries[0]
+    pool = PlayerPoolRepository(connection)
+    player = pool.refresh_player(season_id, 1, "Only Player", afl_team_id=2)
+    OwnershipRepository(connection).acquire(player.season_player_id, entry.season_entry_id)
+    client = MultiRoundMatchClient({1: [Match(1, Team(2, "A"), Team(3, "B"), "CONCLUDED")]})
+    OpeningRoundNominationRepository(connection).nominate(
+        rule.rule_id, entry.season_entry_id, "M1", player.season_player_id, client, actor=scorer
+    )
+    connection.close()
+
+    downgrade(url, "0023_opening_round_submission")
+
+    engine = create_engine(url)
+    names = {c["name"] for c in inspect(engine).get_unique_constraints("opening_round_nomination")}
+    assert "uq_opening_round_nomination_rule_entry" in names
+    engine.dispose()
+
+
 def test_revision_chain_has_single_head():
     cfg = Config("alembic.ini")
     assert ScriptDirectory.from_config(cfg).get_heads() == [HEAD]

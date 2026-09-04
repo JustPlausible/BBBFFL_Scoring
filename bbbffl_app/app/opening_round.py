@@ -82,9 +82,12 @@ RULE_ACCEPTED = "opening_round.rule.accepted"
 RULE_CORRECTED = "opening_round.rule.corrected"
 NOMINATION_CREATED = "opening_round.nomination.created"
 NOMINATION_CORRECTED = "opening_round.nomination.corrected"
+SUBMISSION_CONFIRMED = "opening_round.submission.confirmed"
+SUBMISSION_REOPENED = "opening_round.submission.reopened"
 
 ENTITY_TYPE_RULE = "opening_round.rule"
 ENTITY_TYPE_NOMINATION = "opening_round.nomination"
+ENTITY_TYPE_SUBMISSION = "opening_round.submission"
 
 PROXY_ACTOR_ROLES = frozenset({"scorer", "admin", "replay_operator"})
 
@@ -127,6 +130,13 @@ class UnauthorizedNominationActorError(OpeningRoundError):
 class DeferredSlotLockedError(OpeningRoundError):
     """An ordinary edit, carry-forward or resubmission attempted to change
     a slot that a nomination has already locked."""
+
+
+class SubmissionConfirmedError(OpeningRoundError):
+    """A nomination cannot be created or corrected for a season entry whose
+    Opening Round submission has already been confirmed (issue #133 #3): a
+    confirmed submission must not be silently mutated. An explicit, audited
+    `OpeningRoundSubmissionRepository.reopen` is required first."""
 
 
 def _ensure_operator(actor: ActorContext) -> None:
@@ -627,6 +637,7 @@ class OpeningRoundNominationRepository:
     def __init__(self, database: DatabaseConnection):
         self.database = database
         self.rules = OpeningRoundRuleRepository(database)
+        self.submissions = OpeningRoundSubmissionRepository(database)
 
     def nominate(
         self,
@@ -659,6 +670,11 @@ class OpeningRoundNominationRepository:
         if rule is None or rule.state != "accepted":
             raise UnknownRuleError(f"rule {rule_id} is not an accepted Opening Round rule")
         with transaction(self.database) as conn:
+            if self.submissions.is_confirmed_locked(conn, rule.season_id, season_entry_id):
+                raise SubmissionConfirmedError(
+                    f"season entry {season_entry_id} has already confirmed its Opening Round submission; "
+                    "reopen it before adding a new nomination"
+                )
             player = conn.execute(
                 "SELECT season_id, afl_team_id FROM season_player_pool WHERE season_player_id=?"
                 + _for_update_suffix(self.database),
@@ -783,6 +799,11 @@ class OpeningRoundNominationRepository:
             ).fetchone()
             if not existing:
                 raise KeyError(nomination_id)
+            if self.submissions.is_confirmed_locked(conn, existing["season_id"], existing["season_entry_id"]):
+                raise SubmissionConfirmedError(
+                    f"season entry {existing['season_entry_id']} has already confirmed its Opening Round "
+                    "submission; reopen it before correcting a nomination"
+                )
             new_position = position if position is not None else existing["position"]
             new_player = season_player_id if season_player_id is not None else existing["season_player_id"]
             if new_position not in POSITIONS:
@@ -936,6 +957,25 @@ class OpeningRoundNominationRepository:
         ).fetchall()
         return [_nomination(row) for row in rows]
 
+    def list_for_season_entry(self, season_id: str, season_entry_id: str) -> list[OpeningRoundNomination]:
+        """Every persisted nomination for one `(season_id, season_entry_id)`,
+        exactly once by `nomination_id` -- the season/entry-scoped read the
+        represented-entry response needs (issue #133).
+
+        The prior represented-entry response iterated every accepted rule
+        and called `list_for_round(rule.bbbffl_round_id)` once per rule,
+        re-emitting the same persisted row once for every rule that happened
+        to share a target BBBFFL round. Querying `opening_round_nomination`
+        directly by its own `season_id`/`season_entry_id` columns returns
+        each row once regardless of how many accepted rules target its
+        round, without needing to de-duplicate the result afterward."""
+        rows = self.database.execute(
+            "SELECT * FROM opening_round_nomination WHERE season_id=? AND season_entry_id=? "
+            "ORDER BY bbbffl_round_id, position",
+            (season_id, season_entry_id),
+        ).fetchall()
+        return [_nomination(row) for row in rows]
+
     def get(self, nomination_id: str) -> OpeningRoundNomination | None:
         row = self.database.execute(
             "SELECT * FROM opening_round_nomination WHERE nomination_id=?", (nomination_id,)
@@ -1038,6 +1078,256 @@ class OpeningRoundSelectionGuard:
             remaining_previous = {p: v for p, v in previous_positions.items() if p not in deferred}
             remaining_proposed = {p: v for p, v in proposed_positions.items() if p not in deferred}
             self._inner(conn, lineup_row, remaining_previous, remaining_proposed)
+
+
+# -- Confirmation: OpeningRoundSubmission ------------------------------------
+#
+# Issue #133: the historical BBBFFL Opening Round process was always a
+# *partial* submission -- a coach/proxy could nominate zero or more eligible
+# owned players and deliberately leave the rest vacant. Owning an eligible
+# player, or an accepted rule existing for a club represented in an entry's
+# squad, must never itself imply a required nomination. The only thing that
+# makes an entry's Opening Round input "complete" is this explicit,
+# separately persisted confirmation boundary -- never an inferred count of
+# nominations against eligible rules/players (see `build_opening_round_
+# readiness`, which now keys season/round readiness off this table).
+#
+# Versioned exactly like `OpeningRoundRuleRepository` (header + revision,
+# `current_revision` pointer): a `'draft'` revision represents an entry that
+# has not (or no longer) confirmed; a `'confirmed'` revision is authoritative
+# completeness, with confirmation time and actor/reason provenance. There is
+# no row at all until an entry's submission is first confirmed. Reopening a
+# confirmed submission is a distinct, reason-required operation that writes
+# a fresh `'draft'` revision -- a confirmed submission is never silently
+# mutated back to draft, and its full history remains inspectable.
+
+
+@dataclass(frozen=True)
+class OpeningRoundSubmission:
+    submission_id: str
+    season_id: str
+    season_entry_id: str
+    revision: int
+    state: str
+    confirmed_at: str | None
+    actor_type: str
+    actor_id: str | None
+    actor_role: str | None
+    reason: str | None
+    created_at: str
+
+
+def _submission(row) -> OpeningRoundSubmission:
+    return OpeningRoundSubmission(
+        row["submission_id"],
+        row["season_id"],
+        row["season_entry_id"],
+        row["revision"],
+        row["state"],
+        row["confirmed_at"],
+        row["actor_type"],
+        row["actor_id"],
+        row["actor_role"],
+        row["reason"],
+        row["created_at"],
+    )
+
+
+class OpeningRoundSubmissionRepository:
+    """Season-entry scoped Opening Round submission confirmation boundary.
+    Every write is attributed to an operator acting as proxy
+    (`_ensure_operator`), exactly like `OpeningRoundNominationRepository`."""
+
+    def __init__(self, database: DatabaseConnection):
+        self.database = database
+
+    def get(self, season_id: str, season_entry_id: str) -> OpeningRoundSubmission | None:
+        row = self.database.execute(
+            self._select() + " WHERE m.season_id=? AND m.season_entry_id=?", (season_id, season_entry_id)
+        ).fetchone()
+        return _submission(row) if row else None
+
+    def get_locked(self, conn: ConnectionLike, season_id: str, season_entry_id: str) -> OpeningRoundSubmission | None:
+        """Same as `get`, but read via an already-open transaction
+        connection -- used by `OpeningRoundNominationRepository.nominate`/
+        `correct` to refuse mutating a nomination for an entry whose
+        submission is already confirmed, inside their own transaction."""
+        row = conn.execute(
+            self._select() + " WHERE m.season_id=? AND m.season_entry_id=?", (season_id, season_entry_id)
+        ).fetchone()
+        return _submission(row) if row else None
+
+    def is_confirmed(self, season_id: str, season_entry_id: str) -> bool:
+        current = self.get(season_id, season_entry_id)
+        return current is not None and current.state == "confirmed"
+
+    def is_confirmed_locked(self, conn: ConnectionLike, season_id: str, season_entry_id: str) -> bool:
+        current = self.get_locked(conn, season_id, season_entry_id)
+        return current is not None and current.state == "confirmed"
+
+    def list_for_season(self, season_id: str) -> list[OpeningRoundSubmission]:
+        rows = self.database.execute(self._select() + " WHERE m.season_id=?", (season_id,)).fetchall()
+        return [_submission(row) for row in rows]
+
+    def history(self, season_id: str, season_entry_id: str) -> list[OpeningRoundSubmission]:
+        rows = self.database.execute(
+            self._select(False) + " WHERE m.season_id=? AND m.season_entry_id=? ORDER BY r.revision",
+            (season_id, season_entry_id),
+        ).fetchall()
+        return [_submission(row) for row in rows]
+
+    def confirm(
+        self,
+        season_id: str,
+        season_entry_id: str,
+        *,
+        actor: ActorContext,
+        reason: str | None = None,
+    ) -> OpeningRoundSubmission:
+        """Confirm an entry's Opening Round submission -- explicitly
+        permitting zero, or any partial legal set of, nominations (issue
+        #133). Idempotent/concurrency-safe: calling this again while the
+        submission is already confirmed is a no-op that returns the current
+        state without writing a new revision or audit event, and a genuine
+        concurrent first-confirmation race (nothing existed yet to lock) is
+        reconciled to whichever confirmation actually landed rather than
+        raising."""
+        _ensure_operator(actor)
+        with transaction(self.database) as conn:
+            head = conn.execute(
+                "SELECT * FROM opening_round_submission WHERE season_id=? AND season_entry_id=?"
+                + _for_update_suffix(self.database),
+                (season_id, season_entry_id),
+            ).fetchone()
+            if head:
+                current = self._current(conn, head["submission_id"])
+                if current["state"] == "confirmed":
+                    return self._get(conn, head["submission_id"])
+                submission_id, revision = head["submission_id"], head["current_revision"] + 1
+                conn.execute(
+                    "UPDATE opening_round_submission SET current_revision=? WHERE submission_id=?",
+                    (revision, submission_id),
+                )
+            else:
+                submission_id, revision = _id(), 1
+                try:
+                    conn.execute(
+                        "INSERT INTO opening_round_submission VALUES (?, ?, ?, ?, ?)",
+                        (submission_id, season_id, season_entry_id, revision, _now()),
+                    )
+                except IntegrityError as exc:
+                    existing = self.get(season_id, season_entry_id)
+                    if existing is None:
+                        raise OpeningRoundError(
+                            "concurrent Opening Round submission confirmation could not be reconciled"
+                        ) from exc
+                    return existing
+            now = _now()
+            conn.execute(
+                "INSERT INTO opening_round_submission_revision VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    submission_id,
+                    revision,
+                    "confirmed",
+                    now,
+                    actor.actor_type,
+                    actor.actor_id,
+                    actor.actor_role,
+                    reason,
+                    now,
+                ),
+            )
+            append_event(
+                conn,
+                actor=actor,
+                action=SUBMISSION_CONFIRMED,
+                entity_type=ENTITY_TYPE_SUBMISSION,
+                entity_id=submission_id,
+                entity_version=str(revision),
+                reason=reason,
+                after_state={"state": "confirmed", "season_entry_id": season_entry_id},
+            )
+            return self._get(conn, submission_id)
+
+    def reopen(
+        self,
+        season_id: str,
+        season_entry_id: str,
+        *,
+        actor: ActorContext,
+        reason: str,
+    ) -> OpeningRoundSubmission:
+        """Audited reopen of a confirmed submission back to draft (issue
+        #133 #3): requires a reason, requires the submission to currently be
+        confirmed, and writes a new `'draft'` revision rather than mutating
+        the confirmed one -- the confirmation this supersedes remains in
+        `history()` exactly as it was recorded."""
+        _ensure_operator(actor)
+        if not reason:
+            raise OpeningRoundError("reopening a confirmed Opening Round submission requires a reason")
+        with transaction(self.database) as conn:
+            head = conn.execute(
+                "SELECT * FROM opening_round_submission WHERE season_id=? AND season_entry_id=?"
+                + _for_update_suffix(self.database),
+                (season_id, season_entry_id),
+            ).fetchone()
+            if not head:
+                raise OpeningRoundError("no confirmed Opening Round submission exists for this entry to reopen")
+            current = self._current(conn, head["submission_id"])
+            if current["state"] != "confirmed":
+                raise OpeningRoundError("only a confirmed Opening Round submission can be reopened")
+            submission_id, revision = head["submission_id"], head["current_revision"] + 1
+            conn.execute(
+                "UPDATE opening_round_submission SET current_revision=? WHERE submission_id=?",
+                (revision, submission_id),
+            )
+            now = _now()
+            conn.execute(
+                "INSERT INTO opening_round_submission_revision VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    submission_id,
+                    revision,
+                    "draft",
+                    None,
+                    actor.actor_type,
+                    actor.actor_id,
+                    actor.actor_role,
+                    reason,
+                    now,
+                ),
+            )
+            append_event(
+                conn,
+                actor=actor,
+                action=SUBMISSION_REOPENED,
+                entity_type=ENTITY_TYPE_SUBMISSION,
+                entity_id=submission_id,
+                entity_version=str(revision),
+                reason=reason,
+                before_state={"state": "confirmed"},
+                after_state={"state": "draft"},
+            )
+            return self._get(conn, submission_id)
+
+    @staticmethod
+    def _current(conn: ConnectionLike, submission_id):
+        return conn.execute(
+            "SELECT r.* FROM opening_round_submission m "
+            "JOIN opening_round_submission_revision r ON r.submission_id=m.submission_id AND r.revision=m.current_revision "
+            "WHERE m.submission_id=?",
+            (submission_id,),
+        ).fetchone()
+
+    @staticmethod
+    def _select(current: bool = True) -> str:
+        join = " AND r.revision=m.current_revision" if current else ""
+        return (
+            "SELECT m.submission_id, m.season_id, m.season_entry_id, r.* FROM opening_round_submission m "
+            "JOIN opening_round_submission_revision r ON r.submission_id=m.submission_id" + join
+        )
+
+    def _get(self, conn: ConnectionLike, submission_id: str) -> OpeningRoundSubmission:
+        return _submission(conn.execute(self._select() + " WHERE m.submission_id=?", (submission_id,)).fetchone())
 
 
 # -- Presentation: human-readable rule/round/club labels --------------------
@@ -1146,17 +1436,26 @@ def describe_accepted_rules(database, afl_client, season_id: str) -> list[dict]:
     return [describe_accepted_rule(rule, database, afl_client, round_number_cache=round_number_cache) for rule in rules]
 
 
-# -- Readiness: nomination completeness summary ------------------------------
+# -- Readiness: confirmation completeness summary ----------------------------
 #
-# Issue #131: a coherent, reusable readiness summary -- how many accepted
-# Opening Round rules currently have an owned-player nomination from the
-# entry eligible for them, which entries are incomplete, and defensive
-# integrity checks (duplicate/mismatched/conflicting nominations) -- derived
-# entirely from already-persisted state (accepted rules, current ownership,
-# nominations). Never redefines what an accepted rule is and never mutates
-# rule/nomination history; this is a read model only. Intended to be shared,
-# not duplicated, by Season Centre and round-preparation readiness displays
-# (see `app.season_centre.build_season_centre` and
+# Issue #133: season/round readiness is keyed entirely off explicit
+# `OpeningRoundSubmissionRepository` confirmations, never off how many
+# eligible clubs/players an entry happens to own. Owning an eligible player,
+# or an accepted rule existing for a club represented in an entry's squad,
+# never itself implies a required nomination -- a coach could legitimately
+# confirm with zero nominations. "Required" here means every season entry in
+# the season: each one must explicitly confirm (even with nothing to
+# nominate) before this reads ready, exactly the `N/10 teams confirmed`
+# presentation issue #133 calls for. Defensive integrity checks (duplicate/
+# mismatched/conflicting nominations) are unrelated to and reported
+# separately from confirmation completeness -- a confirmed entry whose
+# underlying nomination data is later corrupted (a trade-away, a rule
+# correction race) still shows as confirmed, but the corruption remains
+# independently visible and still holds `is_ready` False. Never redefines
+# what an accepted rule/nomination is and never mutates rule/nomination/
+# submission history; this is a read model only. Intended to be shared, not
+# duplicated, by Season Centre and round-preparation readiness displays (see
+# `app.season_centre.build_season_centre` and
 # `app.round_preflight.build_round_preflight`).
 
 
@@ -1164,17 +1463,18 @@ def describe_accepted_rules(database, afl_client, season_id: str) -> list[dict]:
 class OpeningRoundEntryReadiness:
     season_entry_id: str
     team_name: str
-    required_rule_ids: tuple[str, ...]
-    nominated_rule_ids: tuple[str, ...]
-    missing_rule_ids: tuple[str, ...]
-    is_complete: bool
+    is_confirmed: bool
+    confirmed_at: str | None
+    confirmed_by_actor_id: str | None
+    confirmed_by_actor_role: str | None
+    nomination_count: int
 
 
 @dataclass(frozen=True)
 class OpeningRoundReadiness:
     season_id: str
-    total_required: int
-    total_completed: int
+    total_entries: int
+    total_confirmed: int
     entries: tuple[OpeningRoundEntryReadiness, ...]
     duplicate_nominations: tuple[dict, ...]
     mismatched_nominations: tuple[dict, ...]
@@ -1193,48 +1493,31 @@ def build_opening_round_readiness(database, season_id: str) -> OpeningRoundReadi
     entry_rows = database.execute(
         "SELECT e.season_entry_id, n.team_name FROM season_entry e "
         "JOIN season_entry_team_name_history n ON n.season_entry_id=e.season_entry_id AND n.ended_at IS NULL "
-        "WHERE e.season_id=?",
+        "WHERE e.season_id=? ORDER BY e.season_entry_id",
         (season_id,),
     ).fetchall()
     team_names = {row["season_entry_id"]: row["team_name"] for row in entry_rows}
 
-    nominations_by_rule: dict[str, list[OpeningRoundNomination]] = {}
-    for rule in rules:
-        # Queried by `rule_id` directly, not by the rule's own current
-        # `bbbffl_round_id` -- a nomination whose persisted target round has
-        # drifted from its rule's target round must still be found here so
-        # `conflicting_nominations` below can actually detect it.
-        rows = database.execute(
-            "SELECT * FROM opening_round_nomination WHERE rule_id=? ORDER BY season_entry_id, position",
-            (rule.rule_id,),
-        ).fetchall()
-        nominations_by_rule[rule.rule_id] = [_nomination(row) for row in rows]
-
-    required: dict[str, set[str]] = {}
-    for rule in rules:
-        owners = database.execute(
-            "SELECT DISTINCT o.season_entry_id FROM player_ownership_period o "
-            "JOIN season_player_pool p ON p.season_player_id=o.season_player_id "
-            "WHERE o.released_at IS NULL AND p.season_id=? AND p.afl_team_id=?",
-            (season_id, rule.afl_club_id),
-        ).fetchall()
-        for owner in owners:
-            required.setdefault(owner["season_entry_id"], set()).add(rule.rule_id)
-            team_names.setdefault(owner["season_entry_id"], "Unknown team")
-
-    nominated: dict[str, set[str]] = {}
+    # Defensive integrity diagnostics only -- these never feed into
+    # `is_confirmed`/completeness below (see this section's docstring).
+    # Queried by `rule_id` directly, not by the rule's own current
+    # `bbbffl_round_id`, so a nomination whose persisted target round has
+    # drifted from its rule's target round is still found here.
     duplicates: list[dict] = []
     mismatched: list[dict] = []
     conflicting: list[dict] = []
     for rule in rules:
+        rows = database.execute(
+            "SELECT * FROM opening_round_nomination WHERE rule_id=? ORDER BY season_entry_id, position",
+            (rule.rule_id,),
+        ).fetchall()
+        nominations = [_nomination(row) for row in rows]
         by_entry: dict[str, list[OpeningRoundNomination]] = {}
-        for nomination in nominations_by_rule[rule.rule_id]:
+        for nomination in nominations:
             by_entry.setdefault(nomination.season_entry_id, []).append(nomination)
             # Checked against the player's *current* club and *current*
             # owner, not merely the state true at nomination time: a trade
-            # or release after nomination must surface here too (a
-            # readiness "complete" must not rest on a slot whose nominated
-            # player the entry no longer owns).
+            # or release after nomination must surface here too.
             player = database.execute(
                 "SELECT p.afl_team_id, o.season_entry_id AS current_owner_id "
                 "FROM season_player_pool p "
@@ -1266,49 +1549,47 @@ def build_opening_round_readiness(database, season_id: str) -> OpeningRoundReadi
                         "season_entry_id": nomination.season_entry_id,
                     }
                 )
-            # Only a nomination free of both integrity problems actually
-            # satisfies the rule's requirement -- a mismatched/conflicting
-            # nomination still occupies the (rule, entry) slot (so a fresh
-            # nominate() is rejected; an operator must correct it instead),
-            # but must not be counted as "complete" while its underlying
-            # data is inconsistent (issue #131 review: a round preflight or
-            # Season Centre readiness reading "complete" must never rest on
-            # a slot whose nominated player has since been traded/released,
-            # or whose target round has drifted from its rule).
-            if not is_mismatched and not is_conflicting:
-                nominated.setdefault(nomination.season_entry_id, set()).add(rule.rule_id)
-        for entry_id, rows in by_entry.items():
-            if len(rows) > 1:
+        for entry_id, entry_rows_ in by_entry.items():
+            if len(entry_rows_) > 1:
                 duplicates.append(
                     {
                         "rule_id": rule.rule_id,
                         "season_entry_id": entry_id,
-                        "nomination_ids": [row.nomination_id for row in rows],
+                        "nomination_ids": [row.nomination_id for row in entry_rows_],
                     }
                 )
 
+    submissions = {
+        submission.season_entry_id: submission
+        for submission in OpeningRoundSubmissionRepository(database).list_for_season(season_id)
+    }
+    count_rows = database.execute(
+        "SELECT season_entry_id, COUNT(*) AS n FROM opening_round_nomination WHERE season_id=? GROUP BY season_entry_id",
+        (season_id,),
+    ).fetchall()
+    nomination_counts = {row["season_entry_id"]: row["n"] for row in count_rows}
+
     entries = []
-    for entry_id in sorted(set(required) | set(nominated)):
-        entry_required = required.get(entry_id, set())
-        entry_done = nominated.get(entry_id, set()) & entry_required
-        entry_missing = entry_required - entry_done
+    for entry_id in sorted(team_names):
+        submission = submissions.get(entry_id)
+        confirmed = submission is not None and submission.state == "confirmed"
         entries.append(
             OpeningRoundEntryReadiness(
                 season_entry_id=entry_id,
                 team_name=team_names.get(entry_id, "Unknown team"),
-                required_rule_ids=tuple(sorted(entry_required)),
-                nominated_rule_ids=tuple(sorted(entry_done)),
-                missing_rule_ids=tuple(sorted(entry_missing)),
-                is_complete=not entry_missing,
+                is_confirmed=confirmed,
+                confirmed_at=submission.confirmed_at if confirmed else None,
+                confirmed_by_actor_id=submission.actor_id if confirmed else None,
+                confirmed_by_actor_role=submission.actor_role if confirmed else None,
+                nomination_count=nomination_counts.get(entry_id, 0),
             )
         )
-    total_required = sum(len(entry.required_rule_ids) for entry in entries)
-    total_completed = sum(len(entry.nominated_rule_ids) for entry in entries)
-    is_ready = total_required == total_completed and not duplicates and not mismatched and not conflicting
+    total_confirmed = sum(1 for entry in entries if entry.is_confirmed)
+    is_ready = total_confirmed == len(entries) and not duplicates and not mismatched and not conflicting
     return OpeningRoundReadiness(
         season_id=season_id,
-        total_required=total_required,
-        total_completed=total_completed,
+        total_entries=len(entries),
+        total_confirmed=total_confirmed,
         entries=tuple(entries),
         duplicate_nominations=tuple(duplicates),
         mismatched_nominations=tuple(mismatched),

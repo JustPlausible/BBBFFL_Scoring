@@ -24,6 +24,7 @@ from app.opening_round import (
     OpeningRoundNominationRepository,
     OpeningRoundRuleRepository,
     OpeningRoundSelectionGuard,
+    OpeningRoundSubmissionRepository,
     build_opening_round_readiness,
     describe_accepted_rules,
 )
@@ -62,6 +63,14 @@ class NominationRequest(BaseModel):
 class CorrectionRequest(BaseModel):
     position: str | None = None
     season_player_id: str | None = None
+    reason: str
+
+
+class ConfirmRequest(BaseModel):
+    reason: str | None = "Replay/reconstructed Opening Round submission confirmed"
+
+
+class ReopenRequest(BaseModel):
     reason: str
 
 
@@ -280,6 +289,43 @@ def _describe_nomination(request: Request, nomination, rules_by_id: dict[str, di
     }
 
 
+def _describe_submission(request: Request, season_id: str, entry_id: str) -> dict:
+    """Operator-readable draft/confirmed state for one represented entry's
+    Opening Round submission -- human-readable confirmation provenance and
+    the full reopen/re-confirm revision history (issue #133 #5). A `None`
+    current submission (no row yet -- see `OpeningRoundSubmissionRepository`'s
+    module docstring) presents as an ordinary, unconfirmed draft."""
+    state = request.app.state
+    submissions = OpeningRoundSubmissionRepository(state.database)
+    current = submissions.get(season_id, entry_id)
+    history = submissions.history(season_id, entry_id)
+
+    def _describe_revision(revision) -> dict:
+        operator = state.identities.get_coach(revision.actor_id) if revision.actor_id else None
+        return {
+            "revision": revision.revision,
+            "state": revision.state,
+            "confirmed_at": revision.confirmed_at,
+            "actor_id": revision.actor_id,
+            "actor_role": revision.actor_role,
+            "actor_display_name": operator.display_name if operator else revision.actor_id,
+            "reason": revision.reason,
+            "created_at": revision.created_at,
+        }
+
+    return {
+        "state": current.state if current else "draft",
+        "confirmed_at": current.confirmed_at if current else None,
+        "confirmed_by_actor_id": current.actor_id if current and current.state == "confirmed" else None,
+        "confirmed_by_actor_role": current.actor_role if current and current.state == "confirmed" else None,
+        "confirmed_by_display_name": (
+            _describe_revision(current)["actor_display_name"] if current and current.state == "confirmed" else None
+        ),
+        "reason": current.reason if current else None,
+        "history": [_describe_revision(revision) for revision in history],
+    }
+
+
 @router.get("/seasons/{season_id}/opening-round")
 def opening_round(season_id: str, request: Request, principal: Principal = Depends(require_nomination)):
     require_role_covers_season(request, principal, season_id)
@@ -294,11 +340,13 @@ def opening_round(season_id: str, request: Request, principal: Principal = Depen
     repo = OpeningRoundNominationRepository(database)
     rules = describe_accepted_rules(database, request.app.state.afl_client, season_id)
     rules_by_id = {rule["rule_id"]: rule for rule in rules}
+    # Season/entry-scoped query, not one `list_for_round` call per accepted
+    # rule: several accepted rules sharing one target BBBFFL round must
+    # never re-emit that round's persisted nomination once per rule (issue
+    # #133's discovered duplication).
     nominations = [
         _describe_nomination(request, nomination, rules_by_id)
-        for rule in rules
-        for nomination in repo.list_for_round(rule["bbbffl_round_id"])
-        if nomination.season_entry_id == entry_id
+        for nomination in repo.list_for_season_entry(season_id, entry_id)
     ]
     readiness = build_opening_round_readiness(database, season_id).for_entry(entry_id)
     return {
@@ -307,7 +355,12 @@ def opening_round(season_id: str, request: Request, principal: Principal = Depen
         "players": _describe_owned_players(request, entry_id),
         "nominations": nominations,
         "readiness": asdict(readiness) if readiness else None,
+        "submission": _describe_submission(request, season_id, entry_id),
         "provenance_notice": f"Replay/reconstructed nominations are entered by {principal.display_name}; they are not historical coach evidence.",
+        "vacancy_notice": (
+            "Zero or a partial set of nominations is a valid, confirmable Opening Round submission -- owning an "
+            "eligible player never itself requires a nomination for that club."
+        ),
     }
 
 
@@ -376,6 +429,45 @@ def correct(
         "provenance": "replay/reconstructed",
         "entered_by": principal.display_name,
     }
+
+
+@router.post("/seasons/{season_id}/opening-round/confirm")
+def confirm_submission(
+    season_id: str, payload: ConfirmRequest, request: Request, principal: Principal = Depends(require_nomination)
+):
+    """Explicit **Confirm Opening Round submission** (issue #133 #3):
+    permits zero nominations or any partial legal set -- confirmation is
+    never inferred from a nomination count. Idempotent: confirming an
+    already-confirmed submission again returns its existing state rather
+    than raising or silently mutating it."""
+    view = opening_round(season_id, request, principal)
+    _csrf(request, principal)
+    entry_id = view["represented_entry"]["season_entry_id"]
+    OpeningRoundSubmissionRepository(request.app.state.database).confirm(
+        season_id, entry_id, actor=_actor(principal), reason=payload.reason
+    )
+    return {
+        "submission": _describe_submission(request, season_id, entry_id),
+        "readiness": asdict(build_opening_round_readiness(request.app.state.database, season_id).for_entry(entry_id)),
+    }
+
+
+@router.post("/seasons/{season_id}/opening-round/reopen")
+def reopen_submission(
+    season_id: str, payload: ReopenRequest, request: Request, principal: Principal = Depends(require_nomination)
+):
+    """Audited reopen of a confirmed submission back to draft (issue #133
+    #3): a confirmed submission must never be silently mutated -- nominating
+    or correcting under it is refused (`SubmissionConfirmedError`) until an
+    operator explicitly reopens it here, with a reason, and the reopen
+    itself is audited exactly like a nomination correction."""
+    view = opening_round(season_id, request, principal)
+    _csrf(request, principal)
+    entry_id = view["represented_entry"]["season_entry_id"]
+    OpeningRoundSubmissionRepository(request.app.state.database).reopen(
+        season_id, entry_id, actor=_actor(principal), reason=payload.reason
+    )
+    return {"submission": _describe_submission(request, season_id, entry_id)}
 
 
 @page_router.get("/operations/rounds/{round_id}/lineup", response_class=HTMLResponse)

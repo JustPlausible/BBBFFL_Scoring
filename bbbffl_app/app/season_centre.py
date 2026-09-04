@@ -180,22 +180,22 @@ def _opening_round_readiness(database, season_id: str) -> dict | None:
     season has never accepted any Opening Round rule. A season that never
     configures Opening Round (issue #69/#126's "explicit season
     configuration" boundary) must show nothing here, not an empty/zero
-    readiness block that implies the capability exists."""
+    readiness block that implies the capability exists.
+
+    Issue #133: readiness is `N/10 teams confirmed`, keyed off explicit
+    per-entry Opening Round submission confirmation -- never off how many
+    eligible clubs/players an entry happens to own."""
     if not OpeningRoundRuleRepository(database).list_accepted_for_season(season_id):
         return None
     readiness = build_opening_round_readiness(database, season_id)
     return {
-        "total_required": readiness.total_required,
-        "total_completed": readiness.total_completed,
+        "total_entries": readiness.total_entries,
+        "total_confirmed": readiness.total_confirmed,
         "is_ready": readiness.is_ready,
-        "entries_requiring_action": [
-            {
-                "season_entry_id": entry.season_entry_id,
-                "team_name": entry.team_name,
-                "missing": len(entry.missing_rule_ids),
-            }
+        "entries_awaiting_confirmation": [
+            {"season_entry_id": entry.season_entry_id, "team_name": entry.team_name}
             for entry in readiness.entries
-            if not entry.is_complete
+            if not entry.is_confirmed
         ],
         "has_integrity_issues": bool(
             readiness.duplicate_nominations or readiness.mismatched_nominations or readiness.conflicting_nominations

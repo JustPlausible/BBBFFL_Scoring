@@ -1,22 +1,28 @@
 # Opening Round deferred selection and compensating-bye scoring
 
-**Status:** implemented, issue [#69](https://github.com/JustPlausible/BBBFFL_Scoring/issues/69) (follow-up to #31's exceptional round mapping); discoverability/presentation/readiness extended by issue [#131](https://github.com/JustPlausible/BBBFFL_Scoring/issues/131)<br>
+**Status:** implemented, issue [#69](https://github.com/JustPlausible/BBBFFL_Scoring/issues/69) (follow-up to #31's exceptional round mapping); discoverability/presentation/readiness extended by issue [#131](https://github.com/JustPlausible/BBBFFL_Scoring/issues/131); nomination read-model duplication fixed and explicit per-entry submission confirmation added by issue [#133](https://github.com/JustPlausible/BBBFFL_Scoring/issues/133)<br>
 **Implementation:** `bbbffl_app/app/opening_round.py` (domain writes, plus
 issue #131's `describe_accepted_rule(s)`/`resolve_afl_club_name` presentation
-helpers and `build_opening_round_readiness` readiness read model), integrated
-into `bbbffl_app/app/calculations.py` (per-slot scoring-source resolution),
-`bbbffl_app/app/lineup_validation.py` (bye/DNP distinction),
+helpers, issue #133's `OpeningRoundSubmissionRepository` confirmation
+boundary and `list_for_season_entry` read model, and
+`build_opening_round_readiness`'s confirmation-based readiness read model),
+integrated into `bbbffl_app/app/calculations.py` (per-slot scoring-source
+resolution), `bbbffl_app/app/lineup_validation.py` (bye/DNP distinction),
 `bbbffl_app/app/lineups.py`'s `WeeklyLineupRepository.submit`/
 `submit_positions` (via the same optional `lock_guard` integration point
 `app/lockouts.py` uses), `bbbffl_app/app/routes/delegated_operations.py` (the
-represented-operator Opening Round Operations API/page),
-`bbbffl_app/app/season_centre.py`/`routes/season_centre.py` (discoverability
-and season-wide readiness), and `bbbffl_app/app/round_preflight.py`
-(incomplete-nomination readiness gate for a dependent ordinary round)<br>
+represented-operator Opening Round Operations API/page, including the
+confirm/reopen endpoints), `bbbffl_app/app/season_centre.py`/
+`routes/season_centre.py` (discoverability and season-wide confirmation
+readiness), and `bbbffl_app/app/round_preflight.py` (confirmation/integrity
+readiness gates for a dependent ordinary round)<br>
 **Schema:** `bbbffl_app/migrations/versions/0020_opening_round_deferral.py`
-(`opening_round_rule`/`opening_round_rule_revision`, `opening_round_nomination`),
-see [`database-migrations.md`](database-migrations.md) -- issue #131 added no
-schema, only read-model resolution over this existing storage<br>
+(`opening_round_rule`/`opening_round_rule_revision`, `opening_round_nomination`)
+and `bbbffl_app/migrations/versions/0023_opening_round_submission.py`
+(`opening_round_submission`/`opening_round_submission_revision`, issue
+#133's explicit confirmation boundary), see
+[`database-migrations.md`](database-migrations.md) -- issue #131 added no
+schema, only read-model resolution over existing storage<br>
 **Evidence:** [`docs/evidence/opening-round/`](evidence/opening-round/) (raw
 2024/2025/2026 captures), `bbbffl_app/tests/opening_round_evidence.py`
 (distilled facts), `bbbffl_app/tests/test_opening_round.py`,
@@ -357,11 +363,70 @@ After selecting an authorised represented entry in shared acting context, open
 visible only once at least one Opening Round rule is accepted for the season,
 never before that, and never requiring the operator to know or type
 `/operations/seasons/<season-id>/opening-round` directly. Season Centre also
-shows nomination progress there (e.g. `7/10 complete`) and which entries still
-require action, driven by the same `app.opening_round.
+shows confirmation progress there (e.g. `7/10 teams confirmed`) and which
+entries still require action, driven by the same `app.opening_round.
 build_opening_round_readiness` read model the Opening Round Operations page
-and Round Preflight's incomplete-nomination blocker both reuse -- one
+and Round Preflight's incomplete-confirmation blocker both reuse -- one
 readiness computation, not three.
+
+### Explicit submission confirmation (issue #133)
+
+The historical BBBFFL process was always a **partial** Opening Round
+submission: a coach/proxy could nominate zero or more eligible owned players
+and deliberately leave the rest vacant. Owning an eligible player, or an
+accepted rule existing for a club represented in an entry's squad, never
+itself requires a nomination for that club -- the Opening Round Operations
+page shows owned players and accepted rules purely as *selection guidance*,
+never as a checklist of required nominations.
+
+Readiness therefore keys entirely off an explicit, persisted
+per-`(season, season entry)` **submission confirmation**
+(`app.opening_round.OpeningRoundSubmissionRepository`), not off how many
+nominations exist. The operator flow is:
+
+1. Enter zero or more nominations for the represented entry (as before).
+2. Click **Confirm Opening Round submission** -- valid with zero
+   nominations, or any partial legal set. This records confirmation time and
+   the authenticated replay operator's provenance (never the historical
+   coach), and is idempotent: confirming an already-confirmed submission
+   again is a no-op.
+3. Once confirmed, the submission is locked: creating or correcting a
+   nomination for that entry is refused (`SubmissionConfirmedError`, HTTP
+   409) until an operator explicitly **reopens** it with a reason -- an
+   audited operation (`OpeningRoundSubmissionRepository.reopen`) that writes
+   a new `draft` revision rather than silently mutating the confirmed one.
+   The full confirm/reopen history remains readable on the page.
+4. Season/round readiness (`N/10 teams confirmed`) counts confirmed season
+   entries; a dependent ordinary round stays blocked until every season
+   entry has confirmed.
+
+Integrity diagnostics (duplicate/mismatched/conflicting nominations) remain
+a defensive check over persisted state, entirely independent of
+confirmation completeness: a confirmed entry whose nomination data is later
+corrupted (a trade-away, a rule correction race) still shows as confirmed,
+but the corruption is reported separately and still blocks the round
+(`opening_round_integrity_conflict`).
+
+If schema support was required for this boundary, it is a normal migration
+(`migrations/versions/0023_opening_round_submission.py`) adding
+`opening_round_submission`/`opening_round_submission_revision`, versioned
+exactly like `opening_round_rule`/`opening_round_rule_revision` -- there is
+no row at all until an entry's submission is first confirmed.
+
+### Represented-entry nomination read model (issue #133)
+
+The represented-entry GET response previously iterated every accepted rule
+and called `OpeningRoundNominationRepository.list_for_round(rule.
+bbbffl_round_id)` once per rule, re-emitting a persisted nomination once for
+every accepted rule that happened to share its target BBBFFL round -- e.g.
+four accepted rules targeting the same compensating-bye round rendered that
+round's one nomination four times. `list_for_season_entry(season_id,
+season_entry_id)` now queries `opening_round_nomination` directly by its own
+season/entry columns, returning each persisted nomination exactly once
+(deterministically ordered), with its correction/audit history rendered
+once alongside it. This was a read-path defect only: the underlying
+persisted nominations were never duplicated, and no rollback or data
+correction was required.
 
 The page lists only accepted Opening Round rule revisions, rendered with a
 human-readable primary label (`app.opening_round.describe_accepted_rule`),
@@ -398,14 +463,22 @@ historical BBBFFL coach made a particular nomination -- and nominations must
 never be inferred, guessed, or backfilled from later AFL statistics or match
 results.
 
-## Where an ordinary round depends on Opening Round nominations (issue #131)
+## Where an ordinary round depends on Opening Round nominations (issues #131, #133)
 
 `app.round_preflight.build_round_preflight` checks whether any accepted
-Opening Round rule targets the round being prepared. If so, and any eligible
-entry's nomination for that rule is still missing, opening is blocked with an
-`opening_round_nominations_incomplete` readiness blocker naming the affected
-entries and linking directly back to Opening Round Operations for that
-season -- never silently inferred or auto-created. The same preflight view's
-existing "Opening Round exceptions" section (already-locked deferred
-selections for this round) is rendered with the same human-readable
-player/club/round labels described above, not raw identifiers.
+Opening Round rule targets the round being prepared. If so, and any season
+entry has not yet explicitly confirmed its Opening Round submission, opening
+is blocked with an `opening_round_nominations_incomplete` readiness blocker
+naming the unconfirmed entries and linking directly back to Opening Round
+Operations for that season -- never silently inferred or auto-created, and
+never derived from how many nominations exist or how many eligible clubs an
+entry's squad happens to represent (issue #133). Separately, a
+`opening_round_integrity_conflict` blocker reports any duplicate/mismatched/
+conflicting nomination affecting this round's rules -- confirmation
+completeness and nomination integrity are independent signals, so a
+confirmed entry whose nomination data is later corrupted (a trade-away, a
+rule correction race) still blocks the round via the integrity blocker, not
+by reverting to "incomplete". The same preflight view's existing "Opening
+Round exceptions" section (already-locked deferred selections for this
+round) is rendered with the same human-readable player/club/round labels
+described above, not raw identifiers.

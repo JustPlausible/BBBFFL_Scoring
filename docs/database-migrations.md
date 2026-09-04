@@ -114,6 +114,16 @@ revision-history table). See
 Downgrade refuses once either table holds any row, matching this
 repository's other irreversible-history revisions.
 
+Revision `0023_opening_round_submission` (issue #133) adds
+`opening_round_submission`/`opening_round_submission_revision` -- the
+explicit, persisted per-`(season, season entry)` Opening Round submission
+confirmation boundary, versioned header+revision exactly like
+`opening_round_rule`/`opening_round_rule_revision`. There is no row at all
+until an entry's submission is first confirmed; a `'draft'` revision is
+written by an audited reopen of a previously confirmed submission. See
+[`opening-round-deferred-selection.md`](opening-round-deferred-selection.md).
+Downgrade refuses once the table holds any row.
+
 ## Migration authoring and rollback
 
 Every relational change must be a new ordered revision. Do not add startup DDL

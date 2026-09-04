@@ -12,14 +12,22 @@ function ruleItem(r){
   opening round ${e(r.afl_opening_round_id)} · bye round ${e(r.afl_bye_round_id)} · BBBFFL round ${e(r.bbbffl_round_id)}</span></details></div>`;
 }
 
-function readinessCard(d){
-  const r=d.readiness;
-  if(!r) return '';
-  const missing=r.missing_rule_ids.map(id=>(state.rulesById[id]||{}).display_label||id);
-  return `<section class="card ${r.is_complete?'ok':'warn'}"><h2>Nomination readiness for ${e(d.represented_entry.team_name)}</h2>
-  <p><span class="pill ${r.is_complete?'ok':'bad'}">${e(r.nominated_rule_ids.length)}/${e(r.required_rule_ids.length)} complete</span></p>
-  ${r.is_complete?'<p>All eligible Opening Round rules for this represented entry have a locked nomination.</p>'
-    :`<p>Missing nomination(s) for: ${missing.map(e).join(', ')}</p>`}
+function submissionCard(d){
+  const s=d.submission;
+  const confirmed=s.state==='confirmed';
+  const vacant=POSITIONS.filter(p=>!d.nominations.some(n=>n.position===p));
+  const historyRows=(s.history||[]).map(h=>`<div class="muted item">${e(h.created_at)} — <b>${e(h.state)}</b> by ${e(h.actor_display_name)} (${e(h.actor_role)})${h.reason?` — ${e(h.reason)}`:''}</div>`).join('');
+  return `<section class="card ${confirmed?'ok':'warn'}"><h2>Opening Round submission for ${e(d.represented_entry.team_name)}</h2>
+  <p><span class="pill ${confirmed?'ok':'bad'}">${confirmed?'CONFIRMED':'DRAFT'}</span></p>
+  <p class="muted">${e(d.vacancy_notice)}</p>
+  ${confirmed?`<p>Confirmed by ${e(s.confirmed_by_display_name)} (${e(s.confirmed_by_actor_role)}) at ${e(s.confirmed_at)}${s.reason?` — ${e(s.reason)}`:''}.</p>
+     <details><summary>Reopen this confirmed submission (audited correction)</summary><form id="reopen-form"><div class="grid">
+     <label>Reopen reason<input name="reason" required placeholder="Why this confirmed submission must be reopened"></label></div>
+     <button>Reopen submission</button></form></details>`
+   :`<p>${d.nominations.length?`${d.nominations.length} current nomination(s).`:'No nominations yet.'} Vacant slot(s): ${vacant.map(e).join(', ')||'none'}.</p>
+     <form id="confirm-form"><div class="grid"><label>Confirmation reason<input name="reason" value="Replay/reconstructed Opening Round submission confirmed" required></label></div>
+     <button>Confirm Opening Round submission</button></form>`}
+  ${historyRows?`<details><summary class="muted">Confirmation/reopen history (${(s.history||[]).length})</summary>${historyRows}</details>`:''}
   </section>`;
 }
 
@@ -44,11 +52,13 @@ function render(d){
   state=d;
   state.rulesById=Object.fromEntries(d.rules.map(r=>[r.rule_id,r]));
   state.rulesByClub=Object.fromEntries(d.rules.map(r=>[r.afl_club_id,r]));
+  const confirmed=d.submission.state==='confirmed';
   document.querySelector('#app').innerHTML=`
   <section class="card banner"><strong>REPLAY / RECONSTRUCTED INPUT</strong><p><b>Representing:</b> ${e(d.represented_entry.team_name)}</p><p>${e(d.provenance_notice)}</p></section>
-  ${readinessCard(d)}
+  ${submissionCard(d)}
   <section class="card"><h2>Accepted, authoritative rules</h2>${d.rules.map(ruleItem).join('')||'<b>No accepted Opening Round rules exist for this season.</b>'}</section>
   <section class="card"><h2>Nominate an owned player</h2>
+  ${confirmed?'<p class="muted">This submission is confirmed. Reopen it above before adding or correcting a nomination.</p>':`
   <form id="nominate"><div class="grid">
   <label>Owned player<select name="player" id="player-select" required><option value="" disabled selected>Choose an owned player…</option>${d.players.map(playerOption).join('')}</select></label>
   <label>Target position<select name="position">${POSITIONS.map(p=>`<option>${p}</option>`).join('')}</select></label>
@@ -56,13 +66,39 @@ function render(d){
   </div>
   <input type="hidden" name="rule" id="rule-value">
   <div class="preview muted" id="rule-preview">Choose an owned player to identify the applicable Opening Round rule.</div>
-  <button id="nominate-submit" disabled>Create and preload locked nomination</button></form>
+  <button id="nominate-submit" disabled>Create and preload locked nomination</button></form>`}
   </section>
   <section class="card"><h2>Current locked deferred selections</h2>${d.nominations.map(nominationItem).join('')||'<p>No replay nominations for this represented entry.</p>'}</section>`;
-  document.querySelector('#nominate').onsubmit=nominate;
-  document.querySelectorAll('[data-correct]').forEach(x=>x.onsubmit=correct);
-  document.querySelector('#player-select').onchange=updatePreview;
-  updatePreview();
+  if(!confirmed){
+    document.querySelector('#nominate').onsubmit=nominate;
+    document.querySelectorAll('[data-correct]').forEach(x=>x.onsubmit=correct);
+    document.querySelector('#player-select').onchange=updatePreview;
+    updatePreview();
+  }
+  const confirmForm=document.querySelector('#confirm-form');
+  if(confirmForm) confirmForm.onsubmit=confirmSubmission;
+  const reopenForm=document.querySelector('#reopen-form');
+  if(reopenForm) reopenForm.onsubmit=reopenSubmission;
+}
+
+async function confirmSubmission(x){
+  x.preventDefault();
+  let f=new FormData(x.target);
+  try{
+    await api(`/api/operations/seasons/${seasonId}/opening-round/confirm`,'POST',{reason:f.get('reason')});
+    await load();
+    msg('Opening Round submission confirmed.',true);
+  }catch(err){msg(err.message)}
+}
+
+async function reopenSubmission(x){
+  x.preventDefault();
+  let f=new FormData(x.target);
+  try{
+    await api(`/api/operations/seasons/${seasonId}/opening-round/reopen`,'POST',{reason:f.get('reason')});
+    await load();
+    msg('Opening Round submission reopened.',true);
+  }catch(err){msg(err.message)}
 }
 
 function updatePreview(){

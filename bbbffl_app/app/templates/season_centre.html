@@ -172,7 +172,7 @@ function readinessHtml(r) {
     ? (r.preseason_window.is_open ? 'Open' : 'Closed')
     : 'Not opened';
   const openingRound = r.opening_round
-    ? `<div class="readiness-item"><div class="value">${r.opening_round.total_completed}/${r.opening_round.total_required}</div><div class="label">Opening Round nominations ${r.opening_round.is_ready ? '(ready)' : '(incomplete)'}</div></div>`
+    ? `<div class="readiness-item"><div class="value">${r.opening_round.total_confirmed}/${r.opening_round.total_entries}</div><div class="label">Opening Round teams confirmed ${r.opening_round.is_ready ? '(ready)' : '(incomplete)'}</div></div>`
     : '';
   return `
     <div class="readiness-grid">
@@ -190,10 +190,10 @@ function readinessHtml(r) {
 
 function openingRoundActionHtml(openingRound) {
   if (!openingRound || openingRound.is_ready) return '';
-  const entries = openingRound.entries_requiring_action || [];
+  const entries = openingRound.entries_awaiting_confirmation || [];
   if (!entries.length) return '';
-  const items = entries.map(e => `<li>${esc(e.team_name)} — ${e.missing} nomination(s) missing</li>`).join('');
-  return `<div class="notice">Entries requiring action: <ul>${items}</ul></div>`;
+  const items = entries.map(e => `<li>${esc(e.team_name)} — Opening Round submission not yet confirmed</li>`).join('');
+  return `<div class="notice">Awaiting confirmation: <ul>${items}</ul></div>`;
 }
 
 function linksHtml(links) {

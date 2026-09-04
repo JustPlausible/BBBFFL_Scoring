@@ -81,6 +81,8 @@ EXPECTED_TABLES = {
     "coach_credential",
     "coach_session",
     "role_grant",
+    "opening_round_submission",
+    "opening_round_submission_revision",
 }
 
 
@@ -588,6 +590,61 @@ def test_downgrade_to_0002_succeeds_when_audit_event_is_empty(tmp_path):
     downgrade(url, "0002_competition")
     engine = create_engine(url)
     assert "audit_event" not in set(inspect(engine).get_table_names())
+
+
+def test_upgrade_from_acting_context_head_adds_opening_round_submission_schema(tmp_path):
+    url = _url(tmp_path / "submission-upgrade.db")
+    migrate(url, "0022_acting_context")
+    engine = create_engine(url)
+    assert not {"opening_round_submission", "opening_round_submission_revision"} <= set(
+        inspect(engine).get_table_names()
+    )
+
+    migrate(url)
+    engine = create_engine(url)
+    tables = set(inspect(engine).get_table_names())
+    assert {"opening_round_submission", "opening_round_submission_revision"} <= tables
+
+    from app.opening_round import OpeningRoundSubmissionRepository
+    from tests.test_competition_lifecycle import operational
+
+    connection = connect(url)
+    _, round_, entries = operational(connection, 2026, 2)
+    season_id = connection.execute(
+        "SELECT c.season_id FROM bbbffl_round r JOIN competition_stream c ON c.competition_id=r.competition_id "
+        "WHERE r.bbbffl_round_id=?",
+        (round_.bbbffl_round_id,),
+    ).fetchone()["season_id"]
+    submissions = OpeningRoundSubmissionRepository(connection)
+    from app.audit import ActorContext
+
+    confirmed = submissions.confirm(
+        season_id, entries[0].season_entry_id, actor=ActorContext.anonymous_operator("admin")
+    )
+    assert confirmed.state == "confirmed"
+
+
+def test_opening_round_submission_downgrade_refused_when_data_exists(tmp_path):
+    from app.audit import ActorContext
+    from app.opening_round import OpeningRoundSubmissionRepository
+    from tests.test_competition_lifecycle import operational
+
+    url = _url(tmp_path / "submission-downgrade.db")
+    migrate(url)
+    connection = connect(url)
+    _, round_, entries = operational(connection, 2026, 2)
+    season_id = connection.execute(
+        "SELECT c.season_id FROM bbbffl_round r JOIN competition_stream c ON c.competition_id=r.competition_id "
+        "WHERE r.bbbffl_round_id=?",
+        (round_.bbbffl_round_id,),
+    ).fetchone()["season_id"]
+    OpeningRoundSubmissionRepository(connection).confirm(
+        season_id, entries[0].season_entry_id, actor=ActorContext.anonymous_operator("admin")
+    )
+    connection.close()
+
+    with pytest.raises(RuntimeError, match="Opening Round submission confirmation history would be lost"):
+        downgrade(url, "0022_acting_context")
 
 
 def test_revision_chain_has_single_head():

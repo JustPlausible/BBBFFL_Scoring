@@ -1,9 +1,12 @@
 """Production PostgreSQL serialization for Opening Round nominations: two
-concurrent nominations that would violate a slot/player/rule uniqueness
+concurrent nominations that would violate a slot/player uniqueness
 invariant (migrations/versions/0020_opening_round_deferral.py) must have
 exactly one winner, never both silently persisted -- mirroring
 tests/test_carry_forward_concurrency.py's pattern for the same
-`FOR UPDATE`-guarded read/insert shape."""
+`FOR UPDATE`-guarded read/insert shape. Two concurrent nominations under
+the same accepted rule that do *not* collide on slot or player must both
+commit (issue #135) -- see
+migrations/versions/0024_opening_round_multi_player.py."""
 
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -103,7 +106,16 @@ def test_two_concurrent_nominations_for_the_same_slot_have_one_winner(postgres_u
     assert stored.season_player_id == winner.season_player_id
 
 
-def test_two_concurrent_nominations_under_the_same_rule_entry_have_one_winner(postgres_url):
+def test_two_concurrent_nominations_under_the_same_rule_entry_for_distinct_players_and_slots_both_succeed(
+    postgres_url,
+):
+    """Issue #135: an accepted rule scopes one AFL club's Opening Round
+    mapping, not how many of that club's owned players may be nominated
+    into distinct target-round slots for one entry -- two distinct players
+    into two distinct slots under the same rule must both commit, even when
+    attempted concurrently, now that `uq_opening_round_nomination_rule_entry`
+    (migrations/versions/0020_opening_round_deferral.py) has been removed
+    (migrations/versions/0024_opening_round_multi_player.py)."""
     db, rule, entry, player_a, player_b, client = _context(postgres_url, 2402)
     nominations = OpeningRoundNominationRepository(db)
 
@@ -119,6 +131,30 @@ def test_two_concurrent_nominations_under_the_same_rule_entry_have_one_winner(po
         )
 
     results = race([lambda: nominate(player_a, "M1"), lambda: nominate(player_b, "M2")])
+    assert sum(result == "conflict" for result in results) == 0
+    persisted = nominations.list_for_season_entry(rule.season_id, entry.season_entry_id)
+    assert {n.nomination_id for n in persisted} == {r.nomination_id for r in results}
+
+
+def test_two_concurrent_nominations_of_the_same_player_under_the_same_rule_have_one_winner(postgres_url):
+    """The player-once-per-target-round invariant is unaffected by issue
+    #135 -- the *same* player nominated twice concurrently under the same
+    rule (into two different slots) must still have exactly one winner."""
+    db, rule, entry, player_a, _player_b, client = _context(postgres_url, 2404)
+    nominations = OpeningRoundNominationRepository(db)
+
+    def nominate(position):
+        return nominations.nominate(
+            rule.rule_id,
+            entry.season_entry_id,
+            position,
+            player_a.season_player_id,
+            client,
+            actor=ActorContext.anonymous_operator("scorer"),
+            reason="concurrent attempt",
+        )
+
+    results = race([lambda: nominate("M1"), lambda: nominate("M2")])
     assert sum(result == "conflict" for result in results) == 1
 
 

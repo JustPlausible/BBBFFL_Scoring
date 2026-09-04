@@ -222,31 +222,49 @@ def build_round_preflight(database, lifecycle, identities, afl_client, round_id:
     # reported as a separate blocker so a confirmed-but-corrupted nomination
     # can never silently pass this gate.
     rule_repo = OpeningRoundRuleRepository(database)
-    round_rules = [
-        rule for rule in rule_repo.list_accepted_for_season(logical["season_id"]) if rule.bbbffl_round_id == round_id
-    ]
-    if round_rules:
+    season_accepted_rules = rule_repo.list_accepted_for_season(logical["season_id"])
+    round_rules = [rule for rule in season_accepted_rules if rule.bbbffl_round_id == round_id]
+    if season_accepted_rules:
         opening_round_readiness = build_opening_round_readiness(database, logical["season_id"])
-        unconfirmed_entries = [
-            {"season_entry_id": entry.season_entry_id, "team_name": entry.team_name}
-            for entry in opening_round_readiness.entries
-            if not entry.is_confirmed
-        ]
-        if unconfirmed_entries:
-            blockers.append(
-                {
-                    "code": "opening_round_nominations_incomplete",
-                    "message": (
-                        f"This round depends on Opening Round deferred selections; "
-                        f"{len(unconfirmed_entries)} entry/entries have not yet confirmed their Opening Round "
-                        "submission. Confirm each entry's submission in Opening Round Operations before opening "
-                        "this round."
-                    ),
-                    "url": f"/operations/seasons/{logical['season_id']}/opening-round",
-                    "entries": unconfirmed_entries,
-                }
-            )
+        if round_rules:
+            unconfirmed_entries = [
+                {"season_entry_id": entry.season_entry_id, "team_name": entry.team_name}
+                for entry in opening_round_readiness.entries
+                if not entry.is_confirmed
+            ]
+            if unconfirmed_entries:
+                blockers.append(
+                    {
+                        "code": "opening_round_nominations_incomplete",
+                        "message": (
+                            f"This round depends on Opening Round deferred selections; "
+                            f"{len(unconfirmed_entries)} entry/entries have not yet confirmed their Opening Round "
+                            "submission. Confirm each entry's submission in Opening Round Operations before "
+                            "opening this round."
+                        ),
+                        "url": f"/operations/seasons/{logical['season_id']}/opening-round",
+                        "entries": unconfirmed_entries,
+                    }
+                )
+        # Matched against *both* the rule's current target (`target_rule_ids`)
+        # and each diagnostic's own persisted round (`bbbffl_round_id`/
+        # `bbbffl_round_ids`) -- a `conflicting_nominations` entry is, by
+        # definition, one whose nomination has drifted to a round no rule
+        # currently targets, so `round_rules` alone would be empty for
+        # exactly the round that nomination is still active in (still
+        # returned by `list_for_round` below, still selectable/scorable).
+        # Matching by rule ID alone would let that round open with corrupted
+        # deferred-selection data (PR #134 review, P1).
         target_rule_ids = {rule.rule_id for rule in round_rules}
+
+        def _affects_this_round(item: dict) -> bool:
+            if item.get("rule_id") in target_rule_ids:
+                return True
+            persisted_rounds = item.get("bbbffl_round_ids")
+            if persisted_rounds is not None:
+                return round_id in persisted_rounds
+            return item.get("bbbffl_round_id") == round_id
+
         integrity_issues = [
             item
             for item in (
@@ -254,7 +272,7 @@ def build_round_preflight(database, lifecycle, identities, afl_client, round_id:
                 *opening_round_readiness.mismatched_nominations,
                 *opening_round_readiness.conflicting_nominations,
             )
-            if item.get("rule_id") in target_rule_ids
+            if _affects_this_round(item)
         ]
         if integrity_issues:
             blockers.append(

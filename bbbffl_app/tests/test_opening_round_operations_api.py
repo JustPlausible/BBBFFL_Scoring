@@ -480,6 +480,76 @@ def test_represented_operator_workflow_end_to_end(operations_client, monkeypatch
     assert reopen_history[1]["reason"] == "historical reconstruction needs a correction"
 
 
+def test_round_preflight_blocks_a_round_holding_a_drifted_nomination_no_rule_currently_targets(operations_client):
+    """PR #134 review (P1): `conflicting_nominations` entries are, by
+    definition, nominations whose persisted `bbbffl_round_id` no longer
+    matches any rule's *current* target -- so the round that nomination
+    actually lives in (still returned by `list_for_round`, still treated as
+    an active locked selection) has no rule targeting it, and the old
+    rule-ID-only match would skip the entire integrity check for that round
+    entirely. It must still block via `opening_round_integrity_conflict`."""
+    from app.competition_lifecycle import CompetitionLifecycleRepository
+    from app.db import transaction as database_transaction
+    from app.round_mapping import RoundMappingRepository
+    from app.season import SeasonRepository
+
+    client = operations_client
+    db = client.app.state.database
+    round2, entries = configured(db, 2026, evidence.EVIDENCE_2026.compensating_bye_round["GWS"])
+    season_id = db.execute(
+        "SELECT c.season_id FROM bbbffl_round r JOIN competition_stream c ON c.competition_id=r.competition_id "
+        "WHERE r.bbbffl_round_id=?",
+        (round2.bbbffl_round_id,),
+    ).fetchone()["season_id"]
+    OwnershipRepository(db).configure_squad_limit(season_id, 5)
+    rule, ev, bye_round_id = _accept_gws_2026_rule(db, season_id, round2.bbbffl_round_id)
+    player = _own(db, season_id, entries[0], 920011, "Nominated GWS Player", GWS_CLUB_ID, GWS_CLUB_NAME)
+    afl_client = _afl_client(ev, bye_round_id)
+
+    nomination = OpeningRoundNominationRepository(db).nominate(
+        rule.rule_id,
+        entries[0].season_entry_id,
+        "M1",
+        player.season_player_id,
+        afl_client,
+        actor=ADMIN,
+        reason="synthetic",
+    )
+    submissions = OpeningRoundSubmissionRepository(db)
+    for entry in entries:
+        submissions.confirm(season_id, entry.season_entry_id, actor=ADMIN)
+
+    # A round no accepted rule currently targets -- created after the
+    # nomination so the drift below is genuinely "no rule targets this
+    # round", not merely "not yet".
+    round3 = SeasonRepository(db).create_round(round2.competition_id, "round-3-drift", "Round 3", 3)
+    RoundMappingRepository(db).accept(
+        round3.bbbffl_round_id,
+        2026,
+        evidence.EVIDENCE_2026.compensating_bye_round["GCFC"],
+        KnownRounds((2026, evidence.EVIDENCE_2026.compensating_bye_round["GCFC"])),
+    )
+    CompetitionLifecycleRepository(db).create_ordinary_round(round3.bbbffl_round_id)
+
+    # Simulate the nomination's persisted target drifting to round3 (never
+    # possible through app.opening_round's own write paths).
+    with database_transaction(db) as conn:
+        conn.execute(
+            "UPDATE opening_round_nomination SET bbbffl_round_id=? WHERE nomination_id=?",
+            (round3.bbbffl_round_id, nomination.nomination_id),
+        )
+
+    drifted_round_view = client.get(f"/api/admin/round-preflight/{round3.bbbffl_round_id}").json()
+    codes = {b["code"] for b in drifted_round_view["readiness"]["blockers"]}
+    assert "opening_round_integrity_conflict" in codes
+    assert drifted_round_view["readiness"]["safe_to_open"] is False
+
+    # The rule's own current target round must still catch it too (the
+    # rule-ID match path, unaffected by this fix).
+    original_round_view = client.get(f"/api/admin/round-preflight/{round2.bbbffl_round_id}").json()
+    assert "opening_round_integrity_conflict" in {b["code"] for b in original_round_view["readiness"]["blockers"]}
+
+
 def test_represented_entry_response_returns_each_nomination_once_when_rules_share_a_target_round(
     operations_client, monkeypatch
 ):

@@ -1549,6 +1549,13 @@ def build_opening_round_readiness(database, season_id: str) -> OpeningRoundReadi
                         "rule_id": rule.rule_id,
                         "season_entry_id": nomination.season_entry_id,
                         "season_player_id": nomination.season_player_id,
+                        # The nomination's own persisted round -- not
+                        # necessarily the rule's current target -- so a
+                        # caller scoping by round (e.g. round preflight)
+                        # can find this diagnostic even if it has drifted
+                        # away from every rule currently targeting that
+                        # round (PR #134 review, P1).
+                        "bbbffl_round_id": nomination.bbbffl_round_id,
                     }
                 )
             if is_conflicting:
@@ -1557,6 +1564,11 @@ def build_opening_round_readiness(database, season_id: str) -> OpeningRoundReadi
                         "nomination_id": nomination.nomination_id,
                         "rule_id": rule.rule_id,
                         "season_entry_id": nomination.season_entry_id,
+                        # By definition differs from `rule.bbbffl_round_id`
+                        # here -- this is the round the nomination actually,
+                        # currently lives in and is treated as active by
+                        # `list_for_round`/selection/scoring.
+                        "bbbffl_round_id": nomination.bbbffl_round_id,
                     }
                 )
         for entry_id, entry_rows_ in by_entry.items():
@@ -1566,6 +1578,7 @@ def build_opening_round_readiness(database, season_id: str) -> OpeningRoundReadi
                         "rule_id": rule.rule_id,
                         "season_entry_id": entry_id,
                         "nomination_ids": [row.nomination_id for row in entry_rows_],
+                        "bbbffl_round_ids": [row.bbbffl_round_id for row in entry_rows_],
                     }
                 )
 

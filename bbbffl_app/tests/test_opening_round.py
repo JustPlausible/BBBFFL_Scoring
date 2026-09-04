@@ -28,12 +28,16 @@ from app.carry_forward import CarryForwardService
 from app.db import transaction as database_transaction
 from app.lineups import WeeklyLineupRepository
 from app.opening_round import (
+    ENTITY_TYPE_NOMINATION,
+    ENTITY_TYPE_SUBMISSION,
     DeferredSlotLockedError,
     IneligiblePlayerError,
     OpeningRoundError,
     OpeningRoundNominationRepository,
     OpeningRoundRuleRepository,
     OpeningRoundSelectionGuard,
+    OpeningRoundSubmissionRepository,
+    SubmissionConfirmedError,
     UnauthorizedNominationActorError,
     UnknownRuleError,
     build_opening_round_readiness,
@@ -1401,85 +1405,84 @@ def test_describe_accepted_rules_shares_one_get_rounds_call_per_afl_season():
     assert client.calls == 1  # one accepted rule's resolution is reused for the other
 
 
-# -- Nomination readiness (issue #131 #8) ------------------------------------
+# -- Nomination readiness (issue #131 #8, replaced by explicit confirmation
+# semantics in issue #133) ----------------------------------------------
 
 
-def test_readiness_transitions_from_missing_to_complete_for_one_eligible_entry():
+def test_readiness_owning_an_eligible_player_never_creates_a_required_nomination():
+    """Issue #133's central fix: owning an eligible Opening Round player, or
+    an accepted rule existing for a club represented in an entry's squad,
+    must never itself imply a required nomination. Before any confirmation,
+    every entry (whether or not it owns an eligible player) reads as simply
+    unconfirmed -- never as "missing" nominations against eligible rules."""
+    db = migrated_connection()
+    _, round_, entries, scope = setup_scope(db, 2026, 1347)
+    ev = evidence.EVIDENCE_2026
+    accept_rule(db, scope["season_id"], 15, ev, ev.compensating_bye_round["GWS"], round_.bbbffl_round_id)
+    own_named_player(
+        db, scope["season_id"], entries[0], 920102, "GWS Player", afl_team_id=15, afl_team_name="GWS Giants"
+    )
+
+    readiness = build_opening_round_readiness(db, scope["season_id"])
+    assert readiness.total_entries == len(entries)
+    assert readiness.total_confirmed == 0
+    assert readiness.is_ready is False
+    entry0 = readiness.for_entry(entries[0].season_entry_id)
+    assert entry0.is_confirmed is False
+    assert entry0.nomination_count == 0
+    # entries[1] owns nothing eligible at all -- it must still appear,
+    # simply as another unconfirmed entry, never omitted or distinguished.
+    entry1 = readiness.for_entry(entries[1].season_entry_id)
+    assert entry1 is not None
+    assert entry1.is_confirmed is False
+
+
+def test_readiness_counts_confirmed_entries_not_nominations_or_eligible_rules():
     db = migrated_connection()
     _, round_, entries, scope = setup_scope(db, 2026, 1347)
     ev = evidence.EVIDENCE_2026
     rule = accept_rule(db, scope["season_id"], 15, ev, ev.compensating_bye_round["GWS"], round_.bbbffl_round_id)
     player = own_named_player(
-        db, scope["season_id"], entries[0], 920102, "GWS Player", afl_team_id=15, afl_team_name="GWS Giants"
+        db, scope["season_id"], entries[0], 920105, "GWS Player", afl_team_id=15, afl_team_name="GWS Giants"
     )
-
-    before = build_opening_round_readiness(db, scope["season_id"])
-    assert before.total_required == 1
-    assert before.total_completed == 0
-    assert before.is_ready is False
-    [entry_readiness] = before.entries
-    assert entry_readiness.season_entry_id == entries[0].season_entry_id
-    assert entry_readiness.required_rule_ids == (rule.rule_id,)
-    assert entry_readiness.missing_rule_ids == (rule.rule_id,)
-    assert entry_readiness.is_complete is False
-    assert before.for_entry(entries[0].season_entry_id) == entry_readiness
-    assert before.for_entry(entries[1].season_entry_id) is None
-
     or_client = MultiRoundMatchClient(
-        {ev.afl_opening_round_id: [Match(9101, Team(15, "GWS"), Team(1, "ADEL"), "CONCLUDED")]}
+        {ev.afl_opening_round_id: [Match(9103, Team(15, "GWS"), Team(1, "ADEL"), "CONCLUDED")]}
     )
     OpeningRoundNominationRepository(db).nominate(
         rule.rule_id, entries[0].season_entry_id, "M1", player.season_player_id, or_client, actor=SCORER
     )
+    # A nomination alone -- with no explicit confirmation -- must not count.
+    assert build_opening_round_readiness(db, scope["season_id"]).total_confirmed == 0
 
-    after = build_opening_round_readiness(db, scope["season_id"])
-    assert after.total_required == 1
-    assert after.total_completed == 1
-    assert after.is_ready is True
-    assert after.entries[0].is_complete is True
-    assert after.entries[0].missing_rule_ids == ()
-    assert after.duplicate_nominations == ()
-    assert after.mismatched_nominations == ()
-    assert after.conflicting_nominations == ()
+    OpeningRoundSubmissionRepository(db).confirm(scope["season_id"], entries[0].season_entry_id, actor=SCORER)
+    after_one = build_opening_round_readiness(db, scope["season_id"])
+    assert after_one.total_confirmed == 1
+    assert after_one.for_entry(entries[0].season_entry_id).is_confirmed is True
+    assert after_one.for_entry(entries[0].season_entry_id).nomination_count == 1
+    assert after_one.is_ready is False  # nine other entries have not confirmed
 
+    # An entry with zero nominations confirms just as validly.
+    OpeningRoundSubmissionRepository(db).confirm(scope["season_id"], entries[1].season_entry_id, actor=SCORER)
+    after_two = build_opening_round_readiness(db, scope["season_id"])
+    assert after_two.total_confirmed == 2
+    zero_nomination_entry = after_two.for_entry(entries[1].season_entry_id)
+    assert zero_nomination_entry.is_confirmed is True
+    assert zero_nomination_entry.nomination_count == 0
 
-def test_readiness_reports_each_entry_independently_across_multiple_rules():
-    db = migrated_connection()
-    _, round_, entries, scope = setup_scope(db, 2026, 1345)
-    ev = evidence.EVIDENCE_2026
-    rule_bl = accept_rule(db, scope["season_id"], 2, ev, ev.compensating_bye_round["BL"], round_.bbbffl_round_id)
-    rule_carl = accept_rule(db, scope["season_id"], 5, ev, ev.compensating_bye_round["CARL"], round_.bbbffl_round_id)
-    bl_player = own_named_player(
-        db, scope["season_id"], entries[0], 920103, "BL Player", afl_team_id=2, afl_team_name="Brisbane Lions"
-    )
-    # Carlton player is owned (making entries[1] eligible/"required") but
-    # never nominated -- that's the missing case this test exercises.
-    own_named_player(db, scope["season_id"], entries[1], 920104, "CARL Player", afl_team_id=5, afl_team_name="Carlton")
-    or_client = MultiRoundMatchClient(
-        {ev.afl_opening_round_id: [Match(9102, Team(2, "BL"), Team(5, "CARL"), "CONCLUDED")]}
-    )
-    OpeningRoundNominationRepository(db).nominate(
-        rule_bl.rule_id, entries[0].season_entry_id, "M1", bl_player.season_player_id, or_client, actor=SCORER
-    )
-    # entries[1] (Carlton) never nominates -- stays missing.
-
-    readiness = build_opening_round_readiness(db, scope["season_id"])
-    assert readiness.total_required == 2
-    assert readiness.total_completed == 1
-    assert readiness.is_ready is False
-    by_entry = {entry.season_entry_id: entry for entry in readiness.entries}
-    assert by_entry[entries[0].season_entry_id].is_complete is True
-    assert by_entry[entries[1].season_entry_id].is_complete is False
-    assert by_entry[entries[1].season_entry_id].missing_rule_ids == (rule_carl.rule_id,)
+    for entry in entries[2:]:
+        OpeningRoundSubmissionRepository(db).confirm(scope["season_id"], entry.season_entry_id, actor=SCORER)
+    full = build_opening_round_readiness(db, scope["season_id"])
+    assert full.total_confirmed == full.total_entries == len(entries)
+    assert full.is_ready is True
 
 
-def test_readiness_detects_mismatched_and_conflicting_nominations_defensively():
+def test_readiness_detects_mismatched_and_conflicting_nominations_independently_of_confirmation():
     """`mismatched`/`conflicting` are defensive integrity checks over
-    already-persisted state (issue #131 #8): they must never occur through
-    the ordinary `nominate()`/`correct()` workflow (both are re-validated
-    exactly like `nominate()`), but readiness must still surface them if
-    the underlying data is ever altered by something other than this
-    module's own domain writes."""
+    already-persisted state, unrelated to and reported separately from
+    confirmation completeness (issue #133): a confirmed entry whose
+    underlying nomination data is later corrupted still shows as confirmed,
+    but the corruption remains independently visible and `is_ready` stays
+    False."""
     db = migrated_connection()
     _, round_, entries, scope = setup_scope(db, 2026, 1347)
     ev = evidence.EVIDENCE_2026
@@ -1493,10 +1496,12 @@ def test_readiness_detects_mismatched_and_conflicting_nominations_defensively():
     nomination = OpeningRoundNominationRepository(db).nominate(
         rule.rule_id, entries[0].season_entry_id, "M1", player.season_player_id, or_client, actor=SCORER
     )
+    OpeningRoundSubmissionRepository(db).confirm(scope["season_id"], entries[0].season_entry_id, actor=SCORER)
 
     clean = build_opening_round_readiness(db, scope["season_id"])
     assert clean.mismatched_nominations == ()
     assert clean.conflicting_nominations == ()
+    assert clean.for_entry(entries[0].season_entry_id).is_confirmed is True
 
     # Simulate the player's cached AFL club changing after the nomination
     # (never done through app.opening_round itself). `database.execute` is
@@ -1510,15 +1515,9 @@ def test_readiness_detects_mismatched_and_conflicting_nominations_defensively():
     mismatched = build_opening_round_readiness(db, scope["season_id"])
     assert [m["nomination_id"] for m in mismatched.mismatched_nominations] == [nomination.nomination_id]
     assert mismatched.is_ready is False
-    # A mismatched nomination must not count as fulfilling the rule (issue
-    # #131 PR review finding) -- see
-    # `test_readiness_treats_a_traded_away_nominated_player_as_incomplete`
-    # for the realistic (trade-away) version of this, where the entry stays
-    # "required" via a second owned eligible player and so is still visible
-    # in `entries` with `is_complete=False`. This particular corruption
-    # (the player's own cached club changing) also removes the entry from
-    # `required` entirely, since eligibility itself is club-derived.
-    assert mismatched.entries == ()
+    # The entry's *confirmation* is entirely unaffected by the corruption --
+    # confirmation completeness and integrity are independent signals.
+    assert mismatched.for_entry(entries[0].season_entry_id).is_confirmed is True
     with database_transaction(db) as conn:
         conn.execute(
             "UPDATE season_player_pool SET afl_team_id=? WHERE season_player_id=?", (15, player.season_player_id)
@@ -1539,48 +1538,257 @@ def test_readiness_detects_mismatched_and_conflicting_nominations_defensively():
     conflicting = build_opening_round_readiness(db, scope["season_id"])
     assert [c["nomination_id"] for c in conflicting.conflicting_nominations] == [nomination.nomination_id]
     assert conflicting.is_ready is False
-    # Same rationale as the mismatch case above: a conflicting nomination
-    # (persisted under a different round than its rule's target) must not
-    # let the rule's *actual* target round be reported as having a
-    # complete nomination -- see
-    # `test_round_preflight_blocks_when_a_targeted_nomination_has_drifted_to_another_round`
-    # for the round-preparation-level consequence of this.
-    assert conflicting.entries[0].is_complete is False
-    assert conflicting.entries[0].missing_rule_ids == (rule.rule_id,)
+    assert conflicting.for_entry(entries[0].season_entry_id).is_confirmed is True
 
 
-def test_readiness_treats_a_traded_away_nominated_player_as_incomplete():
-    """PR #132 review: the mismatch check must revalidate *current*
-    ownership, not merely the player's cached AFL club -- a nomination
-    whose player was released/transferred after nomination must not read
-    as complete merely because another owned player still covers the same
-    rule's club."""
+# -- Explicit Opening Round submission confirmation (issue #133) ------------
+
+
+def test_confirm_with_zero_nominations_is_valid_and_complete():
+    db = migrated_connection()
+    _, round_, entries, scope = setup_scope(db, 2026, 1347)
+    ev = evidence.EVIDENCE_2026
+    accept_rule(db, scope["season_id"], 15, ev, ev.compensating_bye_round["GWS"], round_.bbbffl_round_id)
+    own_named_player(
+        db, scope["season_id"], entries[0], 920110, "GWS Player", afl_team_id=15, afl_team_name="GWS Giants"
+    )
+    submissions = OpeningRoundSubmissionRepository(db)
+    assert submissions.get(scope["season_id"], entries[0].season_entry_id) is None
+
+    confirmed = submissions.confirm(
+        scope["season_id"], entries[0].season_entry_id, actor=SCORER, reason="deliberately no nominations this week"
+    )
+    assert confirmed.state == "confirmed"
+    assert confirmed.confirmed_at is not None
+    assert confirmed.actor_type == "anonymous_operator" and confirmed.actor_role == "scorer"
+    assert submissions.is_confirmed(scope["season_id"], entries[0].season_entry_id) is True
+    assert (
+        OpeningRoundNominationRepository(db).list_for_season_entry(scope["season_id"], entries[0].season_entry_id) == []
+    )
+
+
+def test_confirm_with_a_partial_legal_nomination_set_is_valid():
+    db = migrated_connection()
+    _, round_, entries, scope = setup_scope(db, 2026, 1345)
+    ev = evidence.EVIDENCE_2026
+    rule_bl = accept_rule(db, scope["season_id"], 2, ev, ev.compensating_bye_round["BL"], round_.bbbffl_round_id)
+    accept_rule(db, scope["season_id"], 5, ev, ev.compensating_bye_round["CARL"], round_.bbbffl_round_id)
+    bl_player = own_named_player(
+        db, scope["season_id"], entries[0], 920111, "BL Player", afl_team_id=2, afl_team_name="Brisbane Lions"
+    )
+    # Also owns a Carlton-eligible player, deliberately left unnominated.
+    own_named_player(db, scope["season_id"], entries[0], 920112, "CARL Player", afl_team_id=5, afl_team_name="Carlton")
+    or_client = MultiRoundMatchClient(
+        {ev.afl_opening_round_id: [Match(9110, Team(2, "BL"), Team(5, "CARL"), "CONCLUDED")]}
+    )
+    OpeningRoundNominationRepository(db).nominate(
+        rule_bl.rule_id, entries[0].season_entry_id, "M1", bl_player.season_player_id, or_client, actor=SCORER
+    )
+    submissions = OpeningRoundSubmissionRepository(db)
+    confirmed = submissions.confirm(scope["season_id"], entries[0].season_entry_id, actor=SCORER)
+    assert confirmed.state == "confirmed"
+    assert (
+        len(OpeningRoundNominationRepository(db).list_for_season_entry(scope["season_id"], entries[0].season_entry_id))
+        == 1
+    )
+
+
+def test_confirm_is_idempotent_and_concurrency_safe():
+    db = migrated_connection()
+    _, round_, entries, scope = setup_scope(db, 2026, 1347)
+    ev = evidence.EVIDENCE_2026
+    accept_rule(db, scope["season_id"], 15, ev, ev.compensating_bye_round["GWS"], round_.bbbffl_round_id)
+    submissions = OpeningRoundSubmissionRepository(db)
+    first = submissions.confirm(scope["season_id"], entries[0].season_entry_id, actor=SCORER, reason="first")
+    second = submissions.confirm(scope["season_id"], entries[0].season_entry_id, actor=ADMIN, reason="second")
+    assert second == first  # no new revision, no actor/reason overwrite
+    assert len(submissions.history(scope["season_id"], entries[0].season_entry_id)) == 1
+
+
+def test_confirmed_submission_cannot_be_silently_mutated_by_a_new_nomination():
     db = migrated_connection()
     _, round_, entries, scope = setup_scope(db, 2026, 1347)
     ev = evidence.EVIDENCE_2026
     rule = accept_rule(db, scope["season_id"], 15, ev, ev.compensating_bye_round["GWS"], round_.bbbffl_round_id)
-    nominated_player = own_named_player(
-        db, scope["season_id"], entries[0], 920106, "Nominated GWS Player", afl_team_id=15, afl_team_name="GWS Giants"
+    player = own_named_player(
+        db, scope["season_id"], entries[0], 920113, "GWS Player", afl_team_id=15, afl_team_name="GWS Giants"
     )
-    # entries[0] owns a second, un-nominated GWS-eligible player too, so it
-    # remains "required" for this rule after the nominated player is traded
-    # away -- the exact scenario the review comment describes.
-    own_named_player(
-        db, scope["season_id"], entries[0], 920107, "Replacement GWS Player", afl_team_id=15, afl_team_name="GWS Giants"
+    OpeningRoundSubmissionRepository(db).confirm(scope["season_id"], entries[0].season_entry_id, actor=SCORER)
+
+    or_client = MultiRoundMatchClient(
+        {ev.afl_opening_round_id: [Match(9111, Team(15, "GWS"), Team(1, "ADEL"), "CONCLUDED")]}
+    )
+    with pytest.raises(SubmissionConfirmedError):
+        OpeningRoundNominationRepository(db).nominate(
+            rule.rule_id, entries[0].season_entry_id, "M1", player.season_player_id, or_client, actor=SCORER
+        )
+    assert (
+        OpeningRoundNominationRepository(db).list_for_season_entry(scope["season_id"], entries[0].season_entry_id) == []
+    )
+
+
+def test_confirmed_submission_cannot_be_silently_mutated_by_a_correction():
+    db = migrated_connection()
+    _, round_, entries, scope = setup_scope(db, 2024, 956)
+    rule, player, nomination = nominate_bl_2024(db, scope["season_id"], round_.bbbffl_round_id, entries[0])
+    OpeningRoundSubmissionRepository(db).confirm(scope["season_id"], entries[0].season_entry_id, actor=SCORER)
+
+    with pytest.raises(SubmissionConfirmedError):
+        OpeningRoundNominationRepository(db).correct(
+            nomination.nomination_id, position="M2", actor=ADMIN, reason="attempted post-confirmation change"
+        )
+    assert OpeningRoundNominationRepository(db).get(nomination.nomination_id).position == nomination.position
+
+
+def test_reopen_requires_a_reason_and_a_currently_confirmed_submission():
+    db = migrated_connection()
+    _, round_, entries, scope = setup_scope(db, 2026, 1347)
+    ev = evidence.EVIDENCE_2026
+    accept_rule(db, scope["season_id"], 15, ev, ev.compensating_bye_round["GWS"], round_.bbbffl_round_id)
+    submissions = OpeningRoundSubmissionRepository(db)
+    with pytest.raises(OpeningRoundError):
+        submissions.reopen(scope["season_id"], entries[0].season_entry_id, actor=ADMIN, reason="nothing confirmed yet")
+
+    submissions.confirm(scope["season_id"], entries[0].season_entry_id, actor=SCORER)
+    with pytest.raises(OpeningRoundError):
+        submissions.reopen(scope["season_id"], entries[0].season_entry_id, actor=ADMIN, reason="")
+
+
+def test_confirm_is_refused_before_opening_round_is_configured_for_the_season():
+    """PR #134 review (P2): confirming before the season has any accepted
+    Opening Round rule would let a later-accepted rule's readiness silently
+    count a confirmation the operator never reviewed against it."""
+    db = migrated_connection()
+    _, round_, entries, scope = setup_scope(db, 2026, 1347)
+    submissions = OpeningRoundSubmissionRepository(db)
+    with pytest.raises(OpeningRoundError, match="no accepted Opening Round rule"):
+        submissions.confirm(scope["season_id"], entries[0].season_entry_id, actor=SCORER)
+
+    ev = evidence.EVIDENCE_2026
+    accept_rule(db, scope["season_id"], 15, ev, ev.compensating_bye_round["GWS"], round_.bbbffl_round_id)
+    confirmed = submissions.confirm(scope["season_id"], entries[0].season_entry_id, actor=SCORER)
+    assert confirmed.state == "confirmed"
+
+
+def test_reopen_is_explicit_audited_and_permits_a_subsequent_correction():
+    db = migrated_connection()
+    _, round_, entries, scope = setup_scope(db, 2024, 956)
+    rule, player, nomination = nominate_bl_2024(db, scope["season_id"], round_.bbbffl_round_id, entries[0])
+    submissions = OpeningRoundSubmissionRepository(db)
+    submissions.confirm(scope["season_id"], entries[0].season_entry_id, actor=SCORER)
+
+    reopened = submissions.reopen(
+        scope["season_id"], entries[0].season_entry_id, actor=ADMIN, reason="historical reconstruction correction"
+    )
+    assert reopened.state == "draft"
+    assert submissions.is_confirmed(scope["season_id"], entries[0].season_entry_id) is False
+
+    other_player = own_player(db, scope["season_id"], entries[0], 920114, "Corrected BL Player", afl_team_id=2)
+    corrected = OpeningRoundNominationRepository(db).correct(
+        nomination.nomination_id,
+        season_player_id=other_player.season_player_id,
+        actor=ADMIN,
+        reason="reopened correction",
+    )
+    assert corrected.season_player_id == other_player.season_player_id
+
+    history = submissions.history(scope["season_id"], entries[0].season_entry_id)
+    assert [h.state for h in history] == ["confirmed", "draft"]
+    assert history[1].reason == "historical reconstruction correction"
+
+    events = AuditEventRepository(db).list_events(entity_type=ENTITY_TYPE_SUBMISSION)
+    assert [e.action for e in events] == ["opening_round.submission.confirmed", "opening_round.submission.reopened"]
+
+    # Re-confirming after the correction is a fresh, independently audited
+    # confirmation -- never inferred, never merged with the prior one.
+    reconfirmed = submissions.confirm(scope["season_id"], entries[0].season_entry_id, actor=SCORER)
+    assert reconfirmed.state == "confirmed"
+    assert len(submissions.history(scope["season_id"], entries[0].season_entry_id)) == 3
+
+
+def test_confirmation_requires_an_operator_actor_never_the_coach():
+    db = migrated_connection()
+    _, round_, entries, scope = setup_scope(db, 2026, 1347)
+    with pytest.raises(UnauthorizedNominationActorError):
+        OpeningRoundSubmissionRepository(db).confirm(scope["season_id"], entries[0].season_entry_id, actor=COACH)
+
+
+# -- Represented-entry nomination read model duplication (issue #133) -------
+
+
+def test_list_for_season_entry_returns_one_nomination_once_when_four_rules_share_its_target_round():
+    """The exact discovered defect: four accepted rules targeting one
+    BBBFFL round, one persisted nomination in that round -- the
+    season/entry-scoped read must return it exactly once, never once per
+    accepted rule that happens to share the round."""
+    db = migrated_connection()
+    _, round_, entries, scope = setup_scope(db, 2026, 1345)
+    ev = evidence.EVIDENCE_2026
+    entry = entries[0]
+    # The real 2026 evidence: BL, COLL, CARL and GEEL all share compensating
+    # bye AFL round 1345 -- four accepted rules genuinely targeting one
+    # BBBFFL round, exactly the discovered reproduction (issue #133).
+    clubs = [("BL", 2), ("COLL", 3), ("CARL", 5), ("GEEL", 10)]
+    for code, club_id in clubs:
+        accept_rule(db, scope["season_id"], club_id, ev, ev.compensating_bye_round[code], round_.bbbffl_round_id)
+    bl_player = own_named_player(
+        db, scope["season_id"], entry, 920120, "BL Player", afl_team_id=2, afl_team_name="Brisbane Lions"
     )
     or_client = MultiRoundMatchClient(
-        {ev.afl_opening_round_id: [Match(9104, Team(15, "GWS"), Team(1, "ADEL"), "CONCLUDED")]}
+        {ev.afl_opening_round_id: [Match(9120, Team(2, "BL"), Team(5, "CARL"), "CONCLUDED")]}
     )
+    rule_bl = OpeningRoundRuleRepository(db).resolve(scope["season_id"], 2)
     nomination = OpeningRoundNominationRepository(db).nominate(
-        rule.rule_id, entries[0].season_entry_id, "M1", nominated_player.season_player_id, or_client, actor=SCORER
+        rule_bl.rule_id, entry.season_entry_id, "M1", bl_player.season_player_id, or_client, actor=SCORER
     )
-    complete = build_opening_round_readiness(db, scope["season_id"])
-    assert complete.entries[0].is_complete is True
+    corrected = OpeningRoundNominationRepository(db).correct(
+        nomination.nomination_id, position="F1", actor=ADMIN, reason="audited correction"
+    )
 
-    OwnershipRepository(db).release(nominated_player.season_player_id)
+    results = OpeningRoundNominationRepository(db).list_for_season_entry(scope["season_id"], entry.season_entry_id)
+    assert [n.nomination_id for n in results] == [corrected.nomination_id]
+    events = AuditEventRepository(db).list_events(
+        entity_type=ENTITY_TYPE_NOMINATION, entity_id=nomination.nomination_id
+    )
+    correction_events = [e for e in events if e.action == "opening_round.nomination.corrected"]
+    assert len(correction_events) == 1  # never multiplied by the four sharing rules
 
-    after_release = build_opening_round_readiness(db, scope["season_id"])
-    assert [m["nomination_id"] for m in after_release.mismatched_nominations] == [nomination.nomination_id]
-    assert after_release.entries[0].is_complete is False
-    assert after_release.entries[0].missing_rule_ids == (rule.rule_id,)
-    assert after_release.is_ready is False
+
+def test_list_for_season_entry_returns_two_nominations_across_two_shared_target_rounds():
+    db = migrated_connection()
+    _, round2, entries, scope = setup_scope(db, 2026, 1345)
+    ev = evidence.EVIDENCE_2026
+    entry = entries[0]
+    round3 = SeasonRepository(db).create_round(scope["competition_id"], "round-3", "Round 3", 3)
+    from app.competition_lifecycle import CompetitionLifecycleRepository
+    from app.round_mapping import RoundMappingRepository
+
+    RoundMappingRepository(db).accept(round3.bbbffl_round_id, 2026, 1346, KnownRounds((2026, 1346)))
+    CompetitionLifecycleRepository(db).create_ordinary_round(round3.bbbffl_round_id)
+
+    # Two rules target round2 (BL, CARL, both compensating bye 1345); two
+    # rules target round3 (GCFC, WB, both compensating bye 1346).
+    accept_rule(db, scope["season_id"], 2, ev, ev.compensating_bye_round["BL"], round2.bbbffl_round_id)
+    accept_rule(db, scope["season_id"], 5, ev, ev.compensating_bye_round["CARL"], round2.bbbffl_round_id)
+    accept_rule(db, scope["season_id"], 4, ev, ev.compensating_bye_round["GCFC"], round3.bbbffl_round_id)
+    accept_rule(db, scope["season_id"], 8, ev, ev.compensating_bye_round["WB"], round3.bbbffl_round_id)
+
+    bl_player = own_named_player(db, scope["season_id"], entry, 920121, "BL Player", afl_team_id=2, afl_team_name="BL")
+    gcfc_player = own_named_player(
+        db, scope["season_id"], entry, 920122, "GCFC Player", afl_team_id=4, afl_team_name="GCFC"
+    )
+    or_client = MultiRoundMatchClient(
+        {ev.afl_opening_round_id: [Match(9121, Team(2, "BL"), Team(4, "GCFC"), "CONCLUDED")]}
+    )
+    rule_bl = OpeningRoundRuleRepository(db).resolve(scope["season_id"], 2)
+    rule_gcfc = OpeningRoundRuleRepository(db).resolve(scope["season_id"], 4)
+    nom1 = OpeningRoundNominationRepository(db).nominate(
+        rule_bl.rule_id, entry.season_entry_id, "M1", bl_player.season_player_id, or_client, actor=SCORER
+    )
+    nom2 = OpeningRoundNominationRepository(db).nominate(
+        rule_gcfc.rule_id, entry.season_entry_id, "M2", gcfc_player.season_player_id, or_client, actor=SCORER
+    )
+
+    results = OpeningRoundNominationRepository(db).list_for_season_entry(scope["season_id"], entry.season_entry_id)
+    assert {n.nomination_id for n in results} == {nom1.nomination_id, nom2.nomination_id}
+    assert len(results) == 2

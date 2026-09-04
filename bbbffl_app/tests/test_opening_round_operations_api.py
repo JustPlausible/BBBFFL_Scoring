@@ -21,7 +21,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.audit import ActorContext
-from app.opening_round import OpeningRoundNominationRepository, OpeningRoundRuleRepository
+from app.opening_round import (
+    OpeningRoundNominationRepository,
+    OpeningRoundRuleRepository,
+    OpeningRoundSubmissionRepository,
+)
 from app.player_pool import OwnershipRepository, PlayerPoolRepository
 from tests import opening_round_evidence as evidence
 from tests.test_competition_lifecycle import configured
@@ -180,16 +184,35 @@ def test_season_centre_exposes_opening_round_operations_only_once_rules_are_acce
 
     after = client.get(f"/api/admin/season-centre/{season_id}").json()
     assert after["links"]["opening_round"] == f"/operations/seasons/{season_id}/opening-round"
-    assert after["readiness"]["opening_round"]["total_required"] == 0  # no entry owns an eligible player yet
-    assert after["readiness"]["opening_round"]["is_ready"] is True
+    # No entry has confirmed yet -- not "0 required", never inferred from
+    # eligible clubs/players (issue #133).
+    assert after["readiness"]["opening_round"]["total_entries"] == len(entries)
+    assert after["readiness"]["opening_round"]["total_confirmed"] == 0
+    assert after["readiness"]["opening_round"]["is_ready"] is False
 
     OwnershipRepository(db).configure_squad_limit(season_id, 5)
     _own(db, season_id, entries[0], 920001, "Test GWS Player", GWS_CLUB_ID, GWS_CLUB_NAME)
-    incomplete = client.get(f"/api/admin/season-centre/{season_id}").json()
-    assert incomplete["readiness"]["opening_round"]["total_required"] == 1
-    assert incomplete["readiness"]["opening_round"]["total_completed"] == 0
-    assert incomplete["readiness"]["opening_round"]["is_ready"] is False
-    assert incomplete["readiness"]["opening_round"]["entries_requiring_action"][0]["team_name"] == "Team 0"
+    # Owning an eligible player still does not by itself make confirmation
+    # required for that entry any more than for any other -- the readiness
+    # signal is unchanged by ownership alone.
+    still_unconfirmed = client.get(f"/api/admin/season-centre/{season_id}").json()
+    assert still_unconfirmed["readiness"]["opening_round"]["total_confirmed"] == 0
+    assert still_unconfirmed["readiness"]["opening_round"]["is_ready"] is False
+    awaiting_names = {
+        e["team_name"] for e in still_unconfirmed["readiness"]["opening_round"]["entries_awaiting_confirmation"]
+    }
+    assert "Team 0" in awaiting_names
+
+    from app.audit import ActorContext
+    from app.opening_round import OpeningRoundSubmissionRepository
+
+    submissions = OpeningRoundSubmissionRepository(db)
+    for entry in entries:
+        submissions.confirm(season_id, entry.season_entry_id, actor=ActorContext.anonymous_operator("admin"))
+    confirmed = client.get(f"/api/admin/season-centre/{season_id}").json()
+    assert confirmed["readiness"]["opening_round"]["total_confirmed"] == len(entries)
+    assert confirmed["readiness"]["opening_round"]["is_ready"] is True
+    assert confirmed["readiness"]["opening_round"]["entries_awaiting_confirmation"] == []
 
 
 def test_round_preparation_blocks_on_incomplete_opening_round_nominations_with_navigation_link(operations_client):
@@ -217,12 +240,14 @@ def test_round_preparation_blocks_on_incomplete_opening_round_nominations_with_n
     assert OpeningRoundNominationRepository(db).list_for_round(round_.bbbffl_round_id) == []
 
 
-def test_round_preflight_blocks_when_a_nominated_player_is_traded_away_after_nomination(operations_client, monkeypatch):
-    """PR #132 review (P1): a nomination row existing under the rule is not
-    by itself enough to consider the round safe to open -- once the
-    nominated player is traded away, `build_opening_round_readiness` (fixed
-    to revalidate current ownership, not just cached club) must stop
-    counting it as complete, and round preflight must block again."""
+def test_round_preflight_blocks_when_a_nominated_player_is_traded_away_after_confirmation(
+    operations_client, monkeypatch
+):
+    """Issue #133: confirmation completeness and nomination integrity are
+    independent signals. Once every required entry has confirmed, a
+    nomination row later corrupted by a trade-away must not silently pass
+    round preflight -- it now blocks via a distinct integrity conflict, not
+    by pretending the entry became unconfirmed."""
     client = operations_client
     db = client.app.state.database
     round_, entries = configured(db, 2026, evidence.EVIDENCE_2026.compensating_bye_round["GWS"])
@@ -234,11 +259,6 @@ def test_round_preflight_blocks_when_a_nominated_player_is_traded_away_after_nom
     OwnershipRepository(db).configure_squad_limit(season_id, 5)
     rule, ev, bye_round_id = _accept_gws_2026_rule(db, season_id, round_.bbbffl_round_id)
     nominated_player = _own(db, season_id, entries[0], 920009, "Nominated GWS Player", GWS_CLUB_ID, GWS_CLUB_NAME)
-    # A second owned GWS-eligible player keeps entries[0] "required" for
-    # this rule even after the nominated player is released below --
-    # otherwise this would only prove the entry vanished from tracking, not
-    # that the stale nomination itself was caught.
-    _own(db, season_id, entries[0], 920010, "Replacement GWS Player", GWS_CLUB_ID, GWS_CLUB_NAME)
     monkeypatch.setattr(client.app.state, "afl_client", _afl_client(ev, bye_round_id))
     OpeningRoundNominationRepository(db).nominate(
         rule.rule_id,
@@ -249,15 +269,23 @@ def test_round_preflight_blocks_when_a_nominated_player_is_traded_away_after_nom
         actor=ADMIN,
         reason="synthetic",
     )
+    submissions = OpeningRoundSubmissionRepository(db)
+    for entry in entries:
+        submissions.confirm(season_id, entry.season_entry_id, actor=ADMIN)
 
     ready = client.get(f"/api/admin/round-preflight/{round_.bbbffl_round_id}").json()
-    assert "opening_round_nominations_incomplete" not in {b["code"] for b in ready["readiness"]["blockers"]}
+    codes = {b["code"] for b in ready["readiness"]["blockers"]}
+    assert "opening_round_nominations_incomplete" not in codes
+    assert "opening_round_integrity_conflict" not in codes
 
     OwnershipRepository(db).release(nominated_player.season_player_id)
 
     blocked = client.get(f"/api/admin/round-preflight/{round_.bbbffl_round_id}").json()
     codes = {b["code"] for b in blocked["readiness"]["blockers"]}
-    assert "opening_round_nominations_incomplete" in codes
+    # The entry's confirmation itself is untouched by the trade -- this is
+    # an integrity conflict, never a reversion to "incomplete".
+    assert "opening_round_nominations_incomplete" not in codes
+    assert "opening_round_integrity_conflict" in codes
     assert blocked["readiness"]["safe_to_open"] is False
 
 
@@ -309,9 +337,10 @@ def test_represented_operator_workflow_end_to_end(operations_client, monkeypatch
     assert rule_view["bbbffl_round_label"] == round_.label
     assert rule_view["rule_id"] == rule.rule_id  # internal id retained as secondary diagnostic
 
-    # #8: readiness before any nomination.
-    assert view["readiness"]["required_rule_ids"] == [rule.rule_id]
-    assert view["readiness"]["is_complete"] is False
+    # #8: readiness before any nomination -- unconfirmed, and never
+    # expressed as "required" against eligible rules/players (issue #133).
+    assert view["readiness"]["is_confirmed"] is False
+    assert view["submission"]["state"] == "draft"
 
     # #5/#6: a mismatched player/rule club combination is rejected server-side.
     mismatch = client.post(
@@ -354,9 +383,11 @@ def test_represented_operator_workflow_end_to_end(operations_client, monkeypatch
     draft = lineups.get_draft(season_id, round_.competition_id, round_.bbbffl_round_id, represented.season_entry_id)
     assert draft.positions["M1"] == gws_player.season_player_id  # locked/preloaded, not a UI-only flag
 
+    # A nomination alone still does not confirm anything -- confirmation is
+    # a separate, explicit action (issue #133).
     ready = client.get(url, cookies=cookies).json()
-    assert ready["readiness"]["is_complete"] is True
-    assert ready["readiness"]["nominated_rule_ids"] == [rule.rule_id]
+    assert ready["readiness"]["is_confirmed"] is False
+    assert ready["submission"]["state"] == "draft"
 
     # #7: correction workflow remains functional and its history is readable.
     corrected = client.patch(
@@ -389,6 +420,248 @@ def test_represented_operator_workflow_end_to_end(operations_client, monkeypatch
         cookies=cookies,
     )
     assert unprotected.status_code == 403
+
+    # CSRF protection also guards the confirm/reopen actions.
+    unprotected_confirm = client.post(url + "/confirm", json={"reason": "no csrf"}, cookies=cookies)
+    assert unprotected_confirm.status_code == 403
+
+    # Explicit confirmation: a partial legal set (one nomination, other
+    # eligible slots left vacant) is a valid, confirmable submission.
+    confirmed = client.post(
+        url + "/confirm", json={"reason": "partial replay submission confirmed"}, cookies=cookies, headers=headers
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["submission"]["state"] == "confirmed"
+    assert confirmed.json()["submission"]["confirmed_by_display_name"] == "Authenticated Replay Operator"
+    assert confirmed.json()["readiness"]["is_confirmed"] is True
+
+    after_confirm = client.get(url, cookies=cookies).json()
+    assert after_confirm["submission"]["state"] == "confirmed"
+    assert after_confirm["readiness"]["is_confirmed"] is True
+
+    # A confirmed submission cannot be silently mutated: a further
+    # correction attempt is refused until an explicit, audited reopen.
+    blocked_correction = client.patch(
+        url + f"/nominations/{nomination_id}",
+        json={"position": "Ruck", "reason": "attempted post-confirmation change"},
+        cookies=cookies,
+        headers=headers,
+    )
+    assert blocked_correction.status_code == 409
+
+    # Confirming again is idempotent -- no error, no duplicated history.
+    reconfirmed = client.post(
+        url + "/confirm", json={"reason": "repeat confirmation"}, cookies=cookies, headers=headers
+    )
+    assert reconfirmed.status_code == 200
+    assert len(reconfirmed.json()["submission"]["history"]) == 1
+
+    # Explicit, audited reopen is required before further edits.
+    reopened = client.post(
+        url + "/reopen",
+        json={"reason": "historical reconstruction needs a correction"},
+        cookies=cookies,
+        headers=headers,
+    )
+    assert reopened.status_code == 200, reopened.text
+    assert reopened.json()["submission"]["state"] == "draft"
+
+    now_editable = client.patch(
+        url + f"/nominations/{nomination_id}",
+        json={"position": "Ruck", "reason": "correction after audited reopen"},
+        cookies=cookies,
+        headers=headers,
+    )
+    assert now_editable.status_code == 200, now_editable.text
+    assert now_editable.json()["nomination"]["position"] == "Ruck"
+
+    reopen_history = client.get(url, cookies=cookies).json()["submission"]["history"]
+    assert [h["state"] for h in reopen_history] == ["confirmed", "draft"]
+    assert reopen_history[1]["reason"] == "historical reconstruction needs a correction"
+
+
+def test_round_preflight_blocks_a_round_holding_a_drifted_nomination_no_rule_currently_targets(operations_client):
+    """PR #134 review (P1): `conflicting_nominations` entries are, by
+    definition, nominations whose persisted `bbbffl_round_id` no longer
+    matches any rule's *current* target -- so the round that nomination
+    actually lives in (still returned by `list_for_round`, still treated as
+    an active locked selection) has no rule targeting it, and the old
+    rule-ID-only match would skip the entire integrity check for that round
+    entirely. It must still block via `opening_round_integrity_conflict`."""
+    from app.competition_lifecycle import CompetitionLifecycleRepository
+    from app.db import transaction as database_transaction
+    from app.round_mapping import RoundMappingRepository
+    from app.season import SeasonRepository
+
+    client = operations_client
+    db = client.app.state.database
+    round2, entries = configured(db, 2026, evidence.EVIDENCE_2026.compensating_bye_round["GWS"])
+    season_id = db.execute(
+        "SELECT c.season_id FROM bbbffl_round r JOIN competition_stream c ON c.competition_id=r.competition_id "
+        "WHERE r.bbbffl_round_id=?",
+        (round2.bbbffl_round_id,),
+    ).fetchone()["season_id"]
+    OwnershipRepository(db).configure_squad_limit(season_id, 5)
+    rule, ev, bye_round_id = _accept_gws_2026_rule(db, season_id, round2.bbbffl_round_id)
+    player = _own(db, season_id, entries[0], 920011, "Nominated GWS Player", GWS_CLUB_ID, GWS_CLUB_NAME)
+    afl_client = _afl_client(ev, bye_round_id)
+
+    nomination = OpeningRoundNominationRepository(db).nominate(
+        rule.rule_id,
+        entries[0].season_entry_id,
+        "M1",
+        player.season_player_id,
+        afl_client,
+        actor=ADMIN,
+        reason="synthetic",
+    )
+    submissions = OpeningRoundSubmissionRepository(db)
+    for entry in entries:
+        submissions.confirm(season_id, entry.season_entry_id, actor=ADMIN)
+
+    # A round no accepted rule currently targets -- created after the
+    # nomination so the drift below is genuinely "no rule targets this
+    # round", not merely "not yet".
+    round3 = SeasonRepository(db).create_round(round2.competition_id, "round-3-drift", "Round 3", 3)
+    RoundMappingRepository(db).accept(
+        round3.bbbffl_round_id,
+        2026,
+        evidence.EVIDENCE_2026.compensating_bye_round["GCFC"],
+        KnownRounds((2026, evidence.EVIDENCE_2026.compensating_bye_round["GCFC"])),
+    )
+    CompetitionLifecycleRepository(db).create_ordinary_round(round3.bbbffl_round_id)
+
+    # Simulate the nomination's persisted target drifting to round3 (never
+    # possible through app.opening_round's own write paths).
+    with database_transaction(db) as conn:
+        conn.execute(
+            "UPDATE opening_round_nomination SET bbbffl_round_id=? WHERE nomination_id=?",
+            (round3.bbbffl_round_id, nomination.nomination_id),
+        )
+
+    drifted_round_view = client.get(f"/api/admin/round-preflight/{round3.bbbffl_round_id}").json()
+    codes = {b["code"] for b in drifted_round_view["readiness"]["blockers"]}
+    assert "opening_round_integrity_conflict" in codes
+    assert drifted_round_view["readiness"]["safe_to_open"] is False
+
+    # The rule's own current target round must still catch it too (the
+    # rule-ID match path, unaffected by this fix).
+    original_round_view = client.get(f"/api/admin/round-preflight/{round2.bbbffl_round_id}").json()
+    assert "opening_round_integrity_conflict" in {b["code"] for b in original_round_view["readiness"]["blockers"]}
+
+
+def test_represented_entry_response_returns_each_nomination_once_when_rules_share_a_target_round(
+    operations_client, monkeypatch
+):
+    """The exact discovered reproduction (issue #133): four accepted rules
+    sharing one target BBBFFL round previously caused the represented-entry
+    GET response to repeat that round's single persisted nomination once
+    per rule. A second nomination in a second shared-round group must
+    likewise appear exactly once."""
+    from app.afl_client import Match, Team
+
+    client = operations_client
+    db = client.app.state.database
+    ev = evidence.EVIDENCE_2026
+    round2, entries = configured(db, 2026, ev.compensating_bye_round["BL"])  # afl round 1345
+    season_id = db.execute(
+        "SELECT c.season_id FROM bbbffl_round r JOIN competition_stream c ON c.competition_id=r.competition_id "
+        "WHERE r.bbbffl_round_id=?",
+        (round2.bbbffl_round_id,),
+    ).fetchone()["season_id"]
+    OwnershipRepository(db).configure_squad_limit(season_id, 10)
+
+    from app.competition_lifecycle import CompetitionLifecycleRepository
+    from app.round_mapping import RoundMappingRepository
+    from app.season import SeasonRepository
+
+    round3 = SeasonRepository(db).create_round(round2.competition_id, "round-3", "Round 3", 3)
+    RoundMappingRepository(db).accept(
+        round3.bbbffl_round_id,
+        2026,
+        ev.compensating_bye_round["GCFC"],
+        KnownRounds((2026, ev.compensating_bye_round["GCFC"])),
+    )
+    CompetitionLifecycleRepository(db).create_ordinary_round(round3.bbbffl_round_id)
+
+    def accept(club_id, code, bbbffl_round_id):
+        validator = KnownRounds(
+            (ev.afl_season_id, ev.afl_opening_round_id), (ev.afl_season_id, ev.compensating_bye_round[code])
+        )
+        return OpeningRoundRuleRepository(db).accept(
+            season_id,
+            club_id,
+            ev.afl_season_id,
+            ev.afl_opening_round_id,
+            ev.compensating_bye_round[code],
+            bbbffl_round_id,
+            validator,
+            actor=ADMIN,
+            reason="synthetic",
+        )
+
+    # Round 2: four accepted rules (BL, COLL, CARL, GEEL) sharing one target
+    # BBBFFL round -- exactly the reported reproduction.
+    rule_bl = accept(2, "BL", round2.bbbffl_round_id)
+    accept(3, "COLL", round2.bbbffl_round_id)
+    accept(5, "CARL", round2.bbbffl_round_id)
+    accept(10, "GEEL", round2.bbbffl_round_id)
+    # Round 3: two accepted rules (GCFC, WB) sharing another target round.
+    rule_gcfc = accept(4, "GCFC", round3.bbbffl_round_id)
+    accept(8, "WB", round3.bbbffl_round_id)
+
+    represented = entries[0]
+    bl_player = _own(db, season_id, represented, 921001, "BL Player", 2, "Brisbane Lions")
+    gcfc_player = _own(db, season_id, represented, 921002, "GCFC Player", 4, "Gold Coast")
+
+    operator, cookies, headers = _authenticate_replay_operator(client, season_id, represented.season_entry_id)
+    afl_client = StaticAflClient(
+        matches_by_round={
+            ev.afl_opening_round_id: [
+                Match(match_id=7101, home_team=Team(2, "BL"), away_team=Team(4, "GCFC"), status="CONCLUDED"),
+            ],
+        },
+        rounds_by_season={},
+    )
+    monkeypatch.setattr(client.app.state, "afl_client", afl_client)
+
+    url = f"/api/operations/seasons/{season_id}/opening-round"
+    nomination_1 = client.post(
+        url + "/nominations",
+        json={
+            "rule_id": rule_bl.rule_id,
+            "season_player_id": bl_player.season_player_id,
+            "position": "M1",
+            "reason": "synthetic",
+        },
+        cookies=cookies,
+        headers=headers,
+    ).json()["nomination"]
+
+    # After only one nomination (round 2's), the response must contain
+    # exactly that one -- not four copies of it.
+    only_one = client.get(url, cookies=cookies).json()
+    assert len(only_one["nominations"]) == 1
+    assert only_one["nominations"][0]["nomination_id"] == nomination_1["nomination_id"]
+
+    nomination_2 = client.post(
+        url + "/nominations",
+        json={
+            "rule_id": rule_gcfc.rule_id,
+            "season_player_id": gcfc_player.season_player_id,
+            "position": "M2",
+            "reason": "synthetic",
+        },
+        cookies=cookies,
+        headers=headers,
+    ).json()["nomination"]
+
+    both = client.get(url, cookies=cookies).json()
+    assert {n["nomination_id"] for n in both["nominations"]} == {
+        nomination_1["nomination_id"],
+        nomination_2["nomination_id"],
+    }
+    assert len(both["nominations"]) == 2
 
 
 def test_cross_entry_and_cross_season_nomination_ids_are_not_found(operations_client, monkeypatch):

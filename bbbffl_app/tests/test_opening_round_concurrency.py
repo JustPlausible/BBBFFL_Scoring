@@ -19,6 +19,7 @@ from app.opening_round import (
     OpeningRoundError,
     OpeningRoundNominationRepository,
     OpeningRoundRuleRepository,
+    OpeningRoundSubmissionRepository,
 )
 from app.player_pool import OwnershipRepository, PlayerPoolRepository
 from tests.test_competition_lifecycle import operational
@@ -119,3 +120,43 @@ def test_two_concurrent_nominations_under_the_same_rule_entry_have_one_winner(po
 
     results = race([lambda: nominate(player_a, "M1"), lambda: nominate(player_b, "M2")])
     assert sum(result == "conflict" for result in results) == 1
+
+
+def test_confirm_and_nominate_race_never_leaves_a_confirmed_submission_silently_mutated(postgres_url):
+    """Issue #133 PR review (P1): a nomination write and a confirmation for
+    the same entry must serialize -- never both observe an unconfirmed
+    state and commit, which would leave a confirmed submission whose
+    nominations were mutated without the required reopen."""
+    db, rule, entry, player_a, player_b, client = _context(postgres_url, 2403)
+    submissions = OpeningRoundSubmissionRepository(db)
+    nominations = OpeningRoundNominationRepository(db)
+
+    def do_nominate():
+        return nominations.nominate(
+            rule.rule_id,
+            entry.season_entry_id,
+            "M1",
+            player_a.season_player_id,
+            client,
+            actor=ActorContext.anonymous_operator("scorer"),
+            reason="race",
+        )
+
+    def do_confirm():
+        return submissions.confirm(
+            rule.season_id, entry.season_entry_id, actor=ActorContext.anonymous_operator("admin")
+        )
+
+    nominate_result, confirm_result = race([do_nominate, do_confirm])
+    assert confirm_result != "conflict"
+    submission = submissions.get(rule.season_id, entry.season_entry_id)
+    assert submission is not None and submission.state == "confirmed"
+    persisted = nominations.list_for_season_entry(rule.season_id, entry.season_entry_id)
+    if nominate_result == "conflict":
+        # Confirmation won the race -- the nomination must have been
+        # refused outright, never partially applied.
+        assert persisted == []
+    else:
+        # The nomination won the race and committed before confirmation --
+        # it must be exactly what the confirmed submission covers.
+        assert [n.nomination_id for n in persisted] == [nominate_result.nomination_id]

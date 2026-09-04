@@ -670,7 +670,7 @@ class OpeningRoundNominationRepository:
         if rule is None or rule.state != "accepted":
             raise UnknownRuleError(f"rule {rule_id} is not an accepted Opening Round rule")
         with transaction(self.database) as conn:
-            if self.submissions.is_confirmed_locked(conn, rule.season_id, season_entry_id):
+            if self.submissions.lock_state(conn, rule.season_id, season_entry_id) == "confirmed":
                 raise SubmissionConfirmedError(
                     f"season entry {season_entry_id} has already confirmed its Opening Round submission; "
                     "reopen it before adding a new nomination"
@@ -799,7 +799,7 @@ class OpeningRoundNominationRepository:
             ).fetchone()
             if not existing:
                 raise KeyError(nomination_id)
-            if self.submissions.is_confirmed_locked(conn, existing["season_id"], existing["season_entry_id"]):
+            if self.submissions.lock_state(conn, existing["season_id"], existing["season_entry_id"]) == "confirmed":
                 raise SubmissionConfirmedError(
                     f"season entry {existing['season_entry_id']} has already confirmed its Opening Round "
                     "submission; reopen it before correcting a nomination"
@@ -1147,23 +1147,60 @@ class OpeningRoundSubmissionRepository:
         ).fetchone()
         return _submission(row) if row else None
 
-    def get_locked(self, conn: ConnectionLike, season_id: str, season_entry_id: str) -> OpeningRoundSubmission | None:
-        """Same as `get`, but read via an already-open transaction
-        connection -- used by `OpeningRoundNominationRepository.nominate`/
-        `correct` to refuse mutating a nomination for an entry whose
-        submission is already confirmed, inside their own transaction."""
-        row = conn.execute(
-            self._select() + " WHERE m.season_id=? AND m.season_entry_id=?", (season_id, season_entry_id)
-        ).fetchone()
-        return _submission(row) if row else None
-
     def is_confirmed(self, season_id: str, season_entry_id: str) -> bool:
         current = self.get(season_id, season_entry_id)
         return current is not None and current.state == "confirmed"
 
-    def is_confirmed_locked(self, conn: ConnectionLike, season_id: str, season_entry_id: str) -> bool:
-        current = self.get_locked(conn, season_id, season_entry_id)
-        return current is not None and current.state == "confirmed"
+    @staticmethod
+    def lock_state(conn: ConnectionLike, season_id: str, season_entry_id: str) -> str | None:
+        """Current state (`'draft'`/`'confirmed'`), or `None` if never
+        touched, after locking this entry's submission for the remainder of
+        the caller's transaction -- see `_lock`'s docstring. Used by
+        `OpeningRoundNominationRepository.nominate`/`correct` to refuse
+        mutating a nomination for an already-confirmed entry."""
+        _, _, state = OpeningRoundSubmissionRepository._lock(conn, season_id, season_entry_id)
+        return state
+
+    @staticmethod
+    def _lock(conn: ConnectionLike, season_id: str, season_entry_id: str) -> tuple[str, int, str | None]:
+        """Atomically get-or-create this entry's submission header row and
+        lock it for the remainder of the caller's still-open transaction,
+        returning `(submission_id, current_revision, state)` -- `state` is
+        `None` if the entry has never had a revision written.
+
+        This is the one shared, always-lockable resource
+        `OpeningRoundNominationRepository.nominate`/`correct` and this
+        class's own `confirm`/`reopen` all serialize on (issue #133 PR
+        review, P1). Without it, a nomination write and a confirmation
+        could each read state the other's concurrent commit invalidates --
+        e.g. a confirmation landing while a nomination write is mid-flight,
+        leaving a confirmed submission whose nominations were mutated
+        without the required reopen.
+
+        `INSERT ... ON CONFLICT DO UPDATE ... RETURNING` is used instead of
+        a plain `SELECT ... FOR UPDATE` because the header row may not
+        exist yet on an entry's very first touch -- there would be nothing
+        to lock. The upsert always produces exactly one row and takes the
+        same row-level lock a `FOR UPDATE` read would, atomically, on both
+        PostgreSQL and SQLite. A header whose `current_revision` is `0` is a
+        pure lock placeholder with no matching revision row -- `get()`/
+        `history()` still correctly read such an entry as untouched."""
+        row = conn.execute(
+            "INSERT INTO opening_round_submission (submission_id, season_id, season_entry_id, current_revision, created_at) "
+            "VALUES (?, ?, ?, 0, ?) "
+            "ON CONFLICT(season_id, season_entry_id) DO UPDATE SET season_id=excluded.season_id "
+            "RETURNING submission_id, current_revision",
+            (_id(), season_id, season_entry_id, _now()),
+        ).fetchone()
+        submission_id, current_revision = row["submission_id"], row["current_revision"]
+        state = None
+        if current_revision:
+            state_row = conn.execute(
+                "SELECT state FROM opening_round_submission_revision WHERE submission_id=? AND revision=?",
+                (submission_id, current_revision),
+            ).fetchone()
+            state = state_row["state"] if state_row else None
+        return submission_id, current_revision, state
 
     def list_for_season(self, season_id: str) -> list[OpeningRoundSubmission]:
         rows = self.database.execute(self._select() + " WHERE m.season_id=?", (season_id,)).fetchall()
@@ -1186,42 +1223,29 @@ class OpeningRoundSubmissionRepository:
     ) -> OpeningRoundSubmission:
         """Confirm an entry's Opening Round submission -- explicitly
         permitting zero, or any partial legal set of, nominations (issue
-        #133). Idempotent/concurrency-safe: calling this again while the
+        #133). Refuses while the season has no accepted Opening Round rule
+        at all (PR #134 review): confirming before Opening Round is even
+        configured would let a later-accepted rule's readiness silently
+        count a confirmation the operator never reviewed against it.
+        Idempotent/concurrency-safe: calling this again while the
         submission is already confirmed is a no-op that returns the current
-        state without writing a new revision or audit event, and a genuine
-        concurrent first-confirmation race (nothing existed yet to lock) is
-        reconciled to whichever confirmation actually landed rather than
-        raising."""
+        state without writing a new revision or audit event, and is
+        serialized against a concurrent `nominate`/`correct`/`reopen` for
+        the same entry via `_lock` (PR #134 review, P1)."""
         _ensure_operator(actor)
+        if not OpeningRoundRuleRepository(self.database).list_accepted_for_season(season_id):
+            raise OpeningRoundError(
+                f"season {season_id} has no accepted Opening Round rule yet; there is nothing to confirm"
+            )
         with transaction(self.database) as conn:
-            head = conn.execute(
-                "SELECT * FROM opening_round_submission WHERE season_id=? AND season_entry_id=?"
-                + _for_update_suffix(self.database),
-                (season_id, season_entry_id),
-            ).fetchone()
-            if head:
-                current = self._current(conn, head["submission_id"])
-                if current["state"] == "confirmed":
-                    return self._get(conn, head["submission_id"])
-                submission_id, revision = head["submission_id"], head["current_revision"] + 1
-                conn.execute(
-                    "UPDATE opening_round_submission SET current_revision=? WHERE submission_id=?",
-                    (revision, submission_id),
-                )
-            else:
-                submission_id, revision = _id(), 1
-                try:
-                    conn.execute(
-                        "INSERT INTO opening_round_submission VALUES (?, ?, ?, ?, ?)",
-                        (submission_id, season_id, season_entry_id, revision, _now()),
-                    )
-                except IntegrityError as exc:
-                    existing = self.get(season_id, season_entry_id)
-                    if existing is None:
-                        raise OpeningRoundError(
-                            "concurrent Opening Round submission confirmation could not be reconciled"
-                        ) from exc
-                    return existing
+            submission_id, current_revision, state = self._lock(conn, season_id, season_entry_id)
+            if state == "confirmed":
+                return self._get(conn, submission_id)
+            revision = current_revision + 1
+            conn.execute(
+                "UPDATE opening_round_submission SET current_revision=? WHERE submission_id=?",
+                (revision, submission_id),
+            )
             now = _now()
             conn.execute(
                 "INSERT INTO opening_round_submission_revision VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1261,22 +1285,17 @@ class OpeningRoundSubmissionRepository:
         #133 #3): requires a reason, requires the submission to currently be
         confirmed, and writes a new `'draft'` revision rather than mutating
         the confirmed one -- the confirmation this supersedes remains in
-        `history()` exactly as it was recorded."""
+        `history()` exactly as it was recorded. Serialized against a
+        concurrent `nominate`/`correct`/`confirm` for the same entry via
+        `_lock` (PR #134 review, P1)."""
         _ensure_operator(actor)
         if not reason:
             raise OpeningRoundError("reopening a confirmed Opening Round submission requires a reason")
         with transaction(self.database) as conn:
-            head = conn.execute(
-                "SELECT * FROM opening_round_submission WHERE season_id=? AND season_entry_id=?"
-                + _for_update_suffix(self.database),
-                (season_id, season_entry_id),
-            ).fetchone()
-            if not head:
-                raise OpeningRoundError("no confirmed Opening Round submission exists for this entry to reopen")
-            current = self._current(conn, head["submission_id"])
-            if current["state"] != "confirmed":
+            submission_id, current_revision, state = self._lock(conn, season_id, season_entry_id)
+            if state != "confirmed":
                 raise OpeningRoundError("only a confirmed Opening Round submission can be reopened")
-            submission_id, revision = head["submission_id"], head["current_revision"] + 1
+            revision = current_revision + 1
             conn.execute(
                 "UPDATE opening_round_submission SET current_revision=? WHERE submission_id=?",
                 (revision, submission_id),
@@ -1308,15 +1327,6 @@ class OpeningRoundSubmissionRepository:
                 after_state={"state": "draft"},
             )
             return self._get(conn, submission_id)
-
-    @staticmethod
-    def _current(conn: ConnectionLike, submission_id):
-        return conn.execute(
-            "SELECT r.* FROM opening_round_submission m "
-            "JOIN opening_round_submission_revision r ON r.submission_id=m.submission_id AND r.revision=m.current_revision "
-            "WHERE m.submission_id=?",
-            (submission_id,),
-        ).fetchone()
 
     @staticmethod
     def _select(current: bool = True) -> str:

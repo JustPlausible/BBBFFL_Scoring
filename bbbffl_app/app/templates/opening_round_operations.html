@@ -31,19 +31,22 @@ function submissionCard(d){
   </section>`;
 }
 
-function nominationItem(n){
+function nominationItem(n,confirmed){
   const corrections=(n.correction_history||[]);
+  const correctionBlock=confirmed
+    ?'<p class="muted">Submission confirmed — reopen it above before correcting this nomination.</p>'
+    :`<details><summary>Correct nomination</summary><form data-correct="${e(n.nomination_id)}"><div class="grid">
+  <label>Position<select name="position">${POSITIONS.map(p=>`<option ${p===n.position?'selected':''}>${p}</option>`).join('')}</select></label>
+  <label>Owned player<select name="player">${state.players.map(p=>`<option value="${e(p.season_player_id)}" ${p.season_player_id===n.season_player_id?'selected':''}>${e(p.display_name)} — ${e(p.afl_club_name)}</option>`).join('')}</select></label>
+  <label>Correction reason<input name="reason" required placeholder="Why this correction is necessary"></label></div>
+  <button>Apply audited correction</button></form></details>`;
   return `<div class="item"><strong>${e(n.player_display_name)} — ${e(n.afl_club_name)}</strong> · slot <b>${e(n.position)}</b><br>
   Represented team: ${e(state.represented_entry.team_name)}<br>
   Source: ${e(n.afl_opening_round_label)} → compensating ${e(n.afl_bye_round_label)} → target ${e(n.bbbffl_round_label)}<br>
   <span class="muted">Replay/reconstructed input entered by ${e(n.entered_by_display_name)} (${e(n.actor_role)}); not attributed to the represented coach.</span>
   ${corrections.length?`<details><summary class="muted">Correction history (${corrections.length})</summary>${corrections.map(c=>`<div class="muted item">${e(c.occurred_at)} — ${e(c.reason)}<br>before: ${e(JSON.stringify(c.before_state))} → after: ${e(JSON.stringify(c.after_state))}</div>`).join('')}</details>`:''}
   <details><summary class="muted">Internal identifiers</summary><span class="muted">nomination ${e(n.nomination_id)} · rule ${e(n.rule_id)} · player ${e(n.season_player_id)} · source AFL match ${e(n.source_afl_match_id)} · target round ${e(n.bbbffl_round_id)}</span></details>
-  <details><summary>Correct nomination</summary><form data-correct="${e(n.nomination_id)}"><div class="grid">
-  <label>Position<select name="position">${POSITIONS.map(p=>`<option ${p===n.position?'selected':''}>${p}</option>`).join('')}</select></label>
-  <label>Owned player<select name="player">${state.players.map(p=>`<option value="${e(p.season_player_id)}" ${p.season_player_id===n.season_player_id?'selected':''}>${e(p.display_name)} — ${e(p.afl_club_name)}</option>`).join('')}</select></label>
-  <label>Correction reason<input name="reason" required placeholder="Why this correction is necessary"></label></div>
-  <button>Apply audited correction</button></form></details></div>`;
+  ${correctionBlock}</div>`;
 }
 
 function playerOption(p){return `<option value="${e(p.season_player_id)}" data-club="${e(p.afl_club_id)}">${e(p.display_name)} — ${e(p.afl_club_name)}</option>`;}
@@ -68,7 +71,7 @@ function render(d){
   <div class="preview muted" id="rule-preview">Choose an owned player to identify the applicable Opening Round rule.</div>
   <button id="nominate-submit" disabled>Create and preload locked nomination</button></form>`}
   </section>
-  <section class="card"><h2>Current locked deferred selections</h2>${d.nominations.map(nominationItem).join('')||'<p>No replay nominations for this represented entry.</p>'}</section>`;
+  <section class="card"><h2>Current locked deferred selections</h2>${d.nominations.map(n=>nominationItem(n,confirmed)).join('')||'<p>No replay nominations for this represented entry.</p>'}</section>`;
   if(!confirmed){
     document.querySelector('#nominate').onsubmit=nominate;
     document.querySelectorAll('[data-correct]').forEach(x=>x.onsubmit=correct);

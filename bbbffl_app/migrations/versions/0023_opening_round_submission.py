@@ -20,9 +20,20 @@ exactly like `opening_round_rule`/`opening_round_rule_revision`
 carries only stable identity (`season_id`, `season_entry_id`) and a
 `current_revision` pointer, and each revision carries the mutable `state`
 (`'draft'` | `'confirmed'`), confirmation timestamp, actor provenance and an
-optional reason. There is no row at all until an entry's submission is
-first confirmed -- an entry that never confirms simply has no row, exactly
-like a season/club that has never proposed an Opening Round rule.
+optional reason.
+
+`current_revision` may be `0`, meaning the header exists purely as an
+always-lockable resource with no matching revision row yet -- an entry
+whose nomination or correction has been written, but which has never
+itself been confirmed, still reads as untouched (`get()`/`history()` return
+nothing) exactly like a season/club that has never proposed an Opening
+Round rule. `app.opening_round.OpeningRoundSubmissionRepository._lock`
+get-or-creates this header row and locks it (`INSERT ... ON CONFLICT DO
+UPDATE ... RETURNING`, portable across PostgreSQL and SQLite) so that a
+concurrent nomination write and a concurrent confirmation for the same
+entry always serialize against each other, even before the entry's first
+real confirmation (PR #134 review, P1) -- there would otherwise be no row
+for a `SELECT ... FOR UPDATE` to lock.
 
 A **confirmed** revision is authoritative completeness: `is_ready` season
 readiness and the round-preflight dependency gate
@@ -61,7 +72,11 @@ def upgrade():
             ondelete="RESTRICT",
         ),
         sa.UniqueConstraint("season_id", "season_entry_id", name="uq_opening_round_submission_entry"),
-        sa.CheckConstraint("current_revision >= 1", name="ck_opening_round_submission_revision_positive"),
+        # 0 is a valid, deliberate value here (unlike every other
+        # header+revision table in this codebase): a pure lock placeholder
+        # with no matching revision row yet -- see this migration's
+        # module docstring.
+        sa.CheckConstraint("current_revision >= 0", name="ck_opening_round_submission_revision_nonnegative"),
     )
     op.create_table(
         "opening_round_submission_revision",

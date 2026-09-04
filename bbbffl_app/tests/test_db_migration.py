@@ -605,8 +605,9 @@ def test_upgrade_from_acting_context_head_adds_opening_round_submission_schema(t
     tables = set(inspect(engine).get_table_names())
     assert {"opening_round_submission", "opening_round_submission_revision"} <= tables
 
-    from app.opening_round import OpeningRoundSubmissionRepository
+    from app.opening_round import OpeningRoundRuleRepository, OpeningRoundSubmissionRepository
     from tests.test_competition_lifecycle import operational
+    from tests.test_opening_round import KnownRounds
 
     connection = connect(url)
     _, round_, entries = operational(connection, 2026, 2)
@@ -615,9 +616,20 @@ def test_upgrade_from_acting_context_head_adds_opening_round_submission_schema(t
         "WHERE r.bbbffl_round_id=?",
         (round_.bbbffl_round_id,),
     ).fetchone()["season_id"]
-    submissions = OpeningRoundSubmissionRepository(connection)
     from app.audit import ActorContext
 
+    OpeningRoundRuleRepository(connection).accept(
+        season_id,
+        2,
+        2026,
+        1,
+        2,
+        round_.bbbffl_round_id,
+        KnownRounds((2026, 1), (2026, 2)),
+        actor=ActorContext.anonymous_operator("admin"),
+        reason="migration test fixture",
+    )
+    submissions = OpeningRoundSubmissionRepository(connection)
     confirmed = submissions.confirm(
         season_id, entries[0].season_entry_id, actor=ActorContext.anonymous_operator("admin")
     )
@@ -626,8 +638,9 @@ def test_upgrade_from_acting_context_head_adds_opening_round_submission_schema(t
 
 def test_opening_round_submission_downgrade_refused_when_data_exists(tmp_path):
     from app.audit import ActorContext
-    from app.opening_round import OpeningRoundSubmissionRepository
+    from app.opening_round import OpeningRoundRuleRepository, OpeningRoundSubmissionRepository
     from tests.test_competition_lifecycle import operational
+    from tests.test_opening_round import KnownRounds
 
     url = _url(tmp_path / "submission-downgrade.db")
     migrate(url)
@@ -638,6 +651,17 @@ def test_opening_round_submission_downgrade_refused_when_data_exists(tmp_path):
         "WHERE r.bbbffl_round_id=?",
         (round_.bbbffl_round_id,),
     ).fetchone()["season_id"]
+    OpeningRoundRuleRepository(connection).accept(
+        season_id,
+        2,
+        2026,
+        1,
+        2,
+        round_.bbbffl_round_id,
+        KnownRounds((2026, 1), (2026, 2)),
+        actor=ActorContext.anonymous_operator("admin"),
+        reason="migration test fixture",
+    )
     OpeningRoundSubmissionRepository(connection).confirm(
         season_id, entries[0].season_entry_id, actor=ActorContext.anonymous_operator("admin")
     )

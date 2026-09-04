@@ -1596,6 +1596,8 @@ def test_confirm_with_a_partial_legal_nomination_set_is_valid():
 def test_confirm_is_idempotent_and_concurrency_safe():
     db = migrated_connection()
     _, round_, entries, scope = setup_scope(db, 2026, 1347)
+    ev = evidence.EVIDENCE_2026
+    accept_rule(db, scope["season_id"], 15, ev, ev.compensating_bye_round["GWS"], round_.bbbffl_round_id)
     submissions = OpeningRoundSubmissionRepository(db)
     first = submissions.confirm(scope["season_id"], entries[0].season_entry_id, actor=SCORER, reason="first")
     second = submissions.confirm(scope["season_id"], entries[0].season_entry_id, actor=ADMIN, reason="second")
@@ -1641,6 +1643,8 @@ def test_confirmed_submission_cannot_be_silently_mutated_by_a_correction():
 def test_reopen_requires_a_reason_and_a_currently_confirmed_submission():
     db = migrated_connection()
     _, round_, entries, scope = setup_scope(db, 2026, 1347)
+    ev = evidence.EVIDENCE_2026
+    accept_rule(db, scope["season_id"], 15, ev, ev.compensating_bye_round["GWS"], round_.bbbffl_round_id)
     submissions = OpeningRoundSubmissionRepository(db)
     with pytest.raises(OpeningRoundError):
         submissions.reopen(scope["season_id"], entries[0].season_entry_id, actor=ADMIN, reason="nothing confirmed yet")
@@ -1648,6 +1652,22 @@ def test_reopen_requires_a_reason_and_a_currently_confirmed_submission():
     submissions.confirm(scope["season_id"], entries[0].season_entry_id, actor=SCORER)
     with pytest.raises(OpeningRoundError):
         submissions.reopen(scope["season_id"], entries[0].season_entry_id, actor=ADMIN, reason="")
+
+
+def test_confirm_is_refused_before_opening_round_is_configured_for_the_season():
+    """PR #134 review (P2): confirming before the season has any accepted
+    Opening Round rule would let a later-accepted rule's readiness silently
+    count a confirmation the operator never reviewed against it."""
+    db = migrated_connection()
+    _, round_, entries, scope = setup_scope(db, 2026, 1347)
+    submissions = OpeningRoundSubmissionRepository(db)
+    with pytest.raises(OpeningRoundError, match="no accepted Opening Round rule"):
+        submissions.confirm(scope["season_id"], entries[0].season_entry_id, actor=SCORER)
+
+    ev = evidence.EVIDENCE_2026
+    accept_rule(db, scope["season_id"], 15, ev, ev.compensating_bye_round["GWS"], round_.bbbffl_round_id)
+    confirmed = submissions.confirm(scope["season_id"], entries[0].season_entry_id, actor=SCORER)
+    assert confirmed.state == "confirmed"
 
 
 def test_reopen_is_explicit_audited_and_permits_a_subsequent_correction():

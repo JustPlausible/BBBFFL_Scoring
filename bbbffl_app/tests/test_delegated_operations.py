@@ -7,9 +7,12 @@ from types import SimpleNamespace
 import pytest
 
 from app.authorization import Principal, Role
+from app.identity import IdentityRepository
+from app.lineups import WeeklyLineupRepository
 from app.main import opening_round_error_handler
 from app.opening_round import OpeningRoundError
 from app.routes import delegated_operations
+from tests.test_carry_forward import acquire_players, context, submit_round
 
 
 @pytest.mark.parametrize(
@@ -71,3 +74,43 @@ def test_opening_round_domain_conflict_has_controlled_http_409_response():
     )
     assert response.status_code == 409
     assert json.loads(response.body) == {"detail": "target slot M1 is already nominated"}
+
+
+def test_lineup_view_names_released_carry_forward_player_without_making_it_selectable():
+    db, _, rounds, entries, scope_row, pool, ownership = context(rounds=2)
+    entry = entries[0]
+    released_player, current_player = acquire_players(pool, ownership, scope_row, entry, 1, 2)
+    submit_round(
+        WeeklyLineupRepository(db),
+        scope_row,
+        rounds[0],
+        entry,
+        {"F1": released_player.season_player_id},
+    )
+    ownership.release(released_player.season_player_id)
+    represented_team = IdentityRepository(db).get_public_team(entry.season_entry_id)
+    assert represented_team is not None
+
+    scope = {
+        **dict(scope_row),
+        "bbbffl_round_id": rounds[1],
+        "season_entry_id": entry.season_entry_id,
+        "team_name": represented_team.team_name,
+        "season_label": "Test season",
+        "round_label": "Round 2",
+        "sequence": 2,
+    }
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(database=db, afl_client=SimpleNamespace())))
+    principal = Principal(
+        Role.REPLAY_OPERATOR,
+        coach_id="operator-1",
+        display_name="Replay Operator",
+        represented_season_entry_id=entry.season_entry_id,
+    )
+
+    view = delegated_operations._lineup_view(request, principal, scope)
+
+    assert view["carry_forward_source"]["positions"]["F1"] == released_player.season_player_id
+    assert view["player_display_names"][released_player.season_player_id] == released_player.display_name
+    assert released_player.season_player_id not in {player["season_player_id"] for player in view["players"]}
+    assert current_player.season_player_id in {player["season_player_id"] for player in view["players"]}

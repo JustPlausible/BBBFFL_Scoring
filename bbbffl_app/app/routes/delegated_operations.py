@@ -132,6 +132,14 @@ def _lineup_view(request: Request, principal: Principal, scope: dict) -> dict:
     players = [
         service.pool.get_by_id(p.season_player_id) for p in service.ownership.current_squad(scope["season_entry_id"])
     ]
+    presentation_player_ids = {player_id for player_id in draft.positions.values() if player_id}
+    if source:
+        presentation_player_ids.update(player_id for player_id in source.positions.values() if player_id)
+    player_display_names = {}
+    for player_id in presentation_player_ids:
+        player = service.pool.get_by_id(player_id)
+        if player is not None and player.display_name:
+            player_display_names[player_id] = player.display_name
     return {
         "acting_context": {
             "authenticated_operator_id": principal.coach_id,
@@ -149,6 +157,7 @@ def _lineup_view(request: Request, principal: Principal, scope: dict) -> dict:
         "draft": asdict(draft),
         "submission": asdict(submission) if submission else None,
         "players": [asdict(player) for player in players if player is not None],
+        "player_display_names": player_display_names,
         "deferred": {position: value for position, value in deferred.items() if value},
         "carry_forward_source": asdict(source) if source else None,
         "carry_forward_message": None

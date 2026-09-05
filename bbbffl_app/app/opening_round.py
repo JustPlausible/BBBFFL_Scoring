@@ -1072,9 +1072,16 @@ class OpeningRoundSelectionGuard:
         )
         for position, nominated_player in deferred.items():
             if proposed_positions.get(position) != nominated_player:
+                player = conn.execute(
+                    "SELECT display_name FROM season_player_pool WHERE season_player_id=?",
+                    (nominated_player,),
+                ).fetchone()
+
+                player_name = player["display_name"] if player else nominated_player
+
                 raise DeferredSlotLockedError(
                     f"position {position} is locked by an Opening Round deferred nomination "
-                    f"(player {nominated_player}) and cannot be changed by ordinary submission"
+                    f"(player {player_name}) and cannot be changed by ordinary submission"
                 )
         if self._inner is not None:
             remaining_previous = {p: v for p, v in previous_positions.items() if p not in deferred}

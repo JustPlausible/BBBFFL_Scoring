@@ -370,14 +370,23 @@ validation beyond lock integrity (roadmap 24), the coach/commissioner
 selection or management UI (roadmap 25), matchup score calculation
 (roadmap 26), DNP/Interchange replacement decisions (roadmap 27), scorer
 result finalisation (roadmap 28), any alternate AFL schedule/status data
-source, and any privileged override/correction workflow for an *already-
-activated* trigger or an already-locked player selection (only
-pre-activation `replace` is supported; a later authorised-correction
-mechanism, if ever needed, is out of scope here). `Match.start_time_utc`
-and `app.afl_client.is_recognized_match_status` are the one narrow,
-documented `afl-api` client extension this issue required (both fields were
-already part of the validated v1 contract; only their consumption was
-missing -- see [`afl-api-v1-contract.md`](afl-api-v1-contract.md)).
+source, and any privileged override/correction workflow for an
+*already-activated* trigger's own *configuration* (only pre-activation
+`replace` is supported there -- see `TriggerAlreadyActivatedError` above).
+`Match.start_time_utc` and `app.afl_client.is_recognized_match_status` are
+the one narrow, documented `afl-api` client extension this issue required
+(both fields were already part of the validated v1 contract; only their
+consumption was missing -- see
+[`afl-api-v1-contract.md`](afl-api-v1-contract.md)).
+
+Issue #137 later added the "authorised-correction mechanism, if ever
+needed" this section originally deferred -- but only for an already-locked
+*player selection* (a coach naming the wrong slot before lockout, later
+confirmed by the league), never for a trigger's own configuration, which
+remains exactly as frozen as described above. See
+[`weekly-lineups.md`](weekly-lineups.md#authorised-correction-of-an-already-locked-lineup-issue-137)
+for that workflow and how it relates to (without weakening) everything this
+document describes.
 
 ## Deterministic staged rehearsal (issue #91)
 

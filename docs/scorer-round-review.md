@@ -149,6 +149,32 @@ entity_id=matchup_id)` gives the full `published -> corrected` sequence
 with reasons, distinct from (and never the sole source for
 reconstructing) the official-result versions themselves.
 
+## Relationship to locked-lineup correction (issue #137)
+
+`correct_matchup_result`/`attempt_correction` above are the **post-
+publication** boundary: they version a matchup's already-published
+official result and require `round.state == "final"`. They are never used
+to fix a *lineup* -- a coach naming the wrong player/position, later
+confirmed by the league as an error, even one already covered by an
+activated lockout trigger. That is
+`app.lineup_correction.LineupCorrectionService`/`app.lineups.
+WeeklyLineupRepository.submit_correction`'s separate, narrower job (see
+[`weekly-lineups.md`](weekly-lineups.md#authorised-correction-of-an-already-locked-lineup-issue-137)):
+it is only usable *before* `"final"` (`open`/`live`/`review`) and refuses
+outright once the round is published, directing the operator to this
+module's correction workflow instead.
+
+Because a locked-lineup correction can happen after a matchup has already
+been calculated, `build_matchup_review` compares each side's calculated
+snapshot's `lineup_version` against the lineup's current effective version
+and blocks sign-off ("...recalculate before sign-off") when they no longer
+match, rather than silently reviewing or publishing stale evidence. This is
+distinct from every other kind of scorer decision this module owns: a DNP
+ruling, an Interchange ruling, and a manual score override all operate on
+*already-calculated* evidence for a lineup that is not in dispute; a
+locked-lineup correction changes what was actually selected, upstream of
+calculation entirely.
+
 ## Deliberate scope decisions
 
 - No ladder/finals recomputation — issue #58 exposes correction

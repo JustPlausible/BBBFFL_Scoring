@@ -142,6 +142,20 @@ while the constraint was absent (two nominations sharing one
 constraint; otherwise it recreates
 `uq_opening_round_nomination_rule_entry` exactly as before.
 
+Revision `0025_lineup_correction` (issue #137) widens
+`weekly_lineup_submission.ck_submission_source` to also accept
+`'scorer_correction'` (via `op.batch_alter_table`, same idiom as `0024`;
+SQLite's copy-and-move rebuild for this table additionally requires
+re-creating the hand-written `weekly_lineup_submission_no_update`/
+`_no_delete` immutability triggers afterwards, since that rebuild only
+restores what SQLAlchemy's reflected metadata describes and does not know
+about them) and adds `weekly_lineup_correction`/
+`weekly_lineup_correction_slot` -- the audited Scorer/Admin locked-lineup
+correction's own immutable provenance record, with the same no-update/
+no-delete triggers as `0011`/`0012`. See
+[`weekly-lineups.md`](weekly-lineups.md#authorised-correction-of-an-already-locked-lineup-issue-137).
+Downgrade refuses once `weekly_lineup_correction` holds any row.
+
 ## Migration authoring and rollback
 
 Every relational change must be a new ordered revision. Do not add startup DDL

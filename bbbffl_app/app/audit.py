@@ -135,6 +135,12 @@ PLAYER_RELEASED = "ownership.player.released"
 LINEUP_SUBMITTED = "lineup.submission.created"
 LOCKOUT_TRIGGER_CONFIGURED = "lockout.trigger.configured"
 
+# Issue #137: authorised Scorer/Admin correction of an already-locked
+# weekly lineup. Never repurposes LINEUP_SUBMITTED -- a correction is a
+# materially distinct, more narrowly-authorised event that must remain
+# separately queryable/auditable from an ordinary submission.
+LINEUP_CORRECTED = "lineup.correction.recorded"
+
 # Roadmap package 19 (issue #74): coach authentication/session events. See
 # app/auth.py and docs/coach-authentication.md.
 AUTH_LOGIN_SUCCEEDED = "auth.login.succeeded"

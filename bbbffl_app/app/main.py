@@ -34,7 +34,8 @@ from app.draft import (
 from app.fixtures import FixtureRepository
 from app.identity import IdentityRepository
 from app.ladder import LadderRepository
-from app.lineups import LineupConflictError, WeeklyLineupRepository
+from app.lineup_correction import UnauthorizedCorrectionActorError
+from app.lineups import LineupConflictError, RoundPublishedError, WeeklyLineupRepository
 from app.migrations import migrate
 from app.opening_round import OpeningRoundError
 from app.player_pool import PlayerPoolRepository, PlayerUnavailableError, SquadCapacityError
@@ -67,6 +68,7 @@ from app.routes import context as context_routes
 from app.routes import delegated_operations as delegated_operations_routes
 from app.routes import draft as draft_routes
 from app.routes import fixture_setup as fixture_setup_routes
+from app.routes import lineup_correction as lineup_correction_routes
 from app.routes import lineups as lineup_routes
 from app.routes import preseason as preseason_routes
 from app.routes import public_rounds as public_round_routes
@@ -268,6 +270,8 @@ app.include_router(fixture_setup_routes.page_router)
 app.include_router(context_routes.router)
 app.include_router(delegated_operations_routes.router)
 app.include_router(delegated_operations_routes.page_router)
+app.include_router(lineup_correction_routes.router)
+app.include_router(lineup_correction_routes.page_router)
 
 
 @app.exception_handler(AflApiError)
@@ -289,6 +293,23 @@ async def lineup_conflict_handler(request: Request, exc: LineupConflictError) ->
 async def opening_round_error_handler(request: Request, exc: OpeningRoundError) -> JSONResponse:
     """Expected nomination/locking conflicts are operator-resolvable, not 500s."""
     return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(RoundPublishedError)
+async def round_published_error_handler(request: Request, exc: RoundPublishedError) -> JSONResponse:
+    """Issue #137: a locked-lineup correction was attempted against an
+    already-published round. A stable, closed fact -- not a conflict the
+    operator resolves by retrying -- matching CompetitionFinalizedError's
+    423 (Locked) convention below; the operator must use the separate
+    official-result correction workflow instead."""
+    return JSONResponse(status_code=423, content={"detail": str(exc)})
+
+
+@app.exception_handler(UnauthorizedCorrectionActorError)
+async def unauthorized_correction_actor_error_handler(
+    request: Request, exc: UnauthorizedCorrectionActorError
+) -> JSONResponse:
+    return JSONResponse(status_code=403, content={"detail": str(exc)})
 
 
 # app.scorer_decisions raises plain domain exceptions rather than

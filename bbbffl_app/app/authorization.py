@@ -180,6 +180,7 @@ CAPABILITIES: dict[Role, frozenset[str]] = {
         {
             "scoring.manage",
             "lineup.proxy",
+            "lineup.correct_locked",
             "opening_round.nominate",
             "draft.participate",
             "fixture.manage",
@@ -208,6 +209,7 @@ CAPABILITIES: dict[Role, frozenset[str]] = {
             "scoring.manage",
             "round.review",
             "lineup.proxy",
+            "lineup.correct_locked",
             "opening_round.nominate",
         }
     ),

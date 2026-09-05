@@ -83,6 +83,8 @@ EXPECTED_TABLES = {
     "role_grant",
     "opening_round_submission",
     "opening_round_submission_revision",
+    "weekly_lineup_correction",
+    "weekly_lineup_correction_slot",
 }
 
 

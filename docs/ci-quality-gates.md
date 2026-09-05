@@ -163,16 +163,17 @@ against a real PostgreSQL server the job itself provisions, never a
 developer's local database. It finishes by running the dedicated PostgreSQL
 concurrency suites
 (`test_competition_lifecycle_concurrency.py`, `test_lineups_concurrency.py`,
-`test_lockouts_concurrency.py`), which the ordinary `test` job cannot run
-because they require `BBBFFL_DATABASE_URL` to point at real PostgreSQL to
-exercise `SELECT ... FOR UPDATE`/`ON CONFLICT` semantics SQLite does not
-have. To run the same suite locally against your own PostgreSQL instance:
+`test_lockouts_concurrency.py`, `test_lineup_correction_concurrency.py`),
+which the ordinary `test` job cannot run because they require
+`BBBFFL_DATABASE_URL` to point at real PostgreSQL to exercise
+`SELECT ... FOR UPDATE`/`ON CONFLICT` semantics SQLite does not have. To run
+the same suite locally against your own PostgreSQL instance:
 
 ```bash
 cd bbbffl_app
 export BBBFFL_DATABASE_URL=postgresql+psycopg://bbbffl:bbbffl@localhost:5432/bbbffl_test
 python -m app.migrations upgrade
-pytest -q tests/test_competition_lifecycle_concurrency.py tests/test_lineups_concurrency.py tests/test_lockouts_concurrency.py
+pytest -q tests/test_competition_lifecycle_concurrency.py tests/test_lineups_concurrency.py tests/test_lockouts_concurrency.py tests/test_lineup_correction_concurrency.py
 ```
 
 ## Dependency/security policy

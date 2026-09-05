@@ -34,12 +34,24 @@ from uuid import uuid4
 
 from sqlalchemy.exc import IntegrityError
 
-from app.audit import ENTITY_TYPE_LINEUP, LINEUP_SUBMITTED, ActorContext, append_event
+from app.audit import ENTITY_TYPE_LINEUP, LINEUP_CORRECTED, LINEUP_SUBMITTED, ActorContext, append_event
 from app.db import _for_update_suffix, transaction
 from app.season import _now
 
 POSITIONS = ("F1", "F2", "F3", "M1", "M2", "M3", "Ruck", "Tackler", "Interchange")
-SUBMISSION_SOURCES = frozenset({"coach", "scorer_proxy", "carry_forward", "system_derived"})
+# "scorer_correction" (issue #137) is deliberately distinct from
+# "scorer_proxy": a proxy submission still goes through the ordinary
+# lock_guard rejection like a coach's own submission, while a correction is
+# the one path an authorised operator uses specifically to override an
+# already-locked position -- see `submit_correction` below.
+SUBMISSION_SOURCES = frozenset({"coach", "scorer_proxy", "carry_forward", "system_derived", "scorer_correction"})
+CORRECTION_SOURCE_TYPE = "scorer_correction"
+# A correction is permitted for any round state an ordinary submission is
+# not yet frozen out of publication for -- "open", "live" (main/selective
+# lockout already active) and "review" (calculated but not yet signed off).
+# "final" is deliberately excluded: post-publication correction is the
+# separate app.round_review.attempt_correction workflow (issue #137).
+CORRECTION_ALLOWED_STATES = frozenset({"open", "live", "review"})
 # Whole-draft (not per-position) origin of the *current* draft revision --
 # see migrations/versions/0018_proxy_draft_source.py's docstring and
 # `submit`'s use of it below.
@@ -52,6 +64,24 @@ class LineupConflictError(RuntimeError):
 
 class LineupIntegrityError(ValueError):
     pass
+
+
+class RoundPublishedError(LineupIntegrityError):
+    """A locked-lineup correction was attempted against a round that has
+    already reached final publication (issue #137). This workflow never
+    edits published official history -- see
+    `app.round_review.attempt_correction`, the separate official-result
+    correction boundary, instead."""
+
+
+class NoEffectiveSubmissionError(LineupIntegrityError):
+    """A correction was attempted against a lineup with no effective
+    submitted version yet -- there is nothing to correct."""
+
+
+class NoOpCorrectionError(LineupIntegrityError):
+    """A correction's proposed positions are identical to the current
+    effective submission -- there is nothing to record."""
 
 
 @dataclass(frozen=True)
@@ -81,6 +111,45 @@ class SubmittedLineup:
     source_type: str
     source_detail: dict | None
     reason: str | None
+
+
+@dataclass(frozen=True)
+class CorrectionSlotChange:
+    """One position's before/after and, if it was locked at the time of
+    correction, the original lock evidence copied read-only from
+    `weekly_lineup_lock` -- never a recomputation, and never written back
+    to that immutable table (issue #137's "corrected lock provenance")."""
+
+    position: str
+    previous_season_player_id: str | None
+    corrected_season_player_id: str | None
+    was_locked: bool
+    lock_reason: str | None
+    afl_match_id: int | None
+    effective_lock_at: str | None
+    observed_status: str | None
+    locked_at: str | None
+
+
+@dataclass(frozen=True)
+class LineupCorrection:
+    """The full audited record of one authorised locked-lineup correction
+    (issue #137): which submission version it superseded and which new one
+    became effective, who did it under which role and why, and the
+    per-position provenance of exactly what changed."""
+
+    correction_id: str
+    lineup_id: str
+    bbbffl_round_id: str
+    season_entry_id: str
+    from_version: int
+    to_version: int
+    actor_type: str
+    actor_id: str | None
+    actor_role: str | None
+    reason: str
+    created_at: str
+    slots: tuple[CorrectionSlotChange, ...]
 
 
 class WeeklyLineupRepository:
@@ -382,6 +451,8 @@ class WeeklyLineupRepository:
         source_detail,
         reason,
         lock_guard,
+        allowed_states=frozenset({"open"}),
+        correlation_id=None,
     ):
         lineup_id = lineup["lineup_id"]
         current = lineup["effective_submission_version"] or 0
@@ -391,7 +462,16 @@ class WeeklyLineupRepository:
             "SELECT state FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?" + _for_update_suffix(self.database),
             (lineup["bbbffl_round_id"],),
         ).fetchone()
-        if not lifecycle or lifecycle["state"] != "open":
+        if not lifecycle or lifecycle["state"] not in allowed_states:
+            if lifecycle and lifecycle["state"] == "final" and "final" not in allowed_states:
+                # issue #137: a published round is never edited through this
+                # ordinary/correction submission path -- see
+                # app.round_review.attempt_correction, the separate
+                # official-result correction boundary.
+                raise RoundPublishedError(
+                    "BBBFFL round has already reached final publication; use the official-result "
+                    "correction workflow (app.round_review.attempt_correction) instead"
+                )
             raise LineupIntegrityError("BBBFFL round does not currently permit submission")
         self._validate_players(conn, lineup["season_id"], positions, lock=True)
         self._validate_ownership(conn, lineup["season_entry_id"], positions)
@@ -447,11 +527,262 @@ class WeeklyLineupRepository:
             entity_type=ENTITY_TYPE_LINEUP,
             entity_id=lineup_id,
             entity_version=str(version),
+            correlation_id=correlation_id,
             reason=reason,
             after_state={"effective_submission_version": version},
             payload={"source_type": source_type, "based_on_draft_revision": based_on_draft_revision},
         )
         return version
+
+    def submit_correction(
+        self,
+        lineup_id,
+        positions,
+        *,
+        expected_submission_version,
+        actor,
+        reason,
+    ) -> LineupCorrection:
+        """Authorised Scorer/Admin/Replay-Operator correction of an
+        authoritative weekly lineup after a selective or main lockout has
+        already activated (issue #137).
+
+        `positions` is the complete, atomic corrected position map -- the
+        same full nine-position contract `submit`/`submit_positions` use, so
+        a direct swap (e.g. Tackler <-> Interchange) is validated against
+        the single final proposed state, never an invalid intermediate
+        duplicate-player state. Callers that only want to change one or two
+        slots (the common case) merge their change onto the lineup's
+        current effective positions before calling this -- see
+        `app.lineup_correction.LineupCorrectionService.correct`, which is
+        the authorised, reason-checked entry point most callers should use
+        instead of this method directly.
+
+        Unlike `submit`/`submit_positions`, this:
+
+        - is permitted for any round state in `CORRECTION_ALLOWED_STATES`
+          ("open", "live", "review"), not just "open" -- the entire point is
+          correcting a lineup *after* a lockout has activated, which by
+          definition means the round has moved past "open". A round that
+          has already reached "final" publication raises
+          `RoundPublishedError` instead (see `_finalize_submission`); this
+          workflow never edits published official history.
+        - never invokes `lock_guard` -- an authorised correction is exactly
+          the one path permitted to override an already-locked position.
+          Ordinary `app.lockouts.LockGuard` rejection remains fully intact
+          for every other submission source (`submit`/`submit_positions`
+          with any `source_type` other than `"scorer_correction"`, which
+          this method is the only caller of).
+        - never touches `weekly_lineup_lock` (immutable, untouched) but
+          copies each corrected position's existing lock evidence, if any,
+          read-only into a new `weekly_lineup_correction`/
+          `weekly_lineup_correction_slot` audit record in the same
+          transaction as the new submission version -- see this module's
+          docstring in migrations/versions/0025_lineup_correction.py.
+
+        Raises `NoEffectiveSubmissionError` if the lineup has never been
+        submitted (nothing to correct), and `NoOpCorrectionError` if
+        `positions` is identical to the current effective submission (a
+        correction, unlike an ordinary resubmission, must change something
+        -- issue #137's atomic position map exists specifically to record a
+        deliberate slot change, not a no-op replay of the same content).
+        """
+        if not reason or not reason.strip():
+            raise LineupIntegrityError("a locked-lineup correction requires a substantive reason")
+        positions = self._normalise(positions)
+        correlation_id = str(uuid4())
+        with transaction(self.database) as conn:
+            lineup = self._lock_lineup_row(conn, lineup_id)
+            lineup_id = lineup["lineup_id"]
+            from_version = lineup["effective_submission_version"] or 0
+            if from_version == 0:
+                raise NoEffectiveSubmissionError(
+                    f"lineup {lineup_id} has no effective submitted version yet; there is nothing to correct"
+                )
+            previous_rows = conn.execute(
+                "SELECT position, season_player_id FROM weekly_lineup_submission_slot WHERE lineup_id=? AND version=?",
+                (lineup_id, from_version),
+            ).fetchall()
+            previous_positions = {row["position"]: row["season_player_id"] for row in previous_rows}
+            changed_positions = [p for p in POSITIONS if previous_positions.get(p) != positions.get(p)]
+            if not changed_positions:
+                raise NoOpCorrectionError("a correction must change at least one position")
+            # Opening Round deferred slots retain their own separate audited
+            # correction workflow (app.opening_round.OpeningRoundNominationRepository.
+            # correct) and must never be reachable through this one -- the
+            # same query `OpeningRoundSelectionGuard` uses inside
+            # `submit`/`submit_positions`, applied here explicitly since this
+            # method deliberately bypasses `lock_guard` (which is how that
+            # guard is ordinarily plugged in).
+            deferred_positions = {
+                row["position"]: row["season_player_id"]
+                for row in conn.execute(
+                    "SELECT position, season_player_id FROM opening_round_nomination "
+                    "WHERE bbbffl_round_id=? AND season_entry_id=?",
+                    (lineup["bbbffl_round_id"], lineup["season_entry_id"]),
+                ).fetchall()
+            }
+            deferred_changed = [p for p in changed_positions if p in deferred_positions]
+            if deferred_changed:
+                raise LineupIntegrityError(
+                    f"positions {deferred_changed} are Opening Round deferred slots and cannot be changed "
+                    "through this correction workflow; use the Opening Round nomination correction workflow instead"
+                )
+            existing_locks = {
+                row["position"]: row
+                for row in conn.execute(
+                    "SELECT position, season_player_id, afl_match_id, observed_status, effective_lock_at, "
+                    "lock_reason, locked_at FROM weekly_lineup_lock WHERE lineup_id=?",
+                    (lineup_id,),
+                ).fetchall()
+            }
+            to_version = self._finalize_submission(
+                conn,
+                lineup,
+                positions,
+                based_on_draft_revision=lineup["draft_revision"],
+                expected_submission_version=expected_submission_version,
+                actor=actor,
+                source_type=CORRECTION_SOURCE_TYPE,
+                source_detail=None,
+                reason=reason,
+                lock_guard=None,
+                allowed_states=CORRECTION_ALLOWED_STATES,
+                correlation_id=correlation_id,
+            )
+            correction_id, now = str(uuid4()), _now()
+            conn.execute(
+                "INSERT INTO weekly_lineup_correction VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    correction_id,
+                    lineup_id,
+                    lineup["bbbffl_round_id"],
+                    lineup["season_entry_id"],
+                    from_version,
+                    to_version,
+                    actor.actor_type,
+                    actor.actor_id,
+                    actor.actor_role,
+                    reason,
+                    now,
+                ),
+            )
+            slots = []
+            # Alphabetical, matching `_to_correction`'s `ORDER BY position`
+            # read-back -- so a freshly-returned `LineupCorrection` compares
+            # equal to one re-read via `get_correction`/`list_corrections`.
+            for position in sorted(changed_positions):
+                lock_row = existing_locks.get(position)
+                was_locked = lock_row is not None and lock_row["season_player_id"] == previous_positions.get(position)
+                conn.execute(
+                    "INSERT INTO weekly_lineup_correction_slot VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        correction_id,
+                        position,
+                        previous_positions.get(position),
+                        positions.get(position),
+                        int(was_locked),
+                        lock_row["lock_reason"] if was_locked else None,
+                        lock_row["afl_match_id"] if was_locked else None,
+                        lock_row["effective_lock_at"] if was_locked else None,
+                        lock_row["observed_status"] if was_locked else None,
+                        lock_row["locked_at"] if was_locked else None,
+                    ),
+                )
+                slots.append(
+                    CorrectionSlotChange(
+                        position,
+                        previous_positions.get(position),
+                        positions.get(position),
+                        was_locked,
+                        lock_row["lock_reason"] if was_locked else None,
+                        lock_row["afl_match_id"] if was_locked else None,
+                        lock_row["effective_lock_at"] if was_locked else None,
+                        lock_row["observed_status"] if was_locked else None,
+                        lock_row["locked_at"] if was_locked else None,
+                    )
+                )
+            append_event(
+                conn,
+                actor=actor,
+                action=LINEUP_CORRECTED,
+                entity_type=ENTITY_TYPE_LINEUP,
+                entity_id=lineup_id,
+                entity_version=str(to_version),
+                correlation_id=correlation_id,
+                reason=reason,
+                before_state={"version": from_version, "positions": previous_positions},
+                after_state={"version": to_version, "positions": positions},
+                payload={
+                    "correction_id": correction_id,
+                    "locked_positions_overridden": [slot.position for slot in slots if slot.was_locked],
+                },
+            )
+        return LineupCorrection(
+            correction_id,
+            lineup_id,
+            lineup["bbbffl_round_id"],
+            lineup["season_entry_id"],
+            from_version,
+            to_version,
+            actor.actor_type,
+            actor.actor_id,
+            actor.actor_role,
+            reason,
+            now,
+            tuple(slots),
+        )
+
+    def get_correction(self, correction_id: str) -> LineupCorrection | None:
+        row = self.database.execute(
+            "SELECT * FROM weekly_lineup_correction WHERE correction_id=?", (correction_id,)
+        ).fetchone()
+        if not row:
+            return None
+        return self._to_correction(row)
+
+    def list_corrections(self, lineup_id: str) -> list[LineupCorrection]:
+        """Every correction ever recorded against this lineup, oldest
+        first -- the full audited history issue #137 requires scorer
+        review/lineup inspection surfaces to display."""
+        rows = self.database.execute(
+            "SELECT * FROM weekly_lineup_correction WHERE lineup_id=? ORDER BY to_version", (lineup_id,)
+        ).fetchall()
+        return [self._to_correction(row) for row in rows]
+
+    def _to_correction(self, row) -> LineupCorrection:
+        slot_rows = self.database.execute(
+            "SELECT * FROM weekly_lineup_correction_slot WHERE correction_id=? ORDER BY position",
+            (row["correction_id"],),
+        ).fetchall()
+        slots = tuple(
+            CorrectionSlotChange(
+                s["position"],
+                s["previous_season_player_id"],
+                s["corrected_season_player_id"],
+                bool(s["was_locked"]),
+                s["lock_reason"],
+                s["afl_match_id"],
+                s["effective_lock_at"],
+                s["observed_status"],
+                s["locked_at"],
+            )
+            for s in slot_rows
+        )
+        return LineupCorrection(
+            row["correction_id"],
+            row["lineup_id"],
+            row["bbbffl_round_id"],
+            row["season_entry_id"],
+            row["from_version"],
+            row["to_version"],
+            row["actor_type"],
+            row["actor_id"],
+            row["actor_role"],
+            row["reason"],
+            row["created_at"],
+            slots,
+        )
 
     def get_effective_submission(self, lineup_id):
         row = self.database.execute(

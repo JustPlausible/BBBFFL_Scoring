@@ -551,3 +551,191 @@ def test_published_round_refuses_correction():
             reason="attempt to correct a published round",
         )
     assert lineups.get_effective_submission(lineup_id).version == submission.version
+
+
+# -- Review findings: reserved source, repeated corrections, sign-off race,
+# -- stale scorer decisions --------------------------------------------
+
+
+def test_scorer_correction_source_type_is_rejected_by_ordinary_submission_paths():
+    """`source_type='scorer_correction'` must only ever be reachable through
+    `submit_correction`, which alone records the correction provenance a
+    plain `submit`/`submit_positions` call would silently skip."""
+    db, lifecycle, round_, entry, scope, pool, ownership, lineups, matches, draft, submitted, tackler, bench = (
+        _locked_context()
+    )
+    with pytest.raises(LineupIntegrityError, match="reserved"):
+        lineups.submit(
+            draft.lineup_id,
+            expected_draft_revision=draft.revision,
+            expected_submission_version=submitted.version,
+            source_type="scorer_correction",
+        )
+    with pytest.raises(LineupIntegrityError, match="reserved"):
+        lineups.submit_positions(
+            draft.lineup_id,
+            dict(submitted.positions),
+            expected_submission_version=submitted.version,
+            actor=SCORER,
+            source_type="scorer_correction",
+        )
+    assert lineups.get_effective_submission(draft.lineup_id).version == submitted.version
+    assert lineups.list_corrections(draft.lineup_id) == []
+
+
+def test_repeated_correction_of_the_same_locked_position_preserves_lock_provenance():
+    """A second correction of a position already corrected once must still
+    carry forward the original lock's provenance -- the current occupant at
+    correction time is a prior correction's own result, not the row
+    `weekly_lineup_lock` was materialized against."""
+    db, lifecycle, round_, entry, scope, pool, ownership, lineups, matches, draft, submitted, tackler, bench = (
+        _locked_context()
+    )
+    third = acquire(pool, ownership, scope, entry, 3, LATE_HOME, name="Third Player")
+    first_correction = lineups.submit_correction(
+        draft.lineup_id,
+        {"Tackler": bench.season_player_id, "Interchange": tackler.season_player_id},
+        expected_submission_version=submitted.version,
+        actor=SCORER,
+        reason="first correction of the locked Tackler slot",
+    )
+    first_tackler_slot = next(s for s in first_correction.slots if s.position == "Tackler")
+    assert first_tackler_slot.was_locked is True
+
+    second_correction = lineups.submit_correction(
+        draft.lineup_id,
+        {"Tackler": third.season_player_id, "Interchange": tackler.season_player_id, "F1": bench.season_player_id},
+        expected_submission_version=first_correction.to_version,
+        actor=SCORER,
+        reason="second correction of the same, already-corrected Tackler slot",
+    )
+    second_tackler_slot = next(s for s in second_correction.slots if s.position == "Tackler")
+    assert second_tackler_slot.was_locked is True
+    assert second_tackler_slot.lock_reason == "selective_trigger_activated"
+    assert second_tackler_slot.afl_match_id == EARLY_MATCH_ID
+    assert second_tackler_slot.previous_season_player_id == bench.season_player_id
+    assert second_tackler_slot.corrected_season_player_id == third.season_player_id
+    # The immutable lock evidence itself never changes across either correction.
+    lock_row = db.execute(
+        "SELECT season_player_id FROM weekly_lineup_lock WHERE lineup_id=? AND position='Tackler'",
+        (draft.lineup_id,),
+    ).fetchone()
+    assert lock_row["season_player_id"] == tackler.season_player_id
+
+
+def test_correction_bumps_matchup_review_version_closing_the_signoff_race():
+    """A correction that lands between a review build and sign-off's own
+    transactional CAS check must still be caught: `publish_results` only
+    re-validates `expected_review_versions`, so a correction must bump that
+    counter exactly like a DNP ruling/override already does, or a stale
+    pre-correction score could be published."""
+    db, lifecycle, round_, entries, stats, canon, review_repo, identities = _round_review_setup(2670)
+    entry = entries[0]
+    review_before = build_round_review(lifecycle, review_repo, identities, round_.bbbffl_round_id)
+    matchup = next(
+        m for m in review_before.matchups if entry.season_entry_id in (m.home.season_entry_id, m.away.season_entry_id)
+    )
+    stale_review_versions = {m.matchup_id: m.review_version for m in review_before.matchups}
+    stale_results = {m.matchup_id: (m.home.effective_score, m.away.effective_score) for m in review_before.matchups}
+
+    lineups = WeeklyLineupRepository(db)
+    entry_index = next(i for i, e in enumerate(entries) if e.season_entry_id == entry.season_entry_id)
+    lineup_id = f"lineup-2670-100-{entry_index}"
+    submission = lineups.get_effective_submission(lineup_id)
+    f1_player, f2_player = submission.positions["F1"], submission.positions["F2"]
+    ownership = OwnershipRepository(db)
+    ownership.configure_squad_limit(lifecycle.get_round(round_.bbbffl_round_id).season_id, 20)
+    for player_id in submission.positions.values():
+        if player_id is not None:
+            ownership.acquire(player_id, entry.season_entry_id)
+
+    lineups.submit_correction(
+        lineup_id,
+        {**submission.positions, "F1": f2_player, "F2": f1_player},
+        expected_submission_version=submission.version,
+        actor=SCORER,
+        reason="swap to prove the review_version CAS closes the sign-off race",
+    )
+
+    current_review_version = db.execute(
+        "SELECT review_version FROM bbbffl_matchup WHERE matchup_id=?", (matchup.matchup_id,)
+    ).fetchone()["review_version"]
+    assert current_review_version == stale_review_versions[matchup.matchup_id] + 1
+
+    from app.competition_lifecycle import StaleRoundVersionError
+
+    with pytest.raises(StaleRoundVersionError):
+        lifecycle.publish_results(
+            round_.bbbffl_round_id,
+            stale_results,
+            actor=SCORER,
+            reason="attempted stale publish racing the correction",
+            expected_round_version=review_before.round_version,
+            expected_review_versions=stale_review_versions,
+        )
+
+
+def test_correction_invalidates_stale_dnp_ruling_and_override_for_the_changed_position():
+    """A DNP ruling/override recorded against the pre-correction occupant of
+    a slot must never silently keep applying to whoever the correction
+    installs there instead."""
+    db, lifecycle, round_, entries, stats, canon, review_repo, identities = _round_review_setup(2680)
+    entry = entries[0]
+    matchup = next(
+        m
+        for m in lifecycle.list_matchups(round_.bbbffl_round_id)
+        if entry.season_entry_id in (m.home_season_entry_id, m.away_season_entry_id)
+    )
+    review_repo.record_dnp_ruling(
+        matchup.matchup_id,
+        entry.season_entry_id,
+        "F1",
+        True,
+        expected_review_version=1,
+        actor=SCORER,
+        reason="pre-correction DNP ruling",
+    )
+    review_repo.record_override(
+        matchup.matchup_id,
+        entry.season_entry_id,
+        "F2",
+        99.0,
+        10.0,
+        "pre-correction override",
+        expected_review_version=2,
+        actor=SCORER,
+    )
+    assert "F1" in {slot for _entry, slot in review_repo.get_slot_rulings(matchup.matchup_id)}
+
+    lineups = WeeklyLineupRepository(db)
+    entry_index = next(i for i, e in enumerate(entries) if e.season_entry_id == entry.season_entry_id)
+    lineup_id = f"lineup-2680-100-{entry_index}"
+    submission = lineups.get_effective_submission(lineup_id)
+    f1_player, f3_player = submission.positions["F1"], submission.positions["F3"]
+    ownership = OwnershipRepository(db)
+    ownership.configure_squad_limit(lifecycle.get_round(round_.bbbffl_round_id).season_id, 20)
+    for player_id in submission.positions.values():
+        if player_id is not None:
+            ownership.acquire(player_id, entry.season_entry_id)
+
+    correction = lineups.submit_correction(
+        lineup_id,
+        {**submission.positions, "F1": f3_player, "F3": f1_player},
+        expected_submission_version=submission.version,
+        actor=SCORER,
+        reason="correct F1/F3 to prove stale DNP ruling is invalidated",
+    )
+    assert any(s.position == "F1" for s in correction.slots)
+
+    remaining_rulings = review_repo.get_slot_rulings(matchup.matchup_id)
+    assert (entry.season_entry_id, "F1") not in remaining_rulings
+    remaining_overrides = review_repo.get_overrides(matchup.matchup_id)
+    assert (entry.season_entry_id, "F2") in remaining_overrides  # F2 was never touched by this correction
+
+    # review_version starts at 1, then the DNP ruling and the override each
+    # bump it once (-> 3), then the correction's own invalidation pass bumps
+    # it a final time (-> 4).
+    current_review_version = db.execute(
+        "SELECT review_version FROM bbbffl_matchup WHERE matchup_id=?", (matchup.matchup_id,)
+    ).fetchone()["review_version"]
+    assert current_review_version == 4

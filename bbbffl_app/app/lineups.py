@@ -290,6 +290,11 @@ class WeeklyLineupRepository:
         coach's own subsequent `save_draft` call resets `draft_source` back
         to `"coach"`, lifting this again.
         """
+        if source_type == CORRECTION_SOURCE_TYPE:
+            raise LineupIntegrityError(
+                "'scorer_correction' is reserved for submit_correction(), which alone records the "
+                "required correction provenance -- it cannot be used with this ordinary submission path"
+            )
         if source_type not in SUBMISSION_SOURCES:
             raise LineupIntegrityError("unknown submission source")
         if lock_guard is not None and hasattr(lock_guard, "materialize"):
@@ -376,6 +381,11 @@ class WeeklyLineupRepository:
         """
         if source_type == "coach":
             raise LineupIntegrityError("coach submissions must go through submit(), which reads live draft content")
+        if source_type == CORRECTION_SOURCE_TYPE:
+            raise LineupIntegrityError(
+                "'scorer_correction' is reserved for submit_correction(), which alone records the "
+                "required correction provenance -- it cannot be used with this ordinary submission path"
+            )
         if source_type not in SUBMISSION_SOURCES:
             raise LineupIntegrityError("unknown submission source")
         positions = self._normalise(positions)
@@ -673,7 +683,17 @@ class WeeklyLineupRepository:
             # equal to one re-read via `get_correction`/`list_corrections`.
             for position in sorted(changed_positions):
                 lock_row = existing_locks.get(position)
-                was_locked = lock_row is not None and lock_row["season_player_id"] == previous_positions.get(position)
+                # `weekly_lineup_lock`'s PK is `(lineup_id, position)`: at
+                # most one lock instance can ever be materialized for a
+                # given position, durably marking that position as having
+                # been governed by an activated trigger. A *second*
+                # correction of the same position must still carry that
+                # provenance forward even though the position's occupant at
+                # correction time (a prior correction's own result) no
+                # longer matches the row's original `season_player_id` --
+                # comparing occupancy here would silently lose the lock
+                # link on any correction after the first.
+                was_locked = lock_row is not None
                 conn.execute(
                     "INSERT INTO weekly_lineup_correction_slot VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
@@ -702,6 +722,9 @@ class WeeklyLineupRepository:
                         lock_row["locked_at"] if was_locked else None,
                     )
                 )
+            invalidated_positions = self._invalidate_stale_review_state(
+                conn, lineup["bbbffl_round_id"], lineup["season_entry_id"], changed_positions
+            )
             append_event(
                 conn,
                 actor=actor,
@@ -716,6 +739,7 @@ class WeeklyLineupRepository:
                 payload={
                     "correction_id": correction_id,
                     "locked_positions_overridden": [slot.position for slot in slots if slot.was_locked],
+                    "invalidated_review_state_for_positions": invalidated_positions,
                 },
             )
         return LineupCorrection(
@@ -732,6 +756,96 @@ class WeeklyLineupRepository:
             now,
             tuple(slots),
         )
+
+    @staticmethod
+    def _invalidate_stale_review_state(conn, bbbffl_round_id: str, season_entry_id: str, changed_positions) -> list:
+        """Two correctness gaps closed together, both found by review of
+        this correction feature:
+
+        1. `app.round_review`'s per-matchup `review_version` is the CAS
+           `CompetitionLifecycleRepository.publish_results`/`attempt_signoff`
+           actually re-check inside their own locked transaction (see
+           `app.round_review`'s "Atomicity and concurrency"). A correction
+           changes what a matchup's calculated score is derived from just as
+           much as a DNP ruling/override does, but previously never bumped
+           it -- so a correction landing between `build_round_review` and
+           `publish_results`'s row lock could still let a stale,
+           pre-correction score be published, even though this module's own
+           lineup-version staleness check (see `app.round_review.
+           build_matchup_review`) would have blocked a *fresh* review. Every
+           matchup this entry participates in for this round has its
+           `review_version` bumped here, in the same transaction as the
+           correction itself, so any in-flight sign-off/correction attempt
+           built from the pre-correction revision fails closed
+           (`StaleRoundVersionError`) instead of racing it.
+        2. `bbbffl_matchup_slot_ruling`/`bbbffl_matchup_interchange_ruling`/
+           `bbbffl_matchup_override` are keyed by `(matchup_id,
+           season_entry_id, slot/position)`, never by player -- a DNP ruling
+           or override recorded against the *pre-correction* occupant of a
+           position would otherwise silently keep applying to whichever
+           player the correction just installed there instead, with nothing
+           in `app.round_review`'s lineup-version staleness check catching
+           it (that check compares lineup *versions*, not per-slot rulings).
+           Any slot ruling/override for a position this correction actually
+           changed is deleted here -- the scorer must re-decide DNP/
+           interchange/override for the corrected occupant, exactly as if
+           reviewing this position for the first time. Every prior ruling/
+           override's own history remains fully inspectable via
+           `app.audit.AuditEventRepository` regardless (`SLOT_RULING_
+           RECORDED`/`INTERCHANGE_RULING_RECORDED`/`OVERRIDE_RECORDED`); only
+           the current-decision pointer row is cleared, exactly like
+           clearing an override via `RoundReviewRepository.record_override(
+           override_score=None)` already does.
+
+        Raw SQL against `app.round_review`'s tables, not an import of that
+        module -- `app.round_review` sits *above* the season model
+        (app.lineups), so the reverse dependency this method would need if
+        it called into `app.round_review` directly is architecturally
+        disallowed (see tests/test_architecture.py); this mirrors how this
+        method already reaches into `weekly_lineup_lock`/
+        `opening_round_nomination` by table name rather than by import. A
+        round with no persisted matchups yet (or no rulings/overrides at
+        all -- the overwhelming common case) is a safe no-op.
+
+        Returns the list of positions any ruling/override/interchange
+        ruling was actually invalidated for, for the correction's own audit
+        payload.
+        """
+        matchups = conn.execute(
+            "SELECT matchup_id FROM bbbffl_matchup WHERE bbbffl_round_id=? "
+            "AND (home_season_entry_id=? OR away_season_entry_id=?)",
+            (bbbffl_round_id, season_entry_id, season_entry_id),
+        ).fetchall()
+        invalidated: set = set()
+        for matchup in matchups:
+            matchup_id = matchup["matchup_id"]
+            conn.execute(
+                "UPDATE bbbffl_matchup SET review_version = review_version + 1 WHERE matchup_id=?", (matchup_id,)
+            )
+            for position in changed_positions:
+                ruling_result = conn.execute(
+                    "DELETE FROM bbbffl_matchup_slot_ruling WHERE matchup_id=? AND season_entry_id=? AND slot=?",
+                    (matchup_id, season_entry_id, position),
+                )
+                override_result = conn.execute(
+                    "DELETE FROM bbbffl_matchup_override WHERE matchup_id=? AND season_entry_id=? AND position=?",
+                    (matchup_id, season_entry_id, position),
+                )
+                if ruling_result.rowcount or override_result.rowcount:
+                    invalidated.add(position)
+            interchange_row = conn.execute(
+                "SELECT target_position FROM bbbffl_matchup_interchange_ruling WHERE matchup_id=? AND season_entry_id=?",
+                (matchup_id, season_entry_id),
+            ).fetchone()
+            if interchange_row is not None and (
+                "Interchange" in changed_positions or interchange_row["target_position"] in changed_positions
+            ):
+                conn.execute(
+                    "DELETE FROM bbbffl_matchup_interchange_ruling WHERE matchup_id=? AND season_entry_id=?",
+                    (matchup_id, season_entry_id),
+                )
+                invalidated.add("Interchange")
+        return sorted(invalidated)
 
     def get_correction(self, correction_id: str) -> LineupCorrection | None:
         row = self.database.execute(

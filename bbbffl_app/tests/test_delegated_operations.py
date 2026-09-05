@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.authorization import Principal, Role
+from app.identity import IdentityRepository
 from app.lineups import WeeklyLineupRepository
 from app.main import opening_round_error_handler
 from app.opening_round import OpeningRoundError
@@ -87,12 +88,14 @@ def test_lineup_view_names_released_carry_forward_player_without_making_it_selec
         {"F1": released_player.season_player_id},
     )
     ownership.release(released_player.season_player_id)
+    represented_team = IdentityRepository(db).get_public_team(entry.season_entry_id)
+    assert represented_team is not None
 
     scope = {
         **dict(scope_row),
         "bbbffl_round_id": rounds[1],
         "season_entry_id": entry.season_entry_id,
-        "team_name": entry.team_name,
+        "team_name": represented_team.team_name,
         "season_label": "Test season",
         "round_label": "Round 2",
         "sequence": 2,

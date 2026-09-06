@@ -143,6 +143,17 @@ matching reusable "may this principal write to this season entry" check
 (Coach-owns vs. delegated-represents), for any future route that mutates a
 specific entry.
 
+`lineup.correct_locked` (issue #137) is a narrow, deliberate example of
+this pattern gating a genuinely privileged operation rather than an
+ordinary one: it permits the audited Scorer/Admin/Replay-Operator
+correction of an already-locked weekly lineup
+(`app.lineup_correction.LineupCorrectionService`, see
+[`weekly-lineups.md`](weekly-lineups.md#authorised-correction-of-an-already-locked-lineup-issue-137)),
+granted to Scorer and Administrator unconditionally and to Replay Operator
+only where `require_role_covers_season` confirms that role was actually
+granted for the season in question -- never implied by the broader
+`lineup.proxy` capability, and never available to Coach at all.
+
 ## Provenance / audit
 
 Delegated *domain* writes (e.g. a future scorer/admin lineup-proxy route)

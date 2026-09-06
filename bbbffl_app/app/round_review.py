@@ -440,6 +440,21 @@ class RoundReviewRepository:
             for row in rows
         }
 
+    def current_lineup_version(self, lineup_id: str | None) -> int | None:
+        """The lineup's *current* effective submission version, for
+        comparison against whatever version a calculated snapshot was
+        computed from (issue #137 requirement 6: a locked-lineup correction
+        made after a calculation must be surfaced as requiring
+        recalculation, not silently reviewed against stale evidence). `None`
+        for an unknown/absent lineup, matching `calc.snapshot`'s own
+        optional `lineup_id`."""
+        if lineup_id is None:
+            return None
+        row = self.database.execute(
+            "SELECT effective_submission_version FROM weekly_lineup WHERE lineup_id=?", (lineup_id,)
+        ).fetchone()
+        return row["effective_submission_version"] if row else None
+
     def get_overrides(self, matchup_id) -> dict[tuple[str, str], Override]:
         rows = self.database.execute(
             "SELECT * FROM bbbffl_matchup_override WHERE matchup_id=?", (matchup_id,)
@@ -728,6 +743,21 @@ def build_matchup_review(lifecycle, review_repo, identities, matchup, *, evidenc
     else:
         if not evidence_fresh:
             blockers.append("AFL evidence behind the calculated result was not confirmed fresh; refresh and retry")
+        for side_name, side_snapshot in (("home", calc.snapshot["home"]), ("away", calc.snapshot["away"])):
+            current_version = review_repo.current_lineup_version(side_snapshot.get("lineup_id"))
+            calculated_version = side_snapshot.get("lineup_version")
+            if current_version is not None and current_version != calculated_version:
+                # Issue #137: an authorised correction advanced the
+                # effective submission version after this snapshot was
+                # calculated -- never silently reviewed/signed off against
+                # the pre-correction lineup; recalculation (which always
+                # reads the *current* effective version, see
+                # app.calculations.MatchupCalculationService._entry) is
+                # required first.
+                blockers.append(
+                    f"{side_name} lineup was corrected (now version {current_version}, "
+                    f"calculated against version {calculated_version}); recalculate before sign-off"
+                )
         home, home_blockers = _side_review(
             matchup.home_season_entry_id, calc.snapshot["home"], dnp_rulings, interchange_rulings, overrides, identities
         )

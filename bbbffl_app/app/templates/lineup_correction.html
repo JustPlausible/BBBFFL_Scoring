@@ -1,0 +1,107 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Locked Lineup Correction · BBBFFL</title><style>
+:root{color-scheme:dark}body{font:15px system-ui;margin:auto;max-width:1040px;padding:22px;background:#0f1115;color:#e7e9ee}a{color:#79c0ff}.card{background:#171a21;border:1px solid #303744;border-radius:11px;padding:17px;margin:14px 0}.banner{border:3px solid #d29922}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}label{display:grid;gap:4px}button,input,select{font:inherit;padding:8px;border:1px solid #596273;border-radius:6px;background:#222733;color:inherit}.muted{color:#aab2c0;font-size:13px}.item{padding:10px;background:#11151b;border-radius:7px;margin:8px 0}.ok{border-left:4px solid #3fb950}.bad{border-left:4px solid #f85149}.warn{border-left:4px solid #d29922}.pill{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px;font-weight:600}.pill.ok{background:#123822;color:#7ee2a8;border:none}.pill.bad{background:#3a1414;color:#ffb4ab;border:none}.pill.warn{background:#3a2e0e;color:#f2c766;border:none}.changed{outline:2px solid #d29922}details summary{cursor:pointer}table{width:100%;border-collapse:collapse}td,th{padding:6px 4px;text-align:left;border-bottom:1px solid #303744}
+</style></head><body><a href="/scorer/round-centre">← Round centre</a><h1>Locked Lineup Correction</h1>
+<p class="muted">Authorised Scorer/Admin/Replay-Operator correction of an authoritative weekly lineup after a selective or main lockout has already activated. This overrides an activated lock as a deliberate, audited competition decision — it is not an ordinary lineup edit.</p>
+<div id="message"></div>
+<section class="card"><h2>1. Select round and team</h2><div class="grid">
+<label>BBBFFL round ID<input id="round-id" value="{{ round_id or '' }}" placeholder="bbbffl round id"></label>
+<label>&nbsp;<button id="load-round">Load round</button></label>
+</div><div id="teams"></div></section>
+<div id="detail"></div>
+<script>
+const csrf={{csrf_token|tojson}};
+const e=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(path,method='GET',body){let r=await fetch(path,{method,headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:body?JSON.stringify(body):undefined}),d=await r.json();if(!r.ok)throw Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail));return d}
+function msg(x,ok=false){let n=document.querySelector('#message');n.className='card';n.style.borderColor=ok?'#3fb950':'#f85149';n.textContent=x}
+let currentRoundId=null,currentEntryId=null,candidate=null;
+
+async function loadRound(){
+  currentRoundId=document.querySelector('#round-id').value.trim();
+  if(!currentRoundId){msg('Enter a BBBFFL round ID.');return}
+  history.replaceState(null,'','/scorer/lineup-correction/'+encodeURIComponent(currentRoundId));
+  try{
+    const d=await api(`/api/admin/lineup-correction/${encodeURIComponent(currentRoundId)}`);
+    document.querySelector('#teams').innerHTML=`<p class="muted">Round: <b>${e(d.round.label)}</b> (${e(d.round.state)}) — season ${e(d.season.label)}</p>
+    <div class="grid">${d.entries.map(t=>`<button data-entry="${e(t.season_entry_id)}">${e(t.team_name)}<br><span class="muted">${e(t.coach_name)}</span></button>`).join('')}</div>`;
+    document.querySelectorAll('[data-entry]').forEach(b=>b.onclick=()=>loadEntry(b.dataset.entry));
+    document.querySelector('#detail').innerHTML='';
+  }catch(err){msg(err.message)}
+}
+
+async function loadEntry(entryId){
+  currentEntryId=entryId;
+  try{
+    candidate=await api(`/api/admin/lineup-correction/${encodeURIComponent(currentRoundId)}/${encodeURIComponent(entryId)}`);
+    render();
+  }catch(err){msg(err.message)}
+}
+
+function lockPill(slot){
+  if(slot.lock_state==='locked')return '<span class="pill bad">LOCKED</span>';
+  if(slot.lock_state==='indeterminate')return '<span class="pill warn">INDETERMINATE</span>';
+  return '<span class="pill ok">editable</span>';
+}
+
+function playerOptions(currentId){
+  const opts=candidate.available_players.map(p=>`<option value="${e(p.season_player_id)}" ${p.season_player_id===currentId?'selected':''}>${e(p.display_name)} — ${e(p.afl_club_name)}</option>`).join('');
+  return `<option value="">(vacant)</option>${opts}`;
+}
+
+function historyItem(c){
+  return `<div class="muted item">${e(c.created_at)} — version ${e(c.from_version)} → ${e(c.to_version)} by ${e(c.actor_id)} (${e(c.actor_role)}): "${e(c.reason)}"<br>
+  ${c.slots.map(s=>`${e(s.position)}: ${e(s.previous_player_display_name)} → ${e(s.corrected_player_display_name)}${s.was_locked?` (was locked: ${e(s.lock_reason)})`:''}`).join('<br>')}</div>`;
+}
+
+function render(){
+  const publishable=candidate.round_state!=='final';
+  document.querySelector('#detail').innerHTML=`
+  <section class="card banner"><strong>AUTHORISED COMPETITION CORRECTION</strong>
+  <p>Team: <b>${e(candidate.team_name)}</b> · Coach: ${e(candidate.coach_name)} · Round state: ${e(candidate.round_state)}</p>
+  <p>Any position marked LOCKED below has already had its lockout trigger activate. Changing it here is a deliberate override of that activated lock, recorded as an authorised competition correction — never a silent edit.</p>
+  ${publishable?'':'<p><b>This round has reached final publication. Use the official-result correction workflow instead — this action will be refused.</b></p>'}</section>
+  <section class="card"><h2>2–3. Current effective lineup (version ${e(candidate.expected_submission_version)}) and proposed correction</h2>
+  <form id="correct-form"><table><thead><tr><th>Position</th><th>Current</th><th>Lock state</th><th>Corrected selection</th></tr></thead><tbody>
+  ${candidate.slots.map(s=>`<tr><td>${e(s.position)}</td><td>${e(s.player_display_name)}${s.afl_club_name?` (${e(s.afl_club_name)})`:''}</td><td>${lockPill(s)}<br><span class="muted">${e(s.lock_reason)}</span></td>
+  <td><select name="${e(s.position)}" data-original="${e(s.season_player_id||'')}">${playerOptions(s.season_player_id)}</select></td></tr>`).join('')}
+  </tbody></table>
+  <div id="preview" class="muted"></div>
+  <label>Reason for this correction (required; record the league decision/consultation)<input name="reason" required placeholder="e.g. League chat confirmed James Rowbottom named Interchange, not Tackler; scorer transcription error"></label>
+  <label><input type="checkbox" id="confirm-override" required> I confirm this authorised correction may override an already-activated lock, and the before/after above is correct.</label>
+  <button ${publishable?'':'disabled'}>Apply audited correction</button></form>
+  </section>
+  <section class="card"><h2>Correction history (${candidate.correction_history.length})</h2>${candidate.correction_history.length?candidate.correction_history.map(historyItem).join(''):'<p class="muted">No corrections recorded for this lineup.</p>'}</section>`;
+  document.querySelector('#correct-form').onsubmit=submitCorrection;
+  document.querySelectorAll('#correct-form select').forEach(s=>s.onchange=updatePreview);
+  updatePreview();
+}
+
+function updatePreview(){
+  const changes=[];
+  document.querySelectorAll('#correct-form select').forEach(s=>{
+    if(s.value!==s.dataset.original) changes.push(`${s.name}: ${s.dataset.original||'(vacant)'} → ${s.value||'(vacant)'}`);
+  });
+  document.querySelector('#preview').textContent=changes.length?('Before → after: '+changes.join('; ')):'No changes selected yet.';
+}
+
+async function submitCorrection(x){
+  x.preventDefault();
+  const f=new FormData(x.target);
+  const position_changes={};
+  document.querySelectorAll('#correct-form select').forEach(s=>{
+    if(s.value!==s.dataset.original) position_changes[s.name]=s.value||null;
+  });
+  if(Object.keys(position_changes).length===0){msg('Select at least one changed position before applying.');return}
+  try{
+    candidate=await api(`/api/admin/lineup-correction/${encodeURIComponent(currentRoundId)}/${encodeURIComponent(currentEntryId)}/correct`,'POST',{
+      expected_submission_version:candidate.expected_submission_version,
+      position_changes,
+      reason:f.get('reason'),
+    });
+    msg('Correction applied. All read surfaces below now reflect the corrected authoritative lineup.',true);
+    render();
+  }catch(err){msg(err.message)}
+}
+
+document.querySelector('#load-round').onclick=loadRound;
+if(document.querySelector('#round-id').value) loadRound();
+</script></body></html>

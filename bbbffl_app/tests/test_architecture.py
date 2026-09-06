@@ -150,7 +150,15 @@ OPENING_ROUND = {"app.opening_round"}
 # and no lower layer (season model, lockouts, weekly-submission-sources)
 # may depend back on it.
 AUTH = {"app.auth", "app.authorization"}
-COACH_LINEUP = {"app.coach_lineup"}
+# app.lineup_correction (issue #137) is the authorised Scorer/Admin
+# locked-lineup correction application service: like app.coach_lineup, it
+# sits above the season model/lockouts (reusing app.coach_lineup's already-
+# constructed WeeklyLineupRepository/LockoutRepository/match-facts
+# collaborators rather than duplicating them) and is meant to be imported
+# directly by its thin route (app/routes/lineup_correction.py), the same
+# shape as app.round_review/app.opening_round/app.auth (see this file's
+# ROUND_REVIEW comment).
+COACH_LINEUP = {"app.coach_lineup", "app.lineup_correction"}
 
 # AFL participation-evidence classification (roadmap package 26, issue #57):
 # a pure function of public afl-api facts (a match, a bye list, a stat line)
@@ -215,6 +223,7 @@ ROUTES = {
     "app.routes.context",
     "app.routes.fixture_setup",
     "app.routes.round_preflight",
+    "app.routes.lineup_correction",
 }
 
 COMPOSITION_ROOT = {"app.main"}

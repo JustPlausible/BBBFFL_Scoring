@@ -79,3 +79,129 @@ into a slot a nomination already owns. It composes with an ordinary
 `app.lockouts.LockGuard` (via its `inner` argument) rather than replacing
 it, so both mechanisms govern the same lineup without either weakening the
 other. See [`opening-round-deferred-selection.md`](opening-round-deferred-selection.md).
+
+## Authorised correction of an already-locked lineup (issue #137)
+
+Ordinary submission (`submit`/`submit_positions`, whichever `source_type`)
+always goes through `lock_guard` and always requires the round to be
+`open` -- neither of those loosens for a coach, a scorer/admin proxy
+entry, carry-forward, or any future ordinary source. That is deliberate:
+none of them may ever place or move a player into an already-locked
+position, no matter who is acting.
+
+Real competitions still occasionally need exactly that: a coach names a
+player in the wrong position in a league-chat message, or a scorer
+transposes a position while entering a delegated lineup, and the error is
+only noticed after the covering AFL match has already started. Historically
+the league discusses the case and the scorer either makes or refuses the
+adjustment by hand; the system must preserve that decision and its reason
+rather than force a raw database edit, a checkpoint rollback, or a
+score-only override -- none of which would preserve authoritative lineup
+history.
+
+`WeeklyLineupRepository.submit_correction` is that one narrow door,
+distinct from every ordinary submission path:
+
+- `source_type="scorer_correction"` -- its own value in
+  `SUBMISSION_SOURCES`, distinct from `"scorer_proxy"`: an ordinary proxy
+  submission still goes through `lock_guard` exactly like a coach's own
+  submission (see `app.lineup_proxy`) and gets no special exemption.
+- Permitted for any round state in `CORRECTION_ALLOWED_STATES` (`"open"`,
+  `"live"`, `"review"`) rather than only `"open"` -- the whole point is
+  correcting a lineup *after* a lockout has activated, which by definition
+  means the round has moved past `open`. A round that has already reached
+  `"final"` publication raises `RoundPublishedError` instead: this
+  workflow never edits published official history, which remains
+  `app.round_review.attempt_correction`'s separate boundary (see
+  [`scorer-round-review.md`](scorer-round-review.md)).
+- Never invokes `lock_guard` -- an authorised correction is exactly the one
+  path permitted to override an already-locked position. It still accepts
+  only the ordinary, atomic, whole-lineup validation every other submission
+  source gets (`_normalise`'s no-duplicate-player/legal-position rules,
+  `_validate_players`/`_validate_ownership`'s season/ownership checks): a
+  correction is authorised to bypass the *lock*, never ordinary lineup
+  integrity.
+- Rejects any change to a position with an active Opening Round deferred
+  nomination (`opening_round_nomination`) -- that slot's own separate
+  audited correction workflow
+  (`app.opening_round.OpeningRoundNominationRepository.correct`, see
+  [`opening-round-deferred-selection.md`](opening-round-deferred-selection.md))
+  remains the only door into it.
+- Requires a substantive reason and at least one actually-changed position
+  (`NoOpCorrectionError` otherwise) -- a correction records a deliberate
+  competition decision, never a content-free resubmission.
+
+Like every other submission source, a correction creates a brand-new
+immutable `weekly_lineup_submission` version (`to_version =
+from_version + 1`) via the *same* `weekly_lineup.effective_submission_
+version` compare-and-swap and the *same* database-trigger-enforced
+immutability every prior version already has -- it never edits
+`from_version`'s row, and `weekly_lineup_lock`'s existing evidence for the
+positions involved is never read for write purposes, only copied read-only
+into the correction's own provenance record. Two new immutable,
+trigger-protected tables (`migrations/versions/0025_lineup_correction.py`)
+carry that provenance:
+
+- `weekly_lineup_correction` -- one row per correction: `from_version`/
+  `to_version` (always sequential), the round/entry, actor/role, the
+  required reason, and the timestamp.
+- `weekly_lineup_correction_slot` -- one row per position the correction
+  actually changed: the previous and corrected player, and, copied
+  verbatim from `weekly_lineup_lock` at correction time if that position
+  was locked, which trigger/AFL match/instant locked it. This is what lets
+  a corrected occupant of a formerly-locked slot retain defensible
+  provenance tracing back to the already-active trigger, without
+  fabricating a new, later lock event or touching `weekly_lineup_lock`
+  itself -- the original lock evidence, and every prior submitted version,
+  remain byte-for-byte intact and independently readable
+  (`get_submission`/`get_correction`/`list_corrections`).
+
+An audit event (`app.audit.LINEUP_CORRECTED`) records the same before/after
+positions, actor, role and reason, sharing one `correlation_id` with the
+correction's own `LINEUP_SUBMITTED` event so both read back as one logical
+command.
+
+### Authority
+
+`app.lineup_correction.LineupCorrectionService` is the reason-checked,
+human-readable entry point most callers use: it merges a caller's partial
+`{position: season_player_id}` change map onto the lineup's current
+effective positions (so a Tackler <-> Interchange swap only needs to name
+those two slots) and rejects any actor that is not an `anonymous_operator`
+with `actor_role` in `{"scorer", "admin", "replay_operator"}` --
+`UnauthorizedCorrectionActorError` otherwise. This mirrors, but is
+independent of, generic proxy-entry authority (`app.lineup_proxy`):
+broad `lineup.proxy` capability alone is never treated as sufficient here.
+
+`app/routes/lineup_correction.py` (`/api/admin/lineup-correction`) gates
+every request behind the season-scoped `lineup.correct_locked` capability
+(`app.authorization.CAPABILITIES`) -- granted to Scorer and Administrator
+unconditionally, and to Replay Operator only for a season that role has
+actually been granted for (`require_role_covers_season`, exactly as
+`app.round_review`/Opening Round operations already require -- see
+[`acting-context.md`](acting-context.md)). Ordinary Coach authority never
+carries this capability. The browser page (`/scorer/lineup-correction`)
+shows the current effective lineup with human-readable player/club/lock
+evidence, an atomic corrected-position editor, a required reason field, a
+before/after preview, an explicit warning and confirmation that this
+overrides an activated lock as an authorised competition decision, and the
+complete correction history -- reloading every read surface from the
+corrected authoritative state once applied.
+
+### Calculation and review interaction
+
+A correction never emulates itself as a numeric score override. Because
+`app.calculations.MatchupCalculationService` always reads a lineup's
+*current* `effective_submission_version`, a calculation run after a
+correction automatically scores the corrected lineup with no correction-
+specific code of its own. `app.round_review.build_matchup_review` compares
+each side's *already-calculated* snapshot's `lineup_version` against the
+lineup's current effective version and adds a blocker
+("...lineup was corrected...; recalculate before sign-off") whenever they
+differ, so a correction made after calculation but before sign-off is
+never silently reviewed against stale evidence -- recalculation (which
+`/signoff` already always does immediately before validating readiness)
+clears it. After the round reaches `"final"` publication,
+`submit_correction` refuses outright (`RoundPublishedError`); the operator
+is directed to `app.round_review.attempt_correction`'s separate
+official-result correction workflow instead.

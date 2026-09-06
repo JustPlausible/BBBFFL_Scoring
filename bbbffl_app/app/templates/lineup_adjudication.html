@@ -44,10 +44,12 @@ function evidencePill(status){
   return '<span class="pill warn">vacant</span>';
 }
 
+function playerLabel(name,club){return name?(club?`${e(name)} (${e(club)})`:e(name)):'Vacant'}
+
 function evidencedTable(){
   if(!candidate.evidenced_preview)return '<p class="muted">No saved private draft exists for this team.</p>';
   return `<table><thead><tr><th>Position</th><th>Resolved value</th><th>Evidence</th><th>Trigger/match</th><th>Saved at</th></tr></thead><tbody>
-  ${candidate.evidenced_preview.map(s=>`<tr><td>${e(s.position)}</td><td>${e(s.season_player_id)}</td><td>${evidencePill(s.evidence_status)}</td>
+  ${candidate.evidenced_preview.map(s=>`<tr><td>${e(s.position)}</td><td>${playerLabel(s.player_name,s.afl_club)}</td><td>${evidencePill(s.evidence_status)}</td>
   <td class="muted">${e(s.lock_reason)}${s.afl_match_id?` (match ${e(s.afl_match_id)})`:''}${s.effective_lock_at?`<br>lock: ${e(s.effective_lock_at)}`:''}</td>
   <td class="muted">${e(s.evidence_saved_at)}</td></tr>`).join('')}
   </tbody></table>`;
@@ -57,8 +59,8 @@ function carryForwardTable(){
   if(!candidate.carry_forward_preview)return '<p class="muted">No previous-round submitted lineup is available to carry forward.</p>';
   const cf=candidate.carry_forward_preview;
   return `<p class="muted">Source: round ${e(cf.source_bbbffl_round_id)}, submission version ${e(cf.source_submission_version)}</p>
-  <table><thead><tr><th>Position</th><th>Value</th></tr></thead><tbody>
-  ${Object.entries(cf.positions).map(([position,player])=>`<tr><td>${e(position)}</td><td>${e(player)}</td></tr>`).join('')}
+  <table><thead><tr><th>Position</th><th>Player</th></tr></thead><tbody>
+  ${Object.entries(cf.positions_detail).map(([position,detail])=>`<tr><td>${e(position)}</td><td>${playerLabel(detail.player_name,detail.afl_club)}</td></tr>`).join('')}
   </tbody></table>`;
 }
 

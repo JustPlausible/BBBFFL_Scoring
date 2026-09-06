@@ -356,3 +356,10 @@ def test_adjudication_page_renders_and_issues_csrf_cookie(adjudication_client):
     assert page.status_code == 200
     assert "bbbffl_csrf" in page.cookies
     assert "Missed-Submission Adjudication" in page.text
+    # Issue #151: the browser Round A/B preview tables must render the API's
+    # player_name/afl_club fields, not the raw season_player_id -- proven
+    # here by asserting the template's own field references, since this
+    # repo has no headless-JS execution harness for these vanilla-JS pages.
+    assert "s.player_name" in page.text
+    assert "s.season_player_id" not in page.text
+    assert "positions_detail" in page.text

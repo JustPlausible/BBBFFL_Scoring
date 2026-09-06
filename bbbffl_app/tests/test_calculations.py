@@ -93,13 +93,14 @@ def setup_round(db=None, *, year=2027):
                 conn.execute(
                     text(
                         "INSERT INTO weekly_lineup_draft_slot "
-                        "(lineup_id, position, season_player_id) "
-                        "VALUES (:lineup_id, :position, :player_id)"
+                        "(lineup_id, position, season_player_id, updated_at) "
+                        "VALUES (:lineup_id, :position, :player_id, :now)"
                     ),
                     {
                         "lineup_id": lineup_id,
                         "position": position,
                         "player_id": player,
+                        "now": now,
                     },
                 )
                 conn.execute(
@@ -236,10 +237,10 @@ def _seed_evidence_lineup(conn, scope, round_id, entry_id, side, position_player
         )
         conn.execute(
             text(
-                "INSERT INTO weekly_lineup_draft_slot (lineup_id, position, season_player_id) "
-                "VALUES (:lineup_id, :position, :player_id)"
+                "INSERT INTO weekly_lineup_draft_slot (lineup_id, position, season_player_id, updated_at) "
+                "VALUES (:lineup_id, :position, :player_id, :now)"
             ),
-            {"lineup_id": lineup_id, "position": position, "player_id": player_id},
+            {"lineup_id": lineup_id, "position": position, "player_id": player_id, "now": now},
         )
         conn.execute(
             text(

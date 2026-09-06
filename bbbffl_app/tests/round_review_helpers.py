@@ -118,10 +118,10 @@ def full_round(db=None, *, year=2200, afl_round=100, stat_line=None, vacant_slot
                 conn.execute(
                     text(
                         "INSERT INTO weekly_lineup_draft_slot "
-                        "(lineup_id, position, season_player_id) "
-                        "VALUES (:lineup_id, :position, :player_id)"
+                        "(lineup_id, position, season_player_id, updated_at) "
+                        "VALUES (:lineup_id, :position, :player_id, :now)"
                     ),
-                    {"lineup_id": lineup_id, "position": position, "player_id": selected_player_id},
+                    {"lineup_id": lineup_id, "position": position, "player_id": selected_player_id, "now": now},
                 )
                 conn.execute(
                     text(

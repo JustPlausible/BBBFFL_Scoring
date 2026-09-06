@@ -329,7 +329,7 @@ class CoachLineupService:
         )
         return self.lineups.get_draft(season_id, entry["competition_id"], round_id, entry["season_entry_id"])
 
-    def save(self, season_id, round_id, entry, positions, revision):
+    def save(self, season_id, round_id, entry, positions, revision, coach_id=None):
         deferred = self.nominations.active_positions(round_id, entry["season_entry_id"])
         positions.update(deferred)  # crafted ordinary edits cannot displace #69 slots
         return self.lineups.save_draft(
@@ -339,6 +339,7 @@ class CoachLineupService:
             entry["season_entry_id"],
             positions,
             expected_revision=revision,
+            actor=ActorContext.coach(coach_id) if coach_id is not None else None,
         )
 
     def submit(self, draft, submission_version, coach_id):

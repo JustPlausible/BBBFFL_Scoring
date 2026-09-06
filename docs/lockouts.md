@@ -486,6 +486,18 @@ remains exactly as frozen as described above. See
 for that workflow and how it relates to (without weakening) everything this
 document describes.
 
+Issue #146 covers the different, narrower case issue #137 explicitly does
+not: a coach who saved a private draft before a lockout but never created
+an authoritative submission at all before a trigger activated. This
+module's `LockoutRepository` gained three small public wrappers
+(`materialize_round_triggers`/`trigger_coverage_locked`/
+`evaluate_draft_position_locked`) so that workflow can evaluate a private
+draft's per-position lock evidence atomically inside its own transaction,
+without duplicating any of the trigger-coverage/lock-decision logic this
+document describes. See
+[`weekly-lineups.md`](weekly-lineups.md#audited-adjudication-of-a-missed-initial-submission-after-lockout-issue-146)
+for that workflow.
+
 ## Deterministic staged rehearsal (issue #91)
 
 The operator-ready [staged progressive-lockout rehearsal](staged-lockout-rehearsal.md)

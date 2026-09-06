@@ -121,7 +121,7 @@ async def lineup_action(request: Request, season_id: str, round_id: str):
         return HTMLResponse("Private lineup not found", status_code=404)
     try:
         revision = int(form.get("draft_revision", "-1"))
-        draft = service.save(season_id, round_id, entry, positions, revision)
+        draft = service.save(season_id, round_id, entry, positions, revision, coach_id=coach.coach_id)
         if form.get("action") == "save":
             return RedirectResponse(
                 f"/coach/seasons/{season_id}/rounds/{round_id}/lineup?notice=draft-saved", status_code=303

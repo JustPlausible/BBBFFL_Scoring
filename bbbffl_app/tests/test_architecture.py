@@ -158,7 +158,14 @@ AUTH = {"app.auth", "app.authorization"}
 # directly by its thin route (app/routes/lineup_correction.py), the same
 # shape as app.round_review/app.opening_round/app.auth (see this file's
 # ROUND_REVIEW comment).
-COACH_LINEUP = {"app.coach_lineup", "app.lineup_correction"}
+#
+# app.lineup_adjudication (issue #146) is the same shape again: the
+# authorised Scorer/Admin adjudication of a *missed initial* submission
+# after lockout, sitting above the season model/lockouts/carry-forward
+# (reusing app.coach_lineup's collaborators, plus app.carry_forward's
+# previous-round resolution for its own carry-forward fallback), imported
+# directly by its thin route (app/routes/lineup_adjudication.py).
+COACH_LINEUP = {"app.coach_lineup", "app.lineup_correction", "app.lineup_adjudication"}
 
 # AFL participation-evidence classification (roadmap package 26, issue #57):
 # a pure function of public afl-api facts (a match, a bye list, a stat line)
@@ -224,6 +231,7 @@ ROUTES = {
     "app.routes.fixture_setup",
     "app.routes.round_preflight",
     "app.routes.lineup_correction",
+    "app.routes.lineup_adjudication",
 }
 
 COMPOSITION_ROOT = {"app.main"}

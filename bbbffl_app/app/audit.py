@@ -141,6 +141,15 @@ LOCKOUT_TRIGGER_CONFIGURED = "lockout.trigger.configured"
 # separately queryable/auditable from an ordinary submission.
 LINEUP_CORRECTED = "lineup.correction.recorded"
 
+# Issue #146: authorised Scorer/Admin adjudication of a missed *initial*
+# weekly-lineup submission after lockout -- either accepting sufficiently
+# evidenced pre-lockout draft values, or applying the carry-forward
+# fallback, as the league's externally reached decision directs. Distinct
+# from both LINEUP_SUBMITTED (an ordinary submission) and LINEUP_CORRECTED
+# (issue #137's correction of an *existing* submission): this event always
+# accompanies a lineup's first-ever authoritative submission.
+LINEUP_ADJUDICATED = "lineup.adjudication.recorded"
+
 # Roadmap package 19 (issue #74): coach authentication/session events. See
 # app/auth.py and docs/coach-authentication.md.
 AUTH_LOGIN_SUCCEEDED = "auth.login.succeeded"

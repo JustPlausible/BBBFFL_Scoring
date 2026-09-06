@@ -65,7 +65,18 @@ POSITIONS = ("F1", "F2", "F3", "M1", "M2", "M3", "Ruck", "Tackler", "Interchange
 # lock_guard rejection like a coach's own submission, while a correction is
 # the one path an authorised operator uses specifically to override an
 # already-locked position -- see `submit_correction` below.
-SUBMISSION_SOURCES = frozenset({"coach", "scorer_proxy", "carry_forward", "system_derived", "scorer_correction"})
+# "scorer_late_capture"/"scorer_adjudicated_carry_forward" (issue #146) are
+# likewise distinct from every ordinary source: each creates a lineup's
+# *first* authoritative submission after an activated lockout trigger left
+# ordinary submission unable to (see `submit_adjudicated_first_submission`
+# below and app/lineup_adjudication.py, the reason-checked orchestration
+# layer most callers should use instead of this method directly).
+ADJUDICATED_LATE_CAPTURE_SOURCE_TYPE = "scorer_late_capture"
+ADJUDICATED_CARRY_FORWARD_SOURCE_TYPE = "scorer_adjudicated_carry_forward"
+ADJUDICATION_SOURCE_TYPES = frozenset({ADJUDICATED_LATE_CAPTURE_SOURCE_TYPE, ADJUDICATED_CARRY_FORWARD_SOURCE_TYPE})
+SUBMISSION_SOURCES = frozenset(
+    {"coach", "scorer_proxy", "carry_forward", "system_derived", "scorer_correction"} | ADJUDICATION_SOURCE_TYPES
+)
 CORRECTION_SOURCE_TYPE = "scorer_correction"
 # Ordinary submission (coach, scorer/admin proxy, carry-forward) is
 # permitted while the round is "open" (before any AFL match has started) or
@@ -84,6 +95,13 @@ ORDINARY_SUBMISSION_ALLOWED_STATES = frozenset({"open", "live"})
 # "final" is deliberately excluded: post-publication correction is the
 # separate app.round_review.attempt_correction workflow (issue #137).
 CORRECTION_ALLOWED_STATES = frozenset({"open", "live", "review"})
+# Issue #146's adjudication workflow is deliberately narrower still: it only
+# ever applies once a round has actually moved past "open" (there being no
+# "missed initial submission after lockout" to adjudicate before any lock
+# could possibly have activated), through "review". "final" remains outside
+# this frozenset for the same reason it is outside every other submission
+# path -- see `RoundPublishedError`.
+ADJUDICATION_ALLOWED_STATES = frozenset({"live", "review"})
 # Whole-draft (not per-position) origin of the *current* draft revision --
 # see migrations/versions/0018_proxy_draft_source.py's docstring and
 # `submit`'s use of it below.
@@ -116,6 +134,14 @@ class NoOpCorrectionError(LineupIntegrityError):
     effective submission -- there is nothing to record."""
 
 
+class EffectiveSubmissionExistsError(LineupIntegrityError):
+    """Issue #146's adjudicated missed-submission capture was attempted
+    against a lineup that already has an effective authoritative
+    submission. That is never this workflow's job -- see
+    `app.lineup_correction.LineupCorrectionService`, issue #137's audited
+    correction of an *existing* submission, instead."""
+
+
 @dataclass(frozen=True)
 class LineupDraft:
     lineup_id: str
@@ -128,6 +154,20 @@ class LineupDraft:
     created_at: str
     updated_at: str
     draft_source: str
+
+
+@dataclass(frozen=True)
+class DraftSlotProvenance:
+    """One position's own timing/actor evidence within a lineup's current
+    private draft revision (issue #146) -- see `save_draft`'s docstring and
+    `WeeklyLineupRepository.get_draft_slot_provenance`."""
+
+    position: str
+    season_player_id: str | None
+    updated_at: str
+    actor_type: str | None
+    actor_id: str | None
+    actor_role: str | None
 
 
 @dataclass(frozen=True)
@@ -189,7 +229,16 @@ class WeeklyLineupRepository:
         self.database = database
 
     def save_draft(
-        self, season_id, competition_id, round_id, entry_id, positions, *, expected_revision, draft_source="coach"
+        self,
+        season_id,
+        competition_id,
+        round_id,
+        entry_id,
+        positions,
+        *,
+        expected_revision,
+        draft_source="coach",
+        actor=None,
     ):
         """`draft_source` records the whole-draft origin of the resulting
         revision -- `"coach"` (default, ordinary editing) or
@@ -199,11 +248,32 @@ class WeeklyLineupRepository:
         docstring for why this exists. A coach's own subsequent edit
         (leaving `draft_source` at its default) resets it back to
         `"coach"` -- this tracks only the *current* revision's origin, not
-        a history of every edit."""
+        a history of every edit.
+
+        `actor` (an `app.audit.ActorContext`, optional) records who saved
+        this revision -- per position, not per whole draft (issue #146).
+        Each of the nine `weekly_lineup_draft_slot` rows keeps its own
+        `updated_at`/actor columns and is only touched when that position's
+        *value* actually changes; a position left untouched across this
+        save keeps whatever timestamp/actor it already carried. This is
+        what lets a later save (e.g. filling in a still-unlocked position
+        after a selective lockout has activated) advance without silently
+        rewriting the evidence of *when* an already-locked position's value
+        was actually set -- see migrations/versions/0026_lineup_adjudication.py
+        and app/lineup_adjudication.py, which read these columns to
+        establish whether a locked position's draft value predates that
+        position's effective lock instant. `actor=None` (the default, and
+        every call site that has not yet been updated to attribute one)
+        simply records no actor for whichever positions this save touches --
+        never a fabricated identity.
+        """
         if draft_source not in DRAFT_SOURCES:
             raise LineupIntegrityError(f"unknown draft source: {draft_source!r}")
         selected = self._normalise(positions)
         now = _now()
+        actor_type = actor.actor_type if actor is not None else None
+        actor_id = actor.actor_id if actor is not None else None
+        actor_role = actor.actor_role if actor is not None else None
         try:
             with transaction(self.database) as conn:
                 self._validate_scope(conn, season_id, competition_id, round_id, entry_id)
@@ -231,6 +301,11 @@ class WeeklyLineupRepository:
                             draft_source,
                         ),
                     )
+                    for position in POSITIONS:
+                        conn.execute(
+                            "INSERT INTO weekly_lineup_draft_slot VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (lineup_id, position, selected[position], now, actor_type, actor_id, actor_role),
+                        )
                 else:
                     if row["draft_revision"] != expected_revision:
                         raise LineupConflictError("stale draft revision")
@@ -243,17 +318,56 @@ class WeeklyLineupRepository:
                     # also documents and protects the authoritative transition.
                     if not result.rowcount:
                         raise LineupConflictError("stale draft revision")
-                    conn.execute("DELETE FROM weekly_lineup_draft_slot WHERE lineup_id=?", (lineup_id,))
-                for position in POSITIONS:
-                    conn.execute(
-                        "INSERT INTO weekly_lineup_draft_slot VALUES (?, ?, ?)",
-                        (lineup_id, position, selected[position]),
-                    )
+                    existing = {
+                        r["position"]: r["season_player_id"]
+                        for r in conn.execute(
+                            "SELECT position, season_player_id FROM weekly_lineup_draft_slot WHERE lineup_id=?"
+                            + _for_update_suffix(self.database),
+                            (lineup_id,),
+                        ).fetchall()
+                    }
+                    changed_positions = [p for p in POSITIONS if existing.get(p) != selected[p]]
+                    # Two passes, not one UPDATE per changed position: clearing
+                    # every changed slot to NULL first, then assigning its
+                    # final value, avoids a transient violation of
+                    # `uq_draft_player_once` when a save swaps two positions'
+                    # players (e.g. F1<->M1) -- updating F1 to M1's current
+                    # player in one step, before M1's own row has moved off
+                    # it, would otherwise briefly duplicate that player across
+                    # two rows of the same lineup. `_normalise` above already
+                    # guarantees `selected` itself has no duplicate player, so
+                    # the second pass can never collide with an unchanged row
+                    # either.
+                    for position in changed_positions:
+                        conn.execute(
+                            "UPDATE weekly_lineup_draft_slot SET season_player_id=NULL WHERE lineup_id=? AND position=?",
+                            (lineup_id, position),
+                        )
+                    for position in changed_positions:
+                        conn.execute(
+                            "UPDATE weekly_lineup_draft_slot SET season_player_id=?, updated_at=?, "
+                            "actor_type=?, actor_id=?, actor_role=? WHERE lineup_id=? AND position=?",
+                            (selected[position], now, actor_type, actor_id, actor_role, lineup_id, position),
+                        )
         except IntegrityError as exc:
             raise LineupConflictError("concurrent draft creation or edit") from exc
         return LineupDraft(
             lineup_id, season_id, competition_id, round_id, entry_id, revision, selected, created, now, draft_source
         )
+
+    def get_draft_slot_provenance(self, lineup_id: str) -> dict:
+        """`{position: DraftSlotProvenance}` for every scoring position of
+        this lineup's current private draft revision -- the per-position
+        timing/actor evidence `app.lineup_adjudication` reads to establish
+        whether an already-locked position's draft value predates that
+        position's effective lock instant (issue #146). Never itself a lock
+        decision: purely a read of `weekly_lineup_draft_slot`'s own columns."""
+        rows = self.database.execute(
+            "SELECT position, season_player_id, updated_at, actor_type, actor_id, actor_role "
+            "FROM weekly_lineup_draft_slot WHERE lineup_id=?",
+            (lineup_id,),
+        ).fetchall()
+        return {row["position"]: DraftSlotProvenance(**dict(row)) for row in rows}
 
     def get_draft(self, season_id, competition_id, round_id, entry_id):
         # Materialise the header and slots in one database statement. Under
@@ -326,6 +440,11 @@ class WeeklyLineupRepository:
             raise LineupIntegrityError(
                 "'scorer_correction' is reserved for submit_correction(), which alone records the "
                 "required correction provenance -- it cannot be used with this ordinary submission path"
+            )
+        if source_type in ADJUDICATION_SOURCE_TYPES:
+            raise LineupIntegrityError(
+                f"{source_type!r} is reserved for submit_adjudicated_first_submission(), which alone records "
+                "the required adjudication provenance -- it cannot be used with this ordinary submission path"
             )
         if source_type not in SUBMISSION_SOURCES:
             raise LineupIntegrityError("unknown submission source")
@@ -417,6 +536,11 @@ class WeeklyLineupRepository:
             raise LineupIntegrityError(
                 "'scorer_correction' is reserved for submit_correction(), which alone records the "
                 "required correction provenance -- it cannot be used with this ordinary submission path"
+            )
+        if source_type in ADJUDICATION_SOURCE_TYPES:
+            raise LineupIntegrityError(
+                f"{source_type!r} is reserved for submit_adjudicated_first_submission(), which alone records "
+                "the required adjudication provenance -- it cannot be used with this ordinary submission path"
             )
         if source_type not in SUBMISSION_SOURCES:
             raise LineupIntegrityError("unknown submission source")
@@ -831,6 +955,94 @@ class WeeklyLineupRepository:
             now,
             tuple(slots),
         )
+
+    def submit_adjudicated_first_submission(
+        self,
+        lineup_id,
+        *,
+        actor,
+        reason,
+        source_type,
+        source_detail,
+        resolve_positions,
+        record_adjudication,
+        correlation_id=None,
+    ):
+        """The low-level domain primitive behind issue #146's audited
+        adjudication of a missed *initial* weekly-lineup submission after
+        lockout. `app.lineup_adjudication.LineupAdjudicationService` is the
+        reason-checked, lockout-aware orchestration layer every caller
+        should use instead of this method directly -- exactly the
+        relationship `app.lineup_correction.LineupCorrectionService` has
+        with `submit_correction` above.
+
+        This method itself knows nothing about AFL matches, lockout
+        triggers or private-draft evidence timing (this module never
+        imports app/lockouts.py -- see the module docstring); it only
+        knows how to atomically create a lineup's *first* authoritative
+        submission through a distinct, audited source, under the same
+        `weekly_lineup` row lock and CAS discipline every other submission
+        path uses. All of the lockout-aware position resolution and
+        adjudication-record persistence is supplied by the caller as two
+        callbacks, both invoked on `conn` -- the same connection already
+        holding the row lock, so the resulting submission and its
+        adjudication provenance are always part of one atomic transaction:
+
+        - `resolve_positions(conn, lineup_row) -> positions`: computes the
+          complete, atomic position map to submit (evaluating locked-
+          position draft evidence, or copying a carry-forward source, as
+          appropriate) using state read fresh on `conn` -- never state the
+          caller precomputed before this transaction opened, so a trigger
+          that activates or an authoritative submission that is created
+          concurrently is always caught before this commits.
+        - `record_adjudication(conn, version)`: called *after* the new
+          submission version (always `1`, see below) is durably written,
+          so it can persist the adjudication header/slot rows referencing
+          that confirmed version and append its own audit event sharing
+          `correlation_id` with the submission's own `LINEUP_SUBMITTED`
+          event (see `_finalize_submission`).
+
+        Raises `EffectiveSubmissionExistsError` if the lineup already has
+        an effective submission -- this workflow only ever creates the
+        *first* one; an existing submission is instead corrected through
+        `submit_correction` (issue #137). That check happens under the same
+        row lock `_finalize_submission` re-validates against below, so a
+        submission created concurrently by any other path (ordinary coach
+        submission, proxy, carry-forward, another adjudication attempt)
+        cannot race this into creating two version-1 submissions.
+        """
+        if not reason or not reason.strip():
+            raise LineupIntegrityError("an adjudicated missed-submission capture requires a substantive reason")
+        if source_type not in ADJUDICATION_SOURCE_TYPES:
+            raise LineupIntegrityError(f"unknown adjudication source: {source_type!r}")
+        correlation_id = correlation_id or str(uuid4())
+        with transaction(self.database) as conn:
+            lineup = self._lock_lineup_row(conn, lineup_id)
+            if (lineup["effective_submission_version"] or 0) != 0:
+                raise EffectiveSubmissionExistsError(
+                    f"lineup {lineup_id} already has an effective submitted version; adjudicate a missed "
+                    "initial submission only where none exists yet -- use the locked-lineup correction "
+                    "workflow (issue #137) to correct an existing submission instead"
+                )
+            positions = self._normalise(resolve_positions(conn, lineup))
+            version = self._finalize_submission(
+                conn,
+                lineup,
+                positions,
+                based_on_draft_revision=lineup["draft_revision"],
+                expected_submission_version=0,
+                actor=actor,
+                source_type=source_type,
+                source_detail=source_detail,
+                reason=reason,
+                lock_guard=None,
+                allowed_states=ADJUDICATION_ALLOWED_STATES,
+                require_lock_guard_when_live=False,
+                correlation_id=correlation_id,
+            )
+            record_adjudication(conn, version)
+        # See submit()'s matching comment: read back only after commit.
+        return self.get_submission(lineup_id, version), correlation_id
 
     @staticmethod
     def _invalidate_stale_review_state(conn, bbbffl_round_id: str, season_entry_id: str, changed_positions) -> list:

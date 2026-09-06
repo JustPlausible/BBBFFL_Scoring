@@ -231,6 +231,7 @@ def test_correction_service_merges_partial_change_and_enforces_actor(monkeypatch
         _locked_context()
     )
     service = LineupCorrectionService(db, afl_client=None)
+    service.match_facts = matches  # avoid a real afl-api dependency; see FakeMatchFacts
     correction = service.correct(
         scope["season_id"],
         scope["competition_id"],
@@ -616,6 +617,53 @@ def test_repeated_correction_of_the_same_locked_position_preserves_lock_provenan
     assert second_tackler_slot.previous_season_player_id == bench.season_player_id
     assert second_tackler_slot.corrected_season_player_id == third.season_player_id
     # The immutable lock evidence itself never changes across either correction.
+    lock_row = db.execute(
+        "SELECT season_player_id FROM weekly_lineup_lock WHERE lineup_id=? AND position='Tackler'",
+        (draft.lineup_id,),
+    ).fetchone()
+    assert lock_row["season_player_id"] == tackler.season_player_id
+
+
+def test_correction_materializes_lock_evidence_when_none_exists_yet():
+    """A correction that is the very first lineup operation since a trigger
+    activated must still capture accurate lock provenance. Lock evidence is
+    materialized lazily (by `lock_state`/an ordinary submission attempt),
+    never eagerly, so `submit_correction` must materialize it itself via
+    `lock_guard` rather than assume some prior read already did."""
+    db, lifecycle, round_, entries, scope, pool, ownership = context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_selective(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], key="early-1", sequence=1)
+    tackler = acquire(pool, ownership, scope, entry, 1, EARLY_HOME, name="James Rowbottom")
+    bench = acquire(pool, ownership, scope, entry, 2, LATE_HOME, name="Bench Player")
+    lineups = WeeklyLineupRepository(db)
+    matches = FakeMatchFacts(ALL_MATCHES)
+    draft, submitted = establish(
+        lineups,
+        round_,
+        entry,
+        scope,
+        {"Tackler": tackler.season_player_id, "Interchange": bench.season_player_id},
+    )
+    # Deliberately no prior lock_state()/materialize call: weekly_lineup_lock
+    # has no row yet even though the trigger has, by this evaluation
+    # instant, already activated.
+    assert db.execute("SELECT 1 FROM weekly_lineup_lock WHERE lineup_id=?", (draft.lineup_id,)).fetchone() is None
+
+    guard = LockoutRepository(db).guard(match_facts=matches, evaluation_at=EARLY_START + timedelta(minutes=5))
+    correction = lineups.submit_correction(
+        draft.lineup_id,
+        {"Tackler": bench.season_player_id, "Interchange": tackler.season_player_id},
+        expected_submission_version=submitted.version,
+        actor=SCORER,
+        reason="correcting before anything else ever materialized the lock",
+        lock_guard=guard,
+    )
+    tackler_slot = next(s for s in correction.slots if s.position == "Tackler")
+    assert tackler_slot.was_locked is True
+    assert tackler_slot.lock_reason == "selective_trigger_activated"
+    assert tackler_slot.afl_match_id == EARLY_MATCH_ID
+    # Lock evidence is now durably materialized for future reads too.
     lock_row = db.execute(
         "SELECT season_player_id FROM weekly_lineup_lock WHERE lineup_id=? AND position='Tackler'",
         (draft.lineup_id,),

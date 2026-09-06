@@ -552,6 +552,7 @@ class WeeklyLineupRepository:
         expected_submission_version,
         actor,
         reason,
+        lock_guard=None,
     ) -> LineupCorrection:
         """Authorised Scorer/Admin/Replay-Operator correction of an
         authoritative weekly lineup after a selective or main lockout has
@@ -568,6 +569,23 @@ class WeeklyLineupRepository:
         the authorised, reason-checked entry point most callers should use
         instead of this method directly.
 
+        `lock_guard`, if given and exposing a `.materialize(lineup_id)`
+        method, is called *before* this opens its own transaction -- exactly
+        the same pre-transaction step `submit`/`submit_positions` already
+        take (see this module's docstring and app.lockouts's docstring for
+        why materialization must happen outside, and before, the write
+        transaction). This is the only use this method ever makes of
+        `lock_guard`: its rejecting `__call__` behaviour is never invoked
+        (see below). Without this, a correction that is the very first
+        lineup operation since a trigger activated -- lock evidence is
+        materialized lazily, by `lock_state`/an ordinary submission attempt,
+        never eagerly -- could read `weekly_lineup_lock` before any row for
+        the affected position exists yet, and wrongly record `was_locked=
+        False` with no trigger/match/instant provenance even though the
+        position is, in fact, already governed by an activated trigger.
+        `app.lineup_correction.LineupCorrectionService.correct` always
+        supplies one.
+
         Unlike `submit`/`submit_positions`, this:
 
         - is permitted for any round state in `CORRECTION_ALLOWED_STATES`
@@ -577,12 +595,13 @@ class WeeklyLineupRepository:
           has already reached "final" publication raises
           `RoundPublishedError` instead (see `_finalize_submission`); this
           workflow never edits published official history.
-        - never invokes `lock_guard` -- an authorised correction is exactly
-          the one path permitted to override an already-locked position.
-          Ordinary `app.lockouts.LockGuard` rejection remains fully intact
-          for every other submission source (`submit`/`submit_positions`
-          with any `source_type` other than `"scorer_correction"`, which
-          this method is the only caller of).
+        - never invokes `lock_guard` as a rejecting callable -- an
+          authorised correction is exactly the one path permitted to
+          override an already-locked position. Ordinary
+          `app.lockouts.LockGuard` rejection remains fully intact for every
+          other submission source (`submit`/`submit_positions` with any
+          `source_type` other than `"scorer_correction"`, which this method
+          is the only caller of).
         - never touches `weekly_lineup_lock` (immutable, untouched) but
           copies each corrected position's existing lock evidence, if any,
           read-only into a new `weekly_lineup_correction`/
@@ -600,6 +619,15 @@ class WeeklyLineupRepository:
         if not reason or not reason.strip():
             raise LineupIntegrityError("a locked-lineup correction requires a substantive reason")
         positions = self._normalise(positions)
+        if lock_guard is not None and hasattr(lock_guard, "materialize"):
+            # Runs in its own standalone transaction, deliberately *before*
+            # this method opens its own below -- see the module docstring
+            # and app.lockouts's docstring for why a lock observed here must
+            # be durably recorded independently of whatever this correction
+            # goes on to do, and so that the read of `weekly_lineup_lock`
+            # below always reflects the lineup's *current* effective lock
+            # state rather than whatever a caller last happened to trigger.
+            lock_guard.materialize(lineup_id)
         correlation_id = str(uuid4())
         with transaction(self.database) as conn:
             lineup = self._lock_lineup_row(conn, lineup_id)

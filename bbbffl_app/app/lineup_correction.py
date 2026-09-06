@@ -179,6 +179,13 @@ class LineupCorrectionService:
         for duplicate players/legal positions/ownership, so a direct swap
         (e.g. Tackler <-> Interchange, each named in `position_changes`)
         never requires an invalid intermediate duplicate-player state.
+
+        Always passes an ordinary `app.lockouts.LockGuard` to
+        `submit_correction` for its `.materialize()` step only (never for
+        rejection -- see that method's docstring): this guarantees the
+        current effective lineup's lock evidence is durably recorded before
+        the correction's own provenance is captured, even if this is the
+        very first lineup operation since a trigger activated.
         """
         _ensure_correction_actor(actor)
         unknown = set(position_changes) - set(POSITIONS)
@@ -198,6 +205,7 @@ class LineupCorrectionService:
             expected_submission_version=expected_submission_version,
             actor=actor,
             reason=reason,
+            lock_guard=self.lockouts.guard(match_facts=self.match_facts),
         )
 
     def _describe_correction(self, correction: LineupCorrection) -> dict:

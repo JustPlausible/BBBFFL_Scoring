@@ -19,10 +19,12 @@ updates and deletes of snapshots. Replay and scoring consumers must read a
 specific submitted version (or the effective submitted version); neither a
 mutable draft nor prototype JSON is a substitute.
 
-Submission accepts only an `open` persisted BBBFFL round, stable season-player
-IDs currently owned by the entry, and no duplicate selected player. Ownership
-is queried from the existing ledger and is **not copied as a second current-owner
-authority**. Submitted player IDs remain intact after a later release or trade.
+Submission accepts an `open` or `live` persisted BBBFFL round (issue #144;
+see "`open` vs. `live`: two independent dimensions" below), stable
+season-player IDs currently owned by the entry, and no duplicate selected
+player. Ownership is queried from the existing ledger and is **not copied as
+a second current-owner authority**. Submitted player IDs remain intact after
+a later release or trade.
 
 A formal submission is not required to name a player in every position
 (issue #98). One or more positions may be deliberately left `null` -- a
@@ -80,14 +82,54 @@ into a slot a nomination already owns. It composes with an ordinary
 it, so both mechanisms govern the same lineup without either weakening the
 other. See [`opening-round-deferred-selection.md`](opening-round-deferred-selection.md).
 
+## `open` vs. `live`: two independent dimensions (issue #144)
+
+A BBBFFL round's persisted lifecycle
+([`competition-lifecycle.md`](competition-lifecycle.md)) and its
+position-level lock state ([`lockouts.md`](lockouts.md)) answer two
+different questions, and conflating them was issue #144's defect:
+
+- **Lifecycle** (`open` -> `live` -> `review` -> `final`) answers "is
+  ordinary lineup submission in scope for this round at all?" `live` means
+  the round's first AFL match has started -- nothing more.
+- **Position-level lock state** (`app.lockouts`) answers "is *this
+  particular* position, right now, legal to change?" It is governed
+  entirely by the round's configured selective/main trigger plan, never by
+  the round's own lifecycle field.
+
+`_finalize_submission` (the one core `submit`/`submit_positions` share)
+therefore accepts an ordinary submission attempt for a round in either
+`open` or `live`, and -- unchanged from before this issue -- always
+delegates the actual per-position decision to `lock_guard`. A round
+becoming `live` at its first AFL match does **not** itself freeze
+submission: staged lockout means most positions are typically still
+individually editable for a while afterwards, and the round should reflect
+that accurately rather than staying artificially `open` until the main
+lockout. `review` and `final` remain outside the states an ordinary
+submission accepts at all, regardless of `lock_guard`.
+
+Because `lock_guard` is the *only* thing standing between a `live` round
+and an unrestricted rewrite of every position, `_finalize_submission`
+fails closed if a round is `live` and no `lock_guard` was supplied at
+all -- every production submission source (`app.coach_lineup`,
+`app.lineup_proxy`, `app.carry_forward`) always supplies a real one built
+from `app.lockouts.LockoutRepository.guard`, composed with
+`OpeningRoundSelectionGuard` where a deferred nomination also applies; this
+is a defensive invariant for any future submission source, not a change to
+those paths. This rule applies uniformly to the coach's own submission,
+scorer/admin/replay-operator proxy submission, and carry-forward -- there is
+one authoritative rule (`app.lineups.ORDINARY_SUBMISSION_ALLOWED_STATES`),
+never a per-route re-implementation of the lifecycle gate.
+
 ## Authorised correction of an already-locked lineup (issue #137)
 
 Ordinary submission (`submit`/`submit_positions`, whichever `source_type`)
 always goes through `lock_guard` and always requires the round to be
-`open` -- neither of those loosens for a coach, a scorer/admin proxy
-entry, carry-forward, or any future ordinary source. That is deliberate:
-none of them may ever place or move a player into an already-locked
-position, no matter who is acting.
+`open` or `live` (issue #144) -- neither of those loosens for a coach, a
+scorer/admin proxy entry, carry-forward, or any future ordinary source.
+That is deliberate: none of them may ever place or move a player into an
+already-locked position, no matter who is acting or which lifecycle state
+the round is in.
 
 Real competitions still occasionally need exactly that: a coach names a
 player in the wrong position in a league-chat message, or a scorer

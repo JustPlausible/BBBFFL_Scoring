@@ -26,6 +26,27 @@ an exact copy of a prior round's submitted lineup) and `app.lineup_proxy`
 submissions that go through the ordinary draft (`source_type=
 "scorer_proxy"`) may use either, but a source that must not read/displace
 the entry's own private draft always uses `submit_positions`.
+
+## Round lifecycle vs. position-level lock state (issue #144)
+
+`ORDINARY_SUBMISSION_ALLOWED_STATES` is the round-lifecycle gate ("is
+ordinary submission even in scope for this round at all"), and it is
+deliberately coarser than the position-level lock decision `lock_guard`
+makes ("is *this particular* change legal right now"). A BBBFFL round
+becomes `live` the instant its first AFL match begins, but staged lockout
+(see app/lockouts.py) means most positions typically remain individually
+editable for a while after that -- `live` is a fact about play having
+started somewhere, never a global submission freeze. `_finalize_submission`
+therefore accepts an ordinary submission for either `"open"` or `"live"`,
+and always delegates the actual per-position accept/reject decision to
+`lock_guard`, unchanged. Because that delegation is the *only* thing
+standing between a `live` round and an unrestricted rewrite of every
+position, `_finalize_submission` also refuses outright (fails closed) if a
+round is `live` and no `lock_guard` was supplied -- an ordinary submission
+source can never silently skip position-level enforcement just because it
+forgot to pass one. `"review"` and `"final"` remain outside
+`ORDINARY_SUBMISSION_ALLOWED_STATES` entirely: ordinary submission stays
+closed there regardless of any lock_guard.
 """
 
 import json
@@ -46,6 +67,17 @@ POSITIONS = ("F1", "F2", "F3", "M1", "M2", "M3", "Ruck", "Tackler", "Interchange
 # already-locked position -- see `submit_correction` below.
 SUBMISSION_SOURCES = frozenset({"coach", "scorer_proxy", "carry_forward", "system_derived", "scorer_correction"})
 CORRECTION_SOURCE_TYPE = "scorer_correction"
+# Ordinary submission (coach, scorer/admin proxy, carry-forward) is
+# permitted while the round is "open" (before any AFL match has started) or
+# "live" (issue #144: at least one AFL match has started, but staged
+# position-level lockout -- app/lockouts.py -- may still leave most
+# positions individually editable). Every "live" submission still passes
+# through the caller-supplied `lock_guard` exactly as it always has; this
+# frozenset only ever widens *which rounds* an ordinary submission attempt
+# is in scope for, never which positions within one are legal to change.
+# "review" and "final" are deliberately excluded: ordinary submission stays
+# closed once a round moves past ordinary play, regardless of lock_guard.
+ORDINARY_SUBMISSION_ALLOWED_STATES = frozenset({"open", "live"})
 # A correction is permitted for any round state an ordinary submission is
 # not yet frozen out of publication for -- "open", "live" (main/selective
 # lockout already active) and "review" (calculated but not yet signed off).
@@ -461,7 +493,8 @@ class WeeklyLineupRepository:
         source_detail,
         reason,
         lock_guard,
-        allowed_states=frozenset({"open"}),
+        allowed_states=ORDINARY_SUBMISSION_ALLOWED_STATES,
+        require_lock_guard_when_live=True,
         correlation_id=None,
     ):
         lineup_id = lineup["lineup_id"]
@@ -483,6 +516,19 @@ class WeeklyLineupRepository:
                     "correction workflow (app.round_review.attempt_correction) instead"
                 )
             raise LineupIntegrityError("BBBFFL round does not currently permit submission")
+        if lifecycle["state"] == "live" and require_lock_guard_when_live and lock_guard is None:
+            # issue #144: "live" is never itself a global submission lock,
+            # but the only thing that keeps it from becoming one in practice
+            # is `lock_guard` actually running on every submission attempt.
+            # An ordinary submission source that omitted one while the round
+            # is live would otherwise be able to rewrite every position --
+            # including ones an activated trigger has already locked -- with
+            # no enforcement at all. Fail closed rather than trust the
+            # caller silently opted out of position-level enforcement.
+            raise LineupIntegrityError(
+                "a submission while the BBBFFL round is live requires an active position-level lock "
+                "guard (see app.lockouts.LockoutRepository.guard); none was supplied"
+            )
         self._validate_players(conn, lineup["season_id"], positions, lock=True)
         self._validate_ownership(conn, lineup["season_entry_id"], positions)
         if lock_guard is not None:
@@ -686,6 +732,7 @@ class WeeklyLineupRepository:
                 reason=reason,
                 lock_guard=None,
                 allowed_states=CORRECTION_ALLOWED_STATES,
+                require_lock_guard_when_live=False,
                 correlation_id=correlation_id,
             )
             correction_id, now = str(uuid4()), _now()

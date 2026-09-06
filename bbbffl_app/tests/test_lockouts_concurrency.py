@@ -15,6 +15,7 @@ from threading import Barrier
 import pytest
 
 from app.afl_client import Match, Team
+from app.competition_lifecycle import CompetitionLifecycleRepository
 from app.db import connect
 from app.lineups import LineupConflictError, WeeklyLineupRepository
 from app.lockouts import (
@@ -167,6 +168,93 @@ def test_late_edit_races_a_concurrent_lock_observation_and_fails_safely(postgres
         "SELECT season_player_id FROM weekly_lineup_lock WHERE lineup_id=? AND position='F1'", (draft.lineup_id,)
     ).fetchall()
     assert [row["season_player_id"] for row in locks] == [incumbent.season_player_id]
+
+
+def test_trigger_activation_races_a_live_round_submission_and_fails_closed(postgres_url):
+    """Issue #144: ordinary submission is now legal while the round
+    lifecycle is `live`, not only `open` -- but every `live` submission
+    still passes through the same authoritative `lock_guard` as before.
+    This proves that relaxing the lifecycle gate did not reopen the race
+    window #34 originally closed: with the round explicitly transitioned to
+    `live` (not left at `open`, unlike the equivalent #34-era coverage
+    above), a submission attempting to move a now-started position races a
+    concurrent, independent observation that durably materializes the very
+    trigger activation the submission depends on. The submission must never
+    commit against a position that has become locked, whichever side wins
+    the race to record that activation first."""
+    db, round_, entries, scope, incumbent, challenger = postgres_context(postgres_url, 2405)
+    CompetitionLifecycleRepository(db).transition(round_.bbbffl_round_id, "live")
+    reader_db = connect(postgres_url)
+    lineups = WeeklyLineupRepository(db)
+    pre_lock_guard = LockoutRepository(db).guard(
+        match_facts=FixedMatchFacts(), evaluation_at=START - timedelta(minutes=5)
+    )
+    draft = lineups.save_draft(
+        scope["season_id"],
+        scope["competition_id"],
+        round_.bbbffl_round_id,
+        entries[0].season_entry_id,
+        {"F1": incumbent.season_player_id},
+        expected_revision=0,
+    )
+    submitted = lineups.submit(
+        draft.lineup_id,
+        expected_draft_revision=draft.revision,
+        expected_submission_version=0,
+        lock_guard=pre_lock_guard,
+    )
+
+    edit = lineups.save_draft(
+        scope["season_id"],
+        scope["competition_id"],
+        round_.bbbffl_round_id,
+        entries[0].season_entry_id,
+        {"F1": challenger.season_player_id},
+        expected_revision=draft.revision,
+    )
+    post_lock_guard = LockoutRepository(db).guard(
+        match_facts=FixedMatchFacts(), evaluation_at=START + timedelta(minutes=1)
+    )
+
+    def submit_attempt():
+        try:
+            lineups.submit(
+                edit.lineup_id,
+                expected_draft_revision=edit.revision,
+                expected_submission_version=submitted.version,
+                lock_guard=post_lock_guard,
+            )
+            return "committed"
+        except LockedSelectionError:
+            return "locked"
+
+    def concurrent_trigger_activation():
+        # The same read a coach/scorer page load performs -- durably
+        # materializes the round's trigger activation independently of,
+        # and concurrently with, the racing submission above.
+        view = LockoutRepository(reader_db).lock_state(
+            draft.lineup_id,
+            round_.bbbffl_round_id,
+            entries[0].season_entry_id,
+            {"F1": incumbent.season_player_id},
+            match_facts=FixedMatchFacts(),
+            evaluation_at=START + timedelta(minutes=1),
+        )
+        return view.positions["F1"].state
+
+    submit_result, activation_result = race([submit_attempt, concurrent_trigger_activation])
+    assert submit_result == "locked"
+    assert activation_result == LockState.LOCKED
+
+    effective = lineups.get_effective_submission(draft.lineup_id)
+    assert effective.version == submitted.version
+    assert effective.positions["F1"] == incumbent.season_player_id
+    locks = db.execute(
+        "SELECT season_player_id FROM weekly_lineup_lock WHERE lineup_id=? AND position='F1'", (draft.lineup_id,)
+    ).fetchall()
+    assert [row["season_player_id"] for row in locks] == [incumbent.season_player_id]
+    # The race itself never touches the round's own lifecycle state.
+    assert CompetitionLifecycleRepository(db).get_round(round_.bbbffl_round_id).state == "live"
 
 
 def test_concurrent_first_observations_of_a_lock_converge_to_one_record(postgres_url):

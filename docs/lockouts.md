@@ -380,11 +380,12 @@ club/match to resolve, so there is nothing for a selective or main trigger to
 lock, and nothing is ever invented to fill the gap. Concretely:
 
 - a vacant position stays open to a later partial resubmission for as long
-  as the round's own lifecycle remains `open`, whatever the round's
-  selective/main trigger activation state -- this is a deliberate choice not
-  to pre-empt the still-unresolved "partial early submission followed by no
-  main submission" competition rule (`docs/plans/2027-season-decisions.md`)
-  by inventing a lock boundary for an empty slot;
+  as ordinary submission remains in scope for the round at all -- `open` or
+  `live` (issue #144) -- whatever the round's selective/main trigger
+  activation state; this is a deliberate choice not to pre-empt the
+  still-unresolved "partial early submission followed by no main submission"
+  competition rule (`docs/plans/2027-season-decisions.md`) by inventing a
+  lock boundary for an empty slot;
 - filling a vacant position is still governed by the *new* player's own
   match: `guard_transition`'s existing "introducing a genuinely new player"
   rule (see above) applies identically whether the position was previously
@@ -412,6 +413,53 @@ module's ordinary evaluation, so a deferred player -- whose club has no AFL
 match in the target round by construction -- never has to be resolved
 through `resolve_match` at all, and every other position keeps its normal
 staged-lock behaviour untouched.
+
+## Round lifecycle and position-level lock state are independent (issue #144)
+
+A staged round has two separate dimensions, and conflating them was issue
+#144's defect:
+
+- **Round lifecycle** (`open` -> `live` -> `review` -> `final`,
+  [`competition-lifecycle.md`](competition-lifecycle.md)) is a coarse
+  bridge fact: `live` means the round's first AFL match has started.
+  Nothing more.
+- **Position-level lock state** (this module) is the fine-grained fact:
+  whether *this particular* position is currently legal to change, decided
+  entirely by the round's configured selective/main trigger plan.
+
+Before issue #144, `app.lineups.WeeklyLineupRepository._finalize_submission`
+only permitted an ordinary submission while the round's lifecycle was
+`open` -- so a round advancing to `live` at its first AFL match rejected
+*every* ordinary submission outright, before this module's per-position
+`lock_guard` ever ran. That was wrong: staged lockout is specifically
+designed so most positions remain individually editable well after the
+round goes `live`, and the round should report `live` accurately (play has
+started) rather than being held artificially `open` to keep ordinary
+submission working.
+
+`_finalize_submission` now accepts an ordinary submission attempt for a
+round in either `open` or `live`
+(`app.lineups.ORDINARY_SUBMISSION_ALLOWED_STATES`), and -- exactly as
+before -- always delegates the actual accept/reject decision for each
+position to this module's `lock_guard`. Nothing about trigger evaluation,
+irreversibility, materialization ordering or concurrency handling
+(everything above) changed: the only thing that changed is *which round
+lifecycle states an ordinary submission attempt is in scope for at all*.
+`review` and `final` remain entirely outside that scope, so ordinary
+submission stays closed there regardless of lock state. Because
+`lock_guard` is the sole thing standing between a `live` round and an
+unguarded rewrite of every position, `_finalize_submission` also refuses
+outright if a round is `live` and no `lock_guard` was supplied -- a
+defensive invariant, since every production submission source already
+supplies a real one (see [`weekly-lineups.md`](weekly-lineups.md)'s
+"`open` vs. `live`" section).
+
+The authorised locked-lineup correction workflow (issue #137, see
+[`weekly-lineups.md`](weekly-lineups.md#authorised-correction-of-an-already-locked-lineup-issue-137))
+is unaffected: it was already permitted during `live` (and `review`) before
+issue #144, and remains the one path that can override an already-locked
+position -- issue #144 only widens *ordinary* submission's own lifecycle
+gate to match the position-level facts this module has always enforced.
 
 ## Non-goals of this issue
 

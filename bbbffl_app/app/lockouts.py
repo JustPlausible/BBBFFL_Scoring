@@ -957,7 +957,8 @@ class LockoutRepository:
             # trigger -- selective or main -- to lock, and no lock boundary
             # is ever invented for it (issue #98, docs/lockouts.md
             # "Deliberately vacant positions"). It stays editable for as
-            # long as the round itself remains open; `guard_transition`'s
+            # long as ordinary submission remains in scope for the round at
+            # all -- "open" or "live" (issue #144); `guard_transition`'s
             # new-player rule still governs whichever player, if any, is
             # later introduced here.
             return PositionLockState(position, None, LockState.EDITABLE, "empty", None, None, None, False)

@@ -293,17 +293,17 @@ def test_part_3_partial_submit_selective_lock_fill_vacancy_resubmit_then_main_lo
     # coach reverting their own attempted edit would.
     assert post(client, url, cookies, second.positions, "save").status_code == 303
 
-    # 4. Main activates. The two *named* positions (F1, M2) lock; the seven
-    # still-vacant positions have no player -- hence no match -- for any
-    # trigger to lock, so they keep reporting editable/"empty" (see
-    # docs/lockouts.md, "Deliberately vacant positions"). Nothing is ever
-    # invented into them: Main still refuses to let a *new* player be
-    # introduced there (checked below), it just never fabricates a lock
-    # reason for an empty slot.
+    # 4. Main activates. The two *named* positions (F1, M2) lock exactly as
+    # before; the seven still-vacant positions have no player -- hence no
+    # match -- for any trigger to lock, so nothing is ever fabricated for
+    # them (see docs/lockouts.md, "Deliberately vacant positions"). But
+    # Main's own activation is itself authority enough to make *every*
+    # remaining ordinary position immutable, vacant ones included (issue
+    # #155) -- so all nine positions now render locked, none editable.
     reload_stage(client, result, "main")
     final_page = client.get(url, cookies=cookies)
-    assert final_page.text.count('class="badge locked"') == 2
-    assert final_page.text.count('<span class="badge">Editable</span>') == len(POSITIONS) - 2
+    assert final_page.text.count('class="badge locked"') == len(POSITIONS)
+    assert final_page.text.count('<span class="badge">Editable</span>') == 0
     final = effective(database, lineup_id)
     assert final.version == 2
     assert final.positions["F1"] == full["F1"] and final.positions["M2"] == full["M2"]

@@ -367,18 +367,59 @@ class CoachLineupService:
         # until the coach edits it; submission validation remains authoritative.
         squad = self.ownership.current_squad(entry["season_entry_id"])
         players = [self.pool.get_by_id(period.season_player_id) for period in squad]
-        selected_players = {
-            position: self.pool.get_by_id(player_id) if player_id else None
-            for position, player_id in draft.positions.items()
-        }
         deferred = {
             position: self.nominations.deferred_context(round_id, entry["season_entry_id"], position)
             for position in POSITIONS
         }
         deferred = {key: value for key, value in deferred.items() if value}
+        # Issue #155 (Codex review, PR #157): immutability must be evaluated
+        # against the lineup's *effective submission*, never a private draft
+        # that may hold a rejected, never-submitted attempt -- e.g. the
+        # coach's own save-then-submit into a position Main has already
+        # locked. Evaluating straight off `draft.positions` would otherwise
+        # echo that rejected pick back as though it were the authoritative
+        # locked value, exactly the class of bug issue #138 already fixed
+        # for the delegated surface (`app.routes.delegated_operations.
+        # _lineup_view`). A still-editable position keeps reflecting the
+        # coach's own current draft pick live -- there is nothing
+        # authoritative to defer to yet.
+        submitted_positions = submission.positions if submission is not None else None
+        authoritative_positions = submitted_positions if submitted_positions is not None else draft.positions
         locks = resolve_position_locks(
-            self.lockouts, draft.lineup_id, round_id, entry["season_entry_id"], draft.positions, self.match_facts
+            self.lockouts,
+            draft.lineup_id,
+            round_id,
+            entry["season_entry_id"],
+            authoritative_positions,
+            self.match_facts,
         )
+        if submitted_positions is not None and draft.positions != submitted_positions:
+            draft_locks = resolve_position_locks(
+                self.lockouts, draft.lineup_id, round_id, entry["season_entry_id"], draft.positions, self.match_facts
+            )
+            locks = {
+                **locks,
+                **{
+                    position: draft_locks[position]
+                    for position, lock in locks.items()
+                    if lock.state == LockState.EDITABLE and position in draft_locks
+                },
+            }
+        # Built from `locks`, not `draft.positions`, for the same reason:
+        # a locked position's displayed occupant must be the authoritative
+        # selection, never a divergent, unsubmitted draft value. An
+        # editable position's `PositionLockState.season_player_id` already
+        # equals the draft's own current pick (see above), so this is a
+        # no-op there. Falls back to the draft's own value for a position
+        # `locks` has no entry for at all (never true in production --
+        # `resolve_position_locks` always covers every position it is
+        # given -- but some unit tests stub `lockouts.lock_state` down to
+        # an empty read model for concerns unrelated to lockout evaluation).
+        selected_players = {}
+        for position in POSITIONS:
+            lock = locks.get(position)
+            player_id = lock.season_player_id if lock is not None else draft.positions.get(position)
+            selected_players[position] = self.pool.get_by_id(player_id) if player_id else None
         if validation is None and submission is not None:
             validation = LineupValidationService(self.database, self.afl_client).validate_submission(
                 draft.lineup_id, draft.positions

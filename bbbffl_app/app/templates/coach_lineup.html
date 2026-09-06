@@ -49,7 +49,11 @@ select { width:100%; min-height:48px; border:1px solid #59636e; border-radius:9p
 <article class="slot">
  <div class="slot-head"><span class="position">{{ position }}</span>{% if deferred %}<span class="badge locked">Opening Round · locked</span>{% elif lock and lock.state.value != 'editable' %}<span class="badge locked">{{ lock.state.value|capitalize }}</span>{% else %}<span class="badge">Editable</span>{% endif %}</div>
  {% if deferred or (lock and lock.state.value != 'editable') %}
-   <input type="hidden" name="position_{{ position }}" value="{{ selected or '' }}">
+   {# Issue #155: the hidden (resubmitted) value for a locked position must
+      be the authoritative lock's own selection, never a possibly-divergent
+      raw draft value -- `deferred` is unaffected (a deferred slot's draft
+      value is already forced to match its nomination at save time). #}
+   <input type="hidden" name="position_{{ position }}" value="{{ ((selected if deferred else (lock.season_player_id if lock else selected)) or '') }}">
    <select disabled aria-label="{{ position }} locked selection"><option>{% if selected_player %}{{ selected_player.display_name }} — {{ selected_player.afl_team_name or 'Club unknown' }}{% else %}Empty{% endif %}</option></select>
  {% else %}
    <select name="position_{{ position }}" aria-label="Select player for {{ position }}"><option value="">Empty — choose later</option>{% if selected_player and selected_player not in lineup.players %}<option value="{{ selected }}" selected>{{ selected_player.display_name }} — no longer in your owned squad; choose a replacement</option>{% endif %}{% for player in lineup.players %}<option value="{{ player.season_player_id }}" {% if player.season_player_id == selected %}selected{% endif %}>{{ player.display_name }} — {{ player.afl_team_name or 'Club unknown' }}</option>{% endfor %}</select>

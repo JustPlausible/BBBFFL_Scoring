@@ -38,8 +38,11 @@ from tests.test_lockouts import (
     EARLY_MATCH_ID,
     EARLY_START,
     LATE_HOME,
+    LATE_MATCH_ID,
+    LATE_START,
     FakeMatchFacts,
     acquire,
+    configure_main,
     configure_selective,
     context,
     edit_draft,
@@ -694,6 +697,68 @@ def test_correction_materializes_lock_evidence_when_none_exists_yet():
         (draft.lineup_id,),
     ).fetchone()
     assert lock_row["season_player_id"] == tackler.season_player_id
+
+
+def test_correction_of_a_main_locked_vacancy_preserves_trigger_provenance_without_a_lock_row():
+    """Issue #155 (Codex review, PR #157): a position that was a deliberate
+    vacancy when Main activated never gets its own `weekly_lineup_lock` row
+    -- there is no player to hold one (`app.lockouts._evaluate_position`
+    never fabricates one). A correction that populates such a vacancy must
+    still record it as having overridden a lock: `was_locked` must be True,
+    with `lock_reason="main_lockout_triggered"` and `effective_lock_at` set
+    to the main trigger's own activation instant -- never silently
+    `was_locked=False` just because `weekly_lineup_lock` has no matching
+    row, and never a fabricated `afl_match_id`/`observed_status` (there is
+    no player-level match evidence to attribute this to)."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_selective(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], key="early-1", sequence=1)
+    configure_main(triggers, round_.bbbffl_round_id, [LATE_MATCH_ID])
+    tackler = acquire(pool, ownership, scope, entry, 1, EARLY_HOME, name="James Rowbottom")
+    replacement = acquire(pool, ownership, scope, entry, 2, LATE_HOME, name="Post-Main Correction Target")
+    lineups = WeeklyLineupRepository(db)
+    matches = FakeMatchFacts(ALL_MATCHES)
+    draft, submitted = establish(lineups, round_, entry, scope, {"Tackler": tackler.season_player_id})
+    assert submitted.positions["Interchange"] is None
+
+    guard = LockoutRepository(db).guard(match_facts=matches, evaluation_at=LATE_START)
+    # No prior `lock_state`/materialize call: the main trigger's own
+    # activation is not yet durably recorded either -- `submit_correction`
+    # must materialize it itself via `lock_guard`, exactly like the
+    # player-level case above.
+    correction = lineups.submit_correction(
+        draft.lineup_id,
+        {"Interchange": replacement.season_player_id},
+        expected_submission_version=submitted.version,
+        actor=SCORER,
+        reason="league confirmed Interchange was actually filled after main lockout",
+        lock_guard=guard,
+    )
+
+    interchange_slot = next(s for s in correction.slots if s.position == "Interchange")
+    assert interchange_slot.was_locked is True
+    assert interchange_slot.lock_reason == "main_lockout_triggered"
+    assert interchange_slot.effective_lock_at == LATE_START.isoformat()
+    assert interchange_slot.afl_match_id is None
+    assert interchange_slot.observed_status is None
+    assert interchange_slot.previous_season_player_id is None
+    assert interchange_slot.corrected_season_player_id == replacement.season_player_id
+
+    events = AuditEventRepository(db).list_events(
+        entity_type=ENTITY_TYPE_LINEUP, entity_id=draft.lineup_id, action=LINEUP_CORRECTED
+    )
+    assert "Interchange" in events[0].payload["locked_positions_overridden"]
+
+    # No player-level lock evidence is ever fabricated for this position --
+    # the main trigger's own activation record is the only durable fact
+    # backing this correction's provenance.
+    assert (
+        db.execute(
+            "SELECT 1 FROM weekly_lineup_lock WHERE lineup_id=? AND position='Interchange'", (draft.lineup_id,)
+        ).fetchone()
+        is None
+    )
 
 
 def test_correction_bumps_matchup_review_version_closing_the_signoff_race():

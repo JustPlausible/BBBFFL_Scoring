@@ -1085,14 +1085,33 @@ class LockoutRepository:
                     True,
                 )
             # A genuine deliberate vacancy (never previously locked here)
-            # has no AFL club/match to resolve, so there is nothing for any
-            # trigger -- selective or main -- to lock, and no lock boundary
-            # is ever invented for it (issue #98, docs/lockouts.md
-            # "Deliberately vacant positions"). It stays editable for as
-            # long as ordinary submission remains in scope for the round at
-            # all -- "open" or "live" (issue #144); `guard_transition`'s
-            # new-player rule still governs whichever player, if any, is
-            # later introduced here.
+            # has no AFL club/match to resolve, so there is nothing a
+            # *selective* trigger -- always scoped to specific AFL matches
+            # -- could ever lock here (issue #98, docs/lockouts.md
+            # "Deliberately vacant positions"): an unrelated vacancy stays
+            # editable through any number of selective activations.
+            #
+            # The round's *main* trigger is different: once activated, it
+            # freezes every remaining ordinary position at once, "regardless
+            # of whether that player's own AFL match has started" (this
+            # module's docstring, 'The round lockout plan') -- and a vacancy
+            # is exactly such a remaining position. There is still no player
+            # and no AFL match to resolve, so nothing is fabricated and
+            # nothing is written to `weekly_lineup_lock` (that table's
+            # `season_player_id` column is NOT NULL -- see migration 0012 --
+            # there is no row that could ever represent an empty position);
+            # the activated main trigger itself is reported as the sole,
+            # already-durable authority making this vacancy immutable
+            # (issue #155). `guard_transition` below independently refuses
+            # any attempt to populate this position once main has activated.
+            if coverage.main_activated:
+                return PositionLockState(
+                    position, None, LockState.LOCKED, "main_lockout_triggered", None, None, None, False
+                )
+            # It stays editable for as long as ordinary submission remains
+            # in scope for the round at all -- "open" or "live" (issue
+            # #144); `guard_transition`'s new-player rule still governs
+            # whichever player, if any, is later introduced here.
             return PositionLockState(position, None, LockState.EDITABLE, "empty", None, None, None, False)
         row = existing.get(position)
         if row is not None and row["season_player_id"] == season_player_id:

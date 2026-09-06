@@ -370,22 +370,19 @@ fact is not itself a privileged decision. `LockoutTriggerRepository.create`/
 configuring the lockout plan is itself a privileged BBBFFL competition
 decision, not an observation.
 
-## Deliberately vacant positions (issue #98)
+## Deliberately vacant positions (issue #98, revised by issue #155)
 
 A submitted position may deliberately hold no player (`season_player_id`
 `null`) -- a legitimate partial submission, never malformed input (see
-`docs/weekly-lineups.md`). `_evaluate_position` treats a vacant position as
-`editable`/`"empty"` unconditionally: with no selected player there is no AFL
-club/match to resolve, so there is nothing for a selective or main trigger to
-lock, and nothing is ever invented to fill the gap. Concretely:
+`docs/weekly-lineups.md`). With no selected player there is no AFL club/
+match to resolve, so a *selective* trigger -- always scoped to specific AFL
+matches -- can never lock a vacancy: `_evaluate_position` never invents a
+match for one, and an unrelated vacancy stays editable through any number
+of selective activations. Concretely:
 
 - a vacant position stays open to a later partial resubmission for as long
   as ordinary submission remains in scope for the round at all -- `open` or
-  `live` (issue #144) -- whatever the round's selective/main trigger
-  activation state; this is a deliberate choice not to pre-empt the
-  still-unresolved "partial early submission followed by no main submission"
-  competition rule (`docs/plans/2027-season-decisions.md`) by inventing a
-  lock boundary for an empty slot;
+  `live` (issue #144) -- until the round's *main* trigger activates;
 - filling a vacant position is still governed by the *new* player's own
   match: `guard_transition`'s existing "introducing a genuinely new player"
   rule (see above) applies identically whether the position was previously
@@ -396,10 +393,42 @@ lock, and nothing is ever invented to fill the gap. Concretely:
   can never revert a locked selection back to vacant (`proposed_player !=
   previous_player` covers `None` like any other change).
 
-Reaching a round's main trigger therefore never locks a still-vacant
-position, and never infers or invents the player that was never submitted
-there -- it simply stays vacant, eligible for Interchange coverage
-(`app.round_review`).
+**Main is different.** Once the round's main trigger activates, it "locks
+at once, in every lineup for the round ... regardless of whether that
+player's own AFL match has started" (see this document's opening section)
+-- and a vacancy is exactly such a remaining position. Issue #155 corrected
+`_evaluate_position` to honour this for vacancies too: once
+`TriggerCoverage.main_activated` is true, a position with no selected
+player is reported `locked`/`"main_lockout_triggered"` -- the activated main
+trigger itself is the authoritative reason, never a fabricated player-level
+lock. Concretely:
+
+- **nothing is ever persisted to `weekly_lineup_lock` for a vacant
+  position** -- that table's `season_player_id` column is `NOT NULL`
+  (migration 0012), so there is no row that could ever represent an empty
+  position, and `_evaluate_position`'s vacancy branch never calls
+  `_insert_lock`. `PositionLockState.irreversible` therefore always reads
+  `False` for a main-locked vacancy: the durable, already-irreversible fact
+  making it immutable is the trigger's own activation row
+  (`bbbffl_round_lockout_trigger_activation`), not a `weekly_lineup_lock`
+  row, which simply does not exist for this position and never will;
+- the Coach and delegated/proxy weekly-lineup surfaces both read this
+  through the same shared `resolve_position_locks`/`describe_ordinary_
+  position` boundary (`app.coach_lineup`), so both render the position as
+  main-locked, disable its control, and keep its human-readable value
+  `Vacant` -- never an enabled, editable dropdown;
+- `guard_transition` already refused to let a new player be introduced
+  through a vacancy whose *own* match was covered by an activated trigger;
+  this fix makes the *read model* agree before that point is even reached
+  -- once main has activated, the vacancy's own evaluated state is `locked`,
+  so any attempt to change it away from `None` is rejected in
+  `guard_transition`'s first pass, atomically with every other position in
+  the same submission attempt, for every ordinary mutation path (coach
+  submit/resubmit, delegated/proxy submission, carry-forward).
+
+Reaching a round's main trigger therefore still never infers or invents the
+player that was never submitted there -- but it does make that empty slot
+immutable, exactly like every other remaining ordinary position.
 
 ## Coexistence with Opening Round deferred locking (issue #69)
 

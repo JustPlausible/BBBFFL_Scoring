@@ -195,7 +195,7 @@ def test_selective_boundary_locks_covered_players_leaves_uncovered_editable():
     assert locks["M1"]["state"] == "editable"
 
 
-def test_main_lockout_locks_every_selected_ordinary_player_and_preserves_vacancies():
+def test_main_lockout_locks_every_selected_ordinary_player_and_the_remaining_vacancy():
     db, _, round_, entries, scope_row, pool, ownership = lockout_context()
     entry = entries[0]
     triggers = LockoutTriggerRepository(db)
@@ -234,12 +234,99 @@ def test_main_lockout_locks_every_selected_ordinary_player_and_preserves_vacanci
     locks = _lock_by_position(view)
     assert locks["F1"]["state"] == "locked" and locks["F1"]["lock_type"] == "selective_trigger"
     assert locks["M1"]["state"] == "locked" and locks["M1"]["lock_type"] == "main_trigger"
-    # A deliberately vacant position keeps its documented semantics --
-    # editable/"empty", never invented into a fabricated lock.
-    assert locks["M2"]["state"] == "editable"
-    assert locks["M2"]["lock_type"] == "vacant"
-    assert locks["M2"]["reason_code"] == "empty"
+    # Issue #155: a deliberately vacant position is never invented into a
+    # fabricated player-level lock, but Main lockout still makes it
+    # immutable -- every *remaining* ordinary position locks the instant
+    # Main activates, vacant ones included. It renders as main-locked, its
+    # control disabled, and its human-readable value stays "Vacant"
+    # (`season_player_id` stays `None`) -- never as an editable, enabled
+    # dropdown.
+    assert locks["M2"]["state"] == "locked"
+    assert locks["M2"]["editable"] is False
+    assert locks["M2"]["lock_type"] == "main_trigger"
+    assert locks["M2"]["reason_code"] == "main_lockout_triggered"
     assert locks["M2"]["season_player_id"] is None
+    assert locks["M2"]["irreversible"] is False
+
+
+def test_delegated_proxy_submission_cannot_populate_a_vacancy_after_main_lockout():
+    """Issue #155: the delegated/proxy submission path (`LineupProxyService`,
+    the exact service `app.routes.delegated_operations.submit` calls) must
+    reject -- atomically, with the prior authoritative submission
+    unchanged -- an attempt to introduce a player into a position that was
+    a deliberate vacancy right through Main lockout. A private draft save
+    is not itself an authoritative mutation and is allowed to hold the
+    attempted (never-submitted) change; only `submit` is the enforcement
+    boundary, and it must not provide a bypass."""
+    from app.lineup_proxy import LineupProxyService
+    from app.lockouts import LockoutRepository, RoundMatchFactsProvider
+    from app.round_mapping import RoundMappingRepository
+
+    db, _, round_, entries, scope_row, pool, ownership = lockout_context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_selective(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], key="early-1", sequence=1)
+    configure_main(triggers, round_.bbbffl_round_id, [LATE_MATCH_ID], sequence=2)
+    early = acquire(pool, ownership, scope_row, entry, 1, EARLY_HOME)
+    late_filler = acquire(pool, ownership, scope_row, entry, 2, UNCOVERED_HOME, name="Post-Main Vacancy Filler")
+    submitted = _save_and_submit(
+        db,
+        round_,
+        scope_row,
+        entry,
+        {"F1": early.season_player_id},
+        matches=ALL_MATCHES,
+        evaluation_at=EARLY_START - timedelta(minutes=5),
+    )
+    assert submitted.positions["M2"] is None
+
+    lineup_id = db.execute(
+        "SELECT lineup_id FROM weekly_lineup WHERE bbbffl_round_id=? AND season_entry_id=?",
+        (round_.bbbffl_round_id, entry.season_entry_id),
+    ).fetchone()["lineup_id"]
+
+    class _Facts:
+        def matches_for(self, bbbffl_round_id):
+            return ALL_MATCHES
+
+    proxy = LineupProxyService(db)
+    attempted_fill = {"F1": early.season_player_id, "M2": late_filler.season_player_id}
+    # The private draft itself is not the authoritative record -- saving it
+    # succeeds (a scorer/operator may need to stage a candidate change),
+    # but that alone must never move the effective/submitted lineup.
+    proxy.create_or_amend(
+        scope_row["season_id"],
+        scope_row["competition_id"],
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        attempted_fill,
+        expected_revision=1,
+        actor=OPERATOR,
+    )
+    assert WeeklyLineupRepository(db).get_effective_submission(lineup_id).positions == submitted.positions
+
+    draft = WeeklyLineupRepository(db).get_draft(
+        scope_row["season_id"], scope_row["competition_id"], round_.bbbffl_round_id, entry.season_entry_id
+    )
+    main_guard = LockoutRepository(db).guard(
+        match_facts=RoundMatchFactsProvider(RoundMappingRepository(db), afl_client(ALL_MATCHES)),
+        evaluation_at=LATE_START,
+    )
+    with pytest.raises(LockedSelectionError, match="M2"):
+        proxy.submit(
+            lineup_id,
+            expected_draft_revision=draft.revision,
+            expected_submission_version=submitted.version,
+            actor=OPERATOR,
+            reason="issue #155 delegated proxy post-main vacancy fill attempt",
+            lock_guard=main_guard,
+        )
+    # Rejected atomically: the prior authoritative submission survives
+    # completely unchanged, never a partial write of the attempted change.
+    final = WeeklyLineupRepository(db).get_effective_submission(lineup_id)
+    assert final.version == submitted.version
+    assert final.positions == submitted.positions
+    assert final.positions["M2"] is None
 
 
 # ---------------------------------------------------------------------------

@@ -892,12 +892,16 @@ def test_interchange_cannot_bypass_a_locked_players_match():
 # ---------------------------------------------------------------------------
 
 
-def test_vacant_position_is_fillable_before_its_boundary_and_never_invented_at_main():
+def test_vacant_position_is_fillable_before_its_boundary_and_locked_authoritative_at_main():
     """A deliberate partial submission (F1 named, everything else vacant):
     an unlocked vacancy can still be filled and resubmitted before its own
-    boundary; a locked player survives that resubmission unchanged; and a
-    position left vacant right through Main lockout is never invented into a
-    selection -- it simply stays vacant, reported `editable`/`"empty"`."""
+    boundary; a locked player survives that resubmission unchanged; a
+    position that stays vacant through only a selective activation is never
+    invented into a selection -- it simply stays vacant, reported
+    `editable`/`"empty"`; but once Main itself has activated, that same
+    vacancy becomes immutable too (issue #155) -- reported `locked`/
+    `"main_lockout_triggered"`, never a fabricated player-level lock, and
+    never presented as still-editable."""
     db, _, round_, entries, scope, pool, ownership = context()
     entry = entries[0]
     triggers = LockoutTriggerRepository(db)
@@ -961,7 +965,12 @@ def test_vacant_position_is_fillable_before_its_boundary_and_never_invented_at_m
     assert resubmitted.positions["M2"] is None
 
     # Main activates. The still-vacant M2 is never inferred into a
-    # selection -- it stays vacant/editable in the read model...
+    # selection -- no player, no AFL match, nothing invented -- but it is no
+    # longer presented as editable either: Main's own activation is now the
+    # authoritative, already-durable reason the vacancy itself is immutable
+    # (issue #155), reported without ever writing fabricated player-level
+    # evidence to `weekly_lineup_lock` (irreversible stays False -- there is
+    # no such row and never will be for this position).
     guard_main = lock_repo.guard(match_facts=matches, evaluation_at=LATE_START)
     after_main = lock_repo.lock_state(
         draft2.lineup_id,
@@ -974,9 +983,12 @@ def test_vacant_position_is_fillable_before_its_boundary_and_never_invented_at_m
     assert after_main.positions["F1"].state == LockState.LOCKED
     assert after_main.positions["M1"].state == LockState.LOCKED
     assert after_main.positions["M1"].reason == "main_lockout_triggered"
-    assert after_main.positions["M2"].state == LockState.EDITABLE and after_main.positions["M2"].reason == "empty"
+    assert after_main.positions["M2"].state == LockState.LOCKED
+    assert after_main.positions["M2"].reason == "main_lockout_triggered"
+    assert after_main.positions["M2"].season_player_id is None
+    assert after_main.positions["M2"].irreversible is False
 
-    # ...but Main lockout still refuses to let a *new* player be introduced
+    # ...and Main lockout still refuses to let a *new* player be introduced
     # into that vacancy (or anywhere else): resubmitting it unchanged
     # (still vacant) succeeds, resubmitting it with a newly-named player
     # does not.
@@ -1011,6 +1023,122 @@ def test_vacant_position_is_fillable_before_its_boundary_and_never_invented_at_m
             expected_submission_version=unchanged.version,
             lock_guard=guard_main,
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #155: main lockout must itself make an authoritative vacancy
+# immutable, without ever fabricating/persisting player-level evidence for
+# an empty position.
+# ---------------------------------------------------------------------------
+
+
+def test_vacancy_locks_at_main_without_ever_persisting_fabricated_player_evidence():
+    """Dedicated issue #155 coverage, independent of the broader progressive
+    scenario above: an intentionally vacant position (Interchange, never
+    named) read before the main trigger, after only an unrelated selective
+    trigger, and after main itself activates -- and, throughout, direct
+    proof that `weekly_lineup_lock` (whose `season_player_id` column is
+    NOT NULL -- migration 0012) never gains a row for this position, in
+    any of those three states."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_selective(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], key="early-1", sequence=1)
+    configure_main(triggers, round_.bbbffl_round_id, [LATE_MATCH_ID])
+    early = acquire(pool, ownership, scope, entry, 1, EARLY_HOME)
+    lineups = WeeklyLineupRepository(db)
+    matches = FakeMatchFacts(ALL_MATCHES)
+    lock_repo = LockoutRepository(db)
+
+    def vacancy_rows(lineup_id):
+        return db.execute(
+            "SELECT 1 FROM weekly_lineup_lock WHERE lineup_id=? AND position='Interchange'", (lineup_id,)
+        ).fetchall()
+
+    # F1 is named (and will become selectively locked); Interchange is a
+    # deliberate, never-named vacancy throughout.
+    pre_guard = lock_repo.guard(match_facts=matches, evaluation_at=EARLY_START - timedelta(days=1))
+    draft, submitted = establish(lineups, round_, entry, scope, {"F1": early.season_player_id}, guard=pre_guard)
+    assert submitted.positions["Interchange"] is None
+
+    # 1. Before any trigger: an ordinary open vacancy.
+    before = lock_repo.lock_state(
+        draft.lineup_id,
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        submitted.positions,
+        match_facts=matches,
+        evaluation_at=EARLY_START - timedelta(minutes=1),
+    )
+    assert before.positions["Interchange"].state == LockState.EDITABLE
+    assert before.positions["Interchange"].reason == "empty"
+    assert vacancy_rows(draft.lineup_id) == []
+
+    # 2. Only the unrelated selective trigger has fired: the vacancy is
+    # untouched -- it has no player, hence no match, for a match-scoped
+    # selective trigger to ever cover.
+    after_selective = lock_repo.lock_state(
+        draft.lineup_id,
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        submitted.positions,
+        match_facts=matches,
+        evaluation_at=EARLY_START + timedelta(minutes=1),
+    )
+    assert after_selective.positions["F1"].state == LockState.LOCKED
+    assert after_selective.positions["Interchange"].state == LockState.EDITABLE
+    assert after_selective.positions["Interchange"].reason == "empty"
+    assert vacancy_rows(draft.lineup_id) == []
+
+    # 3. Main activates: the read model now distinguishes this from
+    # ordinary persisted player-level lock evidence (F1's, backed by a real
+    # `weekly_lineup_lock` row) -- the vacancy is reported LOCKED with the
+    # main trigger itself as the authoritative reason, `season_player_id`
+    # still `None`, and `irreversible` False, because there is not, and can
+    # never be, a `weekly_lineup_lock` row for an empty position.
+    after_main = lock_repo.lock_state(
+        draft.lineup_id,
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        submitted.positions,
+        match_facts=matches,
+        evaluation_at=LATE_START,
+    )
+    assert after_main.positions["F1"].state == LockState.LOCKED
+    assert after_main.positions["F1"].irreversible is True
+    assert after_main.positions["Interchange"].state == LockState.LOCKED
+    assert after_main.positions["Interchange"].reason == "main_lockout_triggered"
+    assert after_main.positions["Interchange"].season_player_id is None
+    assert after_main.positions["Interchange"].afl_match_id is None
+    assert after_main.positions["Interchange"].irreversible is False
+    # The decisive check: no fabricated/persisted player-level row exists
+    # for the vacant position, even though materialization has now run
+    # against a durably-activated main trigger.
+    assert vacancy_rows(draft.lineup_id) == []
+
+    # Atomic rejection: an attempt to populate the now-immutable vacancy
+    # after main is refused wholesale, alongside everything else in the
+    # same submission -- never partially applied.
+    late_filler = acquire(pool, ownership, scope, entry, 2, LATE_HOME, name="Post-Main Interchange Filler")
+    guard_main = lock_repo.guard(match_facts=matches, evaluation_at=LATE_START)
+    draft2 = edit_draft(
+        lineups,
+        round_,
+        entry,
+        scope,
+        draft.lineup_id,
+        {"F1": early.season_player_id, "Interchange": late_filler.season_player_id},
+        from_revision=draft.revision,
+    )
+    with pytest.raises(LockedSelectionError, match="Interchange"):
+        lineups.submit(
+            draft2.lineup_id,
+            expected_draft_revision=draft2.revision,
+            expected_submission_version=submitted.version,
+            lock_guard=guard_main,
+        )
+    assert lineups.get_effective_submission(draft.lineup_id).positions == submitted.positions
+    assert vacancy_rows(draft.lineup_id) == []
 
 
 def test_clearing_an_already_locked_position_in_an_unsubmitted_draft_still_reports_it_locked():

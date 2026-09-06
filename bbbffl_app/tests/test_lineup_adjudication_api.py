@@ -24,6 +24,7 @@ from tests.test_lineup_correction_api import (
     _authenticate_plain_coach,
     _authenticate_scorer,
     _setup_round,
+    _submit_lineup,
 )
 
 ADMIN = ActorContext.anonymous_operator("admin")
@@ -92,6 +93,16 @@ def _prepare_missed_submission(db, scope, round_id, entry, lifecycle):
     return player
 
 
+class _CalculableAflClient(_OneAlreadyLiveMatchAflClient):
+    """The same always-live match, plus a (deliberately empty) player-stats
+    source -- `_OneAlreadyLiveMatchAflClient` alone is sufficient for
+    adjudication (which never calculates), but a calculation that resolves
+    a slot to this match needs `get_match_player_stats` to exist at all."""
+
+    def get_match_player_stats(self, match_id):
+        return {}
+
+
 def test_scorer_can_view_and_accept_evidenced_draft_end_to_end(adjudication_client):
     client = adjudication_client
     db = client.app.state.database
@@ -149,6 +160,88 @@ def test_scorer_can_view_and_accept_evidenced_draft_end_to_end(adjudication_clie
     assert second.status_code == 409
 
 
+def test_adjudication_response_reports_calculation_status_immediately(adjudication_client):
+    """Issue #153 acceptance: adjudication must show, in the same response
+    that reveals the new effective submission, whether calculation is
+    required for this team -- this matchup could never have been
+    calculated before (the calculation engine requires an effective
+    submission on both sides, which by definition didn't exist for a
+    missed-initial-submission team), so the honest, immediately-visible
+    signal both before and right after acceptance is `calculated: False`
+    -- never silently omitted, and never a stale value left over from
+    reading the candidate before the submission existed. Calculating the
+    matchup afterwards clears it, visible on the very next read."""
+    from app.calculations import MatchupCalculationService
+
+    client = adjudication_client
+    db = client.app.state.database
+    round_, entries, scope, lifecycle = _setup_round(db, 2902, 2902)
+    entry = entries[0]
+
+    # The calculation engine requires an effective submission on *both*
+    # sides of a matchup -- give the opponent one now, while the round is
+    # still `open` (an ordinary ungoverned submission), before the round
+    # goes `live` below and would require a lock guard for any further
+    # submission.
+    matchup = next(
+        m
+        for m in lifecycle.list_matchups(round_.bbbffl_round_id)
+        if entry.season_entry_id in (m.home_season_entry_id, m.away_season_entry_id)
+    )
+    opponent_id = (
+        matchup.away_season_entry_id
+        if matchup.home_season_entry_id == entry.season_entry_id
+        else matchup.home_season_entry_id
+    )
+    opponent = next(e for e in entries if e.season_entry_id == opponent_id)
+    o1 = PlayerPoolRepository(db).refresh_player(scope["season_id"], 900101, "Opponent One")
+    o2 = PlayerPoolRepository(db).refresh_player(scope["season_id"], 900102, "Opponent Two")
+    OwnershipRepository(db).configure_squad_limit(scope["season_id"], 10)
+    OwnershipRepository(db).acquire(o1.season_player_id, opponent.season_entry_id)
+    OwnershipRepository(db).acquire(o2.season_player_id, opponent.season_entry_id)
+    _submit_lineup(db, scope, round_.bbbffl_round_id, opponent, [o1, o2])
+
+    player = _prepare_missed_submission(db, scope, round_.bbbffl_round_id, entry, lifecycle)
+
+    _operator, cookies, headers = _authenticate_scorer(client, scope["season_id"])
+
+    before = client.get(
+        f"/api/admin/lineup-adjudication/{round_.bbbffl_round_id}/{entry.season_entry_id}",
+        cookies=cookies,
+        headers=headers,
+    )
+    assert before.status_code == 200
+    assert before.json()["calculation"] == {
+        "calculated": False,
+        "calculation_revision": None,
+        "calculated_lineup_version": None,
+        "current_lineup_version": None,
+        "stale": False,
+        "message": "This matchup has not been calculated yet.",
+    }
+
+    accepted = client.post(
+        f"/api/admin/lineup-adjudication/{round_.bbbffl_round_id}/{entry.season_entry_id}/accept-evidenced-draft",
+        json={"reason": "League chat confirmed the coach's pre-lockout draft; quorum accepted it"},
+        cookies=cookies,
+        headers=headers,
+    )
+    assert accepted.status_code == 200
+    result = accepted.json()
+    assert result["submission"]["positions"]["F1"] == player.season_player_id
+    assert result["calculation"]["calculated"] is False
+
+    MatchupCalculationService(db, _CalculableAflClient()).calculate_matchup(matchup.matchup_id)
+
+    after = client.get(
+        f"/api/admin/lineup-adjudication/{round_.bbbffl_round_id}/{entry.season_entry_id}",
+        cookies=cookies,
+        headers=headers,
+    )
+    assert after.json()["calculation"]["calculated"] is True
+    assert after.json()["calculation"]["stale"] is False
+
+
 def test_candidate_view_resolves_player_names_and_club_for_resolution_a_and_b_previews():
     """Issue #151: `_candidate_view` (the shared read model behind the
     Scorer/Admin missed-submission adjudication API) must show player name
@@ -156,13 +249,22 @@ def test_candidate_view_resolves_player_names_and_club_for_resolution_a_and_b_pr
     Resolution A's evidenced-draft preview and Resolution B's carry-forward
     preview -- a vacant position resolves to no player, never a misleading
     fallback name."""
+    from types import SimpleNamespace
+
+    from app.competition_lifecycle import CompetitionLifecycleRepository
     from app.lineup_adjudication import AdjudicationCandidate, AdjudicationSlotRecord, CarryForwardPreview
     from app.player_pool import PlayerPoolRepository
+    from app.round_review import RoundReviewRepository
     from app.routes.lineup_adjudication import _candidate_view, _collect_player_ids
     from app.season import SeasonRepository
     from tests.db_helpers import migrated_connection
 
     db = migrated_connection()
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(lifecycle=CompetitionLifecycleRepository(db), round_review=RoundReviewRepository(db))
+        )
+    )
     season = SeasonRepository(db).create_season(2027, "2027")
     pool = PlayerPoolRepository(db)
     evidenced_player = pool.refresh_player(season.season_id, 1, "Evidenced Player", afl_team_name="Fitzroy")
@@ -204,7 +306,7 @@ def test_candidate_view_resolves_player_names_and_club_for_resolution_a_and_b_pr
         evidenced_preview=candidate.evidenced_preview, carry_forward_preview=candidate.carry_forward_preview
     )
     player_labels = pool.labels_by_id(player_ids)
-    view = _candidate_view(candidate, {"team_name": "Fitzroy Phoenix", "coach_name": "Barry"}, player_labels)
+    view = _candidate_view(request, candidate, {"team_name": "Fitzroy Phoenix", "coach_name": "Barry"}, player_labels)
 
     assert view["evidenced_preview"][0]["player_name"] == "Evidenced Player"
     assert view["evidenced_preview"][0]["afl_club"] == "Fitzroy"

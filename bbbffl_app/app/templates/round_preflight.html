@@ -15,5 +15,48 @@ function render(d){current=d;const r=d.round,ready=d.readiness.safe_to_open;docu
 ${d.opening_round.applies?`<section class="card warn"><h2>Opening Round exceptions</h2><p>Readiness includes these deferred/preloaded slots and their compensating-bye source.</p>${d.opening_round.deferred_selections.map(n=>`<div class="item"><strong>${e(n.team_name)} · ${e(n.player_display_name)} — ${e(n.afl_club_name)} · slot ${e(n.position)} · locked/deferred</strong><br>${e(n.rule_display_label)}<br>Source ${e(n.afl_opening_round_label)} (AFL Match ${e(n.source_afl_match_id)}) → compensating ${e(n.afl_bye_round_label)} → target ${e(n.bbbffl_round_label)}<br><span class="muted">Evidence ${e(n.evidence_classification)} · entered by ${e(n.actor_id)} (${e(n.actor_role)}). Replay operator input is not attributed to the represented coach.</span><details><summary class="muted">Internal identifiers</summary><span class="id">nomination ${e(n.nomination_id)} · rule ${e(n.rule_id)} · player ${e(n.season_player_id)} · target round ${e(n.bbbffl_round_id)}</span></details></div>`).join('')}</section>`:''}
 <section class="card ${ready?'ok':'bad'}"><h2>Readiness</h2><h3>${ready?'Safe to open':'Not safe to open'}</h3>${d.readiness.blockers.map(x=>`<div class="item bad"><strong>Blocking</strong> · ${e(x.message)}${x.url?` <a href="${e(x.url)}">Go to Opening Round Operations →</a>`:''}</div>`).join('')}${d.readiness.advisories.map(x=>`<div class="item warn"><strong>Advisory</strong> · ${e(x.message)}</div>`).join('')}<button class="primary" id="open" ${ready?'':'disabled'}>Open Round</button><p class="muted">This persists the authoritative BBBFFL lifecycle; it is not a browser-only flag.</p></section>`;
 document.querySelector('#mapping').onsubmit=map;document.querySelector('#trigger').onsubmit=trigger;document.querySelector('#open').onclick=openRound}
-async function map(x){x.preventDefault();let f=new FormData(x.target);try{render(await api(`/api/admin/round-preflight/${roundId}/mapping`,{afl_season_id:+f.get('season'),afl_round_id:+f.get('round'),reason:f.get('reason')||null}));msg('Authoritative mapping confirmed.',true)}catch(x){msg(x.message)}}async function trigger(x){x.preventDefault();let f=new FormData(x.target);try{render(await api(`/api/admin/round-preflight/${roundId}/lockout-trigger`,{trigger_key:f.get('key'),trigger_type:f.get('type'),sequence:+f.get('sequence'),afl_match_ids:f.get('matches').split(',').map(Number),reason:'Configured during operator preflight'}));msg('Lockout trigger persisted.',true)}catch(x){msg(x.message)}}async function openRound(){if(!confirm('Open this BBBFFL round for coach team selection?'))return;try{render(await api(`/api/admin/round-preflight/${roundId}/open`,{}));msg('Round opened. Coaches may now use the weekly selection workflow.',true)}catch(x){msg(x.message)}}api(`/api/admin/round-preflight/${roundId}`).then(render).catch(x=>msg(x.message));
+// A rejected/stale mutation must never leave the previous render looking
+// current: reload the authoritative preflight view (a plain GET, never a
+// repeat of the rejected mutation) so readiness/blockers/mapping/lockout
+// state shown can never drift from what the server actually holds.
+async function reloadAfterFailure(){try{render(await api(`/api/admin/round-preflight/${roundId}`))}catch(_){}}
+async function map(x){
+  x.preventDefault();
+  let f=new FormData(x.target),season=f.get('season'),round=f.get('round'),reason=f.get('reason');
+  try{
+    render(await api(`/api/admin/round-preflight/${roundId}/mapping`,{afl_season_id:+season,afl_round_id:+round,reason:reason||null}));
+    msg('Authoritative mapping confirmed.',true)
+  }catch(x){
+    await reloadAfterFailure();
+    // Recoverable validation failure: retyping season/round/reason is safe
+    // (they name nothing that could now be stale) and worth preserving.
+    const form=document.querySelector('#mapping');
+    if(form){form.season.value=season;form.round.value=round;form.reason.value=reason}
+    msg('Mapping NOT confirmed — '+x.message+' Current authoritative state has been reloaded.')
+  }
+}
+async function trigger(x){
+  x.preventDefault();
+  let f=new FormData(x.target),key=f.get('key'),type=f.get('type'),sequence=f.get('sequence'),matches=f.get('matches');
+  try{
+    render(await api(`/api/admin/round-preflight/${roundId}/lockout-trigger`,{trigger_key:key,trigger_type:type,sequence:+sequence,afl_match_ids:matches.split(',').map(Number),reason:'Configured during operator preflight'}));
+    msg('Lockout trigger persisted.',true)
+  }catch(x){
+    await reloadAfterFailure();
+    const form=document.querySelector('#trigger');
+    if(form){form.key.value=key;form.type.value=type;form.sequence.value=sequence;form.matches.value=matches}
+    msg('Lockout trigger NOT persisted — '+x.message+' Current authoritative state has been reloaded.')
+  }
+}
+async function openRound(){
+  if(!confirm('Open this BBBFFL round for coach team selection?'))return;
+  try{
+    render(await api(`/api/admin/round-preflight/${roundId}/open`,{}));
+    msg('Round opened. Coaches may now use the weekly selection workflow.',true)
+  }catch(x){
+    await reloadAfterFailure();
+    msg('Round NOT opened — '+x.message+' Current authoritative state has been reloaded.')
+  }
+}
+api(`/api/admin/round-preflight/${roundId}`).then(render).catch(x=>msg(x.message));
 </script></body></html>

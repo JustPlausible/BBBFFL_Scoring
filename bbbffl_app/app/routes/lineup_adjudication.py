@@ -30,6 +30,7 @@ from app.authorization import (
 from app.config import BASE_DIR
 from app.csrf import issue_token, verify_token
 from app.lineup_adjudication import LineupAdjudicationService
+from app.round_review import calculation_staleness_for_entry
 
 router = APIRouter(prefix="/api/admin/lineup-adjudication")
 page_router = APIRouter()
@@ -131,7 +132,37 @@ def _label_positions(positions: dict, player_labels: dict) -> dict:
     return detail
 
 
-def _candidate_view(candidate, entry_meta: dict, player_labels: dict) -> dict:
+def _calculation_status(request: Request, round_id: str, season_entry_id: str) -> dict:
+    """Issue #153: adjudication creates a lineup's first authoritative
+    submission outside the ordinary calculation flow -- if the round was
+    already calculated (e.g. against a vacant/no-submission side) before
+    this adjudication resolved it, the operator must see immediately that
+    recalculation is required, from the same read that shows the new
+    effective submission. Mirrors `app.routes.lineup_correction`'s
+    identical need exactly (see `app.round_review.
+    calculation_staleness_for_entry`'s shared docstring)."""
+    state = request.app.state
+    matchup = next(
+        (
+            m
+            for m in state.lifecycle.list_matchups(round_id)
+            if season_entry_id in (m.home_season_entry_id, m.away_season_entry_id)
+        ),
+        None,
+    )
+    if matchup is None:
+        return {
+            "calculated": False,
+            "calculation_revision": None,
+            "calculated_lineup_version": None,
+            "current_lineup_version": None,
+            "stale": False,
+            "message": "This team has no matchup in this round.",
+        }
+    return calculation_staleness_for_entry(state.lifecycle, state.round_review, matchup, season_entry_id)
+
+
+def _candidate_view(request: Request, candidate, entry_meta: dict, player_labels: dict) -> dict:
     view = asdict(candidate)
     view["team_name"] = entry_meta.get("team_name")
     view["coach_name"] = entry_meta.get("coach_name")
@@ -141,10 +172,13 @@ def _candidate_view(candidate, entry_meta: dict, player_labels: dict) -> dict:
         view["carry_forward_preview"]["positions_detail"] = _label_positions(
             view["carry_forward_preview"]["positions"], player_labels
         )
+    view["calculation"] = _calculation_status(request, candidate.bbbffl_round_id, candidate.season_entry_id)
     return view
 
 
-def _submission_view(submission, adjudication, player_labels: dict) -> dict:
+def _submission_view(
+    request: Request, round_id: str, season_entry_id: str, submission, adjudication, player_labels: dict
+) -> dict:
     return {
         "submission": {
             "lineup_id": submission.lineup_id,
@@ -164,6 +198,7 @@ def _submission_view(submission, adjudication, player_labels: dict) -> dict:
             if adjudication is not None
             else None
         ),
+        "calculation": _calculation_status(request, round_id, season_entry_id),
     }
 
 
@@ -222,7 +257,7 @@ def get_adjudication_candidate(
         evidenced_preview=candidate.evidenced_preview, carry_forward_preview=candidate.carry_forward_preview
     )
     player_labels = service.pool.labels_by_id(player_ids)
-    return _candidate_view(candidate, entry_meta, player_labels)
+    return _candidate_view(request, candidate, entry_meta, player_labels)
 
 
 @router.post("/{round_id}/{season_entry_id}/accept-evidenced-draft")
@@ -251,7 +286,7 @@ def accept_evidenced_draft(
         reason=payload.reason,
     )
     player_labels = service.pool.labels_by_id(submission.positions.values())
-    return _submission_view(submission, adjudication, player_labels) | {
+    return _submission_view(request, round_id, season_entry_id, submission, adjudication, player_labels) | {
         "team_name": entry_meta.get("team_name"),
         "coach_name": entry_meta.get("coach_name"),
     }
@@ -283,7 +318,7 @@ def apply_carry_forward(
         reason=payload.reason,
     )
     player_labels = service.pool.labels_by_id(submission.positions.values())
-    return _submission_view(submission, adjudication, player_labels) | {
+    return _submission_view(request, round_id, season_entry_id, submission, adjudication, player_labels) | {
         "team_name": entry_meta.get("team_name"),
         "coach_name": entry_meta.get("coach_name"),
     }

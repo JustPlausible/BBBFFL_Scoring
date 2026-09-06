@@ -740,6 +740,53 @@ def _snapshot_season_player_ids(snapshot) -> set[str]:
     return {slot["season_player_id"] for slot in snapshot["slots"] if slot["season_player_id"]}
 
 
+def calculation_staleness_for_entry(lifecycle, round_review, matchup, season_entry_id: str) -> dict:
+    """Whether the matchup's calculated snapshot for `season_entry_id`'s
+    side still reflects that lineup's *current* effective submission
+    version -- issue #153: locked-lineup correction (issue #137) and
+    missed-submission adjudication (issue #146) both change a lineup's
+    effective submission outside the ordinary calculation flow, and each
+    surface must immediately tell the operator whether recalculation is
+    now required rather than leaving them to infer it.
+
+    Reuses exactly the same comparison `build_matchup_review` already
+    performs for the Scorer Round Centre's own blockers (`current_version
+    != calculated_version`) -- this is not a second staleness rule, only a
+    second, narrower place that needs its answer.
+    """
+    calc = lifecycle.get_calculation(matchup.matchup_id)
+    if calc is None:
+        return {
+            "calculated": False,
+            "calculation_revision": None,
+            "calculated_lineup_version": None,
+            "current_lineup_version": None,
+            "stale": False,
+            "message": "This matchup has not been calculated yet.",
+        }
+    side_name = "home" if matchup.home_season_entry_id == season_entry_id else "away"
+    side_snapshot = calc.snapshot[side_name]
+    lineup_id = side_snapshot.get("lineup_id")
+    calculated_version = side_snapshot.get("lineup_version")
+    current_version = round_review.current_lineup_version(lineup_id)
+    stale = current_version != calculated_version
+    message = (
+        f"Calculated against submission version {calculated_version}; the current effective submission is "
+        f"version {current_version}. Recalculate in the Scorer Round Centre before signing off or relying on "
+        "these scores."
+        if stale
+        else f"Calculation revision {calc.revision} already reflects the current effective submission."
+    )
+    return {
+        "calculated": True,
+        "calculation_revision": calc.revision,
+        "calculated_lineup_version": calculated_version,
+        "current_lineup_version": current_version,
+        "stale": stale,
+        "message": message,
+    }
+
+
 def build_matchup_review(
     lifecycle, review_repo, identities, matchup, *, evidence_fresh: bool = True, season_repo=None
 ) -> MatchupReview:

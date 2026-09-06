@@ -68,6 +68,12 @@ function triggerList(){
   return candidate.activated_triggers.map(t=>`<li>${e(t.trigger_key)} (${e(t.trigger_type)}) — ${e(t.activation_reason)}${t.activating_afl_match_id?`, match ${e(t.activating_afl_match_id)}`:''}${t.effective_lock_at?`, effective lock ${e(t.effective_lock_at)}`:''}</li>`).join('')||'<li class="muted">none activated</li>';
 }
 
+function calculationCard(c){
+  if(!c)return'';
+  if(!c.calculated)return `<section class="card"><h2>Calculation</h2><p class="muted">${e(c.message)}</p></section>`;
+  return `<section class="card ${c.stale?'warn':'ok'}"><h2>Calculation</h2><p><span class="pill ${c.stale?'warn':'ok'}">${c.stale?'Recalculation required':'Up to date'}</span> ${e(c.message)}</p></section>`;
+}
+
 function render(){
   document.querySelector('#detail').innerHTML=`
   <section class="card banner"><strong>AUTHORISED MISSED-SUBMISSION ADJUDICATION</strong>
@@ -75,6 +81,7 @@ function render(){
   <p>Activated lockout triggers: <ul>${triggerList()}</ul></p>
   ${candidate.eligible?'':`<p><b>This workflow is not currently available: ${e(candidate.ineligible_reason)}</b></p>`}
   <p class="muted">Consultation with the coach and any league quorum happened outside this application. Confirming below records that outcome — it does not seek or collect approval itself.</p></section>
+  ${calculationCard(candidate.calculation)}
 
   <fieldset class="card"><legend>Resolution A — accept evidenced pre-lockout draft</legend>
   <p class="muted">Draft revision ${e(candidate.draft_revision)}, last saved ${e(candidate.draft_updated_at)}. Locked positions below use only what the draft's own per-position evidence proves predates that position's effective lock instant; anything unproven defaults to vacant, never a substitute.</p>
@@ -101,7 +108,17 @@ async function submitAcceptEvidencedDraft(x){
     const result=await api(`/api/admin/lineup-adjudication/${encodeURIComponent(currentRoundId)}/${encodeURIComponent(currentEntryId)}/accept-evidenced-draft`,'POST',{reason});
     msg(`Evidenced draft accepted as submission version ${result.submission.version}.`,true);
     await loadEntry(currentEntryId);
-  }catch(err){msg(err.message)}
+  }catch(err){
+    // Not accepted -- reload the current authoritative candidate (a plain
+    // GET, never a repeat of the rejected adjudication) so eligibility,
+    // triggers and the evidenced/carry-forward previews shown are never
+    // stale/concurrent with what the server actually holds; restore the
+    // entered reason since re-typing it carries no risk.
+    await loadEntry(currentEntryId);
+    const reasonInput=document.querySelector('#accept-form [name="reason"]');
+    if(reasonInput&&reason)reasonInput.value=reason;
+    msg('Evidenced draft NOT accepted — '+err.message+' Current authoritative state has been reloaded.')
+  }
 }
 
 async function submitCarryForward(x){
@@ -111,7 +128,12 @@ async function submitCarryForward(x){
     const result=await api(`/api/admin/lineup-adjudication/${encodeURIComponent(currentRoundId)}/${encodeURIComponent(currentEntryId)}/apply-carry-forward`,'POST',{reason});
     msg(`Carry-forward fallback applied as submission version ${result.submission.version}.`,true);
     await loadEntry(currentEntryId);
-  }catch(err){msg(err.message)}
+  }catch(err){
+    await loadEntry(currentEntryId);
+    const reasonInput=document.querySelector('#carry-forward-form [name="reason"]');
+    if(reasonInput&&reason)reasonInput.value=reason;
+    msg('Carry-forward NOT applied — '+err.message+' Current authoritative state has been reloaded.')
+  }
 }
 
 document.querySelector('#load-round').onclick=loadRound;

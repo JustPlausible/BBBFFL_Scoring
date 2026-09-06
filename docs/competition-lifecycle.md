@@ -19,6 +19,14 @@ only the five-result publication command can make it, in the same database
 transaction that creates every official version 1 and sets every
 effective-result pointer.
 
+`live` means only that the round's first AFL match has started -- it is
+never itself a signal that every weekly lineup position is locked. Ordinary
+weekly-lineup submission (`app/lineups.py`) is permitted for a round in
+either `open` or `live`; which individual positions are actually still
+editable while `live` is a separate, finer-grained decision owned entirely
+by the staged lockout plan (see [`lockouts.md`](lockouts.md)'s "Round
+lifecycle and position-level lock state are independent", issue #144).
+
 A post-final correction requires a reason and appends a new official version
 for all five matchups atomically. Earlier rows are protected from update and
 delete by database triggers. The matchup pointer identifies exactly one

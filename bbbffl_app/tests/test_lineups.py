@@ -133,7 +133,12 @@ def test_duplicate_foreign_player_lifecycle_and_stale_submission_are_rejected():
     with pytest.raises(LineupConflictError, match="stale submission"):
         repo.submit(draft.lineup_id, expected_draft_revision=2, expected_submission_version=0)
     lifecycle.transition(round_.bbbffl_round_id, "live")
-    with pytest.raises(LineupIntegrityError, match="does not currently permit"):
+    # issue #144: "live" is no longer itself a global submission lock, but an
+    # ordinary submission attempted without a lock_guard while live is
+    # refused outright -- the round has no way to guarantee position-level
+    # lockout enforcement ran. See tests/test_live_round_submission.py for
+    # full lock_guard-present coverage of live-round submission.
+    with pytest.raises(LineupIntegrityError, match="requires an active position-level lock guard"):
         repo.submit(draft.lineup_id, expected_draft_revision=2, expected_submission_version=first.version)
 
 

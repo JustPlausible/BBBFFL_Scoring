@@ -1013,6 +1013,80 @@ def test_vacant_position_is_fillable_before_its_boundary_and_never_invented_at_m
         )
 
 
+def test_clearing_an_already_locked_position_in_an_unsubmitted_draft_still_reports_it_locked():
+    """Issue #138 (Codex review, PR #143): `guard_transition` already
+    refuses to ever clear an effectively-locked position -- its first loop
+    rejects any change away from a locked position's previous value,
+    regardless of the proposed replacement. But before this fix, a caller
+    evaluating a *different* `positions` mapping where that same slot now
+    reads vacant (e.g. a rejected save-then-submit attempt that cleared it
+    in the private draft) saw it reported as an ordinary open vacancy --
+    `_evaluate_position`'s `season_player_id is None` branch returned
+    editable/"empty" unconditionally, without ever consulting the
+    position's own persisted lock evidence first. A delegated/coach UI
+    rendering directly from that read model would then present an
+    authoritatively locked position as an editable, empty dropdown."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_selective(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], key="early-1", sequence=1)
+    early = acquire(pool, ownership, scope, entry, 1, EARLY_HOME)
+    lineups = WeeklyLineupRepository(db)
+    matches = FakeMatchFacts(ALL_MATCHES)
+    pre_lock_guard = LockoutRepository(db).guard(match_facts=matches, evaluation_at=EARLY_START - timedelta(minutes=5))
+    draft, submitted = establish(lineups, round_, entry, scope, {"F1": early.season_player_id}, guard=pre_lock_guard)
+
+    lock_repo = LockoutRepository(db)
+    # Materialise F1's lock evidence (mirrors what a rejected submit
+    # attempt's earlier successful GET/`lock_state` call would already
+    # have done).
+    lock_repo.lock_state(
+        draft.lineup_id,
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        submitted.positions,
+        match_facts=matches,
+        evaluation_at=EARLY_START + timedelta(minutes=1),
+    )
+
+    # An unsubmitted draft that attempted (and would have had rejected) to
+    # clear the now-locked F1 -- this must never be evaluated as an
+    # invented, ordinary vacancy.
+    cleared_draft_positions = dict(submitted.positions)
+    cleared_draft_positions["F1"] = None
+    view = lock_repo.lock_state(
+        draft.lineup_id,
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        cleared_draft_positions,
+        match_facts=matches,
+        evaluation_at=EARLY_START + timedelta(minutes=2),
+    )
+    assert view.positions["F1"].state == LockState.LOCKED
+    assert view.positions["F1"].season_player_id == early.season_player_id
+    assert view.positions["F1"].reason == "selective_trigger_activated"
+    assert view.positions["F1"].irreversible is True
+
+    # A genuinely never-selected vacancy elsewhere is completely unaffected.
+    assert view.positions["M1"].state == LockState.EDITABLE
+    assert view.positions["M1"].reason == "empty"
+
+    # And the guard itself, unchanged, still refuses the actual clearing
+    # attempt -- this fix only corrects the read model's *presentation*,
+    # never the authoritative accept/reject decision.
+    draft2 = edit_draft(
+        lineups, round_, entry, scope, draft.lineup_id, cleared_draft_positions, from_revision=draft.revision
+    )
+    late_guard = LockoutRepository(db).guard(match_facts=matches, evaluation_at=EARLY_START + timedelta(minutes=2))
+    with pytest.raises(LockedSelectionError, match="F1"):
+        lineups.submit(
+            draft2.lineup_id,
+            expected_draft_revision=draft2.revision,
+            expected_submission_version=submitted.version,
+            lock_guard=late_guard,
+        )
+
+
 def test_indeterminate_due_to_missing_match_data_blocks_change_but_allows_unchanged_resubmission():
     """A player selected while their match was normally resolvable can
     become indeterminate if a later afl-api response is missing that match

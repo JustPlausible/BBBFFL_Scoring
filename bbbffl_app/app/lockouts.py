@@ -802,6 +802,56 @@ class LockoutRepository:
             conn, {}, None, position, season_player_id, evaluation_at, matches, coverage, materializable=False
         )
 
+    def trigger_activation_instant(self, conn, bbbffl_round_id: str, afl_match_id: int) -> str | None:
+        """The real lock boundary a position resolved to `afl_match_id`
+        must be judged against, for a caller (issue #146's adjudication)
+        that needs the actual instant a *trigger* activated -- never
+        `PositionLockState.effective_lock_at`/`_evaluate_position`'s
+        `match.start_time_utc`, which is always the *selected player's own*
+        resolved match, regardless of which match actually caused the lock.
+
+        Those two are the same instant only for an ordinary single-match
+        selective trigger fired by its own only match. They diverge for:
+        a **main** trigger, which locks every remaining position the
+        instant it activates regardless of whether that position's own
+        match has itself started (see this module's docstring, 'The round
+        lockout plan') -- the real boundary is the main trigger's own
+        `effective_lock_at`, not the player's future match start; and a
+        **grouped selective** trigger (e.g. a multi-match early stage)
+        fired by an earlier match within the group while `afl_match_id`
+        itself has not yet started -- the real boundary is that trigger's
+        own activation instant, not this later match's own start.
+
+        Returns the earliest activated selective trigger's
+        `effective_lock_at` whose *configured match set* includes
+        `afl_match_id`, if any; otherwise the main trigger's own
+        `effective_lock_at` if it has activated -- checked independently of
+        `afl_match_id`, since main's own configured match set is only what
+        *activates* it, never a restriction on which positions it then
+        locks (see this module's docstring, 'The round lockout plan');
+        otherwise `None` (no trigger currently governs this match --
+        matches `PositionLockState.state == LockState.EDITABLE`)."""
+        selective_rows = conn.execute(
+            "SELECT a.effective_lock_at "
+            "FROM bbbffl_round_lockout_trigger_activation a "
+            "JOIN bbbffl_round_lockout_trigger t ON t.trigger_id=a.trigger_id "
+            "JOIN bbbffl_round_lockout_trigger_revision r ON r.trigger_id=a.trigger_id AND r.revision=a.revision "
+            "JOIN bbbffl_round_lockout_trigger_match m ON m.trigger_id=a.trigger_id AND m.revision=a.revision "
+            "WHERE t.bbbffl_round_id=? AND r.trigger_type='selective' AND m.afl_match_id=?",
+            (bbbffl_round_id, afl_match_id),
+        ).fetchall()
+        if selective_rows:
+            return min(row["effective_lock_at"] for row in selective_rows)
+        main_row = conn.execute(
+            "SELECT a.effective_lock_at "
+            "FROM bbbffl_round_lockout_trigger_activation a "
+            "JOIN bbbffl_round_lockout_trigger t ON t.trigger_id=a.trigger_id "
+            "JOIN bbbffl_round_lockout_trigger_revision r ON r.trigger_id=a.trigger_id AND r.revision=a.revision "
+            "WHERE t.bbbffl_round_id=? AND r.trigger_type='main'",
+            (bbbffl_round_id,),
+        ).fetchone()
+        return main_row["effective_lock_at"] if main_row else None
+
     # -- Enforcement -------------------------------------------------------
     def guard(self, *, match_facts: MatchFactsProvider, evaluation_at: datetime | None = None) -> LockGuard:
         """Build the `lock_guard` accepted by

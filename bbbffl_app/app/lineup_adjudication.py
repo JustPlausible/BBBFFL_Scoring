@@ -185,7 +185,7 @@ class AdjudicationCandidate:
     the carry-forward preview -- so a Scorer never has to interpret opaque
     internal state to choose a resolution."""
 
-    lineup_id: str
+    lineup_id: str | None
     season_id: str
     competition_id: str
     bbbffl_round_id: str
@@ -240,6 +240,25 @@ class LineupAdjudicationService:
 
     # -- Eligibility ---------------------------------------------------------
 
+    def _lineup_header(self, season_id, competition_id, bbbffl_round_id, season_entry_id):
+        """Read-only `(lineup_id, effective_submission_version)` lookup --
+        `(None, 0)` if this entry has never touched this round's lineup at
+        all. Deliberately distinct from `WeeklyLineupRepository.
+        get_or_create_header`, which *creates* an empty draft header as a
+        side effect: an eligibility check must never conjure a draft into
+        existence merely by being asked whether one exists (issue #146
+        Codex review) -- `accept_evidenced_draft` in particular relies on
+        this to tell "no draft was ever saved" apart from "a real draft
+        exists but every position happens to be vacant"."""
+        row = self.database.execute(
+            "SELECT lineup_id, effective_submission_version FROM weekly_lineup "
+            "WHERE season_id=? AND competition_id=? AND bbbffl_round_id=? AND season_entry_id=?",
+            (season_id, competition_id, bbbffl_round_id, season_entry_id),
+        ).fetchone()
+        if row is None:
+            return None, 0
+        return row["lineup_id"], row["effective_submission_version"] or 0
+
     def _eligibility(self, season_id, competition_id, bbbffl_round_id, season_entry_id, *, evaluation_at=None):
         """Non-transactional pre-check, for a fast/clear refusal and for the
         preview UI. Every fact this also depends on is re-validated
@@ -247,15 +266,17 @@ class LineupAdjudicationService:
         `submit_adjudicated_first_submission` and this module's own
         `resolve_positions` callbacks -- this is a courtesy check only, per
         the issue's "must be concurrency-safe rather than merely a UI
-        check" requirement.
+        check" requirement. `lineup_id` is `None` if this entry has never
+        touched this round's lineup at all (see `_lineup_header`) -- a
+        caller that needs a real row to write into (`apply_carry_forward_
+        fallback`) creates one itself via `get_or_create_header`, only once
+        it has confirmed eligibility.
 
         `evaluation_at`, like every other entry point in `app.lockouts`/
         `app.carry_forward`, is an explicit override for tests/replay --
         production callers leave it `None` and get the real wall clock (or
         a replay client's own clock, via `self.match_facts`)."""
-        lineup_id, effective_version = self.lineups.get_or_create_header(
-            season_id, competition_id, bbbffl_round_id, season_entry_id
-        )
+        lineup_id, effective_version = self._lineup_header(season_id, competition_id, bbbffl_round_id, season_entry_id)
         round_row = self.database.execute(
             "SELECT state FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?", (bbbffl_round_id,)
         ).fetchone()
@@ -435,10 +456,26 @@ class LineupAdjudicationService:
                     )
                 )
                 continue
+            # The real boundary this position's evidence must predate is the
+            # *trigger's* own activation instant, never
+            # `lock_eval.effective_lock_at` (always the selected player's
+            # own resolved match start -- see `_evaluate_position`). Those
+            # coincide only for an ordinary single-match selective trigger
+            # fired by its own match; they diverge for a main trigger (locks
+            # every remaining position immediately, regardless of that
+            # position's own match time) and for a grouped selective trigger
+            # fired by an earlier match than this position's own (issue #146
+            # Codex review) -- either would otherwise let a post-lock edit
+            # slip through as apparently pre-lock evidence.
+            trigger_lock_at = (
+                self.lockouts.trigger_activation_instant(conn, bbbffl_round_id, lock_eval.afl_match_id)
+                if lock_eval.afl_match_id is not None
+                else None
+            )
             proven = (
                 evidence_saved_at is not None
-                and lock_eval.effective_lock_at is not None
-                and _parse_instant(evidence_saved_at) <= _parse_instant(lock_eval.effective_lock_at)
+                and trigger_lock_at is not None
+                and _parse_instant(evidence_saved_at) <= _parse_instant(trigger_lock_at)
             )
             resolved_value = draft_value if proven else None
             slots.append(
@@ -449,7 +486,7 @@ class LineupAdjudicationService:
                     "proven_pre_lock" if proven else "unproven_defaulted_vacant",
                     lock_eval.reason,
                     lock_eval.afl_match_id,
-                    lock_eval.effective_lock_at,
+                    trigger_lock_at,
                     lock_eval.observed_status,
                     evidence_saved_at,
                 )
@@ -487,11 +524,24 @@ class LineupAdjudicationService:
                 "an adjudicated evidenced-draft capture requires a substantive Scorer reason recording the "
                 "externally reached league decision"
             )
-        lineup_id, _effective_version, _round_state, _activated, reasons = self._eligibility(
+        _lineup_id, _effective_version, _round_state, _activated, reasons = self._eligibility(
             season_id, competition_id, bbbffl_round_id, season_entry_id, evaluation_at=evaluation_at
         )
         if reasons:
             raise RoundNotEligibleForAdjudicationError("; ".join(reasons))
+        # A private draft must already exist -- `_eligibility` deliberately
+        # never creates one (see `_lineup_header`'s docstring). Without this
+        # check, an entry that never saved anything at all would still
+        # "pass" eligibility and this method would go on to capture an
+        # empty, synthetic position map as though it were genuine pre-lock
+        # evidence (issue #146 Codex review).
+        existing_draft = self.lineups.get_draft(season_id, competition_id, bbbffl_round_id, season_entry_id)
+        if existing_draft is None:
+            raise RoundNotEligibleForAdjudicationError(
+                "no private draft was ever saved for this entry in this round; there is no evidence to "
+                "capture -- consider the carry-forward fallback instead"
+            )
+        lineup_id = existing_draft.lineup_id
 
         # Materialized here, deliberately *before* `submit_adjudicated_
         # first_submission` opens its own transaction below -- exactly the
@@ -636,7 +686,7 @@ class LineupAdjudicationService:
                 "an adjudicated carry-forward fallback requires a substantive Scorer reason recording the "
                 "externally reached league decision"
             )
-        lineup_id, _effective_version, _round_state, _activated, reasons = self._eligibility(
+        _lineup_id, _effective_version, _round_state, _activated, reasons = self._eligibility(
             season_id, competition_id, bbbffl_round_id, season_entry_id, evaluation_at=evaluation_at
         )
         if reasons:
@@ -647,6 +697,11 @@ class LineupAdjudicationService:
                 f"no previous submitted lineup exists for entry {season_entry_id} in competition "
                 f"{competition_id} before round {bbbffl_round_id}; the carry-forward fallback is not available"
             )
+        # Unlike Resolution A, this never needs a draft to already exist --
+        # `_eligibility` deliberately never creates the header row (see
+        # `_lineup_header`), so it is created here, now that eligibility and
+        # source-availability are both confirmed.
+        lineup_id, _ = self.lineups.get_or_create_header(season_id, competition_id, bbbffl_round_id, season_entry_id)
 
         correlation_id = str(uuid4())
         captured: dict = {}

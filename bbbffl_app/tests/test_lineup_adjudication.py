@@ -42,8 +42,10 @@ from tests.test_lockouts import (
     EARLY_MATCH_ID,
     EARLY_START,
     LATE_HOME,
+    LATE_START,
     FakeMatchFacts,
     acquire,
+    configure_main,
     configure_selective,
     context,
 )
@@ -279,6 +281,102 @@ def test_missing_reason_fails_atomically_with_no_writes():
         )
     assert lineups.get_effective_submission(draft.lineup_id) is None
     assert db.execute("SELECT 1 FROM lineup_adjudication WHERE lineup_id=?", (draft.lineup_id,)).fetchone() is None
+
+
+def test_accept_evidenced_draft_refuses_when_no_draft_was_ever_saved():
+    """Codex review (PR #149): the eligibility pre-check must never create
+    a synthetic empty draft header merely by being asked whether one
+    exists -- an entry that never touched this round's lineup at all has
+    no evidence to capture, and `accept_evidenced_draft` must say so rather
+    than silently recording an empty position map as though it were a
+    genuine pre-lockout draft."""
+    db, lifecycle, round_, entry, scope, pool, ownership, lineups, matches, draft, early, late, service = (
+        _missed_submission_scenario()
+    )
+    _activate_early_trigger(service, round_.bbbffl_round_id)
+    other_entry = next(
+        e
+        for e in db.execute(
+            "SELECT season_entry_id FROM season_entry WHERE season_id=?", (scope["season_id"],)
+        ).fetchall()
+        if e["season_entry_id"] != entry.season_entry_id
+    )
+    assert (
+        lineups.get_draft(
+            scope["season_id"], scope["competition_id"], round_.bbbffl_round_id, other_entry["season_entry_id"]
+        )
+        is None
+    )
+    with pytest.raises(RoundNotEligibleForAdjudicationError, match="no private draft"):
+        service.accept_evidenced_draft(
+            scope["season_id"],
+            scope["competition_id"],
+            round_.bbbffl_round_id,
+            other_entry["season_entry_id"],
+            actor=SCORER,
+            reason="attempted against an entry that never saved a draft",
+            evaluation_at=EARLY_START + timedelta(hours=2),
+        )
+    # No synthetic header/draft was conjured into existence by the attempt.
+    assert (
+        db.execute(
+            "SELECT 1 FROM weekly_lineup WHERE bbbffl_round_id=? AND season_entry_id=?",
+            (round_.bbbffl_round_id, other_entry["season_entry_id"]),
+        ).fetchone()
+        is None
+    )
+
+
+def test_main_trigger_lock_instant_governs_evidence_not_the_players_own_match_start():
+    """Codex review (PR #149): once a main trigger activates, every
+    remaining position locks at *main's own* activation instant --
+    regardless of whether the selected player's own match has itself
+    started (see app/lockouts.py's 'The round lockout plan'). A draft edit
+    made after main activated, but before that player's own later match
+    starts, must never be accepted as pre-lock evidence just because it
+    predates that later match's own start time."""
+    db, lifecycle, round_, entries, scope, pool, ownership = context(year=2820)
+    lifecycle.transition(round_.bbbffl_round_id, "live")
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_main(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID])
+    late_player = acquire(pool, ownership, scope, entry, 1, LATE_HOME, name="Later Match Player")
+    lineups = WeeklyLineupRepository(db)
+    matches = FakeMatchFacts(ALL_MATCHES)
+    draft = lineups.save_draft(
+        scope["season_id"],
+        scope["competition_id"],
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        {"M1": late_player.season_player_id},
+        expected_revision=0,
+        actor=COACH,
+    )
+    service = LineupAdjudicationService(db, afl_client=None)
+    service.match_facts = matches
+    # Main activates via EARLY_MATCH_ID; LATE_MATCH_ID (this player's own
+    # match) has not started yet at this instant.
+    service.lockouts.materialize_round_triggers(
+        round_.bbbffl_round_id, match_facts=matches, evaluation_at=EARLY_START + timedelta(hours=1)
+    )
+    assert EARLY_START < LATE_START  # sanity: the player's own match is genuinely still in the future
+    # A draft edit lands after main activated but before LATE_START --
+    # never legitimate pre-lock evidence for a position main already locked.
+    _set_draft_slot_saved_at(db, draft.lineup_id, "M1", (EARLY_START + timedelta(hours=2)).isoformat())
+    submission, adjudication = service.accept_evidenced_draft(
+        scope["season_id"],
+        scope["competition_id"],
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        actor=SCORER,
+        reason="main lock instant must govern, not the player's own later match start",
+        evaluation_at=LATE_START - timedelta(hours=1),
+    )
+    m1_slot = next(s for s in adjudication.slots if s.position == "M1")
+    assert m1_slot.evidence_status == "unproven_defaulted_vacant"
+    assert m1_slot.season_player_id is None
+    assert submission.positions["M1"] is None
+    assert m1_slot.effective_lock_at == EARLY_START.isoformat()
 
 
 # -- Resolution A: accept evidenced pre-lockout draft -----------------------

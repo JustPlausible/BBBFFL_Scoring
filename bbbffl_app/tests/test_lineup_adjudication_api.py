@@ -159,6 +159,62 @@ def test_missing_reason_is_rejected_by_the_api(adjudication_client):
     assert response.status_code == 400
 
 
+def test_accept_evidenced_draft_refuses_when_no_draft_exists(adjudication_client):
+    """Codex review (PR #149): an entry that never saved a private draft
+    has no evidence to capture -- the API must refuse with a controlled
+    client error, never proceed to create a synthetic empty submission."""
+    client = adjudication_client
+    db = client.app.state.database
+    round_, entries, scope, lifecycle = _setup_round(db, 2907, 2907)
+    entry = entries[0]
+    other_entry = entries[1]
+    _prepare_missed_submission(db, scope, round_.bbbffl_round_id, entry, lifecycle)
+
+    _operator, cookies, headers = _authenticate_scorer(client, scope["season_id"])
+    candidate = client.get(
+        f"/api/admin/lineup-adjudication/{round_.bbbffl_round_id}/{other_entry.season_entry_id}",
+        cookies=cookies,
+        headers=headers,
+    )
+    assert candidate.status_code == 200
+    assert candidate.json()["evidenced_preview"] is None
+
+    response = client.post(
+        f"/api/admin/lineup-adjudication/{round_.bbbffl_round_id}/{other_entry.season_entry_id}/accept-evidenced-draft",
+        json={"reason": "attempted against an entry with no saved draft"},
+        cookies=cookies,
+        headers=headers,
+    )
+    assert response.status_code == 409
+
+
+def test_carry_forward_with_no_source_round_returns_a_controlled_error(adjudication_client):
+    """Codex review (PR #149): a first-round entry (or any team with no
+    previous submitted lineup) has no carry-forward source -- calling the
+    endpoint directly must return a controlled 4xx, never a bare 500."""
+    client = adjudication_client
+    db = client.app.state.database
+    round_, entries, scope, lifecycle = _setup_round(db, 2908, 2908)
+    entry = entries[0]
+    _prepare_missed_submission(db, scope, round_.bbbffl_round_id, entry, lifecycle)
+
+    _operator, cookies, headers = _authenticate_scorer(client, scope["season_id"])
+    candidate = client.get(
+        f"/api/admin/lineup-adjudication/{round_.bbbffl_round_id}/{entry.season_entry_id}",
+        cookies=cookies,
+        headers=headers,
+    )
+    assert candidate.json()["carry_forward_preview"] is None
+
+    response = client.post(
+        f"/api/admin/lineup-adjudication/{round_.bbbffl_round_id}/{entry.season_entry_id}/apply-carry-forward",
+        json={"reason": "attempted with no previous-round source available"},
+        cookies=cookies,
+        headers=headers,
+    )
+    assert 400 <= response.status_code < 500
+
+
 def test_unauthorized_coach_cannot_access_adjudication_endpoints(adjudication_client):
     client = adjudication_client
     db = client.app.state.database

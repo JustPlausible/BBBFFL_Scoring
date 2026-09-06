@@ -325,11 +325,36 @@ duplicating any lock-decision logic, and without `app.lineups` importing
   `live` submission workflow after this capture;
 - a locked (or indeterminate) position resolves to the draft's current
   value only if that position's own `updated_at` is at or before the
-  covering trigger's durable `effective_lock_at` (`evidence_status=
-  "proven_pre_lock"`); otherwise it resolves to vacant
-  (`"unproven_defaulted_vacant"`). The operator has no way to substitute,
-  move or add a locked player beyond what this evidence proves --
-  `accept_evidenced_draft` accepts no position overrides at all.
+  *actual trigger's* activation instant (`LockoutRepository.
+  trigger_activation_instant`, `evidence_status="proven_pre_lock"`);
+  otherwise it resolves to vacant (`"unproven_defaulted_vacant"`). The
+  operator has no way to substitute, move or add a locked player beyond
+  what this evidence proves -- `accept_evidenced_draft` accepts no
+  position overrides at all.
+- a private draft that was never saved at all has no evidence to
+  capture -- `accept_evidenced_draft` refuses outright
+  (`RoundNotEligibleForAdjudicationError`) rather than treating a
+  synthetic, never-touched header as though it were a genuine pre-lockout
+  draft. The eligibility pre-check (`_eligibility`/`_lineup_header`)
+  deliberately never creates a draft header as a side effect of being
+  asked whether one exists -- unlike `WeeklyLineupRepository.
+  get_or_create_header`, which the carry-forward fallback (which needs no
+  draft at all) still uses once eligibility is otherwise confirmed.
+
+The "actual trigger activation instant" matters because
+`PositionLockState.effective_lock_at` (as `app.lockouts` already computes
+it for display) is always the *selected player's own* resolved match
+start -- correct for an ordinary single-match selective trigger fired by
+that same match, but wrong once a **main** trigger locks every remaining
+position immediately regardless of whether that position's own match has
+itself started, or a **grouped selective** trigger activates via an
+earlier match than the one this position's player belongs to. Using the
+player's own (possibly still-future) match start as the comparison point
+would let a draft edit made *after* the real lock instant, but before that
+player's own match begins, slip through as apparently pre-lock evidence.
+`trigger_activation_instant` reads the durable
+`bbbffl_round_lockout_trigger_activation` row for whichever trigger
+actually governs the position instead.
 
 This evaluation runs twice: once outside any transaction for the
 before-confirmation preview (`describe_candidate`), and again *inside*

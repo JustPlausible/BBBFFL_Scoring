@@ -79,14 +79,15 @@ function render(){
   ${evidencedTable()}
   <form id="accept-form"><label>Substantive reason recording the league's decision to accept this evidenced draft (required)<textarea name="reason" rows="2" required placeholder="e.g. League chat confirmed the coach's Round 4 draft was saved before the early lockout; quorum approved accepting it as submitted."></textarea></label>
   <label><input type="checkbox" required> I confirm this is the team's first authoritative submission for this round, and that only proven pre-lock evidence is being accepted for locked positions.</label>
-  <button ${candidate.eligible?'':'disabled'}>Accept evidenced draft as submission</button></form></fieldset>
+  <button ${candidate.eligible&&candidate.evidenced_preview?'':'disabled'}>Accept evidenced draft as submission</button>
+  ${candidate.evidenced_preview?'':'<p class="muted">No saved private draft exists for this team -- there is no evidence to capture. Use the carry-forward fallback instead.</p>'}</form></fieldset>
 
   <fieldset class="card"><legend>Resolution B — apply carry-forward fallback</legend>
   <p class="muted">Sources this round's first submission from the previous round's effective submitted lineup, under the established BBBFFL carry-forward rules. Never merges any value from the rejected private draft.</p>
   ${carryForwardTable()}
   <form id="carry-forward-form"><label>Substantive reason recording the league's decision to reject the late draft and apply carry-forward (required)<textarea name="reason" rows="2" required placeholder="e.g. Quorum rejected the late capture request; applying carry-forward per BBBFFL rules."></textarea></label>
   <label><input type="checkbox" required> I confirm this is the team's first authoritative submission for this round.</label>
-  <button ${candidate.eligible?'':'disabled'}>Apply carry-forward fallback</button></form></fieldset>`;
+  <button ${candidate.eligible&&candidate.carry_forward_preview?'':'disabled'}>Apply carry-forward fallback</button></form></fieldset>`;
   document.querySelector('#accept-form').onsubmit=submitAcceptEvidencedDraft;
   document.querySelector('#carry-forward-form').onsubmit=submitCarryForward;
 }

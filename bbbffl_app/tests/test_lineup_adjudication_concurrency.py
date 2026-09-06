@@ -82,7 +82,9 @@ def _scenario(url, year):
     triggers.create(round_.bbbffl_round_id, "early-1", "selective", 1, [early_match_id], reason="race fixture")
     matches = FixedMatchFacts()
     activation_at = early_start + timedelta(hours=1)
-    LockoutRepository(db).materialize_round_triggers(round_.bbbffl_round_id, match_facts=matches, evaluation_at=activation_at)
+    LockoutRepository(db).materialize_round_triggers(
+        round_.bbbffl_round_id, match_facts=matches, evaluation_at=activation_at
+    )
 
     lineups = WeeklyLineupRepository(db)
     draft = lineups.save_draft(

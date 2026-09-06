@@ -78,8 +78,12 @@ def _prepare_missed_submission(db, scope, round_id, entry, lifecycle):
     OwnershipRepository(db).acquire(player.season_player_id, entry.season_entry_id)
     lineups = WeeklyLineupRepository(db)
     lineups.save_draft(
-        scope["season_id"], scope["competition_id"], round_id, entry.season_entry_id,
-        {"F1": player.season_player_id}, expected_revision=0,
+        scope["season_id"],
+        scope["competition_id"],
+        round_id,
+        entry.season_entry_id,
+        {"F1": player.season_player_id},
+        expected_revision=0,
     )
     LockoutTriggerRepository(db).create(
         round_id, "early-1", "selective", 1, [FUTURE_LIVE_MATCH_ID], reason="api fixture"

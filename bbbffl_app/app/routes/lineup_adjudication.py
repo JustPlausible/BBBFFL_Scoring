@@ -116,9 +116,7 @@ def _submission_view(submission, adjudication) -> dict:
 
 
 @router.get("/{round_id}")
-def list_round_entries(
-    round_id: str, request: Request, principal: Principal = Depends(require_lineup_adjudicator)
-):
+def list_round_entries(round_id: str, request: Request, principal: Principal = Depends(require_lineup_adjudicator)):
     """Season/round/team selection step: every BBBFFL team competing in this
     round, flagged with whether it currently has an effective submission --
     an operator only ever needs to adjudicate the ones that do not."""
@@ -189,7 +187,12 @@ def accept_evidenced_draft(
         )
     service = LineupAdjudicationService(request.app.state.database, request.app.state.afl_client)
     submission, adjudication = service.accept_evidenced_draft(
-        scope["season_id"], scope["competition_id"], round_id, season_entry_id, actor=_actor(principal), reason=payload.reason
+        scope["season_id"],
+        scope["competition_id"],
+        round_id,
+        season_entry_id,
+        actor=_actor(principal),
+        reason=payload.reason,
     )
     return _submission_view(submission, adjudication) | {
         "team_name": entry_meta.get("team_name"),
@@ -215,7 +218,12 @@ def apply_carry_forward(
         )
     service = LineupAdjudicationService(request.app.state.database, request.app.state.afl_client)
     submission, adjudication = service.apply_carry_forward_fallback(
-        scope["season_id"], scope["competition_id"], round_id, season_entry_id, actor=_actor(principal), reason=payload.reason
+        scope["season_id"],
+        scope["competition_id"],
+        round_id,
+        season_entry_id,
+        actor=_actor(principal),
+        reason=payload.reason,
     )
     return _submission_view(submission, adjudication) | {
         "team_name": entry_meta.get("team_name"),

@@ -340,9 +340,7 @@ class LineupAdjudicationService:
         """A lineup has at most one adjudication record, since this
         workflow only ever creates a lineup's first submission (version 1,
         `ck_adjudication_first_submission_only`)."""
-        row = self.database.execute(
-            "SELECT * FROM lineup_adjudication WHERE lineup_id=?", (lineup_id,)
-        ).fetchone()
+        row = self.database.execute("SELECT * FROM lineup_adjudication WHERE lineup_id=?", (lineup_id,)).fetchone()
         return self._to_adjudication(row) if row else None
 
     def _to_adjudication(self, row) -> LineupAdjudication:

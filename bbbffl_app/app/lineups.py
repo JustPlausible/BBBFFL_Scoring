@@ -73,9 +73,7 @@ POSITIONS = ("F1", "F2", "F3", "M1", "M2", "M3", "Ruck", "Tackler", "Interchange
 # layer most callers should use instead of this method directly).
 ADJUDICATED_LATE_CAPTURE_SOURCE_TYPE = "scorer_late_capture"
 ADJUDICATED_CARRY_FORWARD_SOURCE_TYPE = "scorer_adjudicated_carry_forward"
-ADJUDICATION_SOURCE_TYPES = frozenset(
-    {ADJUDICATED_LATE_CAPTURE_SOURCE_TYPE, ADJUDICATED_CARRY_FORWARD_SOURCE_TYPE}
-)
+ADJUDICATION_SOURCE_TYPES = frozenset({ADJUDICATED_LATE_CAPTURE_SOURCE_TYPE, ADJUDICATED_CARRY_FORWARD_SOURCE_TYPE})
 SUBMISSION_SOURCES = frozenset(
     {"coach", "scorer_proxy", "carry_forward", "system_derived", "scorer_correction"} | ADJUDICATION_SOURCE_TYPES
 )

@@ -461,7 +461,9 @@ def _opening_round_scenario(year):
 
 def test_opening_round_deferred_position_takes_precedence_over_draft_evidence():
     db, lifecycle, round_, entry, scope, lineups, rule, nominated_player = _opening_round_scenario(2830)
-    draft = lineups.get_draft(scope["season_id"], scope["competition_id"], round_.bbbffl_round_id, entry.season_entry_id)
+    draft = lineups.get_draft(
+        scope["season_id"], scope["competition_id"], round_.bbbffl_round_id, entry.season_entry_id
+    )
     other = own_player(db, scope["season_id"], entry, 700100, "Other Player", afl_team_id=EARLY_HOME.team_id)
     positions = dict(draft.positions)
     positions["M1"] = other.season_player_id
@@ -560,7 +562,21 @@ def _carry_forward_scenario(year=2840):
         expected_revision=0,
         actor=COACH,
     )
-    return db, lifecycle, rounds[1], entry, scope, pool, ownership, lineups, matches, service, prev_submission, early, rejected
+    return (
+        db,
+        lifecycle,
+        rounds[1],
+        entry,
+        scope,
+        pool,
+        ownership,
+        lineups,
+        matches,
+        service,
+        prev_submission,
+        early,
+        rejected,
+    )
 
 
 def test_valid_carry_forward_adjudication_and_rejected_draft_is_never_merged():

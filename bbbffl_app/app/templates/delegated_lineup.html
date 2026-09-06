@@ -1,17 +1,89 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Delegated weekly lineup · BBBFFL</title><style>
-:root{color-scheme:dark}body{font:15px system-ui;margin:auto;max-width:1050px;padding:22px;background:#0f1115;color:#e7e9ee}a{color:#79c0ff}.card{background:#171a21;border:1px solid #303744;border-radius:11px;padding:17px;margin:14px 0}.banner{border:3px solid #d29922;background:#2b2414}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}.slot{background:#11151b;border-radius:8px;padding:11px}.locked{border:2px solid #d29922}label{display:grid;gap:5px}button,input,select{font:inherit;padding:8px;border:1px solid #596273;border-radius:6px;background:#222733;color:inherit}button{cursor:pointer}.primary{background:#238636;font-weight:bold}.danger{background:#9e2a2b}.muted{color:#aab2c0}.message:empty{display:none}.positions{font:12px monospace;white-space:pre-wrap}
+:root{color-scheme:dark}body{font:15px system-ui;margin:auto;max-width:1050px;padding:22px;background:#0f1115;color:#e7e9ee}a{color:#79c0ff}.card{background:#171a21;border:1px solid #303744;border-radius:11px;padding:17px;margin:14px 0}.banner{border:3px solid #d29922;background:#2b2414}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}.slot{background:#11151b;border-radius:8px;padding:11px}.locked{border:2px solid #d29922}.indeterminate{border:2px solid #f85149}.editable-slot{border:2px solid #2f7a3f}label{display:grid;gap:5px}button,input,select{font:inherit;padding:8px;border:1px solid #596273;border-radius:6px;background:#222733;color:inherit}button{cursor:pointer}.primary{background:#238636;font-weight:bold}.danger{background:#9e2a2b}.muted{color:#aab2c0}.message:empty{display:none}.positions{font:12px monospace;white-space:pre-wrap}
+.badge{display:inline-block;font-size:11px;padding:2px 8px;border-radius:99px;border:1px solid #596273;text-transform:uppercase;letter-spacing:.03em}.badge.editable{border-color:#3fb950;color:#3fb950}.badge.locked-selective{border-color:#d29922;color:#f2cc60}.badge.locked-main{border-color:#f0883e;color:#f0883e}.badge.locked-opening{border-color:#79c0ff;color:#79c0ff}.badge.indeterminate{border-color:#f85149;color:#f85149}
+.lock-info{margin-top:6px;font-size:12.5px;color:#c9b06a}.indeterminate .lock-info{color:#ff9d94}.slot-head{display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:6px}
+.state-tag{display:inline-block;padding:3px 9px;border-radius:99px;font-size:.8rem;font-weight:700;background:#1f6f3d}.state-tag.private{background:#6e5318}.state-tag.changed{background:#7d4e13}
+.rejection{border:3px solid #f85149;background:#2a1414}
+details.diag{margin-top:6px}details.diag summary{cursor:pointer;color:#aab2c0;font-size:11px}details.diag div{font:11px monospace;color:#aab2c0;white-space:pre-wrap;margin-top:4px}
+table.plan{width:100%;border-collapse:collapse;font-size:13px}table.plan th,table.plan td{border-bottom:1px solid #303744;padding:6px 8px;text-align:left}
 </style></head><body>
 <nav><a href="/admin/round-preflight">← Round preflight</a> · <a href="/admin/round-review">Scorer / round review</a></nav>
 <h1>Delegated weekly lineup</h1><div id="message" class="card message"></div><main id="app">Loading authorised acting context…</main>
 <script>
-const roundId={{round_id|tojson}},csrf={{csrf_token|tojson}};let state;const esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-async function api(path,method='GET',body){const r=await fetch(path,{method,headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:body?JSON.stringify(body):undefined}),d=await r.json();if(!r.ok)throw Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail));return d}function msg(s,ok=false){let n=document.querySelector('#message');n.textContent=s;n.style.borderColor=ok?'#3fb950':'#f85149'}
-function render(d){state=d;let c=d.acting_context;const playerName=id=>id?(d.player_display_names?.[id]||id):'';document.querySelector('#app').innerHTML=`
+const roundId={{round_id|tojson}},csrf={{csrf_token|tojson}};let state;
+const esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function human(iso){if(!iso)return '—';try{return new Date(iso).toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'})}catch(e){return iso}}
+const LOCK_BADGE={opening_round_deferred:['Opening Round · locked','locked-opening'],selective_trigger:['Selective lockout · locked','locked-selective'],main_trigger:['Main lockout · locked','locked-main'],locked:['Locked','locked-selective'],indeterminate:['Indeterminate — fail closed','indeterminate'],vacant:['Editable (vacant)','editable'],editable:['Editable','editable']};
+async function api(path,method='GET',body){const r=await fetch(path,{method,headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:body?JSON.stringify(body):undefined}),d=await r.json();if(!r.ok)throw Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail));return d}
+function msg(s,ok=false){let n=document.querySelector('#message');n.textContent=s;n.style.borderColor=ok?'#3fb950':'#f85149'}
+
+function slotMarkup(row){
+  const [badgeLabel,badgeClass]=LOCK_BADGE[row.lock_type]||['Locked','locked-selective'];
+  const slotClass=row.editable?'editable-slot':(row.state==='indeterminate'?'indeterminate':'locked');
+  const diag=`season_player_id: ${esc(row.season_player_id)}\nafl_match_id: ${esc(row.afl_match_id)}\neffective_lock_at (UTC): ${esc(row.effective_lock_at)}\nobserved_status: ${esc(row.observed_status)}\nreason_code: ${esc(row.reason_code)}\nirreversible: ${row.irreversible}`;
+  if(row.editable){
+    const options=state.players.map(x=>`<option value="${esc(x.season_player_id)}" ${row.season_player_id===x.season_player_id?'selected':''}>${esc(x.display_name||x.name||x.season_player_id)}${x.afl_team_name?` — ${esc(x.afl_team_name)}`:''}</option>`).join('');
+    return `<label class="slot ${slotClass}"><b>${esc(row.position)}</b><span class="badge ${badgeClass}">${badgeLabel}</span><select data-position="${esc(row.position)}"><option value="">Vacant</option>${options}</select><details class="diag"><summary>Diagnostics</summary><div>${diag}</div></details></label>`;
+  }
+  const playerLine=row.season_player_id?`${esc(row.player_display_name||row.season_player_id)} — ${esc(row.afl_club_name||'Club unknown')}`:'Vacant';
+  let detail;
+  if(row.lock_type==='opening_round_deferred'){
+    const dc=row.deferred_context||{};
+    detail=`Locked by the Opening Round deferred-selection mechanism. Source AFL Opening Round ${esc(dc.afl_opening_round_id)} · source AFL match ${esc(dc.source_afl_match_id)}.`;
+  } else {
+    detail=`${esc(row.reason_display)}${row.afl_match_id?` · AFL match ${esc(row.afl_match_id)}`:''}${row.observed_status?` · observed AFL status ${esc(row.observed_status)}`:''}${row.effective_lock_at?` · effective lock time ${human(row.effective_lock_at)}`:''}${row.irreversible?' · backed by irreversible persisted evidence':' · not yet durably persisted'}`;
+  }
+  return `<label class="slot ${slotClass}"><b>${esc(row.position)}</b><span class="badge ${badgeClass}">${badgeLabel}</span><input disabled value="${playerLine}"><div class="lock-info">${detail}</div><details class="diag"><summary>Diagnostics</summary><div>${diag}</div></details></label>`;
+}
+
+function planMarkup(d){
+  if(d.lockout_plan_unavailable) return `<p class="muted">${esc(d.lockout_plan_unavailable)}</p>`;
+  if(!d.lockout_plan.length) return '<p class="muted">No lockout plan is configured for this round yet.</p>';
+  const rows=d.lockout_plan.map(t=>{
+    const matches=t.configured_matches.map(m=>`#${esc(m.afl_match_id)} (observed ${esc(m.observed_status)}${m.start_time_utc?`, scheduled ${human(m.start_time_utc)}`:''})`).join(', ');
+    return `<tr><td>${esc(t.sequence)}</td><td>${esc(t.trigger_key)}</td><td>${esc(t.trigger_type)}</td><td>${matches}</td><td>${t.activated?'Activated':'Not yet activated'}</td><td>${esc(t.activation_reason)}</td><td>${t.effective_lock_at?human(t.effective_lock_at):'—'}</td></tr>`;
+  }).join('');
+  return `<div style="overflow-x:auto"><table class="plan"><thead><tr><th>Seq</th><th>Trigger</th><th>Type</th><th>Configured AFL match evidence</th><th>Activation</th><th>Activation reason</th><th>Effective lock time</th></tr></thead><tbody>${rows}</tbody></table></div>
+  <p class="muted">Observed match status is the AFL-side evidence captured for each configured match; it is shown separately from the trigger's own activation fact. A trigger can be <b>Activated</b> even while its match still reads <b>UPCOMING</b>, whenever replay/evaluation time has reached its scheduled start (activation reason <code>match_time_reached</code>) — never treat an observed <code>UPCOMING</code> status as proof the trigger is inactive.</p>`;
+}
+
+function render(d){
+  state=d;let c=d.acting_context;
+  const submittedState=d.submission&&d.draft.revision>d.submission.based_on_draft_revision?['changed','Submitted + private changes']:d.submission?['','Submitted']:['private','Private draft only, never submitted'];
+  const rejectionBanner=d.submission_rejected?`<section class="card rejection"><strong>Submission NOT accepted.</strong> ${esc(d.submission_rejected)}<br>The private draft below may now differ from the authoritative submitted lineup shown in "Lineup state" -- it was saved (save-then-submit) but never became the official submission. ${d.draft_diverges_from_submission?'<button id="discard" class="danger">Discard private draft / rebase onto submitted lineup</button>':''}</section>`:'';
+  document.querySelector('#app').innerHTML=`
 <section class="card banner"><strong>PROXY / DELEGATED OPERATION</strong><div class="grid"><p><b>Signed in as:</b> ${esc(c.display_name)}</p><p><b>Role:</b> ${esc(c.active_role)}</p><p><b>Representing:</b> ${esc(c.team_name)}</p><p><b>Season / round:</b> ${esc(d.season.label)} · ${esc(d.round.label)}</p></div><p>The signed-in human remains the audit actor. The represented team is the target, not the authenticated identity.</p><label>Switch represented team<select id="entry"><option value="">Loading authorised teams…</option></select></label></section>
-<section class="card"><h2>Selection</h2><div class="grid">${Object.entries(d.draft.positions).map(([p,v])=>{let lock=d.deferred[p];return `<label class="slot ${lock?'locked':''}"><b>${esc(p)}</b>${lock?`<span>Opening Round deferred — locked</span><small>Source AFL Opening Round ${esc(lock.afl_opening_round_id)} · match ${esc(lock.source_afl_match_id)}</small><input disabled value="${esc(playerName(v))}">`:`<select data-position="${esc(p)}"><option value="">Vacant</option>${d.players.map(x=>`<option value="${esc(x.season_player_id)}" ${v===x.season_player_id?'selected':''}>${esc(x.display_name||x.name||x.season_player_id)}</option>`).join('')}</select>`}</label>`}).join('')}</div><p><label>Operator reason<input id="reason" value="First-half replay delegated lineup entry" required></label></p><button id="save">Save proxy draft</button> <button class="primary" id="submit">Submit / resubmit</button><p class="muted">Vacant means deliberately vacant; no placeholder or DNP is created. Submission asks for explicit confirmation.</p></section>
-<section class="card"><h2>Carry forward previous submitted lineup</h2>${d.carry_forward_source?`<p>Source round <b>${esc(d.carry_forward_source.source_bbbffl_round_id)}</b>, lineup ${esc(d.carry_forward_source.source_lineup_id)}, version ${esc(d.carry_forward_source.source_version)}</p><div class="positions">${Object.entries(d.carry_forward_source.positions).map(([p,v]) => `${esc(p)}: ${esc(playerName(v))}`).join('\n')}</div><button id="carry">Carry forward exact positions</button>`:`<strong>${esc(d.carry_forward_message)}</strong>`}</section>`;
-document.querySelector('#save').onclick=save;document.querySelector('#submit').onclick=submit;document.querySelector('#carry')?.addEventListener('click',carry);loadEntries(c)}
-function positions(){let p={...state.draft.positions};document.querySelectorAll('[data-position]').forEach(x=>p[x.dataset.position]=x.value||null);return p}async function save(){try{render(await api(`/api/operations/rounds/${roundId}/lineup/draft`,'PUT',{positions:positions(),expected_revision:state.draft.revision}));msg('Proxy draft saved.',true)}catch(e){msg(e.message)}}async function submit(){let visible=positions(),vacancies=Object.entries(visible).filter(([p,v])=>p!=='Interchange'&&!v).map(x=>x[0]);if(vacancies.length&&!confirm(`Submit with deliberate vacancies: ${vacancies.join(', ')}?`))return;try{render(await api(`/api/operations/rounds/${roundId}/lineup/submit`,'POST',{positions:visible,expected_draft_revision:state.draft.revision,expected_submission_version:state.submission?.version||0,reason:document.querySelector('#reason').value}));msg('Authoritative scorer_proxy submission created.',true)}catch(e){msg(e.message)}}async function carry(){if(!confirm('Copy the displayed source exactly, position for position?'))return;try{render(await api(`/api/operations/rounds/${roundId}/lineup/carry-forward`,'POST',{expected_submission_version:state.submission?.version||0,reason:'Explicit first-half replay carry-forward'}));msg('Exact carry-forward submission created.',true)}catch(e){msg(e.message)}}
-async function loadEntries(c){try{let entries=await api(`/api/context/entries?season_id=${encodeURIComponent(state.season.season_id)}`),s=document.querySelector('#entry');s.innerHTML=entries.map(x=>`<option value="${esc(x.season_entry_id)}" ${x.season_entry_id===c.represented_season_entry_id?'selected':''}>${esc(x.team_name)}</option>`).join('');s.onchange=async()=>{try{await api('/api/context/represented-entry','POST',{season_entry_id:s.value});location.reload()}catch(e){msg(e.message)}}}catch(e){msg(e.message)}}api(`/api/operations/rounds/${roundId}/lineup`).then(render).catch(e=>msg(e.message));
+${rejectionBanner}
+<section class="card"><h2>Lineup state</h2><p><span class="state-tag ${submittedState[0]}">${esc(submittedState[1])}</span></p><p class="muted">Draft revision ${esc(d.draft.revision)}${d.submission?` · Authoritative submitted version ${esc(d.submission.version)} (based on draft revision ${esc(d.submission.based_on_draft_revision)})`:' · No authoritative submission exists yet'}. The private draft is never itself the sporting record -- only a submitted version is.</p></section>
+<section class="card"><h2>Lockout plan</h2>${planMarkup(d)}</section>
+<section class="card"><h2>Selection</h2><div class="grid">${d.lock_state.map(slotMarkup).join('')}</div><p><label>Operator reason<input id="reason" value="First-half replay delegated lineup entry" required></label></p><button id="save">Save proxy draft</button> <button class="primary" id="submit">Submit / resubmit</button><p class="muted">Vacant means deliberately vacant; no placeholder or DNP is created. Submission asks for explicit confirmation. Locked and indeterminate positions above are read-only and fail closed -- they can never be changed here, matching the server's own guard.</p></section>
+<section class="card"><h2>Carry forward previous submitted lineup</h2>${d.carry_forward_source?`<p>Source round <b>${esc(d.carry_forward_source.source_bbbffl_round_id)}</b>, lineup ${esc(d.carry_forward_source.source_lineup_id)}, version ${esc(d.carry_forward_source.source_version)}</p><div class="positions">${Object.entries(d.carry_forward_source.positions).map(([p,v]) => `${esc(p)}: ${esc(d.player_display_names?.[v]||v)}`).join('\n')}</div><button id="carry">Carry forward exact positions</button>`:`<strong>${esc(d.carry_forward_message)}</strong>`}</section>`;
+  document.querySelector('#save').onclick=save;document.querySelector('#submit').onclick=submit;document.querySelector('#carry')?.addEventListener('click',carry);document.querySelector('#discard')?.addEventListener('click',discardDraft);loadEntries(c)
+}
+function positions(){let p={...state.draft.positions};document.querySelectorAll('[data-position]').forEach(x=>p[x.dataset.position]=x.value||null);return p}
+async function save(){try{render(await api(`/api/operations/rounds/${roundId}/lineup/draft`,'PUT',{positions:positions(),expected_revision:state.draft.revision}));msg('Proxy draft saved.',true)}catch(e){msg(e.message)}}
+async function submit(){
+  let visible=positions(),vacancies=Object.entries(visible).filter(([p,v])=>p!=='Interchange'&&!v).map(x=>x[0]);
+  if(vacancies.length&&!confirm(`Submit with deliberate vacancies: ${vacancies.join(', ')}?`))return;
+  const expectedRevision=state.draft.revision,expectedVersion=state.submission?.version||0,reason=document.querySelector('#reason').value;
+  try{
+    render(await api(`/api/operations/rounds/${roundId}/lineup/submit`,'POST',{positions:visible,expected_draft_revision:expectedRevision,expected_submission_version:expectedVersion,reason}));
+    msg('Authoritative scorer_proxy submission created.',true)
+  }catch(e){
+    // Save-then-submit: the private draft may already have been persisted
+    // server-side even though the submission itself was rejected. Reload
+    // the authoritative submitted lineup, draft revision and lock state
+    // rather than leaving the attempted (rejected) change looking accepted.
+    try{let fresh=await api(`/api/operations/rounds/${roundId}/lineup`);fresh.submission_rejected=e.message;render(fresh)}catch(_){}
+    msg('Submission rejected — NOT submitted: '+e.message)
+  }
+}
+async function discardDraft(){
+  if(!confirm('Discard the private draft and rebase it back onto the authoritative submitted lineup?'))return;
+  try{render(await api(`/api/operations/rounds/${roundId}/lineup/draft`,'PUT',{positions:state.submission.positions,expected_revision:state.draft.revision}));msg('Private draft discarded and rebased onto the authoritative submitted lineup.',true)}catch(e){msg(e.message)}
+}
+async function carry(){if(!confirm('Copy the displayed source exactly, position for position?'))return;try{render(await api(`/api/operations/rounds/${roundId}/lineup/carry-forward`,'POST',{expected_submission_version:state.submission?.version||0,reason:'Explicit first-half replay carry-forward'}));msg('Exact carry-forward submission created.',true)}catch(e){msg(e.message)}}
+async function loadEntries(c){try{let entries=await api(`/api/context/entries?season_id=${encodeURIComponent(state.season.season_id)}`),s=document.querySelector('#entry');s.innerHTML=entries.map(x=>`<option value="${esc(x.season_entry_id)}" ${x.season_entry_id===c.represented_season_entry_id?'selected':''}>${esc(x.team_name)}</option>`).join('');s.onchange=async()=>{try{await api('/api/context/represented-entry','POST',{season_entry_id:s.value});location.reload()}catch(e){msg(e.message)}}}catch(e){msg(e.message)}}
+api(`/api/operations/rounds/${roundId}/lineup`).then(render).catch(e=>msg(e.message));
 </script></body></html>

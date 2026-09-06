@@ -43,6 +43,109 @@ EXPECTED_COACH_LINEUP_ERRORS = (
 ORDINARY_POSITIONS = tuple(position for position in POSITIONS if position != "Interchange")
 
 
+def resolve_position_locks(lockouts, lineup_id, bbbffl_round_id, season_entry_id, positions, match_facts):
+    """Authoritative position-level lock-state read model (issue #138): the
+    one boundary both the coach page (`CoachLineupService.view`) and the
+    delegated Replay Operator page (`app.routes.delegated_operations.
+    _lineup_view`) call, so the two surfaces can never disagree about
+    which ordinary positions are editable/locked/indeterminate. Neither
+    surface recomputes lock rules itself -- both simply render whatever
+    `LockoutRepository.lock_state` (which durably materialises applicable
+    trigger/position evidence) reports here.
+
+    Fails closed: if the live evidence read itself errors (afl-api down,
+    an unresolved round mapping), every position comes back INDETERMINATE
+    rather than confidently editable -- a failed read is never presented
+    as safe to edit.
+    """
+    try:
+        return lockouts.lock_state(
+            lineup_id, bbbffl_round_id, season_entry_id, positions, match_facts=match_facts
+        ).positions
+    except (AflApiError, MatchResolutionError) as exc:
+        return {
+            position: PositionLockState(
+                position,
+                season_player_id,
+                LockState.INDETERMINATE,
+                f"lock evidence unavailable: {exc}",
+                None,
+                None,
+                None,
+                False,
+            )
+            for position, season_player_id in positions.items()
+        }
+
+
+_LOCK_REASON_DISPLAY = {
+    "empty": "Deliberately vacant",
+    "not_yet_triggered": "Not yet triggered -- editable",
+    "selective_trigger_activated": "Selective lockout trigger activated",
+    "main_lockout_triggered": "Main lockout activated",
+    "lockout_plan_not_configured": "No lockout plan configured for this round",
+    "missing_scheduled_start_time": "AFL match has no scheduled start time on record",
+}
+
+
+def humanize_lock_reason(reason_code: str) -> str:
+    """Operator-readable text for a `PositionLockState.reason` code -- the
+    one place both lineup surfaces translate a reason code to prose, so
+    the wording never drifts between them (issue #138)."""
+    if reason_code in _LOCK_REASON_DISPLAY:
+        return _LOCK_REASON_DISPLAY[reason_code]
+    if reason_code.startswith("unrecognized_status:"):
+        return f"Unrecognised AFL match status ({reason_code.split(':', 1)[1]})"
+    if reason_code.startswith("lock evidence unavailable"):
+        return reason_code
+    return reason_code.replace("_", " ").capitalize()
+
+
+def describe_ordinary_position(position, lock: PositionLockState, deferred_context, player) -> dict:
+    """JSON-ready presentation of one ordinary position's authoritative
+    lock state (issue #138), for the delegated lineup surface. Player
+    names/clubs are resolved here, never left to the browser to guess
+    from a season_player_id; `lock_type` keeps an Opening Round deferred
+    nomination a visually/semantically distinct category from an
+    ordinary selective/main lockout rather than merging them.
+    """
+    season_player_id = lock.season_player_id
+    if deferred_context:
+        lock_type, state, editable = "opening_round_deferred", "locked", False
+        reason_code, reason_display = "opening_round_deferred", "Opening Round deferred nomination"
+    elif lock.state == LockState.EDITABLE:
+        state, editable = "editable", True
+        lock_type = "vacant" if season_player_id is None else "editable"
+        reason_code, reason_display = lock.reason, humanize_lock_reason(lock.reason)
+    elif lock.state == LockState.LOCKED:
+        state, editable = "locked", False
+        lock_type = {
+            "selective_trigger_activated": "selective_trigger",
+            "main_lockout_triggered": "main_trigger",
+        }.get(lock.reason, "locked")
+        reason_code, reason_display = lock.reason, humanize_lock_reason(lock.reason)
+    else:
+        state, editable, lock_type = "indeterminate", False, "indeterminate"
+        reason_code, reason_display = lock.reason, humanize_lock_reason(lock.reason)
+    return {
+        "position": position,
+        "season_player_id": season_player_id,
+        "player_display_name": player.display_name if player else None,
+        "afl_club_id": player.afl_team_id if player else None,
+        "afl_club_name": player.afl_team_name if player else None,
+        "state": state,
+        "lock_type": lock_type,
+        "editable": editable,
+        "reason_code": reason_code,
+        "reason_display": reason_display,
+        "afl_match_id": lock.afl_match_id,
+        "effective_lock_at": lock.effective_lock_at,
+        "observed_status": lock.observed_status,
+        "irreversible": lock.irreversible,
+        "deferred_context": deferred_context,
+    }
+
+
 def vacant_ordinary_positions(positions):
     """The ordinary positions in `positions` (a `{position: season_player_id
     or None}` mapping, e.g. a draft's) that are currently vacant -- used
@@ -245,26 +348,9 @@ class CoachLineupService:
             for position in POSITIONS
         }
         deferred = {key: value for key, value in deferred.items() if value}
-        try:
-            lock_view = self.lockouts.lock_state(
-                draft.lineup_id, round_id, entry["season_entry_id"], draft.positions, match_facts=self.match_facts
-            )
-            locks = lock_view.positions
-        except (AflApiError, MatchResolutionError) as exc:
-            # A failed evidence read is never presented as confidently editable.
-            locks = {
-                position: PositionLockState(
-                    position,
-                    draft.positions[position],
-                    LockState.INDETERMINATE,
-                    f"lock evidence unavailable: {exc}",
-                    None,
-                    None,
-                    None,
-                    False,
-                )
-                for position in POSITIONS
-            }
+        locks = resolve_position_locks(
+            self.lockouts, draft.lineup_id, round_id, entry["season_entry_id"], draft.positions, self.match_facts
+        )
         if validation is None and submission is not None:
             validation = LineupValidationService(self.database, self.afl_client).validate_submission(
                 draft.lineup_id, draft.positions

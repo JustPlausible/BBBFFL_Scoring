@@ -298,4 +298,66 @@ The browser replay workflow is deliberately separate from coach self-service:
 The authenticated person remains the audit actor and the represented entry is
 only the target. The ordinary `/coach/.../lineup` page still resolves the
 signed-in coach's own assignment and does **not** consume represented-entry
-context, so this feature does not turn it into silent impersonation.
+context, so this feature does not turn it into silent impersonation. All of
+the reads above -- the private draft, the authoritative submission and the
+lock state described next -- are resolved through this same authenticated
+acting context; the represented entry never comes from a client-supplied
+identifier alone, and no route on this page can be made to return another
+entry's private draft or lineup no matter what identifier a request carries.
+
+### The delegated lineup page is also an authoritative lock-state inspection surface (issue #138)
+
+Before issue #138, the delegated page only ever rendered the *private
+draft's* positions: an ordinary position kept showing an editable dropdown
+even after a selective or main lockout trigger had activated for it
+elsewhere (the server-side submission guard still correctly rejected the
+resulting change, but the operator was never told why their edit would
+fail). The delegated page now calls the exact same authoritative
+position-level lock-state read model the Coach page uses --
+`app.coach_lineup.resolve_position_locks`, a thin shared wrapper around
+`app.lockouts.LockoutRepository.lock_state` -- for the represented entry's
+own lineup, and renders from its result instead of only the raw draft. See
+[`lockouts.md`](lockouts.md#delegated-lineup-lock-state-presentation-issue-138)
+for the full read-model contract (`editable`/`locked`/`indeterminate`,
+reason codes, AFL match identity, effective lock time, observed AFL match
+status, and whether the answer is backed by irreversible persisted
+evidence) and how it is presented.
+
+Two things this deliberately does **not** do:
+
+- **No delegated-only lock calculation.** The delegated route never
+  evaluates `evaluate_match_lock`, trigger coverage, or match resolution
+  itself -- it only asks `LockoutRepository` the same question the Coach
+  page asks, through the same `CoachLineupService`/`LockoutRepository`
+  boundary. A fix or change to lock evaluation lands in one place and is
+  visible on both surfaces identically.
+- **No client-side lock inference.** The browser never recomputes lock
+  state from AFL match status, timestamps, or anything else -- it only
+  renders the `state`/`reason_code`/`lock_type` fields the server already
+  decided, and disables/read-onlys a control purely from the server's
+  `editable` flag.
+
+Opening Round deferred nominations remain their own distinct lock type
+(`lock_type: "opening_round_deferred"`), never merged into or confused with
+an ordinary selective/main trigger lock -- see
+[`opening-round-deferred-selection.md`](opening-round-deferred-selection.md).
+
+### Rejected delegated submissions (save-then-submit)
+
+The delegated submit route is deliberately still save-then-submit (the
+browser's visible choices are saved as the private draft *before* the
+server attempts to submit them) -- issue #138 did not change that
+architecture, only what happens when the submit half is then rejected by
+the unchanged, authoritative `LockedSelectionError`/lockout guard. When
+that happens the private draft the save half already persisted can now
+differ from the still-unchanged authoritative submission. The page reloads
+the authoritative submission, the current private draft revision and the
+current lock state (the same `GET .../lineup` read model above), states
+plainly that the attempted change was **not** submitted, and -- whenever
+the reloaded draft and submission actually differ -- offers a "Discard
+private draft / rebase onto submitted lineup" action that overwrites the
+private draft with the authoritative submitted positions (an ordinary
+`PUT .../lineup/draft` call, the same draft-revision optimistic-concurrency
+path every other draft edit uses; no second draft/versioning model was
+introduced for this). The rejected change is never left looking as though
+it succeeded.

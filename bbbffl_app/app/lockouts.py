@@ -254,6 +254,33 @@ class LockoutTrigger:
 
 
 @dataclass(frozen=True)
+class TriggerActivationView:
+    """Read-model row explaining one configured trigger's current
+    activation state, for a lockout-plan presentation surface (issue
+    #138's "distinguish configured match evidence from actual trigger
+    activation state"). `configured_matches` is this trigger's *current
+    observed* match evidence (status/scheduled start) -- display only,
+    never itself proof of activation: a match can still read UPCOMING
+    while `activated` is already True, because replay evaluation time
+    reached the scheduled start (`activation_reason="match_time_reached"`)
+    -- `activated`/`activation_reason`/`effective_lock_at` always come
+    from the durable `bbbffl_round_lockout_trigger_activation` record,
+    never re-derived from the observed status shown alongside them."""
+
+    trigger_id: str
+    trigger_key: str
+    trigger_type: str
+    sequence: int
+    afl_match_ids: tuple[int, ...]
+    activated: bool
+    activation_reason: str | None
+    activating_afl_match_id: int | None
+    effective_lock_at: str | None
+    observed_status: str | None
+    configured_matches: tuple[dict, ...]
+
+
+@dataclass(frozen=True)
 class TriggerCoverage:
     """A round's currently-activated trigger state, as consulted by
     `_evaluate_position`. `configured` is false only when the round has no
@@ -633,6 +660,65 @@ class LockoutRepository:
                 for position, season_player_id in positions.items()
             }
         return LineupLockView(lineup_id, bbbffl_round_id, season_entry_id, at.isoformat(), view)
+
+    def describe_triggers(
+        self,
+        bbbffl_round_id: str,
+        *,
+        match_facts: MatchFactsProvider,
+        evaluation_at: datetime | None = None,
+    ) -> list[TriggerActivationView]:
+        """Deterministic (`LockoutTriggerRepository.list_triggers`'s own
+        `ORDER BY sequence, trigger_key`), presentation-ready view of a
+        round's whole lockout plan (issue #138): every configured trigger,
+        ordered by configured sequence, with its currently observed match
+        evidence shown *separately* from whether it has actually activated.
+
+        Durably materializes activation evidence first -- the same
+        authoritative path `lock_state` uses -- so this never depends on
+        some other read/write path having incidentally already triggered
+        materialization."""
+        at = _evaluation_at(evaluation_at, match_facts)
+        self._materialize_round_triggers(bbbffl_round_id, match_facts=match_facts, evaluation_at=at)
+        triggers = LockoutTriggerRepository(self.database).list_triggers(bbbffl_round_id)
+        matches_by_id = {match.match_id: match for match in match_facts.matches_for(bbbffl_round_id)}
+        activations = {
+            row["trigger_id"]: row
+            for row in self.database.execute(
+                "SELECT a.trigger_id, a.afl_match_id, a.observed_status, a.effective_lock_at, a.activation_reason "
+                "FROM bbbffl_round_lockout_trigger_activation a "
+                "JOIN bbbffl_round_lockout_trigger t ON t.trigger_id=a.trigger_id "
+                "WHERE t.bbbffl_round_id=?",
+                (bbbffl_round_id,),
+            ).fetchall()
+        }
+        views = []
+        for trigger in triggers:
+            activation = activations.get(trigger.trigger_id)
+            configured_matches = tuple(
+                {
+                    "afl_match_id": match_id,
+                    "observed_status": matches_by_id[match_id].status if match_id in matches_by_id else None,
+                    "start_time_utc": matches_by_id[match_id].start_time_utc if match_id in matches_by_id else None,
+                }
+                for match_id in trigger.afl_match_ids
+            )
+            views.append(
+                TriggerActivationView(
+                    trigger.trigger_id,
+                    trigger.trigger_key,
+                    trigger.trigger_type,
+                    trigger.sequence,
+                    trigger.afl_match_ids,
+                    activation is not None,
+                    activation["activation_reason"] if activation else None,
+                    activation["afl_match_id"] if activation else None,
+                    activation["effective_lock_at"] if activation else None,
+                    activation["observed_status"] if activation else None,
+                    configured_matches,
+                )
+            )
+        return views
 
     # -- Enforcement -------------------------------------------------------
     def guard(self, *, match_facts: MatchFactsProvider, evaluation_at: datetime | None = None) -> LockGuard:

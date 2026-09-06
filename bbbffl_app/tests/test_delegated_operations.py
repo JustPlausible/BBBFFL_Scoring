@@ -100,7 +100,12 @@ def test_lineup_view_names_released_carry_forward_player_without_making_it_selec
         "round_label": "Round 2",
         "sequence": 2,
     }
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(database=db, afl_client=SimpleNamespace())))
+    # No AFL match evidence at all for round 2 -- issue #138's read model
+    # must still fail closed (indeterminate) rather than raising, exactly
+    # like the Coach page's `view()` does for the same gap.
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(database=db, afl_client=SimpleNamespace(get_matches=lambda _id: [])))
+    )
     principal = Principal(
         Role.REPLAY_OPERATOR,
         coach_id="operator-1",
@@ -114,3 +119,12 @@ def test_lineup_view_names_released_carry_forward_player_without_making_it_selec
     assert view["player_display_names"][released_player.season_player_id] == released_player.display_name
     assert released_player.season_player_id not in {player["season_player_id"] for player in view["players"]}
     assert current_player.season_player_id in {player["season_player_id"] for player in view["players"]}
+    # Issue #138: the same authoritative lock-state read model as the Coach
+    # page is materialised for every ordinary position -- round 2's fresh
+    # draft has no selections yet, so each is a deliberate vacancy,
+    # reported editable/"empty" rather than omitted or guessed.
+    lock_by_position = {row["position"]: row for row in view["lock_state"]}
+    assert set(lock_by_position) == set(delegated_operations.COACH_LINEUP_POSITIONS)
+    assert lock_by_position["F1"]["state"] == "editable"
+    assert lock_by_position["F1"]["lock_type"] == "vacant"
+    assert lock_by_position["F1"]["reason_code"] == "empty"

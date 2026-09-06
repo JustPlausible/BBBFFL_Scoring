@@ -11,10 +11,17 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
+from app.afl_client import AflApiError
 from app.audit import ActorContext
 from app.authorization import Principal, require_capability, require_entry_context, require_role_covers_season
 from app.carry_forward import CarryForwardService
-from app.coach_lineup import COACH_LINEUP_POSITIONS, CoachLineupService
+from app.coach_lineup import (
+    COACH_LINEUP_POSITIONS,
+    CoachLineupService,
+    MatchResolutionError,
+    describe_ordinary_position,
+    resolve_position_locks,
+)
 from app.config import BASE_DIR
 from app.csrf import issue_token, verify_token
 from app.lineup_proxy import LineupProxyService
@@ -135,11 +142,50 @@ def _lineup_view(request: Request, principal: Principal, scope: dict) -> dict:
     presentation_player_ids = {player_id for player_id in draft.positions.values() if player_id}
     if source:
         presentation_player_ids.update(player_id for player_id in source.positions.values() if player_id)
+    if submission:
+        presentation_player_ids.update(player_id for player_id in submission.positions.values() if player_id)
     player_display_names = {}
     for player_id in presentation_player_ids:
         player = service.pool.get_by_id(player_id)
         if player is not None and player.display_name:
             player_display_names[player_id] = player.display_name
+
+    # Issue #138: the same authoritative position-level lock-state read
+    # model the ordinary Coach lineup page uses, evaluated against this
+    # represented entry's own lineup -- never a delegated-only
+    # recomputation of lock rules. `locks` durably materialises applicable
+    # trigger/effective-submission evidence exactly as the Coach page's
+    # `view()` does.
+    locks = resolve_position_locks(
+        service.lockouts,
+        draft.lineup_id,
+        scope["bbbffl_round_id"],
+        scope["season_entry_id"],
+        draft.positions,
+        service.match_facts,
+    )
+    lock_state = [
+        describe_ordinary_position(
+            position,
+            locks[position],
+            deferred.get(position),
+            service.pool.get_by_id(locks[position].season_player_id) if locks[position].season_player_id else None,
+        )
+        for position in COACH_LINEUP_POSITIONS
+    ]
+    try:
+        lockout_plan = [
+            asdict(trigger)
+            for trigger in service.lockouts.describe_triggers(scope["bbbffl_round_id"], match_facts=service.match_facts)
+        ]
+        lockout_plan_unavailable = None
+    except (AflApiError, MatchResolutionError) as exc:
+        lockout_plan = []
+        lockout_plan_unavailable = f"lockout plan evidence unavailable: {exc}"
+
+    submitted_positions = submission.positions if submission else None
+    draft_diverges_from_submission = submitted_positions is not None and draft.positions != submitted_positions
+
     return {
         "acting_context": {
             "authenticated_operator_id": principal.coach_id,
@@ -159,6 +205,10 @@ def _lineup_view(request: Request, principal: Principal, scope: dict) -> dict:
         "players": [asdict(player) for player in players if player is not None],
         "player_display_names": player_display_names,
         "deferred": {position: value for position, value in deferred.items() if value},
+        "lock_state": lock_state,
+        "lockout_plan": lockout_plan,
+        "lockout_plan_unavailable": lockout_plan_unavailable,
+        "draft_diverges_from_submission": draft_diverges_from_submission,
         "carry_forward_source": asdict(source) if source else None,
         "carry_forward_message": None
         if source

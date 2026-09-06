@@ -309,6 +309,56 @@ sequence, associated match IDs). Together these exist so a later coach/
 scorer UI can explain *why* a position is locked without recomputing any of
 these rules client-side. No UI is built in this issue.
 
+## Delegated lineup lock-state presentation (issue #138)
+
+The Coach page (`app.coach_lineup.CoachLineupService.view`) was the first
+consumer of the read model above; the delegated Replay Operator weekly-
+lineup page (`app.routes.delegated_operations._lineup_view`) is the
+second, and it is required to agree with the Coach page exactly, position
+for position, because both call the identical boundary:
+
+- **`app.coach_lineup.resolve_position_locks`** -- the one shared wrapper
+  both surfaces call. It calls `LockoutRepository.lock_state` (which
+  durably materialises applicable trigger/effective-submission evidence
+  exactly as documented above) and, if the live evidence read itself
+  fails (`AflApiError`/`MatchResolutionError` -- afl-api down, an
+  unresolved round mapping), fails closed: every position comes back
+  `INDETERMINATE` rather than editable. Neither the Coach page nor the
+  delegated page recomputes lock rules itself; both simply render whatever
+  this one call reports. There is deliberately no delegated-only lock
+  calculation and no lock inference in browser JavaScript -- the delegated
+  template only ever disables/read-onlys a control from the server's own
+  `editable` flag.
+- **`app.coach_lineup.describe_ordinary_position`** -- the delegated
+  page's JSON presentation of one `PositionLockState`: player display name
+  and AFL club (resolved server-side, never left to the browser to guess
+  from a `season_player_id`), `state` (`editable`/`locked`/
+  `indeterminate`), a `lock_type` that keeps an Opening Round deferred
+  nomination (`"opening_round_deferred"`) structurally distinct from an
+  ordinary `"selective_trigger"`/`"main_trigger"` lock rather than merging
+  them, a human-readable `reason_display` alongside the raw `reason_code`,
+  `afl_match_id`, `effective_lock_at`, `observed_status` and `irreversible`
+  exactly as `PositionLockState` reports them. `state: "indeterminate"`
+  renders exactly like `"locked"` (disabled, fail-closed) -- an
+  indeterminate position is never editable.
+- **`app.lockouts.LockoutRepository.describe_triggers`** -- the ordered
+  (by each trigger's configured `sequence`), presentation-ready view of a
+  round's whole lockout plan the delegated page's "Lockout plan" panel
+  renders: every configured trigger with its *currently observed* AFL
+  match evidence (status, scheduled start) shown **separately** from
+  whether it has actually activated (`activated`, `activation_reason`,
+  `effective_lock_at`) -- observed evidence is display-only and never
+  itself proof of activation. In particular, a match can still read
+  `UPCOMING` while its trigger has already activated because replay/
+  evaluation time reached the scheduled start
+  (`activation_reason: "match_time_reached"`); `describe_triggers` always
+  reads `activated`/`activation_reason` from the durable
+  `bbbffl_round_lockout_trigger_activation` record, never re-derives it
+  from the observed status shown alongside it, and the delegated template
+  never treats an observed `UPCOMING` status as proof a trigger is
+  inactive. This is exactly the 2026 Round 2 replay scenario that
+  motivated issue #138 (Hawthorn v Sydney Swans, AFL match 8052).
+
 ## Audit
 
 Ordinary lock evaluation and materialization never call

@@ -558,6 +558,60 @@ def test_replay_upcoming_match_with_activated_trigger_shows_locked_not_editable(
 # ---------------------------------------------------------------------------
 
 
+def test_discard_and_rebase_draft_onto_submission_clears_the_divergence_flag():
+    """Codex review (PR #143): the discard/rebase action (an ordinary
+    `create_or_amend`/`PUT .../lineup/draft` call saving the authoritative
+    submitted positions back into the draft) advances the draft's
+    revision even though its positions now exactly match the submission
+    again -- `draft_diverges_from_submission` must reflect that actual
+    equality, not merely "has the revision moved since submission"."""
+    db, _, round_, entries, scope_row, pool, ownership = lockout_context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_selective(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], key="early-1", sequence=1)
+    early = acquire(pool, ownership, scope_row, entry, 1, EARLY_HOME)
+    other = acquire(pool, ownership, scope_row, entry, 2, EARLY_HOME, name="Divergent Draft Choice")
+    submitted = _save_and_submit(
+        db,
+        round_,
+        scope_row,
+        entry,
+        {"F1": early.season_player_id},
+        matches=ALL_MATCHES,
+        evaluation_at=EARLY_START - timedelta(minutes=5),
+    )
+
+    proxy = LineupProxyService(db)
+    diverged_draft = proxy.create_or_amend(
+        scope_row["season_id"],
+        scope_row["competition_id"],
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        {"F1": other.season_player_id},
+        expected_revision=1,
+        actor=OPERATOR,
+    )
+    request = _request(db, afl_client(ALL_MATCHES))
+    diverged_view = delegated_operations._lineup_view(request, _principal(entry), _scope(db, round_, scope_row, entry))
+    assert diverged_view["draft_diverges_from_submission"] is True
+
+    # Discard/rebase: save the authoritative submitted positions back into
+    # the draft. This bumps the draft revision again but now exactly
+    # matches the submission.
+    proxy.create_or_amend(
+        scope_row["season_id"],
+        scope_row["competition_id"],
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        submitted.positions,
+        expected_revision=diverged_draft.revision,
+        actor=OPERATOR,
+    )
+    rebased_view = delegated_operations._lineup_view(request, _principal(entry), _scope(db, round_, scope_row, entry))
+    assert rebased_view["draft"]["revision"] > 1
+    assert rebased_view["draft_diverges_from_submission"] is False
+
+
 def test_delegated_lineup_page_renders_lock_state_driven_disabled_controls_client_side():
     """The delegated lineup page is a session-native JSON-driven surface
     (see app/routes/delegated_operations.py's module docstring): the
@@ -595,6 +649,15 @@ def test_delegated_lineup_page_renders_lock_state_driven_disabled_controls_clien
     # Lock state, never recomputed client-side from raw match status.
     assert "row.state" in source and "row.lock_type" in source
     assert "row.observed_status" in source
+    # Codex review (PR #143): the "Submitted + private changes" badge must
+    # key off the server-computed `draft_diverges_from_submission` (an
+    # actual position-by-position comparison), never off draft revision
+    # ordering alone -- every draft save advances the revision even when
+    # positions are unchanged, and the discard/rebase action itself saves
+    # the submitted positions as a newer revision, which would otherwise
+    # still (wrongly) read as "changed" immediately after discarding.
+    assert "d.draft_diverges_from_submission" in source
+    assert "d.draft.revision>d.submission.based_on_draft_revision" not in source
 
 
 def test_lockout_plan_orders_triggers_by_configured_sequence():

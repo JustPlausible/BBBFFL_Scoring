@@ -929,13 +929,37 @@ class LockoutRepository:
         materializable: bool,
     ) -> PositionLockState:
         if season_player_id is None:
-            # A deliberate vacancy has no AFL club/match to resolve, so
-            # there is nothing for any trigger -- selective or main -- to
-            # lock, and no lock boundary is ever invented for it (issue #98,
-            # docs/lockouts.md "Deliberately vacant positions"). It stays
-            # editable for as long as the round itself remains open;
-            # `guard_transition`'s new-player rule still governs whichever
-            # player, if any, is later introduced here.
+            existing_lock = existing.get(position)
+            if existing_lock is not None:
+                # This position holds durable, irreversible lock evidence
+                # for a real player under the lineup's effective submission
+                # -- a caller evaluating a `positions` mapping where this
+                # slot now reads vacant (e.g. an unsubmitted draft that
+                # attempted, and had rejected, clearing an already-locked
+                # position -- issue #138) must never see that reported as
+                # an ordinary open vacancy: `guard_transition` would still
+                # refuse to actually clear it, since any change away from
+                # an effectively-locked position's previous value is
+                # rejected regardless of the proposed replacement. Report
+                # the persisted lock, not an invented vacancy.
+                return PositionLockState(
+                    position,
+                    existing_lock["season_player_id"],
+                    LockState.LOCKED,
+                    existing_lock["lock_reason"],
+                    existing_lock["afl_match_id"],
+                    existing_lock["effective_lock_at"],
+                    existing_lock["observed_status"],
+                    True,
+                )
+            # A genuine deliberate vacancy (never previously locked here)
+            # has no AFL club/match to resolve, so there is nothing for any
+            # trigger -- selective or main -- to lock, and no lock boundary
+            # is ever invented for it (issue #98, docs/lockouts.md
+            # "Deliberately vacant positions"). It stays editable for as
+            # long as the round itself remains open; `guard_transition`'s
+            # new-player rule still governs whichever player, if any, is
+            # later introduced here.
             return PositionLockState(position, None, LockState.EDITABLE, "empty", None, None, None, False)
         row = existing.get(position)
         if row is not None and row["season_player_id"] == season_player_id:

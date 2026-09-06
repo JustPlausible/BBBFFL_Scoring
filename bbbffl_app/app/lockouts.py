@@ -576,6 +576,28 @@ class LockGuard:
       called by `submit` *inside* its own transaction (on `conn`, the same
       connection already holding a `FOR UPDATE` lock on `weekly_lineup`).
       Accepts or rejects the proposed change; never writes anything itself.
+
+    `_at()` resolves and *memoizes* one evaluation instant per `LockGuard`
+    instance, the first time either method calls it -- `materialize()` and
+    `__call__()` therefore always agree on "now" for one submission attempt.
+    Without this, an explicit `evaluation_at` (replay, tests) is unaffected
+    (`_evaluation_at` returns it verbatim every time regardless), but a
+    live, wall-clock-driven submission (`evaluation_at=None`, the
+    production default) could otherwise sample two different instants
+    moments apart: `materialize()` observing the round's trigger plan
+    slightly *before* a boundary (recording nothing), and `__call__`
+    computing its own, later `at` that it never actually re-checks a
+    boundary against -- `guard_transition` decides purely from the
+    durably-materialized `coverage` table, so a second, independent
+    "now" here is not "more live", only inconsistent with what
+    `materialize()` already (correctly, as of its own instant) decided.
+    Every production caller (`app.coach_lineup`, `app.lineup_proxy`,
+    `app.carry_forward`, `app.opening_round`) builds a fresh `LockGuard`
+    per submission attempt (via `LockoutRepository.guard`), so memoizing
+    here never reuses a stale instant across two different submissions --
+    see `tests/test_lockouts.py`'s `LockGuard` memoization coverage
+    (issue #144 Codex review) and this module's "Concurrency" docstring
+    section above.
     """
 
     def __init__(
@@ -584,9 +606,12 @@ class LockGuard:
         self._repository = repository
         self._match_facts = match_facts
         self._evaluation_at = evaluation_at
+        self._resolved_at: datetime | None = None
 
     def _at(self) -> datetime:
-        return _evaluation_at(self._evaluation_at, self._match_facts)
+        if self._resolved_at is None:
+            self._resolved_at = _evaluation_at(self._evaluation_at, self._match_facts)
+        return self._resolved_at
 
     def materialize(self, lineup_id: str) -> None:
         self._repository._materialize(lineup_id, match_facts=self._match_facts, evaluation_at=self._at())

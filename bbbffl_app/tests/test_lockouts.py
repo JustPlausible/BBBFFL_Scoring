@@ -1166,6 +1166,82 @@ def test_rejected_submission_still_durably_materializes_the_observed_lock():
     assert [r["afl_match_id"] for r in trigger_rows] == [EARLY_MATCH_ID]
 
 
+class SteppingMatchFacts:
+    """A `MatchFactsProvider` double whose `evaluation_at()` advances by one
+    step on every call -- used to prove `LockGuard` samples "now" *once*
+    per submission attempt, never once for `materialize()` and again,
+    independently, for `__call__` (issue #144 Codex review, P1). An
+    explicit `evaluation_at` passed to `LockoutRepository.guard` is
+    unaffected either way -- `_evaluation_at` returns it verbatim without
+    ever consulting this double -- so only a live, wall-clock-driven guard
+    (`evaluation_at=None`, the production default) exercises this."""
+
+    def __init__(self, matches, times):
+        self.matches = list(matches)
+        self._times = iter(times)
+        self.calls = 0
+
+    def matches_for(self, bbbffl_round_id):
+        return self.matches
+
+    def evaluation_at(self):
+        self.calls += 1
+        return next(self._times)
+
+
+def test_lock_guard_samples_one_evaluation_instant_for_the_whole_submission():
+    """Before this fix, a `LockGuard` built with no explicit `evaluation_at`
+    (the production default) called `_at()` independently in `materialize()`
+    and again in `__call__` -- so a real wall-clock advance between those
+    two steps of *one* submission attempt could let them disagree about
+    "now". `materialize()`'s own instant is what durably governs a
+    newly-discovered lock (`_insert_lock`'s `effective_lock_at`/`locked_at`
+    columns), so a `__call__` that silently computed a later, unused
+    instant of its own violated this module's documented invariant that
+    `guard_transition` always operates against the *same* moment
+    `materialize()` just recorded evidence for. Fixed: `LockGuard._at()`
+    memoizes the first-resolved instant per instance, so the underlying
+    clock is consulted exactly once per submission attempt."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_selective(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], key="early-1", sequence=1)
+    early = acquire(pool, ownership, scope, entry, 1, EARLY_HOME)
+    uncovered = acquire(pool, ownership, scope, entry, 2, UNCOVERED_HOME)
+    lineups = WeeklyLineupRepository(db)
+    pre_guard = LockoutRepository(db).guard(
+        match_facts=FakeMatchFacts(ALL_MATCHES), evaluation_at=EARLY_START - timedelta(days=1)
+    )
+    draft, submitted = establish(lineups, round_, entry, scope, {"F1": early.season_player_id}, guard=pre_guard)
+
+    edit = edit_draft(
+        lineups,
+        round_,
+        entry,
+        scope,
+        draft.lineup_id,
+        {"F1": early.season_player_id, "M1": uncovered.season_player_id},
+        from_revision=draft.revision,
+    )
+    # Two distinct instants queued: if the clock were sampled twice (the
+    # pre-fix bug), `materialize()` and `__call__` would silently disagree.
+    stepping = SteppingMatchFacts(
+        ALL_MATCHES,
+        [EARLY_START - timedelta(milliseconds=1), EARLY_START + timedelta(milliseconds=1)],
+    )
+    live_guard = LockoutRepository(db).guard(match_facts=stepping, evaluation_at=None)
+    changed = lineups.submit(
+        edit.lineup_id,
+        expected_draft_revision=edit.revision,
+        expected_submission_version=submitted.version,
+        lock_guard=live_guard,
+    )
+    assert changed.positions["M1"] == uncovered.season_player_id
+    # The decisive assertion: the clock was consulted exactly once for this
+    # whole submission attempt, not once per LockGuard method.
+    assert stepping.calls == 1
+
+
 def test_lock_state_never_materializes_evidence_for_a_non_effective_draft_selection():
     db, _, round_, entries, scope, pool, ownership = context()
     entry = entries[0]

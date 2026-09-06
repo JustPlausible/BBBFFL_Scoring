@@ -85,6 +85,8 @@ EXPECTED_TABLES = {
     "opening_round_submission_revision",
     "weekly_lineup_correction",
     "weekly_lineup_correction_slot",
+    "lineup_adjudication",
+    "lineup_adjudication_slot",
 }
 
 
@@ -403,6 +405,226 @@ def test_lockout_trigger_activation_table_is_immutable(tmp_path):
     with pytest.raises(DatabaseError, match="immutable"):
         with engine.begin() as conn:
             conn.execute(text("DELETE FROM bbbffl_round_lockout_trigger_activation"))
+
+
+def test_upgrade_from_lineup_correction_head_adds_adjudication_and_draft_provenance_schema(tmp_path):
+    """Issue #146."""
+    url = _url(tmp_path / "adjudication-upgrade.db")
+    migrate(url, "0025_lineup_correction")
+    engine = create_engine(url)
+    assert not {"lineup_adjudication", "lineup_adjudication_slot"} <= set(inspect(engine).get_table_names())
+    columns_before = {c["name"] for c in inspect(engine).get_columns("weekly_lineup_draft_slot")}
+    assert "updated_at" not in columns_before
+
+    migrate(url)
+    engine = create_engine(url)
+    tables = set(inspect(engine).get_table_names())
+    assert {"lineup_adjudication", "lineup_adjudication_slot"} <= tables
+    columns_after = {c["name"] for c in inspect(engine).get_columns("weekly_lineup_draft_slot")}
+    assert {"updated_at", "actor_type", "actor_id", "actor_role"} <= columns_after
+
+
+def test_draft_slot_provenance_is_backfilled_from_the_draft_header(tmp_path):
+    """A pre-existing draft's per-position `updated_at` is backfilled from
+    its own `weekly_lineup.updated_at` -- the closest available truth for a
+    draft that predates issue #146's per-position provenance. Written via
+    raw SQL against the pre-0026 3-column `weekly_lineup_draft_slot` shape
+    -- `WeeklyLineupRepository.save_draft` in the current codebase already
+    expects the post-migration 7-column shape, so it cannot itself produce
+    the pre-migration state this test needs."""
+    from app.lineups import POSITIONS, WeeklyLineupRepository
+    from app.player_pool import OwnershipRepository, PlayerPoolRepository
+    from tests.test_competition_lifecycle import operational
+
+    url = _url(tmp_path / "draft-provenance-backfill.db")
+    migrate(url, "0025_lineup_correction")
+    connection = connect(url)
+    lifecycle, round_, entries = operational(connection, 2026, 3)
+    lifecycle.transition(round_.bbbffl_round_id, "open")
+    scope = connection.execute(
+        "SELECT c.season_id, c.competition_id FROM bbbffl_round r "
+        "JOIN competition_stream c ON c.competition_id=r.competition_id WHERE r.bbbffl_round_id=?",
+        (round_.bbbffl_round_id,),
+    ).fetchone()
+    OwnershipRepository(connection).configure_squad_limit(scope["season_id"], 5)
+    player = PlayerPoolRepository(connection).refresh_player(scope["season_id"], 55555, "Backfill Fixture Player")
+    OwnershipRepository(connection).acquire(player.season_player_id, entries[0].season_entry_id)
+    connection.close()
+
+    lineup_id, header_updated_at = "pre-migration-lineup", "2025-06-01T00:00:00+00:00"
+    engine = create_engine(url)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO weekly_lineup "
+                "(lineup_id, season_id, competition_id, bbbffl_round_id, season_entry_id, draft_revision, "
+                "effective_submission_version, created_at, updated_at, draft_source) "
+                "VALUES (:lineup_id, :season_id, :competition_id, :round_id, :entry_id, 1, NULL, :now, :now, 'coach')"
+            ),
+            {
+                "lineup_id": lineup_id,
+                "season_id": scope["season_id"],
+                "competition_id": scope["competition_id"],
+                "round_id": round_.bbbffl_round_id,
+                "entry_id": entries[0].season_entry_id,
+                "now": header_updated_at,
+            },
+        )
+        for position in POSITIONS:
+            conn.execute(
+                text(
+                    "INSERT INTO weekly_lineup_draft_slot (lineup_id, position, season_player_id) "
+                    "VALUES (:lineup_id, :position, :player_id)"
+                ),
+                {
+                    "lineup_id": lineup_id,
+                    "position": position,
+                    "player_id": player.season_player_id if position == "F1" else None,
+                },
+            )
+    engine.dispose()
+
+    migrate(url)
+    upgraded = connect(url)
+    provenance = WeeklyLineupRepository(upgraded).get_draft_slot_provenance(lineup_id)
+    assert all(slot.updated_at == header_updated_at for slot in provenance.values())
+    assert all(slot.actor_type is None for slot in provenance.values())
+
+
+def test_lineup_adjudication_tables_are_immutable(tmp_path):
+    """Issue #146: `lineup_adjudication`/`lineup_adjudication_slot` follow
+    the same immutable-history convention as `weekly_lineup_correction`/
+    `weekly_lineup_correction_slot` (0025)."""
+    from app.lineups import WeeklyLineupRepository
+    from app.player_pool import OwnershipRepository, PlayerPoolRepository
+    from tests.test_competition_lifecycle import operational
+
+    url = _url(tmp_path / "adjudication-immutable.db")
+    migrate(url)
+    connection = connect(url)
+    lifecycle, round_, entries = operational(connection, 2026, 4)
+    lifecycle.transition(round_.bbbffl_round_id, "open")
+    scope = connection.execute(
+        "SELECT c.season_id, c.competition_id FROM bbbffl_round r "
+        "JOIN competition_stream c ON c.competition_id=r.competition_id WHERE r.bbbffl_round_id=?",
+        (round_.bbbffl_round_id,),
+    ).fetchone()
+    OwnershipRepository(connection).configure_squad_limit(scope["season_id"], 5)
+    player = PlayerPoolRepository(connection).refresh_player(scope["season_id"], 66666, "Adjudication Fixture Player")
+    OwnershipRepository(connection).acquire(player.season_player_id, entries[0].season_entry_id)
+    lineups = WeeklyLineupRepository(connection)
+    draft = lineups.save_draft(
+        scope["season_id"],
+        scope["competition_id"],
+        round_.bbbffl_round_id,
+        entries[0].season_entry_id,
+        {"F1": player.season_player_id},
+        expected_revision=0,
+    )
+    submitted = lineups.submit(draft.lineup_id, expected_draft_revision=1, expected_submission_version=0)
+    connection.close()
+
+    engine = create_engine(url)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO lineup_adjudication "
+                "(adjudication_id, lineup_id, bbbffl_round_id, season_entry_id, decision_type, submission_version, "
+                "actor_type, actor_id, actor_role, reason, decided_at, correlation_id, source_draft_revision, "
+                "source_draft_saved_at, source_bbbffl_round_id, source_lineup_id, source_submission_version) "
+                "VALUES (:adjudication_id, :lineup_id, :round_id, :entry_id, 'accept_evidenced_draft', "
+                ":version, 'anonymous_operator', NULL, 'scorer', 'fixture', :now, :correlation, 1, :now, "
+                "NULL, NULL, NULL)"
+            ),
+            {
+                "adjudication_id": "fixture-adjudication",
+                "lineup_id": submitted.lineup_id,
+                "round_id": round_.bbbffl_round_id,
+                "entry_id": entries[0].season_entry_id,
+                "version": submitted.version,
+                "now": "2026-01-01T00:00:00+00:00",
+                "correlation": "fixture-correlation",
+            },
+        )
+        conn.execute(
+            text(
+                "INSERT INTO lineup_adjudication_slot "
+                "(adjudication_id, position, season_player_id, was_locked, evidence_status, lock_reason, "
+                "afl_match_id, effective_lock_at, observed_status, evidence_saved_at) "
+                "VALUES ('fixture-adjudication', 'F1', :player, 1, 'proven_pre_lock', 'selective_trigger_activated', "
+                "1, :now, 'LIVE', :now)"
+            ),
+            {"player": player.season_player_id, "now": "2026-01-01T00:00:00+00:00"},
+        )
+    with pytest.raises(DatabaseError, match="immutable"):
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE lineup_adjudication SET reason='changed'"))
+    with pytest.raises(DatabaseError, match="immutable"):
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM lineup_adjudication"))
+    with pytest.raises(DatabaseError, match="immutable"):
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE lineup_adjudication_slot SET evidence_status='changed'"))
+    with pytest.raises(DatabaseError, match="immutable"):
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM lineup_adjudication_slot"))
+
+
+def test_adjudication_downgrade_refuses_loss_of_history(tmp_path):
+    from app.lineups import WeeklyLineupRepository
+    from app.player_pool import OwnershipRepository, PlayerPoolRepository
+    from tests.test_competition_lifecycle import operational
+
+    url = _url(tmp_path / "adjudication-downgrade.db")
+    migrate(url)
+    connection = connect(url)
+    lifecycle, round_, entries = operational(connection, 2026, 5)
+    lifecycle.transition(round_.bbbffl_round_id, "open")
+    scope = connection.execute(
+        "SELECT c.season_id, c.competition_id FROM bbbffl_round r "
+        "JOIN competition_stream c ON c.competition_id=r.competition_id WHERE r.bbbffl_round_id=?",
+        (round_.bbbffl_round_id,),
+    ).fetchone()
+    OwnershipRepository(connection).configure_squad_limit(scope["season_id"], 5)
+    player = PlayerPoolRepository(connection).refresh_player(scope["season_id"], 77777, "Downgrade Fixture Player")
+    OwnershipRepository(connection).acquire(player.season_player_id, entries[0].season_entry_id)
+    lineups = WeeklyLineupRepository(connection)
+    draft = lineups.save_draft(
+        scope["season_id"],
+        scope["competition_id"],
+        round_.bbbffl_round_id,
+        entries[0].season_entry_id,
+        {"F1": player.season_player_id},
+        expected_revision=0,
+    )
+    submitted = lineups.submit(draft.lineup_id, expected_draft_revision=1, expected_submission_version=0)
+    connection.close()
+
+    engine = create_engine(url)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO lineup_adjudication "
+                "(adjudication_id, lineup_id, bbbffl_round_id, season_entry_id, decision_type, submission_version, "
+                "actor_type, actor_id, actor_role, reason, decided_at, correlation_id, source_draft_revision, "
+                "source_draft_saved_at, source_bbbffl_round_id, source_lineup_id, source_submission_version) "
+                "VALUES (:adjudication_id, :lineup_id, :round_id, :entry_id, 'accept_evidenced_draft', :version, "
+                "'anonymous_operator', NULL, 'scorer', 'fixture', :now, :correlation, 1, :now, NULL, NULL, NULL)"
+            ),
+            {
+                "adjudication_id": "downgrade-fixture-adjudication",
+                "lineup_id": submitted.lineup_id,
+                "round_id": round_.bbbffl_round_id,
+                "entry_id": entries[0].season_entry_id,
+                "version": submitted.version,
+                "now": "2026-01-01T00:00:00+00:00",
+                "correlation": "downgrade-fixture-correlation",
+            },
+        )
+    engine.dispose()
+
+    with pytest.raises(RuntimeError, match="audited lineup adjudication history would be lost"):
+        downgrade(url, "0025_lineup_correction")
 
 
 def test_season_length_downgrade_refuses_non_default_configuration(tmp_path):

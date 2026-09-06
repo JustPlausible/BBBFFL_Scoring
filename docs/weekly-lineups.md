@@ -247,3 +247,146 @@ clears it. After the round reaches `"final"` publication,
 `submit_correction` refuses outright (`RoundPublishedError`); the operator
 is directed to `app.round_review.attempt_correction`'s separate
 official-result correction workflow instead.
+
+## Audited adjudication of a missed initial submission after lockout (issue #146)
+
+Issue #137's correction above fixes an *existing* authoritative
+submission. It has nothing to offer a different, narrower failure: a coach
+saves a private draft before a lockout, believes it is submitted, and
+never actually creates an authoritative submission before an activated
+trigger closes ordinary submission for one or more positions. Ordinary
+submission then correctly refuses the draft's now-locked players
+(`LockedSelectionError`, issue #144), and `submit_correction` correctly has
+no prior submission to correct (`NoEffectiveSubmissionError`) -- there is
+no in-app path back to a submitted lineup at all.
+
+**This is a league decision, made outside the application, never an
+in-app vote or approval flow.** `app.lineup_adjudication` implements no
+voting, quorum membership, ballot counting or approval collection of any
+kind. The authorised Scorer/Administrator simply records, as a substantive
+reason, the outcome the league already reached through its normal
+consultation process -- in exactly the same style `submit_correction`
+already requires for its own reason -- and selects one of two outcomes:
+
+- **`accept_evidenced_draft`** -- the league approved capturing the
+  coach's saved pre-lockout draft as the round's first authoritative
+  submission.
+- **`apply_carry_forward`** -- the league rejected the late request (or
+  the draft's evidence was insufficient), so the round's first
+  authoritative submission is instead sourced from the previous round's
+  effective submitted lineup, under the established BBBFFL carry-forward
+  rules.
+
+Both create the lineup's *first* submission (`version` always `1`) through
+`WeeklyLineupRepository.submit_adjudicated_first_submission`, permitted
+only while the round is `live` or `review` (`ADJUDICATION_ALLOWED_STATES`
+-- narrower than correction's own frozenset: `open` is excluded too, since
+no lock could possibly have activated yet). It refuses outright
+(`EffectiveSubmissionExistsError`) if an effective submission already
+exists -- checked under the same `weekly_lineup` row lock/CAS every other
+submission path uses, so this is a real, concurrency-safe guarantee, not
+merely a UI precondition.
+
+### Evidence: what a private draft can actually prove
+
+A saved draft is default evidence only of what the *current* draft
+revision holds and when the *whole draft* was last saved
+(`weekly_lineup.updated_at`) -- and that single, whole-draft timestamp is
+not reliable evidence once a coach legitimately edits a still-unlocked
+position *after* a selective lockout has already activated: the timestamp
+advances even though the already-locked positions were never touched.
+
+Rather than introduce general-purpose draft history/versioning, issue #146
+adds the minimum additional evidence needed: `weekly_lineup_draft_slot`
+(migrations/versions/0026_lineup_adjudication.py) now carries its own
+`updated_at`/`actor_type`/`actor_id`/`actor_role` columns *per position*,
+advanced by `save_draft` only when that position's value actually changes.
+An untouched position keeps whatever timestamp/actor it already had,
+tracing back to when it was first set -- so a later, legitimate edit to a
+different, still-open position can never contaminate the evidence already
+established for an unrelated, already-locked one.
+
+`app.lineup_adjudication.LineupAdjudicationService._resolve_evidenced_positions`
+is the one place that turns this into a per-position decision, using the
+same `app.lockouts.LockoutRepository` trigger-coverage/lock evaluation
+every ordinary submission uses (three small, explicitly-named public
+wrappers -- `materialize_round_triggers`/`trigger_coverage_locked`/
+`evaluate_draft_position_locked` -- expose exactly what this needs without
+duplicating any lock-decision logic, and without `app.lineups` importing
+`app.lockouts`, which the existing module layering disallows):
+
+- a position an active Opening Round deferred nomination governs always
+  resolves to the nominated player (issue #69's existing rule, never
+  reinterpreted);
+- an empty draft position is simply vacant -- there is nothing to prove
+  wrong about an empty slot;
+- a position that is not currently locked resolves to whatever the
+  current draft holds, and remains completable through the ordinary
+  `live` submission workflow after this capture;
+- a locked (or indeterminate) position resolves to the draft's current
+  value only if that position's own `updated_at` is at or before the
+  covering trigger's durable `effective_lock_at` (`evidence_status=
+  "proven_pre_lock"`); otherwise it resolves to vacant
+  (`"unproven_defaulted_vacant"`). The operator has no way to substitute,
+  move or add a locked player beyond what this evidence proves --
+  `accept_evidenced_draft` accepts no position overrides at all.
+
+This evaluation runs twice: once outside any transaction for the
+before-confirmation preview (`describe_candidate`), and again *inside*
+`submit_adjudicated_first_submission`'s own transaction, reading the draft
+and trigger coverage fresh on that transaction's connection -- so a
+trigger that activates, or a draft edit that lands, between the preview
+and the confirmed decision is always caught by the authoritative second
+evaluation.
+
+### Carry-forward fallback
+
+`apply_carry_forward_fallback` sources the current round's first
+submission from `app.carry_forward.CarryForwardService.resolve_source` --
+the same previous-round resolution ordinary carry-forward uses -- and
+re-validates the source is unchanged *inside* the same transaction,
+exactly like ordinary carry-forward's own `require_unchanged`. It never
+reads or merges anything from the entry's own rejected private draft: the
+only positions added on top of the copied source are the current round's
+own active Opening Round deferred nominations, resolved the same way as
+Resolution A. Its own distinct `source_type`
+(`"scorer_adjudicated_carry_forward"`, alongside `"scorer_late_capture"`
+for the evidenced-draft path) keeps both permanently distinguishable from
+an ordinary, pre-lockout `"carry_forward"` submission.
+
+### Audit/provenance
+
+`lineup_adjudication`/`lineup_adjudication_slot`
+(migrations/versions/0026_lineup_adjudication.py) are structurally
+parallel to issue #137's `weekly_lineup_correction`/
+`weekly_lineup_correction_slot`: an immutable header (decision type, the
+resulting version -- always `1` -- actor/role, the required substantive
+reason, and either the source draft revision/timestamp or the previous
+round/version this fallback carried forward) plus one row per position
+recording its resolved value and evidence status, and, for a position that
+was locked, the trigger/match/effective-lock evidence it traces back to.
+An audit event (`app.audit.LINEUP_ADJUDICATED`) shares one `correlation_id`
+with the submission's own `LINEUP_SUBMITTED` event, exactly like
+`LINEUP_CORRECTED` already does for issue #137.
+
+### Authority
+
+`app.lineup_adjudication._ensure_adjudication_actor` rejects any actor
+that is not an `anonymous_operator` with `actor_role` in `{"scorer",
+"admin", "replay_operator"}` (`UnauthorizedAdjudicationActorError`
+otherwise) -- Coach and ordinary delegated/proxy authority
+(`app.lineup_proxy`) are never sufficient. `app/routes/lineup_adjudication.py`
+(`/api/admin/lineup-adjudication`) gates every request behind its own,
+dedicated season-scoped `lineup.adjudicate_missed_submission` capability
+(`app.authorization.CAPABILITIES`) -- distinct from both `lineup.proxy`
+and `lineup.correct_locked` -- granted to Scorer and Administrator
+unconditionally, and to Replay Operator only for a season that role has
+actually been granted for (`require_role_covers_season`). The browser page
+(`/scorer/lineup-adjudication`) shows the activated trigger evidence, the
+evidenced-draft preview (per-position resolved value, evidence strength,
+and trigger/lock detail) or the carry-forward preview (source round/
+version/positions), a required reason field recording the external
+league decision, and an explicit confirmation that the operator is
+creating the team's *first* authoritative submission after lockout --
+never implying the application itself approved the request or conducted
+any consultation.

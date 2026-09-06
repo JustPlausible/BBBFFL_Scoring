@@ -859,7 +859,7 @@ class OpeningRoundNominationRepository:
                 raise OpeningRoundError(
                     "nomination correction conflicts with an existing target slot or nominated player"
                 ) from exc
-            self._reconcile_corrected_target_draft(conn, existing, new_position, new_player, now)
+            self._reconcile_corrected_target_draft(conn, existing, new_position, new_player, now, actor)
             append_event(
                 conn,
                 actor=actor,
@@ -877,7 +877,9 @@ class OpeningRoundNominationRepository:
             )
 
     @staticmethod
-    def _reconcile_corrected_target_draft(conn, previous, new_position: str, new_player: str, now: str) -> None:
+    def _reconcile_corrected_target_draft(
+        conn, previous, new_position: str, new_player: str, now: str, actor: ActorContext
+    ) -> None:
         """Reconcile an already-preloaded draft in the correction transaction.
 
         The old position is cleared only when it still contains the exact
@@ -887,6 +889,12 @@ class OpeningRoundNominationRepository:
         advanced so concurrent browser edits fail rather than overwrite it.
         If no target draft exists yet, the normal preload operation will seed
         the corrected nomination when that lineup is first opened.
+
+        Sets each touched position's own `updated_at`/actor columns (issue
+        #146) to this correction's actor/timestamp -- the same per-position
+        provenance `WeeklyLineupRepository.save_draft` maintains -- since
+        this bypasses `save_draft` itself (a nomination correction is not an
+        ordinary draft edit).
         """
         lineup = conn.execute(
             "SELECT lineup_id FROM weekly_lineup WHERE bbbffl_round_id=? AND season_entry_id=?",
@@ -902,12 +910,14 @@ class OpeningRoundNominationRepository:
             ).fetchone()
             if old_slot is not None and old_slot["season_player_id"] == previous["season_player_id"]:
                 conn.execute(
-                    "UPDATE weekly_lineup_draft_slot SET season_player_id=NULL WHERE lineup_id=? AND position=?",
-                    (lineup_id, previous["position"]),
+                    "UPDATE weekly_lineup_draft_slot SET season_player_id=NULL, updated_at=?, "
+                    "actor_type=?, actor_id=?, actor_role=? WHERE lineup_id=? AND position=?",
+                    (now, actor.actor_type, actor.actor_id, actor.actor_role, lineup_id, previous["position"]),
                 )
         conn.execute(
-            "UPDATE weekly_lineup_draft_slot SET season_player_id=? WHERE lineup_id=? AND position=?",
-            (new_player, lineup_id, new_position),
+            "UPDATE weekly_lineup_draft_slot SET season_player_id=?, updated_at=?, "
+            "actor_type=?, actor_id=?, actor_role=? WHERE lineup_id=? AND position=?",
+            (new_player, now, actor.actor_type, actor.actor_id, actor.actor_role, lineup_id, new_position),
         )
         conn.execute(
             "UPDATE weekly_lineup SET draft_revision=draft_revision+1, updated_at=? WHERE lineup_id=?",
@@ -1047,7 +1057,13 @@ class OpeningRoundNominationRepository:
             return
         merged.update(deferred)
         lineups.save_draft(
-            season_id, competition_id, bbbffl_round_id, season_entry_id, merged, expected_revision=draft.revision
+            season_id,
+            competition_id,
+            bbbffl_round_id,
+            season_entry_id,
+            merged,
+            expected_revision=draft.revision,
+            actor=ActorContext.system(),
         )
 
 

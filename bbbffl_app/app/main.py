@@ -34,8 +34,13 @@ from app.draft import (
 from app.fixtures import FixtureRepository
 from app.identity import IdentityRepository
 from app.ladder import LadderRepository
+from app.lineup_adjudication import (
+    NoActivatedTriggerError,
+    RoundNotEligibleForAdjudicationError,
+    UnauthorizedAdjudicationActorError,
+)
 from app.lineup_correction import UnauthorizedCorrectionActorError
-from app.lineups import LineupConflictError, RoundPublishedError, WeeklyLineupRepository
+from app.lineups import EffectiveSubmissionExistsError, LineupConflictError, RoundPublishedError, WeeklyLineupRepository
 from app.migrations import migrate
 from app.opening_round import OpeningRoundError
 from app.player_pool import PlayerPoolRepository, PlayerUnavailableError, SquadCapacityError
@@ -68,6 +73,7 @@ from app.routes import context as context_routes
 from app.routes import delegated_operations as delegated_operations_routes
 from app.routes import draft as draft_routes
 from app.routes import fixture_setup as fixture_setup_routes
+from app.routes import lineup_adjudication as lineup_adjudication_routes
 from app.routes import lineup_correction as lineup_correction_routes
 from app.routes import lineups as lineup_routes
 from app.routes import preseason as preseason_routes
@@ -272,6 +278,8 @@ app.include_router(delegated_operations_routes.router)
 app.include_router(delegated_operations_routes.page_router)
 app.include_router(lineup_correction_routes.router)
 app.include_router(lineup_correction_routes.page_router)
+app.include_router(lineup_adjudication_routes.router)
+app.include_router(lineup_adjudication_routes.page_router)
 
 
 @app.exception_handler(AflApiError)
@@ -310,6 +318,36 @@ async def unauthorized_correction_actor_error_handler(
     request: Request, exc: UnauthorizedCorrectionActorError
 ) -> JSONResponse:
     return JSONResponse(status_code=403, content={"detail": str(exc)})
+
+
+@app.exception_handler(UnauthorizedAdjudicationActorError)
+async def unauthorized_adjudication_actor_error_handler(
+    request: Request, exc: UnauthorizedAdjudicationActorError
+) -> JSONResponse:
+    return JSONResponse(status_code=403, content={"detail": str(exc)})
+
+
+@app.exception_handler(EffectiveSubmissionExistsError)
+async def effective_submission_exists_error_handler(
+    request: Request, exc: EffectiveSubmissionExistsError
+) -> JSONResponse:
+    """Issue #146: adjudication of a missed *initial* submission was
+    attempted against a lineup that already has one -- an expected,
+    operator-resolvable conflict (use issue #137's correction workflow
+    instead), never a 500."""
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(RoundNotEligibleForAdjudicationError)
+async def round_not_eligible_for_adjudication_error_handler(
+    request: Request, exc: RoundNotEligibleForAdjudicationError
+) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(NoActivatedTriggerError)
+async def no_activated_trigger_error_handler(request: Request, exc: NoActivatedTriggerError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 
 # app.scorer_decisions raises plain domain exceptions rather than

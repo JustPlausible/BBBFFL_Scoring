@@ -136,6 +136,7 @@ class LineupProxyService:
             positions,
             expected_revision=expected_revision,
             draft_source="scorer_proxy",
+            actor=actor,
         )
 
     def submit(

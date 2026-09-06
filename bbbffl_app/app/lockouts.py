@@ -745,6 +745,63 @@ class LockoutRepository:
             )
         return views
 
+    # -- Issue #146: adjudication support -----------------------------------
+    #
+    # A missed-initial-submission adjudication (`app.lineup_adjudication`)
+    # needs to evaluate live lock state for a *candidate* private draft --
+    # never the lineup's effective submission, since by definition none
+    # exists yet -- atomically inside its own already-open transaction (so a
+    # trigger that activates concurrently is always caught before that
+    # transaction commits). `app.lineups` cannot import this module (see
+    # this module's docstring: it imports app.lineups, not the reverse), so
+    # these three thin, explicitly-named wrappers are this module's public
+    # surface for that orchestration layer -- each simply exposes one
+    # existing internal building block `lock_state`/`guard_transition`
+    # already use, rather than duplicating their logic.
+    def materialize_round_triggers(
+        self, bbbffl_round_id: str, *, match_facts: MatchFactsProvider, evaluation_at: datetime | None = None
+    ) -> datetime:
+        """Durably record activation for every configured trigger in this
+        round that has reached lock boundary as of `evaluation_at` (or now),
+        and return the resolved evaluation instant. Safe to call before a
+        caller's own transaction opens, exactly like `LockGuard.materialize`
+        does -- see this module's docstring, 'Historical irreversibility'."""
+        at = _evaluation_at(evaluation_at, match_facts)
+        self._materialize_round_triggers(bbbffl_round_id, match_facts=match_facts, evaluation_at=at)
+        return at
+
+    def trigger_coverage_locked(self, conn, bbbffl_round_id: str) -> TriggerCoverage:
+        """This round's currently-activated trigger coverage, read on the
+        caller's own already-open transaction connection -- the same
+        snapshot `guard_transition` reads inside `WeeklyLineupRepository.
+        submit`'s transaction, exposed here so a caller outside this module
+        can evaluate coverage atomically with its own writes."""
+        return self._trigger_coverage(conn, bbbffl_round_id)
+
+    def evaluate_draft_position_locked(
+        self,
+        conn,
+        position: str,
+        season_player_id: str | None,
+        *,
+        evaluation_at: datetime,
+        matches: list[Match],
+        coverage: TriggerCoverage,
+    ) -> PositionLockState:
+        """Live (never materializing/persisting anything: `materializable=
+        False`) lock evaluation for one candidate `(position,
+        season_player_id)` pair that has no durable `weekly_lineup_lock`
+        evidence of its own -- always true before a lineup's first
+        submission exists, which is exactly when issue #146's adjudication
+        workflow runs. `existing` is always `{}` here: there is nothing to
+        prefer over a fresh evaluation because no submission has ever been
+        materialized for this lineup (see `_materialize_lineup`'s docstring:
+        it only ever writes evidence for a lineup's *effective submission*,
+        never a private draft)."""
+        return self._evaluate_position(
+            conn, {}, None, position, season_player_id, evaluation_at, matches, coverage, materializable=False
+        )
+
     # -- Enforcement -------------------------------------------------------
     def guard(self, *, match_facts: MatchFactsProvider, evaluation_at: datetime | None = None) -> LockGuard:
         """Build the `lock_guard` accepted by

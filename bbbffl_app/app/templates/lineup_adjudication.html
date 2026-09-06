@@ -1,0 +1,116 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Missed-Submission Adjudication · BBBFFL</title><style>
+:root{color-scheme:dark}body{font:15px system-ui;margin:auto;max-width:1080px;padding:22px;background:#0f1115;color:#e7e9ee}a{color:#79c0ff}.card{background:#171a21;border:1px solid #303744;border-radius:11px;padding:17px;margin:14px 0}.banner{border:3px solid #d29922}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}label{display:grid;gap:4px}button,input,select,textarea{font:inherit;padding:8px;border:1px solid #596273;border-radius:6px;background:#222733;color:inherit}.muted{color:#aab2c0;font-size:13px}.item{padding:10px;background:#11151b;border-radius:7px;margin:8px 0}.pill{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px;font-weight:600}.pill.ok{background:#123822;color:#7ee2a8;border:none}.pill.bad{background:#3a1414;color:#ffb4ab;border:none}.pill.warn{background:#3a2e0e;color:#f2c766;border:none}table{width:100%;border-collapse:collapse}td,th{padding:6px 4px;text-align:left;border-bottom:1px solid #303744}fieldset{border:1px solid #303744;border-radius:8px;margin:10px 0}
+</style></head><body><a href="/scorer/round-centre">← Round centre</a><h1>Missed-Submission Adjudication</h1>
+<p class="muted">Authorised Scorer/Admin/Replay-Operator adjudication of a missed <b>initial</b> weekly-lineup submission after lockout has already activated. This records the outcome of a league decision reached <b>outside this application</b> — it does not conduct any consultation, ballot or approval itself. Where an authoritative submission already exists, this workflow refuses; use the locked-lineup correction workflow instead.</p>
+<div id="message"></div>
+<section class="card"><h2>1. Select round and team</h2><div class="grid">
+<label>BBBFFL round ID<input id="round-id" value="{{ round_id or '' }}" placeholder="bbbffl round id"></label>
+<label>&nbsp;<button id="load-round">Load round</button></label>
+</div><div id="teams"></div></section>
+<div id="detail"></div>
+<script>
+const csrf={{csrf_token|tojson}};
+const e=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(path,method='GET',body){let r=await fetch(path,{method,headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:body?JSON.stringify(body):undefined}),d=await r.json();if(!r.ok)throw Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail));return d}
+function msg(x,ok=false){let n=document.querySelector('#message');n.className='card';n.style.borderColor=ok?'#3fb950':'#f85149';n.textContent=x}
+let currentRoundId=null,currentEntryId=null,candidate=null;
+
+async function loadRound(){
+  currentRoundId=document.querySelector('#round-id').value.trim();
+  if(!currentRoundId){msg('Enter a BBBFFL round ID.');return}
+  history.replaceState(null,'','/scorer/lineup-adjudication/'+encodeURIComponent(currentRoundId));
+  try{
+    const d=await api(`/api/admin/lineup-adjudication/${encodeURIComponent(currentRoundId)}`);
+    document.querySelector('#teams').innerHTML=`<p class="muted">Round: <b>${e(d.round.label)}</b> (${e(d.round.state)}) — season ${e(d.season.label)}</p>
+    <div class="grid">${d.entries.map(t=>`<button data-entry="${e(t.season_entry_id)}">${e(t.team_name)}<br><span class="muted">${e(t.coach_name)} — ${t.has_effective_submission?'has submission':'<b>no submission</b>'}</span></button>`).join('')}</div>`;
+    document.querySelectorAll('[data-entry]').forEach(b=>b.onclick=()=>loadEntry(b.dataset.entry));
+    document.querySelector('#detail').innerHTML='';
+  }catch(err){msg(err.message)}
+}
+
+async function loadEntry(entryId){
+  currentEntryId=entryId;
+  try{
+    candidate=await api(`/api/admin/lineup-adjudication/${encodeURIComponent(currentRoundId)}/${encodeURIComponent(entryId)}`);
+    render();
+  }catch(err){msg(err.message)}
+}
+
+function evidencePill(status){
+  if(status==='proven_pre_lock')return '<span class="pill ok">proven pre-lock</span>';
+  if(status==='unproven_defaulted_vacant')return '<span class="pill bad">unproven → vacant</span>';
+  if(status==='opening_round_deferred')return '<span class="pill warn">Opening Round deferred</span>';
+  if(status==='editable_current_draft')return '<span class="pill ok">editable — current draft</span>';
+  return '<span class="pill warn">vacant</span>';
+}
+
+function evidencedTable(){
+  if(!candidate.evidenced_preview)return '<p class="muted">No saved private draft exists for this team.</p>';
+  return `<table><thead><tr><th>Position</th><th>Resolved value</th><th>Evidence</th><th>Trigger/match</th><th>Saved at</th></tr></thead><tbody>
+  ${candidate.evidenced_preview.map(s=>`<tr><td>${e(s.position)}</td><td>${e(s.season_player_id)}</td><td>${evidencePill(s.evidence_status)}</td>
+  <td class="muted">${e(s.lock_reason)}${s.afl_match_id?` (match ${e(s.afl_match_id)})`:''}${s.effective_lock_at?`<br>lock: ${e(s.effective_lock_at)}`:''}</td>
+  <td class="muted">${e(s.evidence_saved_at)}</td></tr>`).join('')}
+  </tbody></table>`;
+}
+
+function carryForwardTable(){
+  if(!candidate.carry_forward_preview)return '<p class="muted">No previous-round submitted lineup is available to carry forward.</p>';
+  const cf=candidate.carry_forward_preview;
+  return `<p class="muted">Source: round ${e(cf.source_bbbffl_round_id)}, submission version ${e(cf.source_submission_version)}</p>
+  <table><thead><tr><th>Position</th><th>Value</th></tr></thead><tbody>
+  ${Object.entries(cf.positions).map(([position,player])=>`<tr><td>${e(position)}</td><td>${e(player)}</td></tr>`).join('')}
+  </tbody></table>`;
+}
+
+function triggerList(){
+  return candidate.activated_triggers.map(t=>`<li>${e(t.trigger_key)} (${e(t.trigger_type)}) — ${e(t.activation_reason)}${t.activating_afl_match_id?`, match ${e(t.activating_afl_match_id)}`:''}${t.effective_lock_at?`, effective lock ${e(t.effective_lock_at)}`:''}</li>`).join('')||'<li class="muted">none activated</li>';
+}
+
+function render(){
+  document.querySelector('#detail').innerHTML=`
+  <section class="card banner"><strong>AUTHORISED MISSED-SUBMISSION ADJUDICATION</strong>
+  <p>Team: <b>${e(candidate.team_name)}</b> · Coach: ${e(candidate.coach_name)} · Round state: ${e(candidate.round_state)}</p>
+  <p>Activated lockout triggers: <ul>${triggerList()}</ul></p>
+  ${candidate.eligible?'':`<p><b>This workflow is not currently available: ${e(candidate.ineligible_reason)}</b></p>`}
+  <p class="muted">Consultation with the coach and any league quorum happened outside this application. Confirming below records that outcome — it does not seek or collect approval itself.</p></section>
+
+  <fieldset class="card"><legend>Resolution A — accept evidenced pre-lockout draft</legend>
+  <p class="muted">Draft revision ${e(candidate.draft_revision)}, last saved ${e(candidate.draft_updated_at)}. Locked positions below use only what the draft's own per-position evidence proves predates that position's effective lock instant; anything unproven defaults to vacant, never a substitute.</p>
+  ${evidencedTable()}
+  <form id="accept-form"><label>Substantive reason recording the league's decision to accept this evidenced draft (required)<textarea name="reason" rows="2" required placeholder="e.g. League chat confirmed the coach's Round 4 draft was saved before the early lockout; quorum approved accepting it as submitted."></textarea></label>
+  <label><input type="checkbox" required> I confirm this is the team's first authoritative submission for this round, and that only proven pre-lock evidence is being accepted for locked positions.</label>
+  <button ${candidate.eligible?'':'disabled'}>Accept evidenced draft as submission</button></form></fieldset>
+
+  <fieldset class="card"><legend>Resolution B — apply carry-forward fallback</legend>
+  <p class="muted">Sources this round's first submission from the previous round's effective submitted lineup, under the established BBBFFL carry-forward rules. Never merges any value from the rejected private draft.</p>
+  ${carryForwardTable()}
+  <form id="carry-forward-form"><label>Substantive reason recording the league's decision to reject the late draft and apply carry-forward (required)<textarea name="reason" rows="2" required placeholder="e.g. Quorum rejected the late capture request; applying carry-forward per BBBFFL rules."></textarea></label>
+  <label><input type="checkbox" required> I confirm this is the team's first authoritative submission for this round.</label>
+  <button ${candidate.eligible?'':'disabled'}>Apply carry-forward fallback</button></form></fieldset>`;
+  document.querySelector('#accept-form').onsubmit=submitAcceptEvidencedDraft;
+  document.querySelector('#carry-forward-form').onsubmit=submitCarryForward;
+}
+
+async function submitAcceptEvidencedDraft(x){
+  x.preventDefault();
+  const reason=new FormData(x.target).get('reason');
+  try{
+    const result=await api(`/api/admin/lineup-adjudication/${encodeURIComponent(currentRoundId)}/${encodeURIComponent(currentEntryId)}/accept-evidenced-draft`,'POST',{reason});
+    msg(`Evidenced draft accepted as submission version ${result.submission.version}.`,true);
+    await loadEntry(currentEntryId);
+  }catch(err){msg(err.message)}
+}
+
+async function submitCarryForward(x){
+  x.preventDefault();
+  const reason=new FormData(x.target).get('reason');
+  try{
+    const result=await api(`/api/admin/lineup-adjudication/${encodeURIComponent(currentRoundId)}/${encodeURIComponent(currentEntryId)}/apply-carry-forward`,'POST',{reason});
+    msg(`Carry-forward fallback applied as submission version ${result.submission.version}.`,true);
+    await loadEntry(currentEntryId);
+  }catch(err){msg(err.message)}
+}
+
+document.querySelector('#load-round').onclick=loadRound;
+if(document.querySelector('#round-id').value) loadRound();
+</script></body></html>

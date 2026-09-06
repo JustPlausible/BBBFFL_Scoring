@@ -132,6 +132,40 @@ api(`/api/operations/rounds/${roundId}/lineup`).then(render).then(async () => {
     assert "reloaded" in lines["MESSAGE"].lower()
 
 
+def test_when_the_post_rejection_reload_also_fails_save_never_claims_success(delegated_lineup_script, tmp_path):
+    """Codex review finding (P2) on this PR: if the rejected save's
+    follow-up reload GET also fails, the message must not claim the page
+    was refreshed."""
+    action = """
+let getCount = 0;
+global.fetch = (path, options) => {
+  if (path.endsWith('/lineup/draft') && options.method === 'PUT') {
+    return Promise.resolve({ ok: false, json: async () => ({ detail: 'stale draft revision' }) });
+  }
+  if (path.endsWith('/lineup') && options.method === 'GET') {
+    getCount++;
+    if (getCount === 1) { return Promise.resolve({ ok: true, json: async () => freshView() }); }
+    return Promise.reject(new Error('network error'));
+  }
+  if (path.startsWith('/api/context/entries')) {
+    return Promise.resolve({ ok: true, json: async () => [] });
+  }
+  return Promise.reject(new Error('unexpected fetch ' + path));
+};
+
+api(`/api/operations/rounds/${roundId}/lineup`).then(render).then(async () => {
+  await save();
+  console.log('MESSAGE:' + document.querySelector('#message').textContent);
+  process.exit(0);
+}).catch((error) => { console.error(error); process.exit(1); });
+"""
+    stdout = _run(tmp_path, delegated_lineup_script, action)
+    lines = dict(line.split(":", 1) for line in stdout.strip().splitlines())
+    assert "NOT saved" in lines["MESSAGE"]
+    assert "has been reloaded" not in lines["MESSAGE"]
+    assert "could not be reloaded" in lines["MESSAGE"].lower()
+
+
 def test_rejected_discard_reloads_authoritative_draft_without_repeating_the_mutation(delegated_lineup_script, tmp_path):
     """Same guarantee for `discardDraft()`: a rejected discard/rebase must
     reload the authoritative state, never leave the stale pre-attempt

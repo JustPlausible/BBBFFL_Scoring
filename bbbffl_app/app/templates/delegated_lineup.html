@@ -88,6 +88,10 @@ function positions(){
   document.querySelectorAll('[data-position]').forEach(x=>p[x.dataset.position]=x.value||null);
   return p;
 }
+// If the post-rejection reload GET itself fails (e.g. a transient outage),
+// the caller must never claim the page was refreshed -- each reload below
+// reports whether it actually succeeded, and this wording reflects it.
+function reloadNotice(reloaded){return reloaded?'Current authoritative state has been reloaded.':'The authoritative state could NOT be reloaded -- treat this page as out of date and reload manually before retrying.'}
 async function save(){
   try{
     render(await api(`/api/operations/rounds/${roundId}/lineup/draft`,'PUT',{positions:positions(),expected_revision:state.draft.revision}));
@@ -98,8 +102,9 @@ async function save(){
     // revision would only fail again -- reload the current authoritative
     // draft/submission/lock state (a plain GET, never a repeat of the
     // rejected save) before reporting the failure.
-    try{render(await api(`/api/operations/rounds/${roundId}/lineup`))}catch(_){}
-    msg('Draft NOT saved — '+e.message+' Current authoritative state has been reloaded.')
+    let reloaded=true;
+    try{render(await api(`/api/operations/rounds/${roundId}/lineup`))}catch(_){reloaded=false}
+    msg('Draft NOT saved — '+e.message+' '+reloadNotice(reloaded))
   }
 }
 async function submit(){
@@ -114,8 +119,9 @@ async function submit(){
     // server-side even though the submission itself was rejected. Reload
     // the authoritative submitted lineup, draft revision and lock state
     // rather than leaving the attempted (rejected) change looking accepted.
-    try{let fresh=await api(`/api/operations/rounds/${roundId}/lineup`);fresh.submission_rejected=e.message;render(fresh)}catch(_){}
-    msg('Submission rejected — NOT submitted: '+e.message)
+    let reloaded=true;
+    try{let fresh=await api(`/api/operations/rounds/${roundId}/lineup`);fresh.submission_rejected=e.message;render(fresh)}catch(_){reloaded=false}
+    msg('Submission rejected — NOT submitted: '+e.message+' '+reloadNotice(reloaded))
   }
 }
 async function discardDraft(){
@@ -124,8 +130,9 @@ async function discardDraft(){
     render(await api(`/api/operations/rounds/${roundId}/lineup/draft`,'PUT',{positions:state.submission.positions,expected_revision:state.draft.revision}));
     msg('Private draft discarded and rebased onto the authoritative submitted lineup.',true)
   }catch(e){
-    try{render(await api(`/api/operations/rounds/${roundId}/lineup`))}catch(_){}
-    msg('Discard NOT applied — '+e.message+' Current authoritative state has been reloaded.')
+    let reloaded=true;
+    try{render(await api(`/api/operations/rounds/${roundId}/lineup`))}catch(_){reloaded=false}
+    msg('Discard NOT applied — '+e.message+' '+reloadNotice(reloaded))
   }
 }
 async function carry(){if(!confirm('Copy the displayed source exactly, position for position?'))return;try{render(await api(`/api/operations/rounds/${roundId}/lineup/carry-forward`,'POST',{expected_submission_version:state.submission?.version||0,reason:'Explicit first-half replay carry-forward'}));msg('Exact carry-forward submission created.',true)}catch(e){msg(e.message)}}

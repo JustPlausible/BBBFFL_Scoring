@@ -33,7 +33,8 @@ async function loadEntry(entryId){
   try{
     candidate=await api(`/api/admin/lineup-adjudication/${encodeURIComponent(currentRoundId)}/${encodeURIComponent(entryId)}`);
     render();
-  }catch(err){msg(err.message)}
+    return true;
+  }catch(err){msg(err.message);return false}
 }
 
 function evidencePill(status){
@@ -113,11 +114,17 @@ async function submitAcceptEvidencedDraft(x){
     // GET, never a repeat of the rejected adjudication) so eligibility,
     // triggers and the evidenced/carry-forward previews shown are never
     // stale/concurrent with what the server actually holds; restore the
-    // entered reason since re-typing it carries no risk.
-    await loadEntry(currentEntryId);
-    const reasonInput=document.querySelector('#accept-form [name="reason"]');
-    if(reasonInput&&reason)reasonInput.value=reason;
-    msg('Evidenced draft NOT accepted — '+err.message+' Current authoritative state has been reloaded.')
+    // entered reason since re-typing it carries no risk. If the reload
+    // itself fails, loadEntry already reports that on its own (and
+    // returns false) -- never overwrite that with a claim it succeeded.
+    const reloaded=await loadEntry(currentEntryId);
+    if(reloaded){
+      const reasonInput=document.querySelector('#accept-form [name="reason"]');
+      if(reasonInput&&reason)reasonInput.value=reason;
+      msg('Evidenced draft NOT accepted — '+err.message+' Current authoritative state has been reloaded.')
+    }else{
+      msg('Evidenced draft NOT accepted — '+err.message+' The authoritative state could NOT be reloaded -- treat this page as out of date and reload manually before retrying.')
+    }
   }
 }
 
@@ -129,10 +136,14 @@ async function submitCarryForward(x){
     msg(`Carry-forward fallback applied as submission version ${result.submission.version}.`,true);
     await loadEntry(currentEntryId);
   }catch(err){
-    await loadEntry(currentEntryId);
-    const reasonInput=document.querySelector('#carry-forward-form [name="reason"]');
-    if(reasonInput&&reason)reasonInput.value=reason;
-    msg('Carry-forward NOT applied — '+err.message+' Current authoritative state has been reloaded.')
+    const reloaded=await loadEntry(currentEntryId);
+    if(reloaded){
+      const reasonInput=document.querySelector('#carry-forward-form [name="reason"]');
+      if(reasonInput&&reason)reasonInput.value=reason;
+      msg('Carry-forward NOT applied — '+err.message+' Current authoritative state has been reloaded.')
+    }else{
+      msg('Carry-forward NOT applied — '+err.message+' The authoritative state could NOT be reloaded -- treat this page as out of date and reload manually before retrying.')
+    }
   }
 }
 

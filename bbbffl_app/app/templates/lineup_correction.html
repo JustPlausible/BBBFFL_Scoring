@@ -115,14 +115,17 @@ async function submitCorrection(x){
     // stale/concurrent with what actually happened server-side; the
     // attempted position changes are discarded (they may no longer be
     // legal against the reloaded state), but the entered reason text is
-    // restored since re-typing it carries no such risk.
+    // restored since re-typing it carries no such risk. If this reload
+    // itself fails (e.g. a transient outage), never claim it succeeded --
+    // the message must say the page could still be stale.
+    let reloaded=true;
     try{
       candidate=await api(`/api/admin/lineup-correction/${encodeURIComponent(currentRoundId)}/${encodeURIComponent(currentEntryId)}`);
       render();
       const reasonInput=document.querySelector('#correct-form [name="reason"]');
       if(reasonInput&&reason)reasonInput.value=reason;
-    }catch(_){}
-    msg('Correction NOT applied — '+err.message+' Current authoritative state has been reloaded.')
+    }catch(_){reloaded=false}
+    msg('Correction NOT applied — '+err.message+' '+(reloaded?'Current authoritative state has been reloaded.':'The authoritative state could NOT be reloaded -- treat this page as out of date and reload manually before retrying.'))
   }
 }
 

@@ -142,3 +142,41 @@ global.fetch = (path, options) => {
     assert "NOT applied" in lines["MESSAGE"]
     assert "reloaded" in lines["MESSAGE"].lower()
     assert lines["REASON_PRESERVED"] == "League chat confirmed the transposed forwards"
+
+
+def test_when_the_post_rejection_reload_also_fails_correction_never_claims_success(correction_script, tmp_path):
+    """Codex review finding (P2) on this PR: if the rejected correction's
+    follow-up reload GET also fails, the message must not claim the page
+    was refreshed."""
+    action = """
+let candidateGetCount = 0;
+global.fetch = (path, options) => {
+  const method = (options && options.method) || 'GET';
+  if (path === '/api/admin/lineup-correction/round-1' && method === 'GET') {
+    return Promise.resolve({ ok: true, json: async () => ({ round: { label: 'Round 5', state: 'live' }, season: { label: '2026' }, entries: [{ season_entry_id: 'entry-1', team_name: 'Team A', coach_name: 'Coach A' }] }) });
+  }
+  if (path === '/api/admin/lineup-correction/round-1/entry-1' && method === 'GET') {
+    candidateGetCount++;
+    if (candidateGetCount === 1) { return Promise.resolve({ ok: true, json: async () => candidateView() }); }
+    return Promise.reject(new Error('network error'));
+  }
+  if (path === '/api/admin/lineup-correction/round-1/entry-1/correct' && method === 'POST') {
+    return Promise.resolve({ ok: false, json: async () => ({ detail: 'stale submission version' }) });
+  }
+  return Promise.reject(new Error('unexpected fetch ' + path));
+};
+
+(async () => {
+  document.querySelector('#round-id').value = 'round-1';
+  await loadRound();
+  await loadEntry('entry-1');
+  await submitCorrection({ preventDefault(){}, target: { _data: { reason: 'League chat confirmed the transposed forwards' } } });
+  console.log('MESSAGE:' + document.querySelector('#message').textContent);
+  process.exit(0);
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+    stdout = _run(tmp_path, correction_script, action)
+    lines = dict(line.split(":", 1) for line in stdout.strip().splitlines())
+    assert "NOT applied" in lines["MESSAGE"]
+    assert "has been reloaded" not in lines["MESSAGE"]
+    assert "could not be reloaded" in lines["MESSAGE"].lower()

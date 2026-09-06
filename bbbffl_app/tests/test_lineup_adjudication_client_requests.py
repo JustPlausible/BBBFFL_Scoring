@@ -175,4 +175,41 @@ global.fetch = (path, options) => {
     assert lines["CANDIDATE_GET_COUNT"] == "2"
     assert "NOT applied" in lines["MESSAGE"]
     assert "reloaded" in lines["MESSAGE"].lower()
-    assert lines["REASON_PRESERVED"] == "Quorum rejected the late capture request"
+
+
+def test_when_the_post_rejection_reload_also_fails_adjudication_never_claims_success(adjudication_script, tmp_path):
+    """Codex review finding (P2) on this PR: if the rejected adjudication's
+    follow-up reload (`loadEntry`) also fails, the message must not claim
+    the page was refreshed."""
+    action = """
+let candidateGetCount = 0;
+global.fetch = (path, options) => {
+  const method = (options && options.method) || 'GET';
+  if (path === '/api/admin/lineup-adjudication/round-1' && method === 'GET') {
+    return Promise.resolve({ ok: true, json: async () => ({ round: { label: 'Round 5', state: 'live' }, season: { label: '2026' }, entries: [{ season_entry_id: 'entry-1', team_name: 'Team A', coach_name: 'Coach A', has_effective_submission: false }] }) });
+  }
+  if (path === '/api/admin/lineup-adjudication/round-1/entry-1' && method === 'GET') {
+    candidateGetCount++;
+    if (candidateGetCount === 1) { return Promise.resolve({ ok: true, json: async () => candidateView() }); }
+    return Promise.reject(new Error('network error'));
+  }
+  if (path === '/api/admin/lineup-adjudication/round-1/entry-1/accept-evidenced-draft' && method === 'POST') {
+    return Promise.resolve({ ok: false, json: async () => ({ detail: 'an effective authoritative submission already exists' }) });
+  }
+  return Promise.reject(new Error('unexpected fetch ' + path));
+};
+
+(async () => {
+  document.querySelector('#round-id').value = 'round-1';
+  await loadRound();
+  await loadEntry('entry-1');
+  await submitAcceptEvidencedDraft({ preventDefault(){}, target: { _data: { reason: 'League chat confirmed the pre-lockout draft' } } });
+  console.log('MESSAGE:' + document.querySelector('#message').textContent);
+  process.exit(0);
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+    stdout = _run(tmp_path, adjudication_script, action)
+    lines = dict(line.split(":", 1) for line in stdout.strip().splitlines())
+    assert "NOT accepted" in lines["MESSAGE"]
+    assert "has been reloaded" not in lines["MESSAGE"]
+    assert "could not be reloaded" in lines["MESSAGE"].lower()

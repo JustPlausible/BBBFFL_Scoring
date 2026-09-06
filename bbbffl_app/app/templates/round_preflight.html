@@ -18,8 +18,12 @@ document.querySelector('#mapping').onsubmit=map;document.querySelector('#trigger
 // A rejected/stale mutation must never leave the previous render looking
 // current: reload the authoritative preflight view (a plain GET, never a
 // repeat of the rejected mutation) so readiness/blockers/mapping/lockout
-// state shown can never drift from what the server actually holds.
-async function reloadAfterFailure(){try{render(await api(`/api/admin/round-preflight/${roundId}`))}catch(_){}}
+// state shown can never drift from what the server actually holds. If
+// that reload itself fails (e.g. a transient outage), the caller must
+// never claim the page was refreshed -- reloadAfterFailure reports
+// whether it actually succeeded, and reloadNotice's wording reflects it.
+async function reloadAfterFailure(){try{render(await api(`/api/admin/round-preflight/${roundId}`));return true}catch(_){return false}}
+function reloadNotice(reloaded){return reloaded?'Current authoritative state has been reloaded.':'The authoritative state could NOT be reloaded -- treat this page as out of date and reload manually before retrying.'}
 async function map(x){
   x.preventDefault();
   let f=new FormData(x.target),season=f.get('season'),round=f.get('round'),reason=f.get('reason');
@@ -27,12 +31,12 @@ async function map(x){
     render(await api(`/api/admin/round-preflight/${roundId}/mapping`,{afl_season_id:+season,afl_round_id:+round,reason:reason||null}));
     msg('Authoritative mapping confirmed.',true)
   }catch(x){
-    await reloadAfterFailure();
+    const reloaded=await reloadAfterFailure();
     // Recoverable validation failure: retyping season/round/reason is safe
     // (they name nothing that could now be stale) and worth preserving.
     const form=document.querySelector('#mapping');
     if(form){form.season.value=season;form.round.value=round;form.reason.value=reason}
-    msg('Mapping NOT confirmed — '+x.message+' Current authoritative state has been reloaded.')
+    msg('Mapping NOT confirmed — '+x.message+' '+reloadNotice(reloaded))
   }
 }
 async function trigger(x){
@@ -42,10 +46,10 @@ async function trigger(x){
     render(await api(`/api/admin/round-preflight/${roundId}/lockout-trigger`,{trigger_key:key,trigger_type:type,sequence:+sequence,afl_match_ids:matches.split(',').map(Number),reason:'Configured during operator preflight'}));
     msg('Lockout trigger persisted.',true)
   }catch(x){
-    await reloadAfterFailure();
+    const reloaded=await reloadAfterFailure();
     const form=document.querySelector('#trigger');
     if(form){form.key.value=key;form.type.value=type;form.sequence.value=sequence;form.matches.value=matches}
-    msg('Lockout trigger NOT persisted — '+x.message+' Current authoritative state has been reloaded.')
+    msg('Lockout trigger NOT persisted — '+x.message+' '+reloadNotice(reloaded))
   }
 }
 async function openRound(){
@@ -54,8 +58,8 @@ async function openRound(){
     render(await api(`/api/admin/round-preflight/${roundId}/open`,{}));
     msg('Round opened. Coaches may now use the weekly selection workflow.',true)
   }catch(x){
-    await reloadAfterFailure();
-    msg('Round NOT opened — '+x.message+' Current authoritative state has been reloaded.')
+    const reloaded=await reloadAfterFailure();
+    msg('Round NOT opened — '+x.message+' '+reloadNotice(reloaded))
   }
 }
 api(`/api/admin/round-preflight/${roundId}`).then(render).catch(x=>msg(x.message));

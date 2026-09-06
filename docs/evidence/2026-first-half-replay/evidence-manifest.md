@@ -27,7 +27,7 @@ altering the package.
 
 | Capability | Public reference | Replay milestone |
 |---|---|---|
-| Opening Round bootstrap | PR #129, merge `a9de656` | Draft/preseason reconstruction |
+| Opening Round bootstrap | PR #127, merge `f92e6af` | Draft/preseason reconstruction |
 | Opening Round multi-player rule | PR #136, merge `32f5e80`; migration `0024_opening_round_multi_player` | All sixty nominations accepted |
 | Audited locked-lineup correction | PR #142, merge `aee6d9e`; migration `0025_lineup_correction` | Exercised in Rounds 2 and 4 |
 | Delegated staged-lock presentation | PR #143, merge `a26fea2` | Exercised from Round 3 |

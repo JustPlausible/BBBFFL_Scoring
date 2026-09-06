@@ -28,7 +28,7 @@ from pydantic import BaseModel
 from app.audit import ActorContext
 from app.authorization import Principal, Role, require_authenticated, require_role_covers_season, resolve_principal
 from app.config import BASE_DIR
-from app.public_rounds import authoritative_player_names, authoritative_submissions
+from app.public_rounds import authoritative_player_names, authoritative_submissions, build_public_ladder
 from app.round_review import attempt_correction, attempt_signoff, build_round_review
 from app.routes.admin import require_admin
 
@@ -126,7 +126,12 @@ class CorrectionRequest(BaseModel):
 def _round_review_view(request: Request, round_id: str, *, evidence_fresh: bool = True) -> dict:
     state = request.app.state
     review = build_round_review(
-        state.lifecycle, state.round_review, state.identities, round_id, evidence_fresh=evidence_fresh
+        state.lifecycle,
+        state.round_review,
+        state.identities,
+        round_id,
+        evidence_fresh=evidence_fresh,
+        season_repo=state.seasons,
     )
     result = dataclasses.asdict(review)
     round_ = state.lifecycle.get_round(round_id)
@@ -166,7 +171,14 @@ def _round_review_view(request: Request, round_id: str, *, evidence_fresh: bool 
         matchup["official_result"] = dataclasses.asdict(official) if official else None
     result["ladder"] = None
     if round_.state == "final":
-        result["ladder"] = dataclasses.asdict(state.ladder.snapshot(round_.competition_id, round_.fixture_round_number))
+        # Issue #151: reuse the same public read model the anonymous ladder
+        # uses (app.public_rounds.build_public_ladder) so the Scorer's
+        # authoritative ladder shows identical human-readable team names --
+        # never the raw season_entry_id the underlying #59 snapshot keys
+        # rows by.
+        result["ladder"] = build_public_ladder(
+            state.ladder, state.identities, round_.competition_id, round_.fixture_round_number
+        )
     return result
 
 

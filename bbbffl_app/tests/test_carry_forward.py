@@ -217,7 +217,7 @@ def test_round_1_has_no_source_and_requires_explicit_scorer_action():
     service = CarryForwardService(db)
 
     assert service.resolve_source(scope["season_id"], scope["competition_id"], rounds[0], entry.season_entry_id) is None
-    with pytest.raises(NoCarryForwardSourceError):
+    with pytest.raises(NoCarryForwardSourceError) as excinfo:
         service.carry_forward(
             scope["season_id"],
             scope["competition_id"],
@@ -226,6 +226,13 @@ def test_round_1_has_no_source_and_requires_explicit_scorer_action():
             expected_submission_version=0,
             actor=CARRY_FORWARD_ACTOR,
         )
+    # Issue #151: the ordinary-user-facing error identifies the team by its
+    # human-readable name -- the season_entry_id remains available, but only
+    # as a secondary diagnostic, never the message's primary identity.
+    team_name = IdentityRepository(db).get_public_team(entry.season_entry_id).team_name
+    message = str(excinfo.value)
+    assert message.startswith(f"no previous submitted lineup exists for {team_name}")
+    assert f"season_entry_id={entry.season_entry_id}" in message
     # Nothing was invented: the round remains genuinely unsubmitted.
     lineups = WeeklyLineupRepository(db)
     lineup_id, version = lineups.get_or_create_header(

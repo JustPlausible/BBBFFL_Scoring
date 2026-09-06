@@ -8,6 +8,7 @@ ladder rules and never serializes their internal/audit objects wholesale.
 from decimal import Decimal
 
 from app.lineups import POSITIONS
+from app.player_pool import PlayerPoolRepository
 from app.round_review import build_round_review
 
 
@@ -18,16 +19,14 @@ def _number(value):
 
 
 def authoritative_player_names(database, season_player_ids):
-    """Resolve display names for players in an authoritative submission."""
-    ids = sorted({item for item in season_player_ids if item})
-    if not ids:
-        return {}
-    placeholders = ",".join("?" for _ in ids)
-    rows = database.execute(
-        f"SELECT season_player_id, display_name FROM season_player_pool WHERE season_player_id IN ({placeholders})",
-        tuple(ids),
-    ).fetchall()
-    return {row["season_player_id"]: row["display_name"] for row in rows}
+    """Resolve display names for players in an authoritative submission --
+    built on `PlayerPoolRepository.labels_by_id` (issue #151's shared
+    player-label read model, also used by `app.round_review` and the
+    Scorer lineup-adjudication route) rather than a second, independent
+    query, so this stays the single place season-player display names are
+    resolved."""
+    labels = PlayerPoolRepository(database).labels_by_id(season_player_ids)
+    return {season_player_id: label.display_name for season_player_id, label in labels.items()}
 
 
 def _deferred_source(scoring_source, source_afl_round_id):

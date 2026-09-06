@@ -48,6 +48,7 @@ explicitly rather than being silently substituted or dropped.
 
 from dataclasses import dataclass
 
+from app.identity import IdentityRepository, team_display_label
 from app.lineup_validation import ValidatedLineupSubmissionService
 from app.lineups import LineupIntegrityError, WeeklyLineupRepository
 
@@ -83,6 +84,7 @@ class CarryForwardService:
         self.database = database
         self._lineups = WeeklyLineupRepository(database)
         self._submissions = ValidatedLineupSubmissionService(database, afl_client)
+        self._identities = IdentityRepository(database)
 
     def resolve_source(
         self, season_id: str, competition_id: str, bbbffl_round_id: str, season_entry_id: str
@@ -155,9 +157,14 @@ class CarryForwardService:
         """
         source = self.resolve_source(season_id, competition_id, bbbffl_round_id, season_entry_id)
         if source is None:
+            # Issue #151: an ordinary-user-facing error must identify the
+            # team by name, never a bare season_entry_id -- the id remains
+            # available, parenthetically, only as an optional diagnostic
+            # (see app.identity.team_display_label).
             raise NoCarryForwardSourceError(
-                f"no previous submitted lineup exists for entry {season_entry_id} in competition "
-                f"{competition_id} before round {bbbffl_round_id}; explicit scorer/admin action is required"
+                f"no previous submitted lineup exists for {team_display_label(self._identities, season_entry_id)} "
+                f"before this round; explicit scorer/admin action is required "
+                f"(season_entry_id={season_entry_id}, competition_id={competition_id}, bbbffl_round_id={bbbffl_round_id})"
             )
         lineup_id, _ = self._lineups.get_or_create_header(season_id, competition_id, bbbffl_round_id, season_entry_id)
         source_detail = {

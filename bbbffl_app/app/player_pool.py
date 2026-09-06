@@ -123,6 +123,33 @@ class OwnershipPeriod:
     created_at: str
 
 
+UNKNOWN_PLAYER_LABEL = "Unknown player"
+
+
+@dataclass(frozen=True)
+class PlayerLabel:
+    """Issue #151's shared presentation read model for one season player:
+    the human display name and AFL club a Scorer/Admin surface should lead
+    with, in place of a bare `season_player_id`/`canonical_player_id`. The
+    stable id is retained for mutation targeting/diagnostics, never as the
+    primary label -- see `label`."""
+
+    season_player_id: str
+    display_name: str | None
+    afl_club: str | None
+
+    @property
+    def label(self) -> str:
+        """Safe to show directly: falls back to an explicit, diagnostic-
+        tagged placeholder rather than a blank name if `display_name` is
+        somehow unset on an existing row."""
+        return self.display_name or f"{UNKNOWN_PLAYER_LABEL} ({self.season_player_id})"
+
+    @property
+    def label_with_club(self) -> str:
+        return f"{self.label} ({self.afl_club})" if self.afl_club else self.label
+
+
 @dataclass(frozen=True)
 class SeasonPlayerPoolItem:
     """Read model for the operational browser; never an ownership authority."""
@@ -245,6 +272,30 @@ class PlayerPoolRepository:
             (season_player_id,),
         ).fetchone()
         return _player(row) if row else None
+
+    def labels_by_id(self, season_player_ids) -> dict[str, "PlayerLabel"]:
+        """Bulk display-name/AFL-club lookup for a batch of
+        `season_player_id`s -- the shared read-model helper issue #151's
+        Scorer/Admin presentation surfaces (player-evidence cards,
+        adjudication previews) use instead of each running its own query or
+        showing a bare id. A `season_player_id` with no matching row (never
+        expected for a live selection, but always possible for a historical
+        one referencing a since-removed pool entry) is simply absent from
+        the result; callers fall back via `PlayerLabel.label`/
+        `label_with_club`, never a blank or missing display."""
+        ids = sorted({item for item in season_player_ids if item})
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        rows = self.database.execute(
+            f"SELECT season_player_id, display_name, afl_team_name FROM season_player_pool "
+            f"WHERE season_player_id IN ({placeholders})",
+            tuple(ids),
+        ).fetchall()
+        return {
+            row["season_player_id"]: PlayerLabel(row["season_player_id"], row["display_name"], row["afl_team_name"])
+            for row in rows
+        }
 
     def list_available(self, season_id):
         """Eligible season players with no currently-open ownership period --

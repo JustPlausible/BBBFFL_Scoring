@@ -93,25 +93,77 @@ class ApplyCarryForwardRequest(BaseModel):
     reason: str
 
 
-def _candidate_view(candidate, entry_meta: dict) -> dict:
+def _collect_player_ids(
+    *, evidenced_preview=(), carry_forward_preview=None, extra_positions: dict | None = None
+) -> set:
+    """Every `season_player_id` a Resolution A/B preview (or the resulting
+    persisted adjudication) can reference -- gathered once so player names/
+    AFL clubs are resolved in a single bulk lookup (issue #151) rather than
+    per-slot queries or a browser-side join."""
+    ids = {slot.season_player_id for slot in (evidenced_preview or ()) if slot.season_player_id}
+    if carry_forward_preview is not None:
+        ids |= {season_player_id for season_player_id in carry_forward_preview.positions.values() if season_player_id}
+    if extra_positions:
+        ids |= {season_player_id for season_player_id in extra_positions.values() if season_player_id}
+    return ids
+
+
+def _label_slot(slot: dict, player_labels: dict) -> dict:
+    label = player_labels.get(slot["season_player_id"])
+    slot["player_name"] = label.display_name if label else None
+    slot["afl_club"] = label.afl_club if label else None
+    return slot
+
+
+def _label_positions(positions: dict, player_labels: dict) -> dict:
+    """`{position: season_player_id}` -> `{position: {season_player_id,
+    player_name, afl_club}}` -- the carry-forward preview's positions stay
+    available verbatim (`carry_forward_preview.positions`, unchanged) while
+    this adds the human-readable detail Resolution B's preview needs."""
+    detail = {}
+    for position, season_player_id in positions.items():
+        label = player_labels.get(season_player_id) if season_player_id else None
+        detail[position] = {
+            "season_player_id": season_player_id,
+            "player_name": label.display_name if label else None,
+            "afl_club": label.afl_club if label else None,
+        }
+    return detail
+
+
+def _candidate_view(candidate, entry_meta: dict, player_labels: dict) -> dict:
     view = asdict(candidate)
     view["team_name"] = entry_meta.get("team_name")
     view["coach_name"] = entry_meta.get("coach_name")
+    if view.get("evidenced_preview"):
+        view["evidenced_preview"] = [_label_slot(slot, player_labels) for slot in view["evidenced_preview"]]
+    if view.get("carry_forward_preview"):
+        view["carry_forward_preview"]["positions_detail"] = _label_positions(
+            view["carry_forward_preview"]["positions"], player_labels
+        )
     return view
 
 
-def _submission_view(submission, adjudication) -> dict:
+def _submission_view(submission, adjudication, player_labels: dict) -> dict:
     return {
         "submission": {
             "lineup_id": submission.lineup_id,
             "version": submission.version,
             "positions": submission.positions,
+            "positions_detail": _label_positions(submission.positions, player_labels),
             "source_type": submission.source_type,
             "submitted_at": submission.submitted_at,
             "actor_role": submission.actor_role,
             "reason": submission.reason,
         },
-        "adjudication": asdict(adjudication) if adjudication is not None else None,
+        "adjudication": (
+            {
+                **asdict(adjudication),
+                "slots": [_label_slot(slot, player_labels) for slot in asdict(adjudication)["slots"]],
+            }
+            if adjudication is not None
+            else None
+        ),
     }
 
 
@@ -166,7 +218,11 @@ def get_adjudication_candidate(
     entry_meta = _authorise_entry(request, scope, season_entry_id)
     service = LineupAdjudicationService(request.app.state.database, request.app.state.afl_client)
     candidate = service.describe_candidate(scope["season_id"], scope["competition_id"], round_id, season_entry_id)
-    return _candidate_view(candidate, entry_meta)
+    player_ids = _collect_player_ids(
+        evidenced_preview=candidate.evidenced_preview, carry_forward_preview=candidate.carry_forward_preview
+    )
+    player_labels = service.pool.labels_by_id(player_ids)
+    return _candidate_view(candidate, entry_meta, player_labels)
 
 
 @router.post("/{round_id}/{season_entry_id}/accept-evidenced-draft")
@@ -194,7 +250,8 @@ def accept_evidenced_draft(
         actor=_actor(principal),
         reason=payload.reason,
     )
-    return _submission_view(submission, adjudication) | {
+    player_labels = service.pool.labels_by_id(submission.positions.values())
+    return _submission_view(submission, adjudication, player_labels) | {
         "team_name": entry_meta.get("team_name"),
         "coach_name": entry_meta.get("coach_name"),
     }
@@ -225,7 +282,8 @@ def apply_carry_forward(
         actor=_actor(principal),
         reason=payload.reason,
     )
-    return _submission_view(submission, adjudication) | {
+    player_labels = service.pool.labels_by_id(submission.positions.values())
+    return _submission_view(submission, adjudication, player_labels) | {
         "team_name": entry_meta.get("team_name"),
         "coach_name": entry_meta.get("coach_name"),
     }

@@ -19,6 +19,7 @@ from app.round_review import (
     attempt_signoff,
     build_round_review,
 )
+from app.season import SeasonRepository
 from tests.round_review_helpers import Facts, full_round, progress_to_review
 
 SCORER = ActorContext.anonymous_operator(role="scorer")
@@ -52,6 +53,78 @@ def test_round_review_exposes_five_matchups_with_scores_and_lineup_versions():
         assert m.home.team_name and m.away.team_name
         assert m.home.coach_name and m.away.coach_name
         assert len(m.home.slots) == 8  # eight scorable slots, Interchange reported separately
+
+
+def test_player_evidence_leads_with_player_name_provider_id_stays_secondary():
+    """Issue #151: a player-evidence card must lead with the player's name
+    -- the season_player_id/canonical_player_id already carried on
+    SlotReview remain present too, but only as secondary/diagnostic
+    identifiers, never removed."""
+    db, lifecycle, round_, entries, stats, canon, review_repo, identities = _setup(3011)
+    review = build_round_review(lifecycle, review_repo, identities, round_.bbbffl_round_id)
+    matchup = review.matchups[0]
+    for slot in matchup.home.slots:
+        assert slot.season_player_id is not None
+        assert slot.canonical_player_id is not None
+        assert slot.player_name == f"P{slot.canonical_player_id}"
+    interchange = matchup.home.interchange
+    assert interchange.player_name == f"P{interchange.canonical_player_id}"
+
+
+def test_matchup_review_exposes_a_human_rules_name_and_version_when_season_repo_is_supplied():
+    """Issue #151: rules metadata must have a useful human-readable name/
+    version -- `rules_version_id` (the audit/mutation identifier) is
+    unchanged either way."""
+    db, lifecycle, round_, entries, stats, canon, review_repo, identities = _setup(3012)
+    seasons = SeasonRepository(db)
+    without_season_repo = build_round_review(lifecycle, review_repo, identities, round_.bbbffl_round_id)
+    assert without_season_repo.matchups[0].rules_version_label is None
+    assert without_season_repo.matchups[0].rules_version_id is not None
+
+    with_season_repo = build_round_review(
+        lifecycle, review_repo, identities, round_.bbbffl_round_id, season_repo=seasons
+    )
+    matchup = with_season_repo.matchups[0]
+    assert matchup.rules_version_id == without_season_repo.matchups[0].rules_version_id
+    assert matchup.rules_version_label == "Rules (v1)"
+
+
+def test_dnp_and_interchange_blockers_identify_the_team_by_name_not_a_bare_uuid():
+    """Issue #151: ordinary Scorer attention/blocker messages must identify
+    the affected team by its human-readable name, not a raw
+    season_entry_id -- while the id remains available on `SideReview.
+    season_entry_id` for anything that needs to act on it."""
+    db, lifecycle, round_, entries, stats, canon, review_repo, identities = _setup(3013, calculate=False)
+    matchup = lifecycle.list_matchups(round_.bbbffl_round_id)[0]
+    missing_canonical = canon[(matchup.home_season_entry_id, "F1")]
+    ambiguous_stats = dict(stats)
+    del ambiguous_stats[missing_canonical]
+    MatchupCalculationService(db, Facts(ambiguous_stats)).calculate_round(round_.bbbffl_round_id)
+
+    review = build_round_review(lifecycle, review_repo, identities, round_.bbbffl_round_id)
+    reviewed = next(m for m in review.matchups if m.matchup_id == matchup.matchup_id)
+    team_name = identities.get_public_team(matchup.home_season_entry_id).team_name
+    blocker = next(reason for reason in reviewed.blockers if "F1" in reason and "unresolved" in reason)
+    assert blocker.startswith(team_name)
+    assert matchup.home_season_entry_id not in blocker
+
+
+def test_blocker_falls_back_to_a_diagnostic_safe_label_when_identity_is_unavailable():
+    """A caller with no identities repository at all (display-only and
+    optional, matching `build_round_review`'s existing convention) still
+    gets a deterministic, non-blank team label in blocker text -- never the
+    bare season_entry_id standing in as a name."""
+    db, lifecycle, round_, entries, stats, canon, review_repo, identities = _setup(3014, calculate=False)
+    matchup = lifecycle.list_matchups(round_.bbbffl_round_id)[0]
+    missing_canonical = canon[(matchup.home_season_entry_id, "F1")]
+    ambiguous_stats = dict(stats)
+    del ambiguous_stats[missing_canonical]
+    MatchupCalculationService(db, Facts(ambiguous_stats)).calculate_round(round_.bbbffl_round_id)
+
+    review = build_round_review(lifecycle, review_repo, None, round_.bbbffl_round_id)
+    reviewed = next(m for m in review.matchups if m.matchup_id == matchup.matchup_id)
+    blocker = next(reason for reason in reviewed.blockers if "F1" in reason and "unresolved" in reason)
+    assert blocker.startswith("Unknown team")
 
 
 def test_round_review_is_ready_when_every_matchup_has_unambiguous_evidence():

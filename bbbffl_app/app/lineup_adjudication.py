@@ -93,6 +93,7 @@ from app.audit import ENTITY_TYPE_LINEUP, LINEUP_ADJUDICATED, ActorContext, appe
 from app.carry_forward import CARRY_FORWARD_SOURCE_TYPE, CarryForwardService, NoCarryForwardSourceError
 from app.coach_lineup import CoachLineupService
 from app.db import _for_update_suffix
+from app.identity import IdentityRepository, team_display_label
 from app.lineups import (
     ADJUDICATED_CARRY_FORWARD_SOURCE_TYPE,
     ADJUDICATED_LATE_CAPTURE_SOURCE_TYPE,
@@ -237,6 +238,7 @@ class LineupAdjudicationService:
         self.ownership = self._coach_lineup.ownership
         self.nominations = self._coach_lineup.nominations
         self._carry_forward = CarryForwardService(database, afl_client)
+        self._identities = IdentityRepository(database)
 
     # -- Eligibility ---------------------------------------------------------
 
@@ -693,9 +695,13 @@ class LineupAdjudicationService:
             raise RoundNotEligibleForAdjudicationError("; ".join(reasons))
         source = self._carry_forward.resolve_source(season_id, competition_id, bbbffl_round_id, season_entry_id)
         if source is None:
+            # Issue #151: same team-name-first, id-diagnostic convention as
+            # app.carry_forward.CarryForwardService.carry_forward's own
+            # NoCarryForwardSourceError.
             raise NoCarryForwardSourceError(
-                f"no previous submitted lineup exists for entry {season_entry_id} in competition "
-                f"{competition_id} before round {bbbffl_round_id}; the carry-forward fallback is not available"
+                f"no previous submitted lineup exists for {team_display_label(self._identities, season_entry_id)} "
+                f"before this round; the carry-forward fallback is not available "
+                f"(season_entry_id={season_entry_id}, competition_id={competition_id}, bbbffl_round_id={bbbffl_round_id})"
             )
         # Unlike Resolution A, this never needs a draft to already exist --
         # `_eligibility` deliberately never creates the header row (see

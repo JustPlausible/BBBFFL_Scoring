@@ -53,6 +53,14 @@ class RulesVersion:
     created_by: str | None
     scoring_rules: dict | None = None
 
+    @property
+    def display_label(self) -> str:
+        """Issue #151: the human-readable rules name/version a Scorer/Admin
+        surface should show in place of a bare `rules_version_id` -- the
+        `name`/`version_number` this table already records, never a new
+        field or a schema change."""
+        return f"{self.name} (v{self.version_number})"
+
 
 @dataclass(frozen=True)
 class CompetitionStream:
@@ -251,6 +259,23 @@ class SeasonRepository:
                 },
             )
         return item
+
+    def get_rules_version(self, rules_version_id: str) -> RulesVersion | None:
+        """Single-row lookup by id -- issue #151's human-readable rules
+        metadata for Scorer/Admin surfaces (`app.round_review`'s
+        `MatchupReview.rules_version_label`) that otherwise only carry a
+        `rules_version_id`. Returns `None` for an unknown/removed id rather
+        than raising, matching `IdentityRepository.get_public_team`'s
+        display-only "may be absent" convention."""
+        row = self.database.execute(
+            "SELECT * FROM season_rules_version WHERE rules_version_id=?",
+            (rules_version_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        values = dict(row)
+        values["scoring_rules"] = json.loads(values["scoring_rules"]) if values.get("scoring_rules") else None
+        return RulesVersion(**values)
 
     def list_rules_versions(self, season_id: str) -> list[RulesVersion]:
         rows = self.database.execute(

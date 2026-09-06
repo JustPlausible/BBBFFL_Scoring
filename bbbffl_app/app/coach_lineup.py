@@ -101,13 +101,27 @@ def humanize_lock_reason(reason_code: str) -> str:
     return reason_code.replace("_", " ").capitalize()
 
 
-def describe_ordinary_position(position, lock: PositionLockState, deferred_context, player) -> dict:
+def describe_ordinary_position(
+    position, lock: PositionLockState, deferred_context, player, draft_season_player_id, draft_player
+) -> dict:
     """JSON-ready presentation of one ordinary position's authoritative
     lock state (issue #138), for the delegated lineup surface. Player
     names/clubs are resolved here, never left to the browser to guess
     from a season_player_id; `lock_type` keeps an Opening Round deferred
     nomination a visually/semantically distinct category from an
     ordinary selective/main lockout rather than merging them.
+
+    `lock` is the *authoritative* evaluation for this position -- evaluated
+    against the effective submission where one exists, so a private draft
+    can never make an already-locked position look editable or show the
+    wrong (unsubmitted) player as though it were the locked selection
+    (issue #138, Codex review on PR #143). `draft_season_player_id` is
+    this position's own current private-draft value; for a still-editable
+    position the caller passes the same live-evaluated value as `lock`
+    itself (there is nothing to diverge from), so `draft_diverges` is only
+    ever true for a non-editable position whose private draft holds a
+    different, unsubmitted value -- surfaced separately here rather than
+    silently overriding or hiding the authoritative lock.
     """
     season_player_id = lock.season_player_id
     if deferred_context:
@@ -127,6 +141,7 @@ def describe_ordinary_position(position, lock: PositionLockState, deferred_conte
     else:
         state, editable, lock_type = "indeterminate", False, "indeterminate"
         reason_code, reason_display = lock.reason, humanize_lock_reason(lock.reason)
+    draft_diverges = not editable and draft_season_player_id != season_player_id
     return {
         "position": position,
         "season_player_id": season_player_id,
@@ -143,6 +158,18 @@ def describe_ordinary_position(position, lock: PositionLockState, deferred_conte
         "observed_status": lock.observed_status,
         "irreversible": lock.irreversible,
         "deferred_context": deferred_context,
+        # The position's own current private-draft value, always -- so the
+        # UI can serialise a Save/Submit payload correctly for every
+        # position (issue #138, Codex review on PR #143): for an editable
+        # position this equals `season_player_id` above; for a locked/
+        # indeterminate/deferred one it may legitimately differ from the
+        # authoritative value, in which case `draft_diverges` is true and
+        # that divergent, unsubmitted value must never be presented or
+        # sent as though it were accepted.
+        "draft_season_player_id": draft_season_player_id,
+        "draft_diverges": draft_diverges,
+        "draft_player_display_name": draft_player.display_name if draft_diverges and draft_player else None,
+        "draft_afl_club_name": draft_player.afl_team_name if draft_diverges and draft_player else None,
     }
 
 

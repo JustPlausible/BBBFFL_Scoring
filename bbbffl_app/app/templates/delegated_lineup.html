@@ -34,7 +34,11 @@ function slotMarkup(row){
   } else {
     detail=`${esc(row.reason_display)}${row.afl_match_id?` · AFL match ${esc(row.afl_match_id)}`:''}${row.observed_status?` · observed AFL status ${esc(row.observed_status)}`:''}${row.effective_lock_at?` · effective lock time ${human(row.effective_lock_at)}`:''}${row.irreversible?' · backed by irreversible persisted evidence':' · not yet durably persisted'}`;
   }
-  return `<label class="slot ${slotClass}"><b>${esc(row.position)}</b><span class="badge ${badgeClass}">${badgeLabel}</span><input disabled value="${playerLine}"><div class="lock-info">${detail}</div><details class="diag"><summary>Diagnostics</summary><div>${diag}</div></details></label>`;
+  // The private draft may hold a different, unsubmitted value here (e.g. a
+  // rejected save-then-submit attempt) -- surfaced separately, never as
+  // though it were the authoritative locked selection above.
+  const divergence=row.draft_diverges?`<div class="lock-info">Private draft (not submitted, will not be honored here) currently holds: ${row.draft_season_player_id?esc(row.draft_player_display_name||row.draft_season_player_id)+(row.draft_afl_club_name?` — ${esc(row.draft_afl_club_name)}`:''):'Vacant'}</div>`:'';
+  return `<label class="slot ${slotClass}"><b>${esc(row.position)}</b><span class="badge ${badgeClass}">${badgeLabel}</span><input disabled value="${playerLine}"><div class="lock-info">${detail}</div>${divergence}<details class="diag"><summary>Diagnostics</summary><div>${diag}</div></details></label>`;
 }
 
 function planMarkup(d){
@@ -51,7 +55,16 @@ function planMarkup(d){
 function render(d){
   state=d;let c=d.acting_context;
   const submittedState=d.submission&&d.draft_diverges_from_submission?['changed','Submitted + private changes']:d.submission?['','Submitted']:['private','Private draft only, never submitted'];
-  const rejectionBanner=d.submission_rejected?`<section class="card rejection"><strong>Submission NOT accepted.</strong> ${esc(d.submission_rejected)}<br>The private draft below may now differ from the authoritative submitted lineup shown in "Lineup state" -- it was saved (save-then-submit) but never became the official submission. ${d.draft_diverges_from_submission?'<button id="discard" class="danger">Discard private draft / rebase onto submitted lineup</button>':''}</section>`:'';
+  // The discard/rebase action must stay available for as long as the
+  // draft actually diverges from the authoritative submission -- not only
+  // immediately after a client-observed rejection (`submission_rejected`
+  // is only ever set locally, right after a failed Submit call in this
+  // same browser session). A stale divergence from an earlier session, a
+  // page reload, or another tab must offer the same recovery action.
+  const discardButton=d.submission&&d.draft_diverges_from_submission?'<button id="discard" class="danger">Discard private draft / rebase onto submitted lineup</button>':'';
+  const rejectionBanner=d.submission_rejected
+    ?`<section class="card rejection"><strong>Submission NOT accepted.</strong> ${esc(d.submission_rejected)}<br>The private draft below may now differ from the authoritative submitted lineup shown in "Lineup state" -- it was saved (save-then-submit) but never became the official submission. ${discardButton}</section>`
+    :(d.draft_diverges_from_submission?`<section class="card rejection"><strong>Private draft differs from the authoritative submitted lineup.</strong> Locked/indeterminate positions below always show the authoritative submitted selection, never this divergent draft value. ${discardButton}</section>`:'');
   document.querySelector('#app').innerHTML=`
 <section class="card banner"><strong>PROXY / DELEGATED OPERATION</strong><div class="grid"><p><b>Signed in as:</b> ${esc(c.display_name)}</p><p><b>Role:</b> ${esc(c.active_role)}</p><p><b>Representing:</b> ${esc(c.team_name)}</p><p><b>Season / round:</b> ${esc(d.season.label)} · ${esc(d.round.label)}</p></div><p>The signed-in human remains the audit actor. The represented team is the target, not the authenticated identity.</p><label>Switch represented team<select id="entry"><option value="">Loading authorised teams…</option></select></label></section>
 ${rejectionBanner}
@@ -61,7 +74,20 @@ ${rejectionBanner}
 <section class="card"><h2>Carry forward previous submitted lineup</h2>${d.carry_forward_source?`<p>Source round <b>${esc(d.carry_forward_source.source_bbbffl_round_id)}</b>, lineup ${esc(d.carry_forward_source.source_lineup_id)}, version ${esc(d.carry_forward_source.source_version)}</p><div class="positions">${Object.entries(d.carry_forward_source.positions).map(([p,v]) => `${esc(p)}: ${esc(d.player_display_names?.[v]||v)}`).join('\n')}</div><button id="carry">Carry forward exact positions</button>`:`<strong>${esc(d.carry_forward_message)}</strong>`}</section>`;
   document.querySelector('#save').onclick=save;document.querySelector('#submit').onclick=submit;document.querySelector('#carry')?.addEventListener('click',carry);document.querySelector('#discard')?.addEventListener('click',discardDraft);loadEntries(c)
 }
-function positions(){let p={...state.draft.positions};document.querySelectorAll('[data-position]').forEach(x=>p[x.dataset.position]=x.value||null);return p}
+function positions(){
+  // Base every position on its own authoritative lock-state value, never
+  // the raw (possibly divergent/rejected) private draft -- a non-editable
+  // slot's `season_player_id` is always the authoritative selection, so a
+  // Save/Submit that leaves it untouched must send that value, not
+  // whatever the draft happens to hold underneath it (issue #138, Codex
+  // review on PR #143). An editable slot's `season_player_id` already
+  // equals the draft's own current pick; the live `<select>` below then
+  // overrides it with whatever the operator has actually chosen.
+  let p={};
+  state.lock_state.forEach(row=>p[row.position]=row.season_player_id);
+  document.querySelectorAll('[data-position]').forEach(x=>p[x.dataset.position]=x.value||null);
+  return p;
+}
 async function save(){try{render(await api(`/api/operations/rounds/${roundId}/lineup/draft`,'PUT',{positions:positions(),expected_revision:state.draft.revision}));msg('Proxy draft saved.',true)}catch(e){msg(e.message)}}
 async function submit(){
   let visible=positions(),vacancies=Object.entries(visible).filter(([p,v])=>p!=='Interchange'&&!v).map(x=>x[0]);

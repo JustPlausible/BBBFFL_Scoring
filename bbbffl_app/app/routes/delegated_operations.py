@@ -18,6 +18,7 @@ from app.carry_forward import CarryForwardService
 from app.coach_lineup import (
     COACH_LINEUP_POSITIONS,
     CoachLineupService,
+    LockState,
     MatchResolutionError,
     describe_ordinary_position,
     resolve_position_locks,
@@ -150,29 +151,70 @@ def _lineup_view(request: Request, principal: Principal, scope: dict) -> dict:
         if player is not None and player.display_name:
             player_display_names[player_id] = player.display_name
 
+    submitted_positions = submission.positions if submission else None
+    draft_diverges_from_submission = submitted_positions is not None and draft.positions != submitted_positions
+
     # Issue #138: the same authoritative position-level lock-state read
     # model the ordinary Coach lineup page uses, evaluated against this
     # represented entry's own lineup -- never a delegated-only
     # recomputation of lock rules. `locks` durably materialises applicable
     # trigger/effective-submission evidence exactly as the Coach page's
     # `view()` does.
+    #
+    # Immutability is derived from the *effective submission* (Codex review
+    # on PR #143): once a submission exists, a private draft that diverges
+    # from it (e.g. a rejected save-then-submit attempt) can never make an
+    # already-locked position look editable, or show its own unsubmitted
+    # replacement as though it were the authoritative locked selection --
+    # `guard_transition` would refuse any change away from the submitted
+    # value there regardless of what the draft proposes. A position the
+    # submission itself leaves open is unaffected: the operator's own
+    # in-progress draft pick for it is still live-evaluated below (the
+    # pre-submission "would this be rejected" preview a brand-new,
+    # never-submitted lineup has always relied on).
+    authoritative_positions = submitted_positions if submitted_positions is not None else draft.positions
     locks = resolve_position_locks(
         service.lockouts,
         draft.lineup_id,
         scope["bbbffl_round_id"],
         scope["season_entry_id"],
-        draft.positions,
+        authoritative_positions,
         service.match_facts,
     )
-    lock_state = [
-        describe_ordinary_position(
-            position,
-            locks[position],
-            deferred.get(position),
-            service.pool.get_by_id(locks[position].season_player_id) if locks[position].season_player_id else None,
+    draft_locks = locks
+    if submitted_positions is not None and draft_diverges_from_submission:
+        draft_locks = resolve_position_locks(
+            service.lockouts,
+            draft.lineup_id,
+            scope["bbbffl_round_id"],
+            scope["season_entry_id"],
+            draft.positions,
+            service.match_facts,
         )
-        for position in COACH_LINEUP_POSITIONS
-    ]
+    lock_state = []
+    for position in COACH_LINEUP_POSITIONS:
+        authoritative_lock = locks[position]
+        # Still open under the authoritative state -> present (and let the
+        # operator continue editing) their own current draft pick, live-
+        # evaluated; already locked/indeterminate there -> the draft's
+        # value is presentational-only divergence, never the primary value.
+        display_lock = draft_locks[position] if authoritative_lock.state == LockState.EDITABLE else authoritative_lock
+        draft_value = draft.positions[position]
+        draft_player = (
+            service.pool.get_by_id(draft_value)
+            if draft_value and draft_value != display_lock.season_player_id
+            else None
+        )
+        lock_state.append(
+            describe_ordinary_position(
+                position,
+                display_lock,
+                deferred.get(position),
+                service.pool.get_by_id(display_lock.season_player_id) if display_lock.season_player_id else None,
+                draft_value,
+                draft_player,
+            )
+        )
     try:
         lockout_plan = [
             asdict(trigger)
@@ -182,9 +224,6 @@ def _lineup_view(request: Request, principal: Principal, scope: dict) -> dict:
     except (AflApiError, MatchResolutionError) as exc:
         lockout_plan = []
         lockout_plan_unavailable = f"lockout plan evidence unavailable: {exc}"
-
-    submitted_positions = submission.positions if submission else None
-    draft_diverges_from_submission = submitted_positions is not None and draft.positions != submitted_positions
 
     return {
         "acting_context": {

@@ -495,6 +495,85 @@ def test_prohibited_submission_is_still_rejected_and_divergent_draft_is_reported
     assert view["submission"]["positions"]["F1"] == early.season_player_id
     assert view["draft_diverges_from_submission"] is True
 
+    # The per-position lock_state (what the delegated template actually
+    # renders) must show the authoritative submitted player as F1's
+    # primary value -- never the divergent, rejected draft replacement --
+    # and separately flag the divergence (Codex review on PR #143).
+    row = _lock_by_position(view)["F1"]
+    assert row["state"] == "locked"
+    assert row["editable"] is False
+    assert row["season_player_id"] == early.season_player_id
+    assert row["draft_season_player_id"] == other_early.season_player_id
+    assert row["draft_diverges"] is True
+    assert row["draft_player_display_name"] == other_early.display_name
+
+
+def test_divergent_draft_replacement_from_an_uncovered_match_still_reports_the_position_locked():
+    """The sharper form of the same defect Codex flagged: the draft's
+    divergent replacement is a *real* player (not vacant) whose own AFL
+    match is not itself covered by any activated trigger. Naively live-
+    evaluating that replacement's own match would report it editable, even
+    though `guard_transition` refuses to change F1 away from its
+    authoritatively locked, submitted value regardless of the
+    replacement's own match state."""
+    db, _, round_, entries, scope_row, pool, ownership = lockout_context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_selective(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], key="early-1", sequence=1)
+    early = acquire(pool, ownership, scope_row, entry, 1, EARLY_HOME)
+    uncovered_replacement = acquire(pool, ownership, scope_row, entry, 2, UNCOVERED_HOME, name="Uncovered Replacement")
+    first = _save_and_submit(
+        db,
+        round_,
+        scope_row,
+        entry,
+        {"F1": early.season_player_id},
+        matches=ALL_MATCHES,
+        evaluation_at=EARLY_START - timedelta(minutes=5),
+    )
+
+    proxy = LineupProxyService(db)
+    proxy.create_or_amend(
+        scope_row["season_id"],
+        scope_row["competition_id"],
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        {"F1": uncovered_replacement.season_player_id},
+        expected_revision=1,
+        actor=OPERATOR,
+    )
+
+    request = _request(db, afl_client(ALL_MATCHES))
+    # Materialise F1's lock evidence via a GET before the trigger fires is
+    # not required here -- evaluating at/after EARLY_START below drives it.
+    from app.lockouts import LockoutRepository, RoundMatchFactsProvider
+    from app.round_mapping import RoundMappingRepository
+
+    match_facts = RoundMatchFactsProvider(RoundMappingRepository(db), afl_client(ALL_MATCHES))
+    lineup_id = db.execute(
+        "SELECT lineup_id FROM weekly_lineup WHERE bbbffl_round_id=? AND season_entry_id=?",
+        (round_.bbbffl_round_id, entry.season_entry_id),
+    ).fetchone()["lineup_id"]
+    LockoutRepository(db).lock_state(
+        lineup_id,
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        first.positions,
+        match_facts=match_facts,
+        evaluation_at=EARLY_START + timedelta(minutes=1),
+    )
+
+    view = delegated_operations._lineup_view(request, _principal(entry), _scope(db, round_, scope_row, entry))
+    row = _lock_by_position(view)["F1"]
+    assert row["state"] == "locked"
+    assert row["lock_type"] == "selective_trigger"
+    assert row["editable"] is False
+    assert row["season_player_id"] == early.season_player_id
+    assert row["draft_season_player_id"] == uncovered_replacement.season_player_id
+    assert row["draft_diverges"] is True
+    assert row["draft_player_display_name"] == uncovered_replacement.display_name
+    assert view["draft_diverges_from_submission"] is True
+
 
 # ---------------------------------------------------------------------------
 # 12: replay-mode UPCOMING plus an activated match_time_reached trigger
@@ -658,6 +737,82 @@ def test_delegated_lineup_page_renders_lock_state_driven_disabled_controls_clien
     # still (wrongly) read as "changed" immediately after discarding.
     assert "d.draft_diverges_from_submission" in source
     assert "d.draft.revision>d.submission.based_on_draft_revision" not in source
+    # Second Codex review round (PR #143): the discard/rebase action must
+    # stay available for a persisted divergence, not only immediately
+    # after a client-observed rejection.
+    assert "d.draft_diverges_from_submission?" in source
+    # positions() (the Save/Submit payload builder) must serialise every
+    # non-editable slot's *authoritative* lock-state value, never the raw,
+    # possibly-divergent private draft underneath it.
+    assert "state.lock_state.forEach(row=>p[row.position]=row.season_player_id)" in source
+
+
+def test_still_open_position_under_the_submission_shows_the_operators_own_live_draft_pick():
+    """A position the authoritative submission leaves open (e.g. still
+    vacant, or a player whose own match has not yet been covered by any
+    activated trigger) must keep showing the operator's own in-progress
+    draft pick, live-evaluated -- not silently reverted to the
+    submission's own (e.g. vacant) value. This is the pre-submission
+    "would this pick be rejected" preview the read model has always
+    given; deriving locked-position immutability from the effective
+    submission (Codex review on PR #143) must not remove it for positions
+    the submission does not itself lock."""
+    db, _, round_, entries, scope_row, pool, ownership = lockout_context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_selective(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], key="early-1", sequence=1)
+    early = acquire(pool, ownership, scope_row, entry, 1, EARLY_HOME)
+    uncovered = acquire(pool, ownership, scope_row, entry, 2, UNCOVERED_HOME)
+    # M1 is left vacant in the authoritative submission.
+    _save_and_submit(
+        db,
+        round_,
+        scope_row,
+        entry,
+        {"F1": early.season_player_id},
+        matches=ALL_MATCHES,
+        evaluation_at=EARLY_START - timedelta(minutes=5),
+    )
+
+    proxy = LineupProxyService(db)
+    proxy.create_or_amend(
+        scope_row["season_id"],
+        scope_row["competition_id"],
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        {"F1": early.season_player_id, "M1": uncovered.season_player_id},
+        expected_revision=1,
+        actor=OPERATOR,
+    )
+
+    from app.lockouts import LockoutRepository, RoundMatchFactsProvider
+    from app.round_mapping import RoundMappingRepository
+
+    match_facts = RoundMatchFactsProvider(RoundMappingRepository(db), afl_client(ALL_MATCHES))
+    lineup_id = db.execute(
+        "SELECT lineup_id FROM weekly_lineup WHERE bbbffl_round_id=? AND season_entry_id=?",
+        (round_.bbbffl_round_id, entry.season_entry_id),
+    ).fetchone()["lineup_id"]
+    LockoutRepository(db).lock_state(
+        lineup_id,
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        {"F1": early.season_player_id},
+        match_facts=match_facts,
+        evaluation_at=EARLY_START + timedelta(minutes=1),
+    )
+
+    request = _request(db, afl_client(ALL_MATCHES))
+    view = delegated_operations._lineup_view(request, _principal(entry), _scope(db, round_, scope_row, entry))
+    m1 = _lock_by_position(view)["M1"]
+    assert m1["state"] == "editable"
+    assert m1["editable"] is True
+    assert m1["season_player_id"] == uncovered.season_player_id
+    assert m1["draft_season_player_id"] == uncovered.season_player_id
+    assert m1["draft_diverges"] is False
+    # F1 is still the authoritative, locked, unaffected selection.
+    f1 = _lock_by_position(view)["F1"]
+    assert f1["state"] == "locked" and f1["season_player_id"] == early.season_player_id
 
 
 def test_lockout_plan_orders_triggers_by_configured_sequence():

@@ -398,6 +398,31 @@ def test_no_effective_submission_cannot_be_corrected():
         )
 
 
+def test_correction_service_error_identifies_the_team_by_name_not_a_bare_uuid():
+    """Issue #151: LineupCorrectionService.correct() -- the entry point an
+    ordinary Scorer/Admin correction request actually goes through -- must
+    identify the affected team by its human-readable name; the
+    season_entry_id remains available, but only as a secondary diagnostic."""
+    db, lifecycle, round_, entries, scope, pool, ownership = context()
+    entry = entries[0]
+    service = LineupCorrectionService(db, afl_client=None)
+    with pytest.raises(NoEffectiveSubmissionError) as excinfo:
+        service.correct(
+            scope["season_id"],
+            scope["competition_id"],
+            round_.bbbffl_round_id,
+            entry.season_entry_id,
+            {},
+            expected_submission_version=0,
+            actor=SCORER,
+            reason="nothing to correct",
+        )
+    team_name = IdentityRepository(db).get_public_team(entry.season_entry_id).team_name
+    message = str(excinfo.value)
+    assert message.startswith(team_name)
+    assert f"season_entry_id={entry.season_entry_id}" in message
+
+
 def test_correction_with_no_actual_change_is_rejected():
     db, lifecycle, round_, entry, scope, pool, ownership, lineups, matches, draft, submitted, tackler, bench = (
         _locked_context()

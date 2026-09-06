@@ -397,3 +397,35 @@ class IdentityRepository:
             (season_id,),
         ).fetchall()
         return [SeasonEntryOverview(**dict(row)) for row in rows]
+
+
+# -- Shared presentation helper --------------------------------------------
+#
+# Issue #151: ordinary Scorer/Admin-facing text (attention/blocker messages,
+# correction/carry-forward errors, ladder rows) must identify a BBBFFL team
+# by its current public name, never by `season_entry_id` alone, while still
+# degrading to an explicit, diagnostic-safe placeholder rather than a blank
+# or misleading label when identity cannot be resolved (a historical/
+# deleted/missing entry, or a caller with no identities repository at all).
+# A single function here -- reused by `app.round_review`, `app.carry_forward`,
+# `app.lineup_correction`, `app.lineup_adjudication` and `app.public_rounds`
+# rather than each re-deriving its own fallback text -- keeps that fallback
+# behaviour deterministic and identical everywhere it is shown.
+
+UNKNOWN_TEAM_LABEL = "Unknown team"
+
+
+def team_display_label(identities: "IdentityRepository | None", season_entry_id: str | None) -> str:
+    """The current public BBBFFL team name for `season_entry_id`, safe to
+    show directly in ordinary user-facing text. Never raises and never
+    returns a bare UUID or a blank string: an unresolvable entry (no
+    `identities` repository supplied, or a `season_entry_id` with no
+    current public team on record) falls back to `UNKNOWN_TEAM_LABEL` with
+    the stable id retained parenthetically, purely as an optional
+    diagnostic -- never as the primary label."""
+    if season_entry_id is None:
+        return UNKNOWN_TEAM_LABEL
+    team = identities.get_public_team(season_entry_id) if identities is not None else None
+    if team is None or not team.team_name:
+        return f"{UNKNOWN_TEAM_LABEL} ({season_entry_id})"
+    return team.team_name

@@ -41,6 +41,7 @@ from dataclasses import dataclass
 
 from app.audit import ActorContext
 from app.coach_lineup import CoachLineupService
+from app.identity import IdentityRepository, team_display_label
 from app.lineups import POSITIONS, LineupCorrection, LineupIntegrityError, NoEffectiveSubmissionError
 
 CORRECTION_ACTOR_ROLES = frozenset({"scorer", "admin", "replay_operator"})
@@ -103,6 +104,7 @@ class LineupCorrectionService:
         self.match_facts = self._coach_lineup.match_facts
         self.pool = self._coach_lineup.pool
         self.ownership = self._coach_lineup.ownership
+        self._identities = IdentityRepository(database)
 
     def describe(self, season_id: str, competition_id: str, bbbffl_round_id: str, season_entry_id: str):
         lineup_id, effective_version = self.lineups.get_or_create_header(
@@ -194,9 +196,12 @@ class LineupCorrectionService:
         lineup_id, _ = self.lineups.get_or_create_header(season_id, competition_id, bbbffl_round_id, season_entry_id)
         current = self.lineups.get_effective_submission(lineup_id)
         if current is None:
+            # Issue #151: same team-name-first, id-diagnostic convention as
+            # app.carry_forward's NoCarryForwardSourceError.
             raise NoEffectiveSubmissionError(
-                f"season entry {season_entry_id} has no effective submitted lineup for round {bbbffl_round_id}; "
-                "there is nothing to correct"
+                f"{team_display_label(self._identities, season_entry_id)} has no effective submitted lineup for "
+                f"this round; there is nothing to correct (season_entry_id={season_entry_id}, "
+                f"bbbffl_round_id={bbbffl_round_id})"
             )
         corrected_positions = {**current.positions, **position_changes}
         return self.lineups.submit_correction(

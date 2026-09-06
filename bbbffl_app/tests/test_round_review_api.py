@@ -519,6 +519,17 @@ def test_regular_season_round_centre_browser_shell_and_authoritative_context(rev
     assert all(matchup["official_result"]["version"] == 1 for matchup in published["matchups"])
     assert published["ladder"]["through_round"] == 1
     assert len(published["ladder"]["rows"]) == 10
+    # Issue #151: the Scorer's authoritative ladder must show the same
+    # human-readable team identity as the public ladder -- never the raw
+    # season_entry_id the #59 snapshot keys rows by -- and, like the public
+    # ladder, it never carries private coach identity.
+    assert all(row["team_name"] for row in published["ladder"]["rows"])
+    assert all("season_entry_id" not in row and "coach_name" not in row for row in published["ladder"]["rows"])
+    public_api = _public_api(client, client.app.state.lifecycle, round_id)
+    public_ladder = client.get(f"{public_api}/ladder").json()
+    assert {row["team_name"] for row in published["ladder"]["rows"]} == {
+        row["team_name"] for row in public_ladder["rows"]
+    }
 
 
 def test_round_centre_api_rejects_stale_browser_ruling_and_returns_current_state(review_client):

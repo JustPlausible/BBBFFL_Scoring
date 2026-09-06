@@ -54,7 +54,9 @@ from dataclasses import dataclass
 from app.audit import ActorContext, append_event
 from app.competition_lifecycle import StaleRoundVersionError
 from app.db import _for_update_suffix, transaction
+from app.identity import team_display_label
 from app.lineups import POSITIONS as SLOTS
+from app.player_pool import PlayerLabel, PlayerPoolRepository
 from app.season import _now
 
 OVERRIDE_POSITIONS = tuple(slot for slot in SLOTS if slot != "Interchange")
@@ -499,6 +501,11 @@ class SlotReview:
     # usable/applied from the ruling alone.
     effective_source: str
     interchange_applied: bool
+    # Issue #151: the player-evidence card's primary label -- resolved
+    # server-side alongside `season_player_id`/`canonical_player_id`, which
+    # remain present as secondary/diagnostic identifiers, never removed.
+    player_name: str | None = None
+    afl_club: str | None = None
 
 
 @dataclass(frozen=True)
@@ -515,6 +522,8 @@ class InterchangeReview:
     source_afl_match_id: int | None
     target_position: str | None
     potential_scores: dict | None
+    player_name: str | None = None
+    afl_club: str | None = None
 
 
 @dataclass(frozen=True)
@@ -544,6 +553,9 @@ class MatchupReview:
     effective_official_version: int | None
     eligible_for_signoff: bool
     blockers: list[str]
+    # Issue #151: human rules name/version alongside the stable id, which
+    # remains unchanged as the mutation/audit identifier.
+    rules_version_label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -564,8 +576,24 @@ def _identity_lookup(identities, entry_id):
     return (team.team_name if team else None), (coach.display_name if coach else None)
 
 
-def _side_review(entry_id, side_snapshot, dnp_rulings, interchange_rulings, overrides, identities):
+def _player_label(
+    player_labels: dict[str, "PlayerLabel"], season_player_id: str | None
+) -> tuple[str | None, str | None]:
+    if season_player_id is None:
+        return None, None
+    label = player_labels.get(season_player_id)
+    return (label.display_name, label.afl_club) if label is not None else (None, None)
+
+
+def _side_review(entry_id, side_snapshot, dnp_rulings, interchange_rulings, overrides, identities, player_labels=None):
+    player_labels = player_labels or {}
     team_name, coach_name = _identity_lookup(identities, entry_id)
+    # Issue #151: ordinary attention/blocker messages must identify the
+    # affected team by name, never by a bare season_entry_id -- this is the
+    # one place `_side_review` builds that text, so every blocker below uses
+    # this label instead of `entry_id` directly. The stable id is never
+    # lost: it remains `SideReview.season_entry_id` in the same read model.
+    team_label = team_name if team_name else team_display_label(identities, entry_id)
     slots_by_position = {slot["position"]: slot for slot in side_snapshot["slots"]}
     interchange_slot = slots_by_position.get("Interchange")
     interchange_ruling = interchange_rulings.get(entry_id)
@@ -589,7 +617,7 @@ def _side_review(entry_id, side_snapshot, dnp_rulings, interchange_rulings, over
         named = slot_dict["season_player_id"] is not None
 
         if named and ruling is None and participation.get("dnp_recommendation") in _AMBIGUOUS_RECOMMENDATIONS:
-            blockers.append(f"{entry_id} {position}: DNP status unresolved -- {participation.get('reason')}")
+            blockers.append(f"{team_label} {position}: DNP status unresolved -- {participation.get('reason')}")
 
         dnp = bool(ruling)
         vacant = dnp or not named
@@ -602,7 +630,7 @@ def _side_review(entry_id, side_snapshot, dnp_rulings, interchange_rulings, over
             # position must never silently discard that player's real
             # contribution -- surface it instead of applying it.
             blockers.append(
-                f"{entry_id} {position}: interchange ruling targets an occupied, non-DNP position -- resolve before sign-off"
+                f"{team_label} {position}: interchange ruling targets an occupied, non-DNP position -- resolve before sign-off"
             )
 
         interchange_usable = bool(
@@ -632,6 +660,7 @@ def _side_review(entry_id, side_snapshot, dnp_rulings, interchange_rulings, over
             else "starter"
         )
         total_effective += effective
+        player_name, afl_club = _player_label(player_labels, slot_dict["season_player_id"])
         slot_reviews.append(
             SlotReview(
                 slot=position,
@@ -651,6 +680,8 @@ def _side_review(entry_id, side_snapshot, dnp_rulings, interchange_rulings, over
                 effective_score=effective,
                 effective_source=effective_source,
                 interchange_applied=interchange_usable,
+                player_name=player_name,
+                afl_club=afl_club,
             )
         )
 
@@ -661,13 +692,16 @@ def _side_review(entry_id, side_snapshot, dnp_rulings, interchange_rulings, over
             and interchange_participation.get("dnp_recommendation") in _AMBIGUOUS_RECOMMENDATIONS
         ):
             blockers.append(
-                f"{entry_id} Interchange: DNP status unresolved -- {interchange_participation.get('reason')}"
+                f"{team_label} Interchange: DNP status unresolved -- {interchange_participation.get('reason')}"
             )
         if vacancies and interchange_ruling is None and not interchange_dnp_ruling:
             blockers.append(
-                f"{entry_id}: interchange recommendation unresolved for vacant position(s) {', '.join(vacancies)}"
+                f"{team_label}: interchange recommendation unresolved for vacant position(s) {', '.join(vacancies)}"
             )
 
+    interchange_player_name, interchange_afl_club = _player_label(
+        player_labels, interchange_slot["season_player_id"] if interchange_slot else None
+    )
     interchange_review = InterchangeReview(
         season_player_id=(interchange_slot["season_player_id"] if interchange_slot else None),
         canonical_player_id=(interchange_slot["canonical_player_id"] if interchange_slot else None),
@@ -685,6 +719,8 @@ def _side_review(entry_id, side_snapshot, dnp_rulings, interchange_rulings, over
         source_afl_match_id=(interchange_slot.get("afl_match_id") if interchange_slot else None),
         target_position=(interchange_ruling.target_position if interchange_ruling else None),
         potential_scores=(potentials or None),
+        player_name=interchange_player_name,
+        afl_club=interchange_afl_club,
     )
     side = SideReview(
         season_entry_id=entry_id,
@@ -700,13 +736,22 @@ def _side_review(entry_id, side_snapshot, dnp_rulings, interchange_rulings, over
     return side, blockers
 
 
-def build_matchup_review(lifecycle, review_repo, identities, matchup, *, evidence_fresh: bool = True) -> MatchupReview:
+def _snapshot_season_player_ids(snapshot) -> set[str]:
+    return {slot["season_player_id"] for slot in snapshot["slots"] if slot["season_player_id"]}
+
+
+def build_matchup_review(
+    lifecycle, review_repo, identities, matchup, *, evidence_fresh: bool = True, season_repo=None
+) -> MatchupReview:
     """Build the review for one matchup -- issue #58 requirement 1's
     per-matchup surface. `lifecycle` is a `CompetitionLifecycleRepository`
     -shaped object (for `get_calculation`), `review_repo` a
     `RoundReviewRepository`-shaped object, `identities` an
     `IdentityRepository`-shaped object or None (team/coach names are
-    display-only and optional)."""
+    display-only and optional), `season_repo` a `SeasonRepository`-shaped
+    object or None (issue #151: the human rules name/version is likewise
+    display-only and optional -- `rules_version_id` remains the audit/
+    mutation identifier either way)."""
     calc = lifecycle.get_calculation(matchup.matchup_id)
     dnp_rulings = review_repo.get_slot_rulings(matchup.matchup_id)
     interchange_rulings = review_repo.get_interchange_rulings(matchup.matchup_id)
@@ -758,16 +803,41 @@ def build_matchup_review(lifecycle, review_repo, identities, matchup, *, evidenc
                     f"{side_name} lineup was corrected (now version {current_version}, "
                     f"calculated against version {calculated_version}); recalculate before sign-off"
                 )
+        # Issue #151: a player-evidence card must lead with the player's
+        # name (and AFL club where available), never a bare season_player_id/
+        # canonical_player_id -- resolved once, in bulk, for every slot on
+        # both sides, rather than per-slot queries or a browser-side join.
+        season_player_ids = _snapshot_season_player_ids(calc.snapshot["home"]) | _snapshot_season_player_ids(
+            calc.snapshot["away"]
+        )
+        player_labels = PlayerPoolRepository(review_repo.database).labels_by_id(season_player_ids)
         home, home_blockers = _side_review(
-            matchup.home_season_entry_id, calc.snapshot["home"], dnp_rulings, interchange_rulings, overrides, identities
+            matchup.home_season_entry_id,
+            calc.snapshot["home"],
+            dnp_rulings,
+            interchange_rulings,
+            overrides,
+            identities,
+            player_labels,
         )
         away, away_blockers = _side_review(
-            matchup.away_season_entry_id, calc.snapshot["away"], dnp_rulings, interchange_rulings, overrides, identities
+            matchup.away_season_entry_id,
+            calc.snapshot["away"],
+            dnp_rulings,
+            interchange_rulings,
+            overrides,
+            identities,
+            player_labels,
         )
         blockers += home_blockers + away_blockers
         rules_version_id = calc.snapshot.get("rules_version_id")
         calculation_revision = calc.revision
         calculation_fingerprint = calc.input_fingerprint
+
+    rules_version_label = None
+    if rules_version_id is not None and season_repo is not None:
+        rules_version = season_repo.get_rules_version(rules_version_id)
+        rules_version_label = rules_version.display_label if rules_version is not None else None
 
     return MatchupReview(
         matchup_id=matchup.matchup_id,
@@ -782,20 +852,26 @@ def build_matchup_review(lifecycle, review_repo, identities, matchup, *, evidenc
         effective_official_version=matchup.effective_official_version,
         eligible_for_signoff=not blockers,
         blockers=blockers,
+        rules_version_label=rules_version_label,
     )
 
 
-def build_round_review(lifecycle, review_repo, identities, round_id, *, evidence_fresh: bool = True) -> RoundReview:
+def build_round_review(
+    lifecycle, review_repo, identities, round_id, *, evidence_fresh: bool = True, season_repo=None
+) -> RoundReview:
     """Build the full round review -- issue #58 requirement 1's round-level
     surface. Makes it immediately apparent whether any of the five
     matchups blocks publication, without the caller inferring validity
-    from low-level records."""
+    from low-level records. `season_repo` is passed straight through to
+    `build_matchup_review` -- see its docstring."""
     round_ = lifecycle.get_round(round_id)
     if round_ is None:
         raise UnknownRoundError(round_id)
     matchups = lifecycle.list_matchups(round_id)
     reviews = [
-        build_matchup_review(lifecycle, review_repo, identities, matchup, evidence_fresh=evidence_fresh)
+        build_matchup_review(
+            lifecycle, review_repo, identities, matchup, evidence_fresh=evidence_fresh, season_repo=season_repo
+        )
         for matchup in matchups
     ]
     round_blockers: list[str] = []

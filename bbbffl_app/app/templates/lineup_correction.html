@@ -52,6 +52,12 @@ function historyItem(c){
   ${c.slots.map(s=>`${e(s.position)}: ${e(s.previous_player_display_name)} → ${e(s.corrected_player_display_name)}${s.was_locked?` (was locked: ${e(s.lock_reason)})`:''}`).join('<br>')}</div>`;
 }
 
+function calculationCard(c){
+  if(!c)return'';
+  if(!c.calculated)return `<section class="card"><h2>Calculation</h2><p class="muted">${e(c.message)}</p></section>`;
+  return `<section class="card ${c.stale?'warn':'ok'}"><h2>Calculation</h2><p><span class="pill ${c.stale?'warn':'ok'}">${c.stale?'Recalculation required':'Up to date'}</span> ${e(c.message)}</p></section>`;
+}
+
 function render(){
   const publishable=candidate.round_state!=='final';
   document.querySelector('#detail').innerHTML=`
@@ -59,6 +65,7 @@ function render(){
   <p>Team: <b>${e(candidate.team_name)}</b> · Coach: ${e(candidate.coach_name)} · Round state: ${e(candidate.round_state)}</p>
   <p>Any position marked LOCKED below has already had its lockout trigger activate. Changing it here is a deliberate override of that activated lock, recorded as an authorised competition correction — never a silent edit.</p>
   ${publishable?'':'<p><b>This round has reached final publication. Use the official-result correction workflow instead — this action will be refused.</b></p>'}</section>
+  ${calculationCard(candidate.calculation)}
   <section class="card"><h2>2–3. Current effective lineup (version ${e(candidate.expected_submission_version)}) and proposed correction</h2>
   <form id="correct-form"><table><thead><tr><th>Position</th><th>Current</th><th>Lock state</th><th>Corrected selection</th></tr></thead><tbody>
   ${candidate.slots.map(s=>`<tr><td>${e(s.position)}</td><td>${e(s.player_display_name)}${s.afl_club_name?` (${e(s.afl_club_name)})`:''}</td><td>${lockPill(s)}<br><span class="muted">${e(s.lock_reason)}</span></td>
@@ -86,6 +93,7 @@ function updatePreview(){
 async function submitCorrection(x){
   x.preventDefault();
   const f=new FormData(x.target);
+  const reason=f.get('reason');
   const position_changes={};
   document.querySelectorAll('#correct-form select').forEach(s=>{
     if(s.value!==s.dataset.original) position_changes[s.name]=s.value||null;
@@ -95,11 +103,30 @@ async function submitCorrection(x){
     candidate=await api(`/api/admin/lineup-correction/${encodeURIComponent(currentRoundId)}/${encodeURIComponent(currentEntryId)}/correct`,'POST',{
       expected_submission_version:candidate.expected_submission_version,
       position_changes,
-      reason:f.get('reason'),
+      reason,
     });
     msg('Correction applied. All read surfaces below now reflect the corrected authoritative lineup.',true);
     render();
-  }catch(err){msg(err.message)}
+  }catch(err){
+    // Not applied -- never leave the previous (possibly stale) candidate on
+    // screen implying success. Reload the current authoritative revision
+    // (a plain GET, not a repeat of the rejected correction) so the lock
+    // states, effective lineup and calculation status shown are never
+    // stale/concurrent with what actually happened server-side; the
+    // attempted position changes are discarded (they may no longer be
+    // legal against the reloaded state), but the entered reason text is
+    // restored since re-typing it carries no such risk. If this reload
+    // itself fails (e.g. a transient outage), never claim it succeeded --
+    // the message must say the page could still be stale.
+    let reloaded=true;
+    try{
+      candidate=await api(`/api/admin/lineup-correction/${encodeURIComponent(currentRoundId)}/${encodeURIComponent(currentEntryId)}`);
+      render();
+      const reasonInput=document.querySelector('#correct-form [name="reason"]');
+      if(reasonInput&&reason)reasonInput.value=reason;
+    }catch(_){reloaded=false}
+    msg('Correction NOT applied — '+err.message+' '+(reloaded?'Current authoritative state has been reloaded.':'The authoritative state could NOT be reloaded -- treat this page as out of date and reload manually before retrying.'))
+  }
 }
 
 document.querySelector('#load-round').onclick=loadRound;

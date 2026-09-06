@@ -256,6 +256,76 @@ def test_csrf_failure_is_rejected(correction_client):
     assert detail.json()["expected_submission_version"] == submitted.version
 
 
+def test_correction_response_reports_calculation_staleness_immediately(correction_client):
+    """Issue #153 acceptance: a correction must show, in the same response
+    that reveals the new effective submission, whether the round's
+    existing calculated snapshot is now stale -- never leave the Scorer to
+    discover this only back on the Round Centre. Recalculating clears it,
+    visible on the very next read."""
+    from app.calculations import MatchupCalculationService
+    from app.lineups import WeeklyLineupRepository
+    from tests.round_review_helpers import Facts, full_round, progress_to_review
+
+    client = correction_client
+    db, lifecycle, round_, entries, stats, _canon = full_round(client.app.state.database, year=2706, afl_round=2706)
+    progress_to_review(lifecycle, round_.bbbffl_round_id)
+    MatchupCalculationService(db, Facts(stats)).calculate_round(round_.bbbffl_round_id)
+
+    entry = entries[0]
+    scope = _season_scope(db, round_.bbbffl_round_id)
+    lineup_id = "lineup-2706-2706-0"
+    submission = WeeklyLineupRepository(db).get_effective_submission(lineup_id)
+    f1_player, f2_player = submission.positions["F1"], submission.positions["F2"]
+    ownership = OwnershipRepository(db)
+    ownership.configure_squad_limit(scope["season_id"], 20)
+    for player_id in submission.positions.values():
+        if player_id is not None:
+            ownership.acquire(player_id, entry.season_entry_id)
+
+    _operator, cookies, headers = _authenticate_scorer(client, scope["season_id"])
+
+    before = client.get(
+        f"/api/admin/lineup-correction/{round_.bbbffl_round_id}/{entry.season_entry_id}",
+        cookies=cookies,
+        headers=headers,
+    )
+    assert before.status_code == 200
+    assert before.json()["calculation"] == {
+        "calculated": True,
+        "calculation_revision": 1,
+        "calculated_lineup_version": submission.version,
+        "current_lineup_version": submission.version,
+        "stale": False,
+        "message": "Calculation revision 1 already reflects the current effective submission.",
+    }
+
+    correction = client.post(
+        f"/api/admin/lineup-correction/{round_.bbbffl_round_id}/{entry.season_entry_id}/correct",
+        json={
+            "expected_submission_version": submission.version,
+            "position_changes": {"F1": f2_player, "F2": f1_player},
+            "reason": "swap F1/F2 via HTTP to prove calculation staleness surfaces immediately",
+        },
+        cookies=cookies,
+        headers=headers,
+    )
+    assert correction.status_code == 200
+    calc = correction.json()["calculation"]
+    assert calc["calculated"] is True
+    assert calc["stale"] is True
+    assert calc["current_lineup_version"] == submission.version + 1
+    assert calc["calculated_lineup_version"] == submission.version
+    assert "recalculate" in calc["message"].lower()
+
+    MatchupCalculationService(db, Facts(stats)).calculate_round(round_.bbbffl_round_id)
+    after = client.get(
+        f"/api/admin/lineup-correction/{round_.bbbffl_round_id}/{entry.season_entry_id}",
+        cookies=cookies,
+        headers=headers,
+    )
+    assert after.json()["calculation"]["stale"] is False
+
+
 def test_correction_page_renders_and_issues_csrf_cookie(correction_client):
     client = correction_client
     page = client.get("/scorer/lineup-correction")

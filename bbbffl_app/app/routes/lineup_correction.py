@@ -29,6 +29,7 @@ from app.authorization import (
 from app.config import BASE_DIR
 from app.csrf import issue_token, verify_token
 from app.lineup_correction import LineupCorrectionService
+from app.round_review import calculation_staleness_for_entry
 
 router = APIRouter(prefix="/api/admin/lineup-correction")
 page_router = APIRouter()
@@ -90,10 +91,39 @@ class CorrectionRequest(BaseModel):
     reason: str
 
 
-def _candidate_view(candidate, entry_meta: dict) -> dict:
+def _calculation_status(request: Request, round_id: str, season_entry_id: str) -> dict:
+    """Issue #153: a correction changes the lineup's effective submission
+    outside the ordinary calculation flow -- the correction UI must show
+    immediately, from the same read that just reflected the new
+    submission, whether the round's existing calculated snapshot (if any)
+    is now stale for this team, never leave the Scorer to discover it only
+    back on the Round Centre."""
+    state = request.app.state
+    matchup = next(
+        (
+            m
+            for m in state.lifecycle.list_matchups(round_id)
+            if season_entry_id in (m.home_season_entry_id, m.away_season_entry_id)
+        ),
+        None,
+    )
+    if matchup is None:
+        return {
+            "calculated": False,
+            "calculation_revision": None,
+            "calculated_lineup_version": None,
+            "current_lineup_version": None,
+            "stale": False,
+            "message": "This team has no matchup in this round.",
+        }
+    return calculation_staleness_for_entry(state.lifecycle, state.round_review, matchup, season_entry_id)
+
+
+def _candidate_view(request: Request, candidate, entry_meta: dict) -> dict:
     view = asdict(candidate)
     view["team_name"] = entry_meta.get("team_name")
     view["coach_name"] = entry_meta.get("coach_name")
+    view["calculation"] = _calculation_status(request, candidate.bbbffl_round_id, candidate.season_entry_id)
     return view
 
 
@@ -138,7 +168,7 @@ def get_correction_candidate(
     entry_meta = _authorise_entry(request, scope, season_entry_id)
     service = LineupCorrectionService(request.app.state.database, request.app.state.afl_client)
     candidate = service.describe(scope["season_id"], scope["competition_id"], round_id, season_entry_id)
-    return _candidate_view(candidate, entry_meta)
+    return _candidate_view(request, candidate, entry_meta)
 
 
 @router.post("/{round_id}/{season_entry_id}/correct")
@@ -166,7 +196,7 @@ def correct_locked_lineup(
         reason=payload.reason,
     )
     candidate = service.describe(scope["season_id"], scope["competition_id"], round_id, season_entry_id)
-    return _candidate_view(candidate, entry_meta)
+    return _candidate_view(request, candidate, entry_meta)
 
 
 @page_router.get("/scorer/lineup-correction", response_class=HTMLResponse)

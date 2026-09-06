@@ -877,6 +877,16 @@ class WeeklyLineupRepository:
                 ),
             )
             slots = []
+            # Issue #155: a position that was a deliberate vacancy when Main
+            # activated never gets its own `weekly_lineup_lock` row (there is
+            # no player to hold one -- see app.lockouts's `_evaluate_position`
+            # and this module's `_main_trigger_effective_lock_at`), so
+            # `existing_locks.get(position)` alone cannot tell a genuinely
+            # never-locked vacancy apart from one Main has already made
+            # immutable. Resolved lazily (only if a changed position is
+            # actually a vacancy with no lock row) and cached across the loop
+            # -- at most one extra query per correction, never per position.
+            main_trigger_checked, main_trigger_lock_at = False, None
             # Alphabetical, matching `_to_correction`'s `ORDER BY position`
             # read-back -- so a freshly-returned `LineupCorrection` compares
             # equal to one re-read via `get_correction`/`list_corrections`.
@@ -893,6 +903,21 @@ class WeeklyLineupRepository:
                 # comparing occupancy here would silently lose the lock
                 # link on any correction after the first.
                 was_locked = lock_row is not None
+                lock_reason = lock_row["lock_reason"] if was_locked else None
+                afl_match_id = lock_row["afl_match_id"] if was_locked else None
+                effective_lock_at = lock_row["effective_lock_at"] if was_locked else None
+                observed_status = lock_row["observed_status"] if was_locked else None
+                locked_at = lock_row["locked_at"] if was_locked else None
+                if not was_locked and previous_positions.get(position) is None:
+                    if not main_trigger_checked:
+                        main_trigger_lock_at = self._main_trigger_effective_lock_at(conn, lineup["bbbffl_round_id"])
+                        main_trigger_checked = True
+                    if main_trigger_lock_at is not None:
+                        was_locked, lock_reason, effective_lock_at = (
+                            True,
+                            "main_lockout_triggered",
+                            main_trigger_lock_at,
+                        )
                 conn.execute(
                     "INSERT INTO weekly_lineup_correction_slot VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
@@ -901,11 +926,11 @@ class WeeklyLineupRepository:
                         previous_positions.get(position),
                         positions.get(position),
                         int(was_locked),
-                        lock_row["lock_reason"] if was_locked else None,
-                        lock_row["afl_match_id"] if was_locked else None,
-                        lock_row["effective_lock_at"] if was_locked else None,
-                        lock_row["observed_status"] if was_locked else None,
-                        lock_row["locked_at"] if was_locked else None,
+                        lock_reason,
+                        afl_match_id,
+                        effective_lock_at,
+                        observed_status,
+                        locked_at,
                     ),
                 )
                 slots.append(
@@ -914,11 +939,11 @@ class WeeklyLineupRepository:
                         previous_positions.get(position),
                         positions.get(position),
                         was_locked,
-                        lock_row["lock_reason"] if was_locked else None,
-                        lock_row["afl_match_id"] if was_locked else None,
-                        lock_row["effective_lock_at"] if was_locked else None,
-                        lock_row["observed_status"] if was_locked else None,
-                        lock_row["locked_at"] if was_locked else None,
+                        lock_reason,
+                        afl_match_id,
+                        effective_lock_at,
+                        observed_status,
+                        locked_at,
                     )
                 )
             invalidated_positions = self._invalidate_stale_review_state(
@@ -1133,6 +1158,34 @@ class WeeklyLineupRepository:
                 )
                 invalidated.add("Interchange")
         return sorted(invalidated)
+
+    @staticmethod
+    def _main_trigger_effective_lock_at(conn, bbbffl_round_id: str) -> str | None:
+        """The round's main lockout trigger's own activation instant, if it
+        has activated -- `None` otherwise. Raw SQL against `app.lockouts`'
+        tables, not an import of that module (same architecture boundary as
+        `_invalidate_stale_review_state` above: `app.lockouts` imports
+        `app.lineups`, not the reverse).
+
+        Exists so `submit_correction` can preserve main-lockout provenance
+        for a corrected position that was a deliberate vacancy (issue
+        #155): `app.lockouts._evaluate_position` never writes a
+        `weekly_lineup_lock` row for a vacancy (there is no player to hold
+        one), so `existing_locks.get(position)` alone cannot tell a
+        genuinely never-locked vacancy apart from one Main has already made
+        immutable. This mirrors `LockoutRepository.trigger_activation_
+        instant`'s own main-trigger fallback query -- the *only* fact that
+        makes such a vacancy's correction locked is Main's own activation,
+        never a per-match/per-player boundary, since Main locks every
+        remaining position regardless of its own match."""
+        row = conn.execute(
+            "SELECT a.effective_lock_at FROM bbbffl_round_lockout_trigger_activation a "
+            "JOIN bbbffl_round_lockout_trigger t ON t.trigger_id=a.trigger_id "
+            "JOIN bbbffl_round_lockout_trigger_revision r ON r.trigger_id=a.trigger_id AND r.revision=a.revision "
+            "WHERE t.bbbffl_round_id=? AND r.trigger_type='main'",
+            (bbbffl_round_id,),
+        ).fetchone()
+        return row["effective_lock_at"] if row else None
 
     def get_correction(self, correction_id: str) -> LineupCorrection | None:
         row = self.database.execute(

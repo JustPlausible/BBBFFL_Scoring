@@ -67,6 +67,7 @@ from app.round_review import (
     UnknownRoundError,
 )
 from app.routes import admin, health, public
+from app.routes import admin_dashboard as admin_dashboard_routes
 from app.routes import auth as auth_routes
 from app.routes import coach_lineup as coach_lineup_routes
 from app.routes import context as context_routes
@@ -283,6 +284,8 @@ app.include_router(lineup_adjudication_routes.router)
 app.include_router(lineup_adjudication_routes.page_router)
 app.include_router(scorer_dashboard_routes.router)
 app.include_router(scorer_dashboard_routes.page_router)
+app.include_router(admin_dashboard_routes.router)
+app.include_router(admin_dashboard_routes.page_router)
 
 
 @app.exception_handler(AflApiError)

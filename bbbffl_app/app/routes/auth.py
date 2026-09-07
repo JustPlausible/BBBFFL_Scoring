@@ -24,6 +24,7 @@ from app.auth_rate_limit import RateLimitedError
 from app.coach_lineup import CoachLineupService
 from app.config import BASE_DIR
 from app.csrf import issue_token, verify_token
+from app.routes import admin_dashboard as admin_dashboard_routes
 from app.routes import scorer_dashboard as scorer_dashboard_routes
 
 router = APIRouter()
@@ -165,6 +166,14 @@ def account_page(request: Request):
     preferred_scorer_role = next(
         (role for role in scorer_dashboard_routes.SCORER_DASHBOARD_ROLE_PREFERENCE if role in granted_roles), None
     )
+    # Issue #148: the same discoverability pattern as the Scorer Dashboard
+    # link above, for the Administrator Dashboard -- a freshly
+    # authenticated session's active role is always "coach" even when
+    # Administrator authority is granted, so this link also switches role
+    # first via the existing acting-context API before navigating.
+    preferred_admin_role = next(
+        (role for role in admin_dashboard_routes.ADMIN_DASHBOARD_ROLE_PREFERENCE if role in granted_roles), None
+    )
     response = templates.TemplateResponse(
         request,
         "account.html",
@@ -174,6 +183,8 @@ def account_page(request: Request):
             "lineup_rounds": lineup_rounds,
             "has_scorer_dashboard_access": preferred_scorer_role is not None,
             "preferred_scorer_role": preferred_scorer_role,
+            "has_admin_dashboard_access": preferred_admin_role is not None,
+            "preferred_admin_role": preferred_admin_role,
         },
     )
     _attach_csrf_cookie(request, response, token)

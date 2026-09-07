@@ -126,7 +126,18 @@ class _CachedMatchFacts:
         return inner_evaluation_at() if callable(inner_evaluation_at) else None
 
 
-def _ordinary_rounds(database, season_id: str) -> list[dict]:
+def ordinary_rounds_with_lifecycle(database, season_id: str) -> list[dict]:
+    """Every logical ordinary `bbbffl_round` definition for a season, left-
+    joined against its (possibly absent) `bbbffl_round_lifecycle` row.
+
+    This is the one authoritative place the *definitions-vs-lifecycle*
+    distinction (issue #148) is read: a round that exists here with
+    `round_state is None` is a configured round definition that has never
+    been opened -- never conflate that with "0 rounds created". Shared
+    verbatim by the Scorer Operations Dashboard (issue #147) and the
+    Administrator Dashboard (issue #148, `app.admin_dashboard`) so both
+    surfaces can never disagree about which rounds exist or their lifecycle
+    state (issue #153)."""
     rows = database.execute(
         "SELECT r.bbbffl_round_id, r.label round_label, r.sequence, r.competition_id, "
         "c.season_id, c.label competition_label, "
@@ -930,7 +941,7 @@ def build_scorer_dashboard(
     if season is None:
         raise KeyError(season_id)
 
-    rounds = _ordinary_rounds(database, season_id)
+    rounds = ordinary_rounds_with_lifecycle(database, season_id)
     selected = select_current_round(rounds, round_id)
     round_options = [_round_option(row) for row in rounds]
     season_view = {"season_id": season.season_id, "year": season.year, "label": season.label}

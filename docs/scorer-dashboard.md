@@ -116,4 +116,8 @@ Reimplementing round, lineup, correction, adjudication or scoring
 mutations; in-app voting/quorum; external notifications; database
 restoration, checkpoint mutation or other replay infrastructure controls
 (those remain outside the Scorer dashboard entirely); Administrator
-identity/role-grant/bootstrap/system configuration management.
+identity/role-grant/bootstrap/system configuration management -- see the
+[Administrator Dashboard](admin-dashboard.md) (issue #148) for that role
+home. It summarises this dashboard's operational state concisely and
+links back here for the operational detail; it never reproduces this
+dashboard's attention queue or next-action logic.

@@ -222,6 +222,18 @@ ROUND_PREFLIGHT = {"app.round_preflight"}
 # lower layer may depend back on it.
 SCORER_DASHBOARD = {"app.scorer_dashboard"}
 
+# Administrator Dashboard (issue #148): a governance/readiness/navigation
+# aggregation read model that sits *above* both `app.season_centre` and
+# `app.scorer_dashboard` -- it composes `build_season_centre` (season
+# identity/readiness) and calls `build_scorer_dashboard` wholesale for its
+# concise operational-handoff summary, plus reads the season model,
+# `app.round_preflight` and audit directly for its own governance framing.
+# Like its two siblings it must stay a sibling of the Grand Final vertical
+# and must never depend on routes or the composition root, and no lower
+# layer (including SEASON_CENTRE/SCORER_DASHBOARD themselves) may depend
+# back on it.
+ADMIN_DASHBOARD = {"app.admin_dashboard"}
+
 ROUTES = {
     "app.routes",
     "app.routes.admin",
@@ -243,6 +255,7 @@ ROUTES = {
     "app.routes.lineup_correction",
     "app.routes.lineup_adjudication",
     "app.routes.scorer_dashboard",
+    "app.routes.admin_dashboard",
 }
 
 COMPOSITION_ROOT = {"app.main"}
@@ -267,6 +280,7 @@ ALL_GROUPS = (
     | REPLAY_BOOTSTRAP
     | ROUND_PREFLIGHT
     | SCORER_DASHBOARD
+    | ADMIN_DASHBOARD
     | ROUTES
     | COMPOSITION_ROOT
 )
@@ -629,6 +643,22 @@ def test_scorer_dashboard_is_an_application_service(graph):
 
     for module in sorted(SEASON_MODEL | LOCKOUTS | WEEKLY_SUBMISSION_SOURCES):
         offending = graph[module] & SCORER_DASHBOARD
+        assert not offending, f"{module} must not depend on application orchestration {sorted(offending)}"
+
+
+def test_admin_dashboard_is_an_application_service(graph):
+    """`app.admin_dashboard` (issue #148) sits above the season model,
+    `app.season_centre`, `app.scorer_dashboard` and `app.round_preflight`
+    -- but must stay a sibling of the Grand Final vertical and must never
+    depend on routes or the composition root, exactly like
+    app.scorer_dashboard itself."""
+    forbidden = GRAND_FINAL_VERTICAL | ROUTES | COMPOSITION_ROOT
+    for module in sorted(ADMIN_DASHBOARD):
+        offending = graph[module] & forbidden
+        assert not offending, f"{module} must not depend on {sorted(offending)}"
+
+    for module in sorted(SEASON_MODEL | LOCKOUTS | WEEKLY_SUBMISSION_SOURCES | SEASON_CENTRE | SCORER_DASHBOARD):
+        offending = graph[module] & ADMIN_DASHBOARD
         assert not offending, f"{module} must not depend on application orchestration {sorted(offending)}"
 
 

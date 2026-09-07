@@ -129,6 +129,21 @@ def test_setup_only_season_reports_incomplete_entries_and_setup_stage():
     assert "4" in incomplete["detail"] and "10" in incomplete["detail"]
 
 
+def test_over_provisioned_entries_is_also_a_setup_blocker():
+    """Codex review, PR #160: an eleventh entry (`IdentityRepository.
+    create_entry` places no upper bound on its own) must be treated as a
+    setup blocker exactly like an incomplete roster -- an unqualified
+    `< BBBFFL_TEAM_COUNT` check silently let an over-provisioned season
+    read as "setup complete" while the fixture repository's own hard
+    ten-team requirement left it unable to progress."""
+    g = build_governed_season(year=9117, entries=11)
+    dashboard = _dashboard(g)
+    assert next(s for s in dashboard["workflow_map"] if s["stage"] == STAGE_SETUP)["is_current"]
+    over = next(i for i in dashboard["attention"] if i["code"] == "identity:incomplete_entries")
+    assert over["category"] == CATEGORY_BLOCKING_CONFIGURATION
+    assert "11" in over["detail"] and "10" in over["detail"]
+
+
 def test_setup_only_season_never_confuses_round_definitions_with_lifecycle_rows():
     """The core issue #148 acceptance criterion: a round that exists as a
     logical definition but was never opened must never present as "0
@@ -199,6 +214,26 @@ def test_active_round_reaches_weekly_operations_stage_and_scorer_summary_agrees(
     assert dashboard["scorer_summary"]["round_label"] == dashboard["current_round"]["round_label"]
     handoff_codes = {i["code"] for i in dashboard["attention"] if i["category"] == CATEGORY_OPERATIONAL_HANDOFF}
     assert "scorer:next_action" in handoff_codes
+
+
+def test_scorer_handoff_links_carry_the_selected_season_and_round():
+    """Codex review, PR #160: without the season/round in the query
+    string, the Scorer Dashboard page has no way to know which season an
+    Administrator meant and silently falls back to the newest season on
+    load -- every handoff link (workflow map, attention queue, scorer
+    summary, portfolio row) must carry both."""
+    g = build_governed_season(year=9116, close_preseason=True, open_round=True)
+    dashboard = _dashboard(g)
+    expected = f"/scorer?season_id={g.season.season_id}&round_id={g.logical_round.bbbffl_round_id}"
+    assert dashboard["scorer_summary"]["scorer_dashboard_url"] == expected
+    weekly_stage = next(s for s in dashboard["workflow_map"] if s["stage"] == STAGE_WEEKLY_OPERATIONS)
+    assert weekly_stage["url"] == expected
+    handoff_items = [i for i in dashboard["attention"] if i["category"] == CATEGORY_OPERATIONAL_HANDOFF]
+    assert handoff_items and all(i["url"] == expected for i in handoff_items)
+
+    portfolio = build_season_portfolio(g.seasons, g.identities, g.draft, g.preseason, g.fixtures, g.database)
+    row = next(r for r in portfolio if r["season_id"] == g.season.season_id)
+    assert row["scorer_dashboard_url"] == expected
 
 
 def test_administrator_summary_agrees_with_the_underlying_scorer_state():
@@ -310,6 +345,34 @@ def test_granted_administrator_clears_the_authority_item():
     codes = {item["code"] for item in dashboard["attention"]}
     assert "authority:no_standing_administrator" not in codes
     assert dashboard["role_overview"]["grants_by_role"]["admin"][0]["display_name"] == "Standing Admin"
+
+
+def test_audit_summary_excludes_role_grants_scoped_to_a_different_season():
+    """Codex review, PR #160: a coach participating in this season may
+    separately hold a season-scoped grant for a *different* season --
+    that other season's role-grant audit events must never appear in this
+    season's audit feed. A global (unscoped) grant for the same coach
+    still must appear, proving the fix does not over-filter."""
+    db = migrated_connection()
+    season_a = build_governed_season(db, year=9118, entries=10)
+    season_b = build_governed_season(db, year=9119, entries=10)
+    shared_coach_id = season_a.identities.list_entries(season_a.season.season_id)[0].coach_id
+    grants = RoleGrantRepository(db)
+    grants.grant(
+        shared_coach_id, "scorer", season_id=season_b.season.season_id, actor=ActorContext.anonymous_operator("admin")
+    )
+    global_grant = grants.grant(
+        shared_coach_id, "secretary", season_id=None, actor=ActorContext.anonymous_operator("admin")
+    )
+    dashboard = _dashboard(season_a)
+    role_grant_diagnostics = {
+        e["diagnostics"]["entity_id"] for e in dashboard["audit"] if e["entity_type"] == "identity.role_grant"
+    }
+    scoped_to_b = next(
+        g for g in grants.list_all_for_coach(shared_coach_id) if g.season_id == season_b.season.season_id
+    )
+    assert global_grant.grant_id in role_grant_diagnostics
+    assert scoped_to_b.grant_id not in role_grant_diagnostics
 
 
 # -- Rules/competition readiness --------------------------------------------

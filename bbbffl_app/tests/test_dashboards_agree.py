@@ -98,7 +98,14 @@ def test_scorer_attention_on_the_admin_dashboard_is_reachable_on_the_scorer_surf
         admin_body = client.get("/api/admin/dashboard", params={"season_id": g.season.season_id}).json()["dashboard"]
         handoff_items = [item for item in admin_body["attention"] if item["category"] == "operational_handoff"]
         assert handoff_items, "expected the Admin dashboard to surface Scorer attention as a handoff item"
-        assert all(item["url"] == "/scorer" for item in handoff_items)
+        # Every handoff link must carry the season this Administrator is
+        # actually looking at (Codex review, PR #160) -- otherwise the
+        # Scorer Dashboard falls back to the newest season on load, which
+        # may not be the one just summarised here.
+        assert all(
+            item["url"] == f"/scorer?season_id={g.season.season_id}&round_id={g.logical_round.bbbffl_round_id}"
+            for item in handoff_items
+        )
 
         scorer_response = client.get("/api/scorer/dashboard", params={"season_id": g.season.season_id})
         assert scorer_response.status_code == 200

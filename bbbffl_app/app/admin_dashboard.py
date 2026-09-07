@@ -114,6 +114,24 @@ OPENING_ROUND_URL = "/operations/seasons/{season_id}/opening-round"
 PREFLIGHT_URL = "/admin/round-preflight/{round_id}"
 
 
+def scorer_dashboard_link(season_id: str, round_id: str | None = None) -> str:
+    """A Scorer Dashboard handoff link carrying the *season this
+    Administrator is actually looking at* (and its current round, where
+    known) as query parameters -- issue #148/Codex review on PR #160: the
+    Scorer Dashboard page has no other way to know which season an
+    Administrator meant, and without this it silently falls back to
+    `SeasonRepository.list_seasons()[0]` (the newest season), which can
+    silently show -- and permit actions against -- a different season
+    than the one this dashboard just summarised. `app.routes.
+    scorer_dashboard.scorer_home_page`/`scorer_dashboard.html` read these
+    same parameters back on load (see that template's `initialSeasonId`/
+    `initialRoundId`)."""
+    url = f"{SCORER_DASHBOARD_URL}?season_id={season_id}"
+    if round_id:
+        url += f"&round_id={round_id}"
+    return url
+
+
 # -- Season portfolio ---------------------------------------------------
 
 
@@ -151,8 +169,8 @@ def _season_blockers(entries, draft_status, window, fixture_draw) -> list[str]:
     governance attention queue (`_attention_queue`) is the authoritative,
     linkable version of this for the *selected* season."""
     blockers = []
-    if len(entries) < BBBFFL_TEAM_COUNT:
-        blockers.append(f"Only {len(entries)}/{BBBFFL_TEAM_COUNT} teams established")
+    if len(entries) != BBBFFL_TEAM_COUNT:
+        blockers.append(f"{len(entries)}/{BBBFFL_TEAM_COUNT} teams established")
     if draft_status is None:
         blockers.append("Draft not yet started")
     elif not draft_status.is_finalized:
@@ -214,7 +232,14 @@ def build_season_portfolio(
                 "blockers": _season_blockers(entries, draft_status, window, fixture_draw),
                 "season_centre_url": SEASON_CENTRE_URL.format(season_id=season.season_id),
                 "public_season_url": PUBLIC_SEASON_URL.format(season_id=season.season_id),
-                "scorer_dashboard_url": SCORER_DASHBOARD_URL if round_summary["rounds_opened"] > 0 else None,
+                "scorer_dashboard_url": (
+                    scorer_dashboard_link(
+                        season.season_id,
+                        round_summary["current_round"]["bbbffl_round_id"] if round_summary["current_round"] else None,
+                    )
+                    if round_summary["rounds_opened"] > 0
+                    else None
+                ),
             }
         )
     return rows
@@ -316,12 +341,12 @@ def _attention_queue(
     season_centre_url = SEASON_CENTRE_URL.format(season_id=season.season_id)
 
     # -- Blocking configuration ------------------------------------------
-    if len(entries) < BBBFFL_TEAM_COUNT:
+    if len(entries) != BBBFFL_TEAM_COUNT:
         items.append(
             _attention_item(
                 CATEGORY_BLOCKING_CONFIGURATION,
                 "identity:incomplete_entries",
-                "Season entries incomplete",
+                "Season entries incomplete" if len(entries) < BBBFFL_TEAM_COUNT else "Season has too many entries",
                 f"{len(entries)} of {BBBFFL_TEAM_COUNT} BBBFFL teams are established for {season.label}.",
                 capability="season.manage",
                 url=season_centre_url,
@@ -480,7 +505,7 @@ def _attention_queue(
                     "Scorer Dashboard has blocking attention items",
                     f"{blocking} blocking item(s) on the current round -- see the Scorer Dashboard.",
                     capability="round.review",
-                    url=SCORER_DASHBOARD_URL,
+                    url=scorer_summary["scorer_dashboard_url"],
                 )
             )
         items.append(
@@ -490,7 +515,7 @@ def _attention_queue(
                 scorer_summary["next_action"]["title"],
                 scorer_summary["next_action"]["detail"],
                 capability=scorer_summary["next_action"]["capability"],
-                url=SCORER_DASHBOARD_URL,
+                url=scorer_summary["scorer_dashboard_url"],
             )
         )
 
@@ -504,7 +529,7 @@ def _attention_queue(
 def _current_stage(season, readiness: dict, window, fixture_draw, round_summary: dict) -> str:
     if season.lifecycle_state == "completed":
         return STAGE_SEASON_COMPLETE
-    if readiness["entries_established"] < BBBFFL_TEAM_COUNT or readiness["competition_streams_configured"] == 0:
+    if readiness["entries_established"] != BBBFFL_TEAM_COUNT or readiness["competition_streams_configured"] == 0:
         return STAGE_SETUP
     draft = readiness["draft"]
     if draft is None or not draft["is_finalized"]:
@@ -543,7 +568,9 @@ def _workflow_map(season, readiness, window, fixture_draw, round_summary, links,
         STAGE_DRAFT: DRAFT_URL.format(season_id=season.season_id),
         STAGE_PRESEASON: PRESEASON_URL.format(season_id=season.season_id),
         STAGE_ROUND_PREPARATION: preparation_url,
-        STAGE_WEEKLY_OPERATIONS: SCORER_DASHBOARD_URL if round_summary["rounds_opened"] > 0 else None,
+        STAGE_WEEKLY_OPERATIONS: (
+            scorer_dashboard_link(season.season_id, current_round_id) if round_summary["rounds_opened"] > 0 else None
+        ),
         STAGE_SEASON_COMPLETE: SEASON_CENTRE_URL.format(season_id=season.season_id),
     }
     return [
@@ -588,7 +615,7 @@ def _scorer_summary(
         "next_action": dashboard["next_action"],
         "attention_counts": counts,
         "review_ready_for_signoff": dashboard["review"]["ready_for_signoff"] if dashboard["review"] else None,
-        "scorer_dashboard_url": SCORER_DASHBOARD_URL,
+        "scorer_dashboard_url": scorer_dashboard_link(season_id, dashboard["round"]["bbbffl_round_id"]),
     }
 
 
@@ -643,8 +670,17 @@ def _audit_summary(
         events += audit_events.list_events(entity_type="preseason.window", entity_id=window.window_id, limit=10)
     if fixture_draw is not None:
         events += audit_events.list_events(entity_type="fixture_draw", entity_id=fixture_draw.fixture_draw_id, limit=5)
+    # Only this season's own role-grant changes -- a coach participating
+    # here may separately hold a season-scoped grant for a *different*
+    # season (or several); `list_all_for_coach` returns every grant that
+    # coach has ever held, so a global grant (`season_id is None`) is kept
+    # but a grant scoped to another season is excluded (Codex review, PR
+    # #160), matching this function's own "recent events for *this*
+    # season" contract.
     for coach_id in coach_ids:
         for grant in role_grants.list_all_for_coach(coach_id):
+            if grant.season_id is not None and grant.season_id != season.season_id:
+                continue
             events += audit_events.list_events(entity_type="identity.role_grant", entity_id=grant.grant_id, limit=5)
     events.sort(key=lambda event: event.sequence, reverse=True)
     seen: set[str] = set()

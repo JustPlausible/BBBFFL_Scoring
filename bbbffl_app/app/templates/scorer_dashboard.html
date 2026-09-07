@@ -95,7 +95,13 @@ function human(iso){if(!iso)return '—';try{return new Date(iso).toLocaleString
 async function api(path){const r=await fetch(path,{headers:{'Accept':'application/json'}});const d=await r.json().catch(()=>({detail:r.statusText}));if(!r.ok){const e=new Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail));e.status=r.status;throw e}return d}
 function msg(s){document.querySelector('#message').textContent=s||''}
 
-let current={season_id:null,round_id:null};
+// A handoff link from another surface (e.g. the Administrator Dashboard,
+// issue #148) may name exactly which season/round it means -- without
+// reading these back, the first load below would silently default to
+// `SeasonRepository.list_seasons()[0]` (the newest season) regardless of
+// what the linking page just summarised (Codex review, PR #160).
+const initialParams=new URLSearchParams(window.location.search);
+let current={season_id:initialParams.get('season_id')||null,round_id:initialParams.get('round_id')||null};
 
 function renderContext(ctx){
   document.querySelector('#context').textContent=ctx.coach_id

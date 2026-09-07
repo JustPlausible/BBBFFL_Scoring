@@ -38,7 +38,13 @@ from app.audit import (
 )
 from app.coach_lineup import ORDINARY_POSITIONS
 from app.lineups import WeeklyLineupRepository
-from app.lockouts import LockoutRepository, LockState, MatchResolutionError, RoundMatchFactsProvider
+from app.lockouts import (
+    LockoutRepository,
+    LockoutTriggerRepository,
+    LockState,
+    MatchResolutionError,
+    RoundMatchFactsProvider,
+)
 from app.round_mapping import RoundMappingRepository
 from app.round_preflight import build_round_preflight
 from app.round_review import build_round_review, calculation_staleness_for_entry
@@ -65,6 +71,15 @@ SUBMISSION_DRAFT_ONLY = "draft_only"
 SUBMISSION_DIVERGED = "diverged"
 SUBMISSION_INCOMPLETE = "incomplete"
 SUBMISSION_SUBMITTED = "submitted"
+
+# A team in either state has no authoritative submission on record -- a
+# saved-but-never-submitted private draft is exactly the case issue #146's
+# missed-submission adjudication resolves (its own "evidenced draft"
+# resolution reads the draft's own content), so both states are equally
+# "missing" for adjudication-eligibility/attention purposes (Codex review,
+# PR #159): only `SUBMISSION_MISSING` was checked before, silently
+# excluding a coach who saved a draft but never pressed Submit.
+NO_AUTHORITATIVE_SUBMISSION_STATES = (SUBMISSION_MISSING, SUBMISSION_DRAFT_ONLY)
 
 ROUND_CENTRE_URL = "/scorer/round-centre/{round_id}"
 PREFLIGHT_URL = "/admin/round-preflight/{round_id}"
@@ -254,10 +269,24 @@ def _build_team_readiness(
             except (AflApiError, MatchResolutionError):
                 lock_summary = None
         adjudication_available = (
-            state == SUBMISSION_MISSING and lifecycle_state in ("live", "review") and any_trigger_activated
+            state in NO_AUTHORITATIVE_SUBMISSION_STATES
+            and lifecycle_state in ("live", "review")
+            and any_trigger_activated
         )
-        correction_available = state in (SUBMISSION_SUBMITTED, SUBMISSION_INCOMPLETE, SUBMISSION_DIVERGED) and (
-            lifecycle_state in ("open", "live", "review")
+        # Correction (issue #137) is the audited path into an *already-
+        # locked* position specifically -- never a substitute for ordinary
+        # resubmission/delegated entry while every position remains
+        # editable (Codex review, PR #159). Gate on `lock_summary` actually
+        # showing a locked position, not merely on round state.
+        locked_positions = (
+            lock_summary["locked_selective"] + lock_summary["locked_main"] + lock_summary["locked_other"]
+            if lock_summary is not None
+            else 0
+        )
+        correction_available = (
+            state in (SUBMISSION_SUBMITTED, SUBMISSION_INCOMPLETE, SUBMISSION_DIVERGED)
+            and lifecycle_state in ("open", "live", "review")
+            and locked_positions > 0
         )
         corrections = lineups_repo.list_corrections(draft.lineup_id) if draft is not None else []
         rows.append(
@@ -425,7 +454,7 @@ def _team_attention(team_rows: list[dict], round_id: str, season_id: str) -> lis
     items = []
     for team in team_rows:
         label = team["team_name"] or f"Unknown team ({team['season_entry_id']})"
-        if team["submission_state"] == SUBMISSION_MISSING:
+        if team["submission_state"] in NO_AUTHORITATIVE_SUBMISSION_STATES:
             if team["adjudication_available"]:
                 items.append(
                     {
@@ -508,10 +537,17 @@ def _team_attention(team_rows: list[dict], round_id: str, season_id: str) -> lis
     return items
 
 
-def _trigger_attention(lifecycle_state: str, trigger_rows: list[dict], round_id: str) -> list[dict]:
+def _trigger_attention(
+    lifecycle_state: str,
+    trigger_rows: list[dict],
+    round_id: str,
+    *,
+    trigger_plan_configured: bool,
+    evidence_unavailable: bool,
+) -> list[dict]:
     if lifecycle_state not in ("open", "live"):
         return []
-    if not trigger_rows:
+    if not trigger_plan_configured:
         return [
             {
                 "category": CATEGORY_BLOCKING,
@@ -525,6 +561,14 @@ def _trigger_attention(lifecycle_state: str, trigger_rows: list[dict], round_id:
                 "diagnostics": None,
             }
         ]
+    if evidence_unavailable:
+        # A plan *is* configured -- a provider outage evaluating its live
+        # activation is never the same fact as nothing having been
+        # configured (Codex review, PR #159). The `lockout:evidence_
+        # unavailable` item `_build_round_dashboard` adds separately
+        # already names the actual problem; this must not additionally
+        # claim the plan itself is missing.
+        return []
     if not any(row["activated"] for row in trigger_rows):
         return [
             {
@@ -572,6 +616,8 @@ def _determine_next_action(
     season_id: str,
     next_round_id: str | None,
     all_matches_finished: bool,
+    trigger_plan_configured: bool,
+    evidence_unavailable: bool,
 ) -> dict:
     round_url = ROUND_CENTRE_URL.format(round_id=round_id)
     preflight_url = PREFLIGHT_URL.format(round_id=round_id)
@@ -608,14 +654,14 @@ def _determine_next_action(
             capability="roundsetup.manage",
         ).__dict__
 
-    missing = [t for t in team_rows if t["submission_state"] == SUBMISSION_MISSING]
+    missing = [t for t in team_rows if t["submission_state"] in NO_AUTHORITATIVE_SUBMISSION_STATES]
     any_activated = any(row["activated"] for row in trigger_rows)
     main_row = next((row for row in trigger_rows if row["trigger_type"] == "main"), None)
     main_activated = bool(main_row and main_row["activated"])
     adjudication_pending = any(t["adjudication_available"] for t in missing)
 
     if lifecycle_state == "open":
-        if not trigger_rows:
+        if not trigger_plan_configured:
             return NextAction(
                 "configure_lockout_plan",
                 CATEGORY_BLOCKING,
@@ -623,6 +669,19 @@ def _determine_next_action(
                 "This round has opened without a lockout trigger plan; configure it now.",
                 preflight_url,
                 capability="roundsetup.manage",
+            ).__dict__
+        if evidence_unavailable:
+            # A plan exists but its live activation could not be evaluated
+            # -- never conflate that provider outage with "not configured"
+            # (Codex review, PR #159): the operator needs to wait for
+            # evidence, not repeat configuration that already happened.
+            return NextAction(
+                "await_lockout_evidence",
+                CATEGORY_WAITING,
+                "Await lockout evidence",
+                "A lockout plan is configured, but the AFL match evidence needed to evaluate its activation is "
+                "currently unavailable.",
+                round_url,
             ).__dict__
         if not any_activated:
             return NextAction(
@@ -950,7 +1009,13 @@ def _build_round_dashboard(
     scope = evidence_batch() if callable(evidence_batch) else nullcontext(afl_client)
     lockout_evidence_error = None
     team_rows: list[dict] = []
+    # A round's *configured* trigger plan is a pure persisted fact, entirely
+    # independent of whether live AFL evidence can be fetched right now --
+    # read it unconditionally so a provider outage below is never confused
+    # with "nothing was ever configured" (Codex review, PR #159).
+    trigger_plan_configured = False
     if lifecycle_state != "not_created":
+        trigger_plan_configured = bool(LockoutTriggerRepository(database).list_triggers(round_id))
         with scope as evidence:
             try:
                 matches = match_facts.matches_for(round_id)
@@ -1023,7 +1088,13 @@ def _build_round_dashboard(
     if round_review_view is not None:
         attention += _review_attention(round_review_view, round_id)
     attention += _team_attention(team_rows, round_id, season.season_id)
-    attention += _trigger_attention(lifecycle_state, trigger_rows, round_id)
+    attention += _trigger_attention(
+        lifecycle_state,
+        trigger_rows,
+        round_id,
+        trigger_plan_configured=trigger_plan_configured,
+        evidence_unavailable=lockout_evidence_error is not None,
+    )
     if lockout_evidence_error:
         attention.append(
             {
@@ -1054,6 +1125,8 @@ def _build_round_dashboard(
         season_id=season.season_id,
         next_round_id=next_round["bbbffl_round_id"] if next_round else None,
         all_matches_finished=all_matches_finished,
+        trigger_plan_configured=trigger_plan_configured,
+        evidence_unavailable=lockout_evidence_error is not None,
     )
 
     matchup_ids = [m.matchup_id for m in matchups]

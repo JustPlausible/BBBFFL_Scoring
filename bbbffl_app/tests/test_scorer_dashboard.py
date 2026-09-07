@@ -369,3 +369,106 @@ def test_live_round_with_all_matches_finished_offers_advance_to_review():
     view = _dashboard(db, afl, _season_id(lifecycle, round_), round_id=round_.bbbffl_round_id)
     assert view["next_action"]["code"] == "advance_to_review"
     assert view["next_action"]["capability"] == "round.review"
+
+
+def test_draft_only_team_is_adjudication_eligible_once_a_trigger_activates():
+    """Codex review, PR #159: a coach who saved a private draft but never
+    pressed Submit has no authoritative submission -- exactly the same as
+    a team that never touched the round at all -- so once a trigger has
+    activated, adjudication (issue #146, which can resolve from the
+    draft's own evidenced content) must be offered, not silently
+    excluded."""
+    db, lifecycle, round_, entries, scope, pool, ownership = lockout_context(year=8917)
+    lineups = WeeklyLineupRepository(db)
+    triggers = LockoutTriggerRepository(db)
+    configure_main(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID])
+    entry_zero = entries[0]
+    lineups.save_draft(
+        _season_id(lifecycle, round_),
+        round_.competition_id,
+        round_.bbbffl_round_id,
+        entry_zero.season_entry_id,
+        {},
+        expected_revision=0,
+    )
+    for entry in entries[1:]:
+        establish(lineups, round_, entry, scope, {})
+    lifecycle.transition(round_.bbbffl_round_id, "live")
+    afl = type("Afl", (), {"get_matches": lambda self, rid: [early_match(status="CONCLUDED", start=EARLY_START)]})()
+    view = _dashboard(db, afl, _season_id(lifecycle, round_), round_id=round_.bbbffl_round_id)
+    row = next(r for r in view["lineups"] if r["season_entry_id"] == entry_zero.season_entry_id)
+    assert row["submission_state"] == SUBMISSION_DRAFT_ONLY
+    assert row["adjudication_available"] is True
+    assert view["next_action"]["code"] == "review_missed_submission_adjudication"
+    assert any(item["code"] == "lineup:missed_submission" for item in view["attention"])
+
+
+def test_correction_is_not_offered_before_any_position_is_locked():
+    """Codex review, PR #159: locked-lineup correction (issue #137) is the
+    audited path into an *already-locked* position specifically. Before
+    any lockout trigger has activated, an ordinary submitted lineup with
+    every position still editable must not advertise "correct locked
+    lineup" -- that would let an operator route an ordinary change through
+    the exceptional audited-correction path instead of resubmission or
+    delegated entry."""
+    db, lifecycle, round_, entries, stats, canon = full_round(year=8918, afl_round=100)
+    afl = Facts(stats)
+    view = _dashboard(db, afl, _season_id(lifecycle, round_), round_id=round_.bbbffl_round_id)
+    assert view["round"]["state"] == "open"
+    for row in view["lineups"]:
+        assert row["submission_state"] == "submitted"
+        assert row["correction_available"] is False
+
+
+def test_correction_becomes_available_once_a_position_actually_locks():
+    db, lifecycle, round_, entries, scope, pool, ownership = lockout_context(year=8919)
+    lineups = WeeklyLineupRepository(db)
+    triggers = LockoutTriggerRepository(db)
+    configure_main(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID])
+    entry_zero = entries[0]
+    player = acquire(pool, ownership, scope, entry_zero, 90101, ALL_MATCHES[0].home_team)
+    establish(lineups, round_, entry_zero, scope, {"F1": player.season_player_id})
+    for entry in entries[1:]:
+        establish(lineups, round_, entry, scope, {})
+    afl = type("Afl", (), {"get_matches": lambda self, rid: [early_match(status="CONCLUDED", start=EARLY_START)]})()
+    view = _dashboard(db, afl, _season_id(lifecycle, round_), round_id=round_.bbbffl_round_id)
+    row = next(r for r in view["lineups"] if r["season_entry_id"] == entry_zero.season_entry_id)
+    assert row["lock_summary"]["locked_main"] >= 1
+    assert row["correction_available"] is True
+    assert row["correction_url"] is not None
+
+
+def test_evidence_outage_is_distinguished_from_no_lockout_plan_configured():
+    """Codex review, PR #159: a live AFL evidence outage must never be
+    presented as "no lockout plan configured" when a plan genuinely is
+    configured -- the persisted configuration fact and the live evaluation
+    of it are independent, and conflating them would send a scorer back to
+    Round Preflight to redo configuration that already exists."""
+    from app.afl_client import AflApiError
+
+    db, lifecycle, round_, entries, scope, pool, ownership = lockout_context(year=8920)
+    triggers = LockoutTriggerRepository(db)
+    configure_main(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID])
+
+    def _raise(self, round_id):
+        raise AflApiError("afl-api is unavailable")
+
+    afl = type("Afl", (), {"get_matches": _raise})()
+    view = _dashboard(db, afl, _season_id(lifecycle, round_), round_id=round_.bbbffl_round_id)
+    assert view["next_action"]["code"] == "await_lockout_evidence"
+    assert not any(item["code"] == "lockout:not_configured" for item in view["attention"])
+    assert any(item["code"] == "lockout:evidence_unavailable" for item in view["attention"])
+
+
+def test_evidence_outage_with_no_configured_plan_still_asks_to_configure_one():
+    from app.afl_client import AflApiError
+
+    db, lifecycle, round_, entries, scope, pool, ownership = lockout_context(year=8921)
+
+    def _raise(self, round_id):
+        raise AflApiError("afl-api is unavailable")
+
+    afl = type("Afl", (), {"get_matches": _raise})()
+    view = _dashboard(db, afl, _season_id(lifecycle, round_), round_id=round_.bbbffl_round_id)
+    assert view["next_action"]["code"] == "configure_lockout_plan"
+    assert any(item["code"] == "lockout:not_configured" for item in view["attention"])

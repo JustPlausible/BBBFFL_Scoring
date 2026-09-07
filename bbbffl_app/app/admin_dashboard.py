@@ -154,6 +154,12 @@ def _round_summary(database, season_id: str, round_id: str | None = None) -> dic
     return {
         "rounds_defined": len(rounds),
         "rounds_opened": len(opened),
+        # Every round has an opened lifecycle row *and* that row's own
+        # state is "final" -- `rounds_opened == rounds_defined` alone
+        # (Codex review, PR #160) is also true the moment the last round
+        # merely opens, well before it is actually published, and stays
+        # true regardless of which round `round_id` asks to view.
+        "all_rounds_final": bool(rounds) and all(r["round_state"] == "final" for r in rounds),
         "current_round": None
         if current is None
         else {
@@ -164,7 +170,7 @@ def _round_summary(database, season_id: str, round_id: str | None = None) -> dic
     }
 
 
-def _season_blockers(entries, draft_status, window, fixture_draw) -> list[str]:
+def _season_blockers(entries, has_ordinary_competition, draft_status, window, fixture_draw) -> list[str]:
     """A short, human-readable list of the most significant readiness
     blockers for one season -- for the portfolio row only; the full
     governance attention queue (`_attention_queue`) is the authoritative,
@@ -172,6 +178,8 @@ def _season_blockers(entries, draft_status, window, fixture_draw) -> list[str]:
     blockers = []
     if len(entries) != BBBFFL_TEAM_COUNT:
         blockers.append(f"{len(entries)}/{BBBFFL_TEAM_COUNT} teams established")
+    if not has_ordinary_competition:
+        blockers.append("No ordinary competition stream configured")
     if draft_status is None:
         blockers.append("Draft not yet started")
     elif not draft_status.is_finalized:
@@ -230,7 +238,7 @@ def build_season_portfolio(
                 "rounds_defined": round_summary["rounds_defined"],
                 "rounds_opened": round_summary["rounds_opened"],
                 "current_round": round_summary["current_round"],
-                "blockers": _season_blockers(entries, draft_status, window, fixture_draw),
+                "blockers": _season_blockers(entries, ordinary is not None, draft_status, window, fixture_draw),
                 "season_centre_url": SEASON_CENTRE_URL.format(season_id=season.season_id),
                 "public_season_url": PUBLIC_SEASON_URL.format(season_id=season.season_id),
                 "scorer_dashboard_url": (
@@ -546,7 +554,7 @@ def _current_stage(
     current_round = round_summary["current_round"]
     if current_round is None or current_round["state"] in ("not_created", "upcoming"):
         return STAGE_ROUND_PREPARATION
-    if current_round["state"] == "final" and round_summary["rounds_opened"] == round_summary["rounds_defined"]:
+    if round_summary["all_rounds_final"]:
         return STAGE_SEASON_COMPLETE
     return STAGE_WEEKLY_OPERATIONS
 
@@ -660,6 +668,10 @@ _ADMIN_AUDIT_ACTION_LABELS = {
 def _audit_summary(
     database,
     lifecycle,
+    identities,
+    seasons_repo,
+    draft_repo,
+    preseason_repo,
     audit_events,
     role_grants,
     season,
@@ -686,8 +698,19 @@ def _audit_summary(
     round, matching `app.scorer_dashboard`'s own single-round scope for
     that same event class -- scanning every entry's private draft across
     every historical round would be disproportionate for a 20-item recent-
-    activity summary."""
+    activity summary.
+
+    Several domain modules record an event against a *child* entity id
+    (`draft.pick`, `preseason.trade`, `preseason.opening_snapshot`,
+    `season.rules_version`) rather than the parent this function otherwise
+    keys off (`draft`, `preseason.window`, `season`) -- each is gathered
+    separately below (Codex review, PR #160) or those events could never
+    appear despite having labels in `_ADMIN_AUDIT_ACTION_LABELS`."""
     events = list(audit_events.list_events(entity_type="season", entity_id=season.season_id, limit=limit))
+    for rules_version in seasons_repo.list_rules_versions(season.season_id):
+        events += audit_events.list_events(
+            entity_type="season.rules_version", entity_id=rules_version.rules_version_id, limit=5
+        )
     coach_ids = {entry.coach_id for entry in entries}
     for coach_id in coach_ids:
         events += audit_events.list_events(entity_type="coach", entity_id=coach_id, limit=5)
@@ -695,8 +718,16 @@ def _audit_summary(
         events += audit_events.list_events(entity_type="season_entry", entity_id=entry.season_entry_id, limit=5)
     if draft_status is not None:
         events += audit_events.list_events(entity_type="draft", entity_id=draft_status.draft_id, limit=10)
+        for pick in draft_repo.picks(season.season_id, include_superseded=True):
+            events += audit_events.list_events(entity_type="draft.pick", entity_id=pick.draft_pick_id, limit=5)
     if window is not None:
         events += audit_events.list_events(entity_type="preseason.window", entity_id=window.window_id, limit=10)
+        for trade in preseason_repo.list_trades(season.season_id):
+            events += audit_events.list_events(entity_type="preseason.trade", entity_id=trade.trade_id, limit=5)
+        for snapshot in preseason_repo.snapshot_versions(season.season_id):
+            events += audit_events.list_events(
+                entity_type="preseason.opening_snapshot", entity_id=snapshot.snapshot_id, limit=5
+            )
     if fixture_draw is not None:
         events += audit_events.list_events(entity_type="fixture_draw", entity_id=fixture_draw.fixture_draw_id, limit=5)
     rounds = ordinary_rounds_with_lifecycle(database, season.season_id)
@@ -721,15 +752,18 @@ def _audit_summary(
             )
             if draft is not None:
                 events += audit_events.list_events(entity_type=ENTITY_TYPE_LINEUP, entity_id=draft.lineup_id, limit=5)
-    # Only this season's own role-grant changes -- a coach participating
-    # here may separately hold a season-scoped grant for a *different*
-    # season (or several); `list_all_for_coach` returns every grant that
-    # coach has ever held, so a global grant (`season_id is None`) is kept
-    # but a grant scoped to another season is excluded (Codex review, PR
-    # #160), matching this function's own "recent events for *this*
-    # season" contract.
-    for coach_id in coach_ids:
-        for grant in role_grants.list_all_for_coach(coach_id):
+    # This season's own role-grant changes: every coach identity, not
+    # merely this season's own entrants -- a standing Administrator or
+    # Scorer need not also be a team coach here, and `_role_overview`
+    # already displays grants for every coach identity, so the audit feed
+    # must cover the same set (Codex review, PR #160). A coach may
+    # separately hold a season-scoped grant for a *different* season (or
+    # several); `list_all_for_coach` returns every grant that coach has
+    # ever held, so a global grant (`season_id is None`) is kept but a
+    # grant scoped to another season is excluded, matching this function's
+    # own "recent events for *this* season" contract.
+    for coach in identities.list_coaches():
+        for grant in role_grants.list_all_for_coach(coach.coach_id):
             if grant.season_id is not None and grant.season_id != season.season_id:
                 continue
             events += audit_events.list_events(entity_type="identity.role_grant", entity_id=grant.grant_id, limit=5)
@@ -846,6 +880,10 @@ def build_admin_dashboard(
     audit_summary = _audit_summary(
         database,
         lifecycle,
+        identities,
+        seasons_repo,
+        draft_repo,
+        preseason_repo,
         audit_events,
         role_grants,
         season,

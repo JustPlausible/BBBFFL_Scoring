@@ -29,10 +29,11 @@ from app.fixtures import FixtureRepository
 from app.identity import IdentityRepository
 from app.player_pool import PlayerPoolRepository
 from app.preseason import PreseasonRepository
+from app.round_mapping import RoundMappingRepository
 from app.round_review import RoundReviewRepository
 from app.scorer_dashboard import build_scorer_dashboard
 from app.season import SeasonRepository
-from tests.admin_dashboard_helpers import build_governed_season
+from tests.admin_dashboard_helpers import KnownRound, build_governed_season
 from tests.db_helpers import migrated_connection
 
 
@@ -273,6 +274,44 @@ def test_audit_summary_includes_round_mapping_and_matchup_events():
     assert "round.afl_mapping" in entity_types
 
 
+def test_audit_summary_includes_draft_pick_events():
+    """Codex review, PR #160: draft-pick completions/corrections are
+    recorded against their own `draft.pick` entity ids, not the parent
+    `draft` id this function otherwise keys off -- previously they could
+    never appear despite having a label in `_ADMIN_AUDIT_ACTION_LABELS`."""
+    g = build_governed_season(year=9123, finalize_draft=True)
+    dashboard = _dashboard(g)
+    entity_types = {e["entity_type"] for e in dashboard["audit"]}
+    assert "draft.pick" in entity_types
+
+
+def test_audit_summary_includes_rules_version_events():
+    """Codex review, PR #160: rules-version creation is recorded against
+    its own `season.rules_version` entity id, not the parent `season` id
+    this function otherwise keys off."""
+    g = build_governed_season(year=9125)
+    dashboard = _dashboard(g)
+    entity_types = {e["entity_type"] for e in dashboard["audit"]}
+    assert "season.rules_version" in entity_types
+
+
+def test_audit_summary_includes_role_grants_for_non_entry_coaches():
+    """Codex review, PR #160: a standing Administrator or Scorer need not
+    also be a team coach in this season -- `_role_overview` already shows
+    their grant, and the audit feed must cover the same coaches, not only
+    this season's own entrants."""
+    g = build_governed_season(year=9124)
+    outside_admin = g.identities.create_coach("Outside Administrator")
+    grant = RoleGrantRepository(g.database).grant(
+        outside_admin.coach_id, "admin", season_id=None, actor=ActorContext.anonymous_operator("admin")
+    )
+    dashboard = _dashboard(g)
+    diagnostics = {
+        e["diagnostics"]["entity_id"] for e in dashboard["audit"] if e["entity_type"] == "identity.role_grant"
+    }
+    assert grant.grant_id in diagnostics
+
+
 # -- Completed/archive season state ------------------------------------
 
 
@@ -283,6 +322,31 @@ def test_completed_season_reaches_the_season_complete_stage():
     dashboard = _dashboard(g)
     assert dashboard["season"]["lifecycle_state"] == "completed"
     assert next(s for s in dashboard["workflow_map"] if s["stage"] == STAGE_SEASON_COMPLETE)["is_current"]
+
+
+def test_a_later_open_round_prevents_season_complete_even_when_an_earlier_final_round_is_selected():
+    """Codex review, PR #160: `rounds_opened == rounds_defined` is also
+    true the instant every round has merely *opened* -- selecting an
+    earlier, already-published round explicitly while a later round is
+    still open must not report the season as complete."""
+    g = build_governed_season(year=9121, close_preseason=True, open_round=True)
+    round_two = g.seasons.create_round(g.competition.competition_id, "round-2", "Round 2", 2)
+    RoundMappingRepository(g.database).accept(round_two.bbbffl_round_id, 9121, 101, KnownRound((9121, 101)))
+    g.lifecycle.create_ordinary_round(round_two.bbbffl_round_id)
+    g.lifecycle.transition(round_two.bbbffl_round_id, "open")
+
+    for target in ("live", "review"):
+        g.lifecycle.transition(g.logical_round.bbbffl_round_id, target, actor=ActorContext.anonymous_operator("scorer"))
+    matchups = g.lifecycle.list_matchups(g.logical_round.bbbffl_round_id)
+    g.lifecycle.publish_results(
+        g.logical_round.bbbffl_round_id, {m.matchup_id: (100, 90) for m in matchups}, reason="approved"
+    )
+
+    dashboard = _dashboard(g, round_id=g.logical_round.bbbffl_round_id)
+    assert dashboard["current_round"]["state"] == "final"
+    stages = {s["stage"]: s["is_current"] for s in dashboard["workflow_map"]}
+    assert stages[STAGE_SEASON_COMPLETE] is False
+    assert stages[STAGE_WEEKLY_OPERATIONS] is True
 
 
 # -- Season portfolio ---------------------------------------------------
@@ -417,6 +481,24 @@ def test_non_ordinary_competition_stream_does_not_satisfy_readiness():
     codes = {item["code"] for item in dashboard["attention"]}
     assert "season:no_competition_configured" in codes
     assert next(s for s in dashboard["workflow_map"] if s["stage"] == STAGE_SETUP)["is_current"]
+
+
+def test_portfolio_reports_missing_ordinary_stream_as_a_blocker():
+    """Codex review, PR #160: the portfolio row's own blocker list must
+    agree with the selected season's attention queue -- a finals-only
+    season must not show "No major blockers" on its portfolio card while
+    its detailed dashboard correctly blocks on the missing ordinary
+    stream."""
+    db = migrated_connection()
+    season, identities = _bare_season(db, 9122)
+    seasons_repo = SeasonRepository(db)
+    rules = seasons_repo.create_rules_version(season.season_id, "finals", 1, "Finals Rules")
+    seasons_repo.create_competition(season.season_id, rules.rules_version_id, "finals", "Finals", "finals")
+    portfolio = build_season_portfolio(
+        seasons_repo, identities, DraftRepository(db), PreseasonRepository(db), FixtureRepository(db), db
+    )
+    row = next(r for r in portfolio if r["season_id"] == season.season_id)
+    assert "No ordinary competition stream configured" in row["blockers"]
 
 
 # -- Unknown season -------------------------------------------------------

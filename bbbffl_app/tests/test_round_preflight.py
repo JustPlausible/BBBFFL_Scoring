@@ -721,3 +721,23 @@ def test_configure_trigger_rejects_a_write_against_a_since_corrected_mapping():
             expected_mapping_revision=observed_mapping.revision,
         )
     assert LockoutTriggerRepository(db).list_triggers(round_.bbbffl_round_id) == []
+
+
+def test_final_results_checkpoint_recommendation_never_treats_postgame_as_concluded():
+    """Codex review (second pass, P1): `app.afl_client`'s own contract
+    deliberately keeps POSTGAME distinct from CONCLUDED -- the siren has
+    sounded but afl-api has not yet declared statistics final. Treating
+    POSTGAME as "good enough" for a final-results checkpoint would
+    recommend checkpointing the round as final while stat corrections
+    remain possible."""
+    db = migrated_connection()
+    round_, _ = configured(db, 2026, 100)
+    LockoutTriggerRepository(db).create(round_.bbbffl_round_id, "main", "main", 1, [9001])
+    postgame_match = _match(9001, status="POSTGAME")
+    replay_evidence = ReplayLikeEvidence(
+        [postgame_match], clock=ReplayClock(datetime(2026, 3, 12, 11, 0, tzinfo=timezone.utc))
+    )
+    view = build_round_preflight(
+        db, CompetitionLifecycleRepository(db), IdentityRepository(db), replay_evidence, round_.bbbffl_round_id
+    )
+    assert not any(r["stage"] == "final-results" for r in view["replay_checkpoint_recommendations"])

@@ -228,6 +228,7 @@ class EndpointCachePolicy:
 
 DEFAULT_CACHE_POLICIES: dict[str, EndpointCachePolicy] = {
     "current_season": EndpointCachePolicy(stale_ttl_seconds=3600),
+    "seasons": EndpointCachePolicy(stale_ttl_seconds=3600),
     "round": EndpointCachePolicy(stale_ttl_seconds=3600),
     "rounds": EndpointCachePolicy(stale_ttl_seconds=3600),
     "matches": EndpointCachePolicy(stale_ttl_seconds=120),
@@ -278,6 +279,8 @@ class AflTransport(Protocol):
 
     def get_current_season(self) -> Any: ...
 
+    def get_seasons(self) -> Any: ...
+
     def get_round(self, season_id: int, round_number: int) -> Any: ...
 
     def get_rounds(self, season_id: int) -> Any: ...
@@ -292,11 +295,12 @@ class AflTransport(Protocol):
 class ResilientAflClient:
     """Wraps an `AflTransport` with retry/backoff, per-endpoint caching, and
     diagnostics. Exposes exactly the same call surface as `AflApiClient`
-    (get_current_season/get_round/get_rounds/get_matches/get_player/
-    get_match_player_stats), so it is a drop-in replacement anywhere the app
-    passes an AFL client around -- `app/service.py`'s `AflDataSource`
-    protocol, `app/lockouts.py`, `app/calculations.py`, and
-    `app/service.py`'s `PlayerIdentityCache` all keep working unchanged.
+    (get_current_season/get_seasons/get_round/get_rounds/get_matches/
+    get_player/get_match_player_stats), so it is a drop-in replacement
+    anywhere the app passes an AFL client around -- `app/service.py`'s
+    `AflDataSource` protocol, `app/lockouts.py`, `app/calculations.py`,
+    `app/round_preflight.py`, and `app/service.py`'s `PlayerIdentityCache`
+    all keep working unchanged.
     """
 
     def __init__(
@@ -327,6 +331,9 @@ class ResilientAflClient:
 
     def get_current_season(self):
         return self._call("current_season", None, self._transport.get_current_season)
+
+    def get_seasons(self):
+        return self._call("seasons", None, self._transport.get_seasons)
 
     def get_round(self, season_id: int, round_number: int):
         return self._call(

@@ -67,6 +67,9 @@ class ScriptedTransport:
     def get_current_season(self):
         return self._next()
 
+    def get_seasons(self):
+        return self._next()
+
     def get_round(self, season_id, round_number):
         return self._next()
 
@@ -219,6 +222,18 @@ def test_successful_fresh_request_is_returned_and_marked_fresh():
     assert report["dependency"] == "afl-api"
     assert report["endpoints"]["matches"]["status"] == "fresh"
     assert client.is_evidence_fresh() is True
+
+
+def test_get_seasons_is_forwarded_through_the_resilient_wrapper():
+    """Issue #152 review: `app/main.py` installs `ResilientAflClient` (never
+    a bare `AflApiClient`) as the live `afl_client` -- if this wrapper did
+    not also expose `get_seasons`, `app.round_preflight`'s human-readable
+    season listing and mapping recommendation would be silently unreachable
+    in every live deployment, not just under test/replay."""
+    transport = ScriptedTransport([[{"season_id": 1, "year": 2026}]])
+    client = ResilientAflClient(transport, sleeper=FakeSleeper(FakeClock()))
+    assert client.get_seasons() == [{"season_id": 1, "year": 2026}]
+    assert client.evidence_report()["endpoints"]["seasons"]["status"] == "fresh"
 
 
 def test_explicit_timeout_with_no_cache_raises_and_is_reported_unavailable():

@@ -91,7 +91,14 @@ async function map(x){
   let f=new FormData(x.target),seasonManual=f.get('season_manual'),roundManual=f.get('round_manual'),
     season=(seasonManual&&roundManual)?seasonManual:f.get('season_select'),
     round=(seasonManual&&roundManual)?roundManual:f.get('round_select'),
-    reason=f.get('reason'),confirmed=x.target.confirmed.checked,expectedRevision=current.mapping?.revision??0;
+    reason=f.get('reason'),confirmed=x.target.confirmed.checked,
+    // An accepted mapping isn't the only prior state worth guarding: an
+    // unresolved/ambiguous proposal already occupies revision 1+ even
+    // though `current.mapping` (the *accepted* mapping only) is null, so
+    // falling back to a bare 0 there would make the round-mapping row's
+    // real current revision look stale forever and permanently reject the
+    // operator's explicit accept.
+    expectedRevision=current.mapping?.revision??(current.mapping_history.length?current.mapping_history[current.mapping_history.length-1].revision:0);
   try{
     render(await api(`/api/admin/round-preflight/${roundId}/mapping`,{afl_season_id:+season,afl_round_id:+round,reason:reason||null,confirmed,expected_revision:expectedRevision}));
     msg('Authoritative mapping confirmed.',true)

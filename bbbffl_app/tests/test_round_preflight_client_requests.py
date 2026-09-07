@@ -81,7 +81,9 @@ def _trigger_view(**overrides):
     return base
 
 
-def _view(mapping=None, mapping_recommendation=None, lockout_triggers=None, lockout_recommendation=None):
+def _view(
+    mapping=None, mapping_history=None, mapping_recommendation=None, lockout_triggers=None, lockout_recommendation=None
+):
     return {
         "round": {
             "season_label": "2026",
@@ -94,6 +96,7 @@ def _view(mapping=None, mapping_recommendation=None, lockout_triggers=None, lock
         "fixture_matchups": [],
         "mapping": mapping,
         "mapping_context": None,
+        "mapping_history": mapping_history or [],
         "mapping_recommendation": mapping_recommendation,
         "afl_seasons": [],
         "afl_evidence_fresh": True,
@@ -387,3 +390,38 @@ api(`/api/admin/round-preflight/${{roundId}}`).then(render).then(async () => {{
     assert lines["FETCH_COUNT"] == "0", "a recommendation fill must never itself issue a network request"
     assert lines["SEASON_MANUAL"] == "91"
     assert lines["ROUND_MANUAL"] == "1234"
+
+
+def test_map_derives_expected_revision_from_mapping_history_when_no_mapping_is_accepted_yet(preflight_script, tmp_path):
+    """Codex review (second pass, P1): a round with an unresolved/ambiguous
+    mapping *proposal* already has a `round_afl_mapping` row at revision 1+
+    even though `mapping` (the *accepted* mapping only) is null. Falling
+    back to a bare 0 there would make the operator's very first explicit
+    accept always look stale and get permanently rejected -- the JS must
+    fall back to the latest `mapping_history` revision instead."""
+    import json
+
+    view = json.dumps(
+        _view(mapping_history=[{"revision": 1, "state": "ambiguous"}, {"revision": 2, "state": "ambiguous"}])
+    )
+    action = f"""
+let lastBody = null;
+global.fetch = (path, options) => {{
+  const method = options && options.method ? options.method : (options && options.body ? 'POST' : 'GET');
+  if (method === 'GET') {{ return Promise.resolve({{ ok: true, json: async () => JSON.parse('{view}') }}); }}
+  lastBody = JSON.parse(options.body);
+  return Promise.resolve({{ ok: true, json: async () => JSON.parse('{view}') }});
+}};
+
+api(`/api/admin/round-preflight/${{roundId}}`).then(render).then(async () => {{
+  await map({{ preventDefault(){{}}, target: {{
+    _data: {{ season_manual: '2026', round_manual: '100', reason: 'explicit accept over an ambiguous proposal' }},
+    confirmed: {{ checked: true }},
+  }} }});
+  console.log('EXPECTED_REVISION:' + lastBody.expected_revision);
+  process.exit(0);
+}}).catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+    stdout = _run(tmp_path, preflight_script, action)
+    lines = dict(line.split(":", 1) for line in stdout.strip().splitlines())
+    assert lines["EXPECTED_REVISION"] == "2", "must use the latest mapping_history revision, not a bare 0"

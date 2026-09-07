@@ -250,7 +250,12 @@ def _replay_checkpoint_recommendations(afl_client, match_views: list[dict], trig
     review, P1). Lacking any actual conclusion-time evidence in `Match`,
     the only safe evidence-backed final-results recommendation is "right
     now", and only once every relevant match's own currently observed
-    status already reads as concluded (postgame/completed) -- otherwise no
+    status already normalizes to `"completed"` -- never `"postgame"`,
+    which `app.afl_client`'s own contract distinguishes precisely because
+    the siren has sounded but afl-api has not yet declared statistics
+    final; treating it as good enough here would recommend checkpointing
+    the round as final while corrections to those statistics remain
+    possible (issue #152 review, second pass, P1). Otherwise no
     final-results recommendation is made at all, rather than guessing one.
     """
     if not hasattr(afl_client, "clock"):
@@ -279,8 +284,7 @@ def _replay_checkpoint_recommendations(afl_client, match_views: list[dict], trig
             }
         )
     if match_views and all(
-        is_recognized_match_status(match["status"])
-        and normalize_match_status(match["status"]) in ("postgame", "completed")
+        is_recognized_match_status(match["status"]) and normalize_match_status(match["status"]) == "completed"
         for match in match_views
     ):
         clock = getattr(afl_client, "clock", None)
@@ -292,8 +296,8 @@ def _replay_checkpoint_recommendations(afl_client, match_views: list[dict], trig
                     "stage": "final-results",
                     "recommended_effective_at": now.isoformat(),
                     "evidence": (
-                        "Every relevant AFL match currently shows a concluded status (postgame/completed), so "
-                        "recording a final-results checkpoint now is expected to be safe."
+                        "Every relevant AFL match currently shows a completed status with final statistics "
+                        "declared, so recording a final-results checkpoint now is expected to be safe."
                     ),
                 }
             )

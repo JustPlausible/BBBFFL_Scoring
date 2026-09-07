@@ -8,6 +8,8 @@ from app.authorization import Principal, require_capability, require_role_covers
 from app.config import BASE_DIR
 from app.csrf import issue_token, verify_token
 from app.round_preflight import (
+    StaleMappingRevisionError,
+    StaleTriggerRevisionError,
     accept_preflight_mapping,
     build_round_preflight,
     configure_preflight_trigger,
@@ -24,6 +26,14 @@ class MappingRequest(BaseModel):
     afl_season_id: int
     afl_round_id: int
     reason: str | None = None
+    # Issue #152: acceptance requires an explicit operator confirmation, not
+    # merely a chosen season/round -- see accept_preflight_mapping's
+    # docstring. Defaults False so an unmodified/legacy client can never
+    # accidentally satisfy it.
+    confirmed: bool = False
+    # Optimistic concurrency: the mapping revision the caller last observed
+    # (0 meaning "no accepted mapping yet"), or omit to skip the check.
+    expected_revision: int | None = None
 
 
 class TriggerRequest(BaseModel):
@@ -32,6 +42,10 @@ class TriggerRequest(BaseModel):
     sequence: int
     afl_match_ids: list[int]
     reason: str | None = None
+    # Optimistic concurrency: the trigger's revision the caller last
+    # observed for this trigger_key (0 meaning "does not exist yet"), or
+    # omit to skip the check.
+    expected_revision: int | None = None
 
 
 def _actor(principal):
@@ -89,6 +103,42 @@ def view(round_id: str, request: Request, principal: Principal = Depends(require
     return _view(request, round_id)
 
 
+@router.get("/{round_id}/afl-seasons")
+def afl_seasons(round_id: str, request: Request, principal: Principal = Depends(require_round_operator)):
+    """Human-readable AFL season listing for mapping selection (issue #152)
+    -- always from the request's own configured afl_client, so live and
+    replay deployments answer through the identical contract/endpoint."""
+    _authorise(request, principal, round_id)
+    client = request.app.state.afl_client
+    list_seasons = getattr(client, "get_seasons", None)
+    if not callable(list_seasons):
+        raise HTTPException(501, "The configured AFL client does not support listing seasons")
+    try:
+        seasons = list_seasons()
+    except Exception as exc:
+        raise HTTPException(502, f"AFL season list is unavailable: {exc}") from exc
+    return {
+        "afl_seasons": [
+            {"season_id": s.season_id, "year": s.year, "name": s.name, "is_current": s.is_current} for s in seasons
+        ]
+    }
+
+
+@router.get("/{round_id}/afl-seasons/{afl_season_id}/afl-rounds")
+def afl_rounds(
+    round_id: str, afl_season_id: int, request: Request, principal: Principal = Depends(require_round_operator)
+):
+    """Human-readable AFL round listing for one season (issue #152), loaded
+    only once an operator has selected a season -- opaque `round_id` is
+    retained only as secondary/reference information alongside `round_number`."""
+    _authorise(request, principal, round_id)
+    try:
+        rounds = request.app.state.afl_client.get_rounds(afl_season_id)
+    except Exception as exc:
+        raise HTTPException(502, f"AFL round list is unavailable: {exc}") from exc
+    return {"afl_rounds": [{"round_id": r.round_id, "round_number": r.round_number} for r in rounds]}
+
+
 @router.post("/{round_id}/mapping")
 def accept_mapping(
     round_id: str, payload: MappingRequest, request: Request, principal: Principal = Depends(require_round_operator)
@@ -103,9 +153,15 @@ def accept_mapping(
             round_id,
             payload.afl_season_id,
             payload.afl_round_id,
-            reason=payload.reason or "Mapping accepted in round preflight",
+            reason=payload.reason,
+            confirmed=payload.confirmed,
+            expected_revision=payload.expected_revision,
             actor=_actor(principal),
         )
+    except StaleMappingRevisionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
     return _view(request, round_id)
@@ -117,13 +173,21 @@ def configure_trigger(
 ):
     _authorise(request, principal, round_id)
     _csrf(request, principal)
-    configure_preflight_trigger(
-        request.app.state.database,
-        round_id,
-        payload,
-        reason=payload.reason or "Lockout plan configured in preflight",
-        actor=_actor(principal),
-    )
+    try:
+        configure_preflight_trigger(
+            request.app.state.database,
+            round_id,
+            payload,
+            request.app.state.afl_client,
+            reason=payload.reason or "Lockout plan configured in preflight",
+            actor=_actor(principal),
+        )
+    except StaleTriggerRevisionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:  # covers TriggerValidationError and app.lockouts.LockoutIntegrityError
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
     return _view(request, round_id)
 
 

@@ -133,6 +133,11 @@ class Season:
     # stale configuration -- e.g. still declaring last year's season after
     # year rollover -- before scoring against the wrong season's data.
     year: int | None = None
+    # Populated from afl-api's "name" field (e.g. "2026 Premiership Season").
+    # Display-only, secondary to `season_id`/`year` for any decision -- see
+    # app/round_preflight.py's human-readable season/round selection, which
+    # never resolves or persists a mapping from this alone.
+    name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -298,8 +303,26 @@ class AflApiClient:
                     is_current=True,
                     current_round_number=entry.get("current_round_number"),
                     year=entry.get("year"),
+                    name=entry.get("name"),
                 )
         raise AflApiError("afl-api /api/v1/seasons returned no season with is_current=true")
+
+    def get_seasons(self) -> list[Season]:
+        """Every AFL season afl-api currently publishes, for human-readable
+        season selection (app/round_preflight.py) -- never filtered to the
+        current one. Display labels come from `name`/`year`; `season_id`
+        remains the only identity ever persisted."""
+        payload = self._get(f"/api/{self._contract_version}/seasons")
+        return [
+            Season(
+                season_id=entry["season_id"],
+                is_current=bool(entry.get("is_current", False)),
+                current_round_number=entry.get("current_round_number"),
+                year=entry.get("year"),
+                name=entry.get("name"),
+            )
+            for entry in _unwrap(payload, "seasons")
+        ]
 
     def get_round(self, season_id: int, round_number: int) -> Round:
         for item in self.get_rounds(season_id):

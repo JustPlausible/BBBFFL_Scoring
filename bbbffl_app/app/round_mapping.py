@@ -56,6 +56,101 @@ def _mapping(row: Mapping[str, Any]) -> RoundMapping:
     )
 
 
+@dataclass(frozen=True)
+class MappingRecommendation:
+    """A purely advisory BBBFFL-round -> AFL-round suggestion (issue #152).
+
+    Never persisted, never returned unless the evidence is unambiguous:
+    `recommend_mapping` below returns `None` rather than guessing whenever a
+    year/round-number correspondence cannot be established with confidence.
+    Acceptance remains exclusively `RoundMappingRepository.accept`/
+    `correct` -- an operator must still explicitly confirm (with a reason)
+    before any mapping this describes takes effect, and may deliberately
+    diverge from it (BBBFFL and AFL round numbering can legitimately
+    differ -- see docs/round-afl-mapping.md)."""
+
+    afl_season_id: int
+    afl_round_id: int
+    afl_season_year: int
+    afl_round_number: int
+    evidence: str
+
+
+class StaleMappingRevisionError(RuntimeError):
+    """A mapping accept/correct was submitted against a revision that is no
+    longer current -- checked atomically under the same row lock that
+    advances `current_revision` (see `RoundMappingRepository._activate`),
+    so a concurrent writer can never silently win against a caller that
+    observed a stale revision (issue #152 review: the equivalent check
+    performed by the caller *before* opening this transaction cannot close
+    this race, since two concurrent callers can both read the same stale
+    revision and both pass that check before either commits)."""
+
+
+def recommend_mapping(
+    afl_client: Any, *, bbbffl_year: int, bbbffl_sequence: int, bbbffl_stream_type: str
+) -> MappingRecommendation | None:
+    """Deterministic, evidence-backed mapping suggestion for the round
+    preflight UI (never for `RoundMappingRepository.accept`/`correct`
+    itself, which stays advisory-blind by design -- see this module's
+    docstring).
+
+    The only rule applied is "the AFL season whose published year equals
+    this BBBFFL season's year, and within it the AFL round whose published
+    round number equals this BBBFFL round's sequence" -- exactly what the
+    2026 evidence in docs/round-afl-mapping.md documents as the *normal*
+    case for the **ordinary** (home-and-away) competition stream, never a
+    general assumption. `bbbffl_stream_type` gates this: for any other
+    stream (finals, superscore, ...) this returns `None` unconditionally,
+    never applying the equal-number heuristic. Those streams' own sequence
+    numbering restarts independently of AFL's (e.g. a BBBFFL Grand Final's
+    sequence 4 corresponds to AFL round 24, not AFL round 4 -- see
+    docs/round-afl-mapping.md's 2026 finals evidence); applying the
+    ordinary-stream heuristic there would recommend a real but *wrong* AFL
+    round with the same false confidence as a correct recommendation
+    (issue #152 review, P1).
+
+    Otherwise fails closed (returns `None`) rather than guessing whenever:
+
+    - the configured client cannot enumerate seasons at all (an older
+      duck-typed test double, or a transport failure);
+    - zero or more than one AFL season publishes this year (ambiguous --
+      e.g. a season rollover window);
+    - zero or more than one AFL round in that season publishes this round
+      number (ambiguous/incomplete); or
+    - the client raises for any other reason (evidence unavailable).
+    """
+    if bbbffl_stream_type != "ordinary":
+        return None
+    list_seasons = getattr(afl_client, "get_seasons", None)
+    if not callable(list_seasons):
+        return None
+    try:
+        seasons = list_seasons()
+        matching_seasons = [season for season in seasons if season.year == bbbffl_year]
+        if len(matching_seasons) != 1:
+            return None
+        season = matching_seasons[0]
+        rounds = afl_client.get_rounds(season.season_id)
+        matching_rounds = [round_ for round_ in rounds if round_.round_number == bbbffl_sequence]
+        if len(matching_rounds) != 1:
+            return None
+        afl_round = matching_rounds[0]
+    except Exception:  # evidence unavailable/malformed is never a guess
+        return None
+    return MappingRecommendation(
+        afl_season_id=season.season_id,
+        afl_round_id=afl_round.round_id,
+        afl_season_year=bbbffl_year,
+        afl_round_number=afl_round.round_number,
+        evidence=(
+            f"Exactly one AFL season ({season.season_id}) publishes year {bbbffl_year}, and within it exactly one "
+            f"AFL round ({afl_round.round_id}) publishes round number {bbbffl_sequence}, matching this BBBFFL "
+            f"round's sequence."
+        ),
+    )
+
+
 class RoundMappingRepository:
     def __init__(self, database: DatabaseConnection):
         self.database = database
@@ -121,10 +216,13 @@ class RoundMappingRepository:
         provider: str = "afl-api-v1",
         actor: ActorContext = ActorContext.anonymous_operator("admin"),
         reason: str | None = None,
+        expected_revision: int | None = None,
     ) -> RoundMapping:
         if not validator.round_exists(afl_season_id, afl_round_id):
             raise ValueError("AFL season/round reference does not exist")
-        return self._activate(bbbffl_round_id, afl_season_id, afl_round_id, provider, actor, reason, False)
+        return self._activate(
+            bbbffl_round_id, afl_season_id, afl_round_id, provider, actor, reason, False, expected_revision
+        )
 
     def correct(
         self,
@@ -136,12 +234,15 @@ class RoundMappingRepository:
         reason: str,
         actor: ActorContext = ActorContext.anonymous_operator("admin"),
         provider: str = "afl-api-v1",
+        expected_revision: int | None = None,
     ) -> RoundMapping:
         if not reason:
             raise ValueError("an authorised correction requires a reason")
         if not validator.round_exists(afl_season_id, afl_round_id):
             raise ValueError("AFL season/round reference does not exist")
-        return self._activate(bbbffl_round_id, afl_season_id, afl_round_id, provider, actor, reason, True)
+        return self._activate(
+            bbbffl_round_id, afl_season_id, afl_round_id, provider, actor, reason, True, expected_revision
+        )
 
     def resolve(self, bbbffl_round_id: str) -> RoundMapping | None:
         row = self.database.execute(
@@ -164,12 +265,38 @@ class RoundMappingRepository:
         actor: ActorContext,
         reason: str | None,
         correction: bool,
+        expected_revision: int | None = None,
     ) -> RoundMapping:
         with transaction(self.database) as conn:
+            # Lock the stable `bbbffl_round` row *first* -- a brand-new
+            # mapping has no `round_afl_mapping` row yet to lock, so two
+            # concurrent first-time accepts would otherwise both see no
+            # header, both pass the expected_revision==0 check below, and
+            # race each other on the INSERT (one losing with a raw
+            # IntegrityError instead of the promised StaleMappingRevisionError).
+            # Locking this always-present parent row instead serializes
+            # every accept/correct for one round through this transaction,
+            # regardless of whether a mapping row exists yet (issue #152
+            # review, second pass).
+            conn.execute(
+                "SELECT 1 FROM bbbffl_round WHERE bbbffl_round_id=?" + _for_update_suffix(self.database), (round_id,)
+            )
             head = conn.execute(
                 "SELECT * FROM round_afl_mapping WHERE bbbffl_round_id=?" + _for_update_suffix(self.database),
                 (round_id,),
             ).fetchone()
+            # Checked immediately after acquiring the row lock above (or
+            # establishing there is no row yet), before any write: this is
+            # what makes stale-revision protection atomic with the write
+            # that would otherwise silently outrun it (issue #152 review).
+            if expected_revision is not None:
+                current_revision = head["current_revision"] if head else 0
+                if current_revision != expected_revision:
+                    raise StaleMappingRevisionError(
+                        f"This mapping has changed since it was loaded (expected revision {expected_revision}, "
+                        f"current revision {current_revision}). Reload the current authoritative mapping before "
+                        "deciding."
+                    )
             if not head:
                 if correction:
                     raise ValueError("correction requires an accepted mapping")

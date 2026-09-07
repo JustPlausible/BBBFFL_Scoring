@@ -8,24 +8,29 @@ durable lock evidence they race to materialize.
 """
 
 import os
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from threading import Barrier
 
 import pytest
 
+import app.lockouts as lockouts_module
 from app.afl_client import Match, Team
 from app.competition_lifecycle import CompetitionLifecycleRepository
 from app.db import connect
 from app.lineups import LineupConflictError, WeeklyLineupRepository
 from app.lockouts import (
     LockedSelectionError,
+    LockoutIntegrityError,
     LockoutRepository,
     LockoutTriggerRepository,
     LockState,
     TriggerAlreadyActivatedError,
 )
 from app.migrations import migrate
+from tests.test_competition_lifecycle import operational
 
 EARLY_HOME = Team(5001, "Concurrency FC")
 EARLY_AWAY = Team(5002, "Concurrency Opp")
@@ -90,6 +95,45 @@ def race(commands):
 
     with ThreadPoolExecutor(max_workers=len(commands)) as executor:
         return list(executor.map(run, commands))
+
+
+def test_concurrent_first_time_trigger_configuration_serializes_on_the_round(postgres_url, monkeypatch):
+    """Issue #152 review (second pass, P1): a round with zero triggers has
+    no trigger header row for `configure()`'s `FOR UPDATE` read to lock, so
+    two concurrent *first* configurations for that round -- here, two
+    different `main` trigger keys -- could previously both read the same
+    empty set, both pass "no other main trigger yet" validation against it,
+    and both commit as two mains. `configure()` now locks the stable
+    `bbbffl_round` parent row first, so the second call instead waits for
+    the first to commit, then correctly observes the first main and is
+    rejected with `LockoutIntegrityError` rather than duplicating it."""
+    db = connect(postgres_url)
+    _, round_, _ = operational(db, 2962, 100)
+    holds_lock = threading.Event()
+    allow_commit = threading.Event()
+    real_append = lockouts_module.append_event
+
+    def pause_first_configure(*args, **kwargs):
+        holds_lock.set()
+        assert allow_commit.wait(timeout=5)
+        return real_append(*args, **kwargs)
+
+    monkeypatch.setattr(lockouts_module, "append_event", pause_first_configure)
+    repo = LockoutTriggerRepository(db)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(repo.configure, round_.bbbffl_round_id, "main-a", "main", 1, [70001], reason="main a")
+        assert holds_lock.wait(timeout=5)
+        second = executor.submit(repo.configure, round_.bbbffl_round_id, "main-b", "main", 2, [70002], reason="main b")
+        time.sleep(0.2)
+        assert not second.done(), "the second concurrent configuration did not wait for the round row lock"
+        allow_commit.set()
+        first.result(timeout=5)
+        with pytest.raises(LockoutIntegrityError):
+            second.result(timeout=5)
+
+    triggers = repo.list_triggers(round_.bbbffl_round_id)
+    assert [t.trigger_key for t in triggers if t.trigger_type == "main"] == ["main-a"]
 
 
 def test_late_edit_races_a_concurrent_lock_observation_and_fails_safely(postgres_url):

@@ -5,6 +5,8 @@ outage, invalid/contract-incompatible responses staying visible, recovery
 after an outage, and secret-safe diagnostics.
 """
 
+import threading
+
 import pytest
 
 from app.afl_client import (
@@ -65,6 +67,9 @@ class ScriptedTransport:
         return outcome
 
     def get_current_season(self):
+        return self._next()
+
+    def get_seasons(self):
         return self._next()
 
     def get_round(self, season_id, round_number):
@@ -219,6 +224,18 @@ def test_successful_fresh_request_is_returned_and_marked_fresh():
     assert report["dependency"] == "afl-api"
     assert report["endpoints"]["matches"]["status"] == "fresh"
     assert client.is_evidence_fresh() is True
+
+
+def test_get_seasons_is_forwarded_through_the_resilient_wrapper():
+    """Issue #152 review: `app/main.py` installs `ResilientAflClient` (never
+    a bare `AflApiClient`) as the live `afl_client` -- if this wrapper did
+    not also expose `get_seasons`, `app.round_preflight`'s human-readable
+    season listing and mapping recommendation would be silently unreachable
+    in every live deployment, not just under test/replay."""
+    transport = ScriptedTransport([[{"season_id": 1, "year": 2026}]])
+    client = ResilientAflClient(transport, sleeper=FakeSleeper(FakeClock()))
+    assert client.get_seasons() == [{"season_id": 1, "year": 2026}]
+    assert client.evidence_report()["endpoints"]["seasons"]["status"] == "fresh"
 
 
 def test_explicit_timeout_with_no_cache_raises_and_is_reported_unavailable():
@@ -458,6 +475,73 @@ def test_evidence_batch_does_not_observe_calls_made_outside_it():
         with pytest.raises(AflEvidenceUnavailableError):
             client.get_player(2)  # unavailable, inside the batch
     assert batch.is_evidence_fresh() is False
+
+
+def test_evidence_batches_are_isolated_across_concurrent_threads():
+    """Issue #152 review (fourth pass, P2): `ResilientAflClient` is one
+    process-wide singleton shared by every request (`app/main.py`'s
+    `app.state.afl_client`), and FastAPI runs sync route handlers in a
+    thread pool -- so two concurrent requests' `evidence_batch()` calls run
+    on different threads at the same time. Before this fix, `_active_batch`
+    was a single shared instance attribute: one thread's fresh/stale
+    observation could land in another thread's batch, corrupting a
+    freshness check a caller relies on to gate a mutation. `threading.
+    local()` keeps each thread's batch independent, proven here by running
+    a guaranteed-fresh call and a guaranteed-unavailable call concurrently
+    on separate threads sharing one client and asserting neither batch
+    observes the other's call."""
+
+    class PerEndpointTransport:
+        def get_current_season(self):
+            raise NotImplementedError
+
+        def get_seasons(self):
+            raise NotImplementedError
+
+        def get_round(self, season_id, round_number):
+            raise NotImplementedError
+
+        def get_rounds(self, season_id):
+            raise NotImplementedError
+
+        def get_matches(self, round_id):
+            return ["fresh-value"]
+
+        def get_player(self, canonical_player_id):
+            raise AflApiConnectionError("/boom")
+
+        def get_match_player_stats(self, match_id):
+            raise NotImplementedError
+
+    client = ResilientAflClient(
+        PerEndpointTransport(), sleeper=FakeSleeper(FakeClock()), retry_policy=RetryPolicy(max_attempts=1)
+    )
+    barrier = threading.Barrier(2)
+    results = {}
+
+    def fresh_thread():
+        barrier.wait(timeout=5)
+        with client.evidence_batch() as batch:
+            client.get_matches(1)
+        results["fresh"] = batch.is_evidence_fresh()
+
+    def unavailable_thread():
+        barrier.wait(timeout=5)
+        with client.evidence_batch() as batch:
+            try:
+                client.get_player(1)
+            except AflEvidenceUnavailableError:
+                pass
+        results["unavailable"] = batch.is_evidence_fresh()
+
+    threads = [threading.Thread(target=fresh_thread), threading.Thread(target=unavailable_thread)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert results["fresh"] is True, "the fresh thread's own batch must not be corrupted by the other thread"
+    assert results["unavailable"] is False
 
 
 def test_stale_ttl_accounts_for_time_consumed_during_retries():

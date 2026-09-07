@@ -150,7 +150,11 @@ class ReplayAflDataSource:
         try:
             self._seasons = {
                 int(x["season_id"]): Season(
-                    int(x["season_id"]), bool(x.get("is_current", False)), x.get("current_round_number"), int(x["year"])
+                    int(x["season_id"]),
+                    bool(x.get("is_current", False)),
+                    x.get("current_round_number"),
+                    int(x["year"]),
+                    x.get("name"),
                 )
                 for x in self._list(payload, "seasons")
             }
@@ -302,6 +306,12 @@ class ReplayAflDataSource:
             (r for rid, r in self._rounds.items() if self._round_seasons[rid] == season_id),
             key=lambda r: r.round_number,
         )
+
+    def get_seasons(self) -> list[Season]:
+        """Every AFL season this replay package carries evidence for, for
+        human-readable season selection (app/round_preflight.py) -- the same
+        common contract `AflApiClient.get_seasons` exposes for live AFL."""
+        return sorted(self._seasons.values(), key=lambda s: (s.year or 0, s.season_id))
 
     def get_matches(self, round_id: int) -> list[Match]:
         if round_id not in self._rounds:

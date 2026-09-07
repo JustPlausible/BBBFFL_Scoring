@@ -72,6 +72,7 @@ avoidably-stale data when afl-api is healthy.
 
 from __future__ import annotations
 
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -228,6 +229,7 @@ class EndpointCachePolicy:
 
 DEFAULT_CACHE_POLICIES: dict[str, EndpointCachePolicy] = {
     "current_season": EndpointCachePolicy(stale_ttl_seconds=3600),
+    "seasons": EndpointCachePolicy(stale_ttl_seconds=3600),
     "round": EndpointCachePolicy(stale_ttl_seconds=3600),
     "rounds": EndpointCachePolicy(stale_ttl_seconds=3600),
     "matches": EndpointCachePolicy(stale_ttl_seconds=120),
@@ -278,6 +280,8 @@ class AflTransport(Protocol):
 
     def get_current_season(self) -> Any: ...
 
+    def get_seasons(self) -> Any: ...
+
     def get_round(self, season_id: int, round_number: int) -> Any: ...
 
     def get_rounds(self, season_id: int) -> Any: ...
@@ -292,11 +296,12 @@ class AflTransport(Protocol):
 class ResilientAflClient:
     """Wraps an `AflTransport` with retry/backoff, per-endpoint caching, and
     diagnostics. Exposes exactly the same call surface as `AflApiClient`
-    (get_current_season/get_round/get_rounds/get_matches/get_player/
-    get_match_player_stats), so it is a drop-in replacement anywhere the app
-    passes an AFL client around -- `app/service.py`'s `AflDataSource`
-    protocol, `app/lockouts.py`, `app/calculations.py`, and
-    `app/service.py`'s `PlayerIdentityCache` all keep working unchanged.
+    (get_current_season/get_seasons/get_round/get_rounds/get_matches/
+    get_player/get_match_player_stats), so it is a drop-in replacement
+    anywhere the app passes an AFL client around -- `app/service.py`'s
+    `AflDataSource` protocol, `app/lockouts.py`, `app/calculations.py`,
+    `app/round_preflight.py`, and `app/service.py`'s `PlayerIdentityCache`
+    all keep working unchanged.
     """
 
     def __init__(
@@ -316,7 +321,17 @@ class ResilientAflClient:
         self._cache_policies = {**DEFAULT_CACHE_POLICIES, **(cache_policies or {})}
         self._cache: dict[tuple[str, Any], CacheEntry] = {}
         self.diagnostics = diagnostics or AflDiagnosticsRegistry()
-        self._active_batch: EvidenceBatch | None = None
+        # A per-thread stack, not a single shared attribute: `ResilientAflClient`
+        # is one process-wide singleton (`app/main.py`'s `app.state.afl_client`),
+        # and FastAPI runs sync route handlers in a thread pool, so two
+        # concurrent requests' `evidence_batch()` calls interleave on
+        # different threads. A single `self._active_batch` attribute would
+        # let one request's fresh/stale observations land in another
+        # request's batch (or vice versa), corrupting a freshness check a
+        # caller relies on to gate a mutation (issue #152 review, fourth
+        # pass, P2) -- `threading.local()` gives each thread its own
+        # independent batch stack instead.
+        self._batch_state = threading.local()
 
     def close(self) -> None:
         close = getattr(self._transport, "close", None)
@@ -327,6 +342,9 @@ class ResilientAflClient:
 
     def get_current_season(self):
         return self._call("current_season", None, self._transport.get_current_season)
+
+    def get_seasons(self):
+        return self._call("seasons", None, self._transport.get_seasons)
 
     def get_round(self, season_id: int, round_number: int):
         return self._call(
@@ -368,19 +386,23 @@ class ResilientAflClient:
         `is_evidence_fresh()` around a "build a result, then maybe finalise
         it" sequence (see `app/routes/admin.py`'s finalize handler), since
         `is_evidence_fresh()` alone can miss a stale fact mixed in among
-        several fresh ones fetched under the same endpoint label. The app
-        only ever opens one such sequence at a time, but nesting is still
-        well-defined: only the innermost open batch observes calls made
+        several fresh ones fetched under the same endpoint label. One
+        calling thread only ever opens one such sequence at a time, but
+        nesting is still well-defined *per thread*: only the innermost open
+        batch on the current thread observes calls made on that thread
         while it is open, and the outer batch (unaware of those calls)
-        becomes active again once the inner one exits.
+        becomes active again once the inner one exits. Batch state is kept
+        per-thread (see `__init__`'s `self._batch_state`), so two concurrent
+        requests sharing this one process-wide client never observe or
+        corrupt each other's batch.
         """
         batch = EvidenceBatch()
-        previous = self._active_batch
-        self._active_batch = batch
+        previous = getattr(self._batch_state, "active", None)
+        self._batch_state.active = batch
         try:
             yield batch
         finally:
-            self._active_batch = previous
+            self._batch_state.active = previous
 
     # -- internals ----------------------------------------------------------
 
@@ -453,8 +475,9 @@ class ResilientAflClient:
             detail=detail,
             cache_age_seconds=cache_age_seconds,
         )
-        if self._active_batch is not None:
-            self._active_batch._observe(status)
+        active_batch = getattr(self._batch_state, "active", None)
+        if active_batch is not None:
+            active_batch._observe(status)
 
 
 def _safe_detail(exc: BaseException) -> str:

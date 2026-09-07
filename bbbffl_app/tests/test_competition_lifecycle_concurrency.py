@@ -12,7 +12,8 @@ from app.afl_client import PlayerStatLine
 from app.calculations import MatchupCalculationService
 from app.db import connect
 from app.migrations import migrate
-from app.round_mapping import RoundMappingRepository
+from app.round_mapping import RoundMappingRepository, StaleMappingRevisionError
+from app.season import SeasonRepository
 from tests.test_calculations import Facts, setup_round
 from tests.test_competition_lifecycle import KnownRound, operational
 
@@ -63,6 +64,73 @@ def test_open_serializes_against_mapping_correction(postgres_database, monkeypat
             opening.result(timeout=5)
 
     assert lifecycle.get_round(round_.bbbffl_round_id).state == "upcoming"
+
+
+def _unmapped_round(database, year):
+    """A round with no `round_afl_mapping` row at all yet -- unlike
+    `operational`/`configured`, which already accept a mapping as part of
+    setup -- for exercising issue #152's *first-ever* accept race, where
+    there is no mapping row yet for `FOR UPDATE` to lock."""
+    seasons = SeasonRepository(database)
+    season = seasons.create_season(year, str(year))
+    rules = seasons.create_rules_version(season.season_id, "ordinary", 1, "Rules")
+    competition = seasons.create_competition(
+        season.season_id, rules.rules_version_id, "ordinary", "Ordinary", "ordinary"
+    )
+    return seasons.create_round(competition.competition_id, "round-1", "Round 1", 1)
+
+
+def test_concurrent_first_time_accepts_serialize_and_the_stale_one_is_rejected(postgres_database, monkeypatch):
+    """Issue #152 review (second pass, P2): a brand-new mapping has no
+    `round_afl_mapping` row yet, so two concurrent first-time `accept()`
+    calls (both observing `expected_revision=0`, "no mapping yet") could
+    previously both pass that check and race each other on the INSERT --
+    one losing with a raw `IntegrityError` instead of the promised
+    `StaleMappingRevisionError`. `_activate` now locks the stable
+    `bbbffl_round` parent row first, so the second accept instead waits for
+    the first to commit, then correctly observes revision 1 and rejects."""
+    round_ = _unmapped_round(postgres_database, 2960)
+    holds_lock = threading.Event()
+    allow_commit = threading.Event()
+    real_append = round_mapping_module.append_event
+
+    def pause_first_accept(*args, **kwargs):
+        holds_lock.set()
+        assert allow_commit.wait(timeout=5)
+        return real_append(*args, **kwargs)
+
+    monkeypatch.setattr(round_mapping_module, "append_event", pause_first_accept)
+    known = KnownRound(2960, 100)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(
+            RoundMappingRepository(postgres_database).accept,
+            round_.bbbffl_round_id,
+            2960,
+            100,
+            known,
+            reason="first accept",
+            expected_revision=0,
+        )
+        assert holds_lock.wait(timeout=5)
+        second = executor.submit(
+            RoundMappingRepository(postgres_database).accept,
+            round_.bbbffl_round_id,
+            2960,
+            100,
+            known,
+            reason="second accept",
+            expected_revision=0,
+        )
+        time.sleep(0.2)
+        assert not second.done(), "the second first-time accept did not wait for the round row lock"
+        allow_commit.set()
+        first.result(timeout=5)
+        with pytest.raises(StaleMappingRevisionError):
+            second.result(timeout=5)
+
+    resolved = RoundMappingRepository(postgres_database).resolve(round_.bbbffl_round_id)
+    assert resolved.revision == 1  # the stale accept never took effect
 
 
 def _concurrent_saves(lifecycle, matchup_id):

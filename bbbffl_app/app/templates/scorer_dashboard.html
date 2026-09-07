@@ -87,6 +87,9 @@ th{color:#8b949e;font-weight:600}
 </section>
 </main>
 <script>
+const csrfToken={{ csrf_token|tojson }};
+const scorerDashboardRoles={{ scorer_dashboard_roles|tojson }};
+let roleSwitchAttempted=false;
 const esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function human(iso){if(!iso)return '—';try{return new Date(iso).toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'})}catch(e){return iso}}
 async function api(path){const r=await fetch(path,{headers:{'Accept':'application/json'}});const d=await r.json().catch(()=>({detail:r.statusText}));if(!r.ok){const e=new Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail));e.status=r.status;throw e}return d}
@@ -188,11 +191,25 @@ function activityHtml(items){
   return `<ul class="queue">${items.map(e=>`<li class="item"><div class="item-title">${esc(e.label)}${e.team_name?` — ${esc(e.team_name)}`:''}</div><div class="item-detail muted">${human(e.occurred_at)} · ${esc(e.actor_role||'system')}${e.reason?` · ${esc(e.reason)}`:''}</div><details class="diag"><summary>Diagnostics</summary><div>entity: ${esc(e.diagnostics.entity_type)} ${esc(e.diagnostics.entity_id)}\ncorrelation: ${esc(e.diagnostics.correlation_id)}</div></details></li>`).join('')}</ul>`;
 }
 
+function workflowLinkOrNote(item){
+  // A next-action/attention item's `url` always names the correct owning
+  // workflow, even when the *active role* cannot use it (e.g. a Replay
+  // Operator does not hold `roundsetup.manage` for Round Preflight) --
+  // never hide the link entirely, but never present it as clickable-for-
+  // you either; say so in text, not colour alone (issue #147, Codex
+  // review on PR #159).
+  if(!item.url)return '';
+  if(item.actionable_by_you===false){
+    return `<p class="muted">Requires <code>${esc(item.capability)}</code> authority, not held by your active role. A Scorer, Secretary or Administrator can open: <a href="${esc(item.url)}">${esc(item.url)}</a></p>`;
+  }
+  return `<a class="item-link" href="${esc(item.url)}">Open workflow →</a>`;
+}
+
 function attentionGroup(category,label,items){
   if(!items.length)return '';
   const open=category!=='completed'&&category!=='advisory';
   return `<details class="queue-group" ${open?'open':''}><summary><h3 style="display:inline">${label} <span class="queue-count">${items.length}</span></h3></summary>
-    <ul class="queue">${items.map(i=>`<li class="item category-${esc(i.category)}"><div class="item-title">${esc(i.title)}</div><div class="item-detail">${esc(i.detail)}</div>${i.url?`<a class="item-link" href="${esc(i.url)}">Open workflow →</a>`:''}${i.diagnostics?`<details class="diag"><summary>Diagnostics</summary><div>${esc(JSON.stringify(i.diagnostics))}</div></details>`:''}</li>`).join('')}</ul></details>`;
+    <ul class="queue">${items.map(i=>`<li class="item category-${esc(i.category)}"><div class="item-title">${esc(i.title)}</div><div class="item-detail">${esc(i.detail)}</div>${workflowLinkOrNote(i)}${i.diagnostics?`<details class="diag"><summary>Diagnostics</summary><div>${esc(JSON.stringify(i.diagnostics))}</div></details>`:''}</li>`).join('')}</ul></details>`;
 }
 
 function attentionHtml(items){
@@ -221,7 +238,7 @@ function renderDashboard(dashboard){
       <h2 id="next-action-heading">Next safe action</h2>
       <p style="font-size:1.05rem;font-weight:700">${esc(na.title)}</p>
       <p>${esc(na.detail)}</p>
-      ${na.url?`<a class="item-link" href="${esc(na.url)}">Open workflow →</a>`:''}
+      ${workflowLinkOrNote(na)}
     </section>
     <section class="card" aria-labelledby="attention-heading">
       <h2 id="attention-heading">Scorer attention queue</h2>
@@ -245,6 +262,19 @@ function renderDashboard(dashboard){
     </section>`;
 }
 
+async function tryActivateQualifyingRole(){
+  try{
+    const ctx=await api('/api/context');
+    if(!ctx.coach_id)return false;
+    const granted=ctx.granted_roles||[];
+    const preferred=scorerDashboardRoles.find(r=>granted.includes(r));
+    if(!preferred)return false;
+    const r=await fetch('/api/context/role',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},body:JSON.stringify({role:preferred})});
+    return r.ok;
+  }catch(e){
+    return false;
+  }
+}
 async function load(){
   try{
     const qs=new URLSearchParams();
@@ -263,7 +293,17 @@ async function load(){
     renderDashboard(d.dashboard);
   }catch(e){
     if(e.status===403){
-      document.querySelector('#app').innerHTML='<div class="card"><p class="warn">The active role is not authorised for the Scorer dashboard. Switch to Scorer, Replay Operator or Administrator via the account context switcher.</p></div>';
+      // A freshly authenticated session's active role is always "coach"
+      // even when granted Scorer/Replay-Operator/Administrator authority
+      // (issue #147, Codex review on PR #159) -- try switching to
+      // whichever qualifying role this identity actually holds, once,
+      // before reporting a real authorization failure.
+      if(!roleSwitchAttempted){
+        roleSwitchAttempted=true;
+        const switched=await tryActivateQualifyingRole();
+        if(switched)return load();
+      }
+      document.querySelector('#app').innerHTML='<div class="card"><p class="warn">The active role is not authorised for the Scorer dashboard. Sign in with a coach identity granted Scorer, Replay Operator or Administrator authority, then reopen this page.</p></div>';
       document.querySelector('#context').textContent='Not authorised';
       return;
     }

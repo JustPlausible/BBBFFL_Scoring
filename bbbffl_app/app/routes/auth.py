@@ -24,6 +24,7 @@ from app.auth_rate_limit import RateLimitedError
 from app.coach_lineup import CoachLineupService
 from app.config import BASE_DIR
 from app.csrf import issue_token, verify_token
+from app.routes import scorer_dashboard as scorer_dashboard_routes
 
 router = APIRouter()
 templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
@@ -141,9 +142,6 @@ async def login_submit(request: Request):
     return response
 
 
-_SCORER_DASHBOARD_ROLES = frozenset({"scorer", "replay_operator", "admin"})
-
-
 @router.get("/account", response_class=HTMLResponse)
 def account_page(request: Request):
     coach = get_current_coach(request)
@@ -156,9 +154,17 @@ def account_page(request: Request):
     # Issue #147: make the Scorer Operations Dashboard the discoverable
     # primary operational destination for a coach identity that holds any
     # role able to reach it -- never a redirect (this page still confirms
-    # "coach" identity first), just an unmistakable link alongside it.
+    # "coach" identity first), just an unmistakable link alongside it. A
+    # freshly authenticated session's *active* role is always "coach"
+    # regardless of what is granted (see `app.auth.ActingContextService`),
+    # so the link must switch to the preferred granted role first (Codex
+    # review on PR #159) -- `preferred_scorer_role` names which one; the
+    # template performs the actual switch via the existing, CSRF-protected
+    # `POST /api/context/role` before navigating to `/scorer`.
     granted_roles = request.app.state.acting_context.available_roles(coach.coach_id)
-    has_scorer_dashboard_access = bool(granted_roles & _SCORER_DASHBOARD_ROLES)
+    preferred_scorer_role = next(
+        (role for role in scorer_dashboard_routes.SCORER_DASHBOARD_ROLE_PREFERENCE if role in granted_roles), None
+    )
     response = templates.TemplateResponse(
         request,
         "account.html",
@@ -166,7 +172,8 @@ def account_page(request: Request):
             "coach": coach,
             "csrf_token": token,
             "lineup_rounds": lineup_rounds,
-            "has_scorer_dashboard_access": has_scorer_dashboard_access,
+            "has_scorer_dashboard_access": preferred_scorer_role is not None,
+            "preferred_scorer_role": preferred_scorer_role,
         },
     )
     _attach_csrf_cookie(request, response, token)

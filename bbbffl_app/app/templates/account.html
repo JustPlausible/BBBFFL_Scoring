@@ -22,6 +22,10 @@
   .rounds a.state-submitted_with_changes { border-left-color: #d29922; }
   .rounds a.state-draft_saved { border-left-color: #58a6ff; }
   .rounds a.state-not_submitted { border-left-color: #566078; }
+  .rounds button.link-button { display: flex; flex-direction: column; gap: 3px; align-items: flex-start; width: 100%; text-align: left; color: #d8e9ff; background: #202838; border-radius: 7px; padding: 10px 12px; text-decoration: none; min-height: 44px; border: none; border-left: 4px solid #58a6ff; font: inherit; cursor: pointer; }
+  .rounds button.link-button:hover { background: #263044; }
+  .rounds button.link-button:disabled { cursor: wait; opacity: 0.8; }
+  .link-error { color: #ff7b72; font-size: 0.82rem; margin: -4px 0 0; min-height: 1.2em; }
   form { margin-top: 18px; }
   button { font-size: 0.9rem; padding: 8px 14px; border-radius: 6px; border: 1px solid #a53a3a; background: #a53a3a; color: white; cursor: pointer; }
   button:hover { background: #8f3232; }
@@ -33,10 +37,46 @@
     <div class="muted">This confirms which coach identity your browser session is authenticated as.</div>
     <div class="field"><span>Coach:</span> {{ coach.display_name }}</div>
     <div class="field"><span>Coach ID:</span> {{ coach.coach_id }}</div>
-    {% if has_scorer_dashboard_access %}<div class="rounds"><a href="/scorer">
-      <span class="round-label">Scorer Operations Dashboard →</span>
-      <span class="round-meta">Your normal operational home once acting as Scorer, Replay Operator or Administrator.</span>
-    </a></div>{% endif %}
+    {% if has_scorer_dashboard_access %}<div class="rounds">
+      <button type="button" class="link-button" id="open-scorer-dashboard">
+        <span class="round-label">Scorer Operations Dashboard →</span>
+        <span class="round-meta">Your normal operational home once acting as Scorer, Replay Operator or Administrator.</span>
+      </button>
+      <p class="link-error" id="open-scorer-dashboard-error" role="alert"></p>
+    </div>
+    <script>
+      (function () {
+        var button = document.getElementById('open-scorer-dashboard');
+        var error = document.getElementById('open-scorer-dashboard-error');
+        var preferredRole = {{ preferred_scorer_role|tojson }};
+        var csrfToken = {{ csrf_token|tojson }};
+        button.addEventListener('click', function () {
+          button.disabled = true;
+          error.textContent = '';
+          // A freshly authenticated session's active role is always "coach"
+          // even when granted Scorer/Replay-Operator/Administrator
+          // authority -- activate the granted role through the existing
+          // acting-context API before navigating, so /scorer never 403s on
+          // the very first click (issue #147, Codex review on PR #159).
+          fetch('/api/context/role', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ role: preferredRole })
+          }).then(function (response) {
+            if (!response.ok) {
+              return response.json().catch(function () { return {}; }).then(function (data) {
+                throw new Error(data.detail || response.statusText);
+              });
+            }
+            window.location.href = '/scorer';
+          }).catch(function (err) {
+            button.disabled = false;
+            error.textContent = 'Could not switch to the ' + preferredRole + ' role: ' + err.message;
+          });
+        });
+      })();
+    </script>
+    {% endif %}
     {% if lineup_rounds %}<h2>Weekly selections</h2><div class="rounds">{% for round in lineup_rounds %}<a class="state-{{ round.state }}" href="/coach/seasons/{{ round.season_id }}/rounds/{{ round.round_id }}/lineup">
       <span class="round-label">{{ round.round_label }} →</span>
       <span class="round-status">{% if round.state == 'submitted_with_changes' %}Submitted + private changes{% elif round.state == 'submitted' %}Submitted{% elif round.state == 'draft_saved' %}Draft saved{% else %}Not submitted{% endif %}</span>

@@ -84,6 +84,33 @@ class NextAction:
     capability: str | None = None
 
 
+class _CachedMatchFacts:
+    """Wraps a `MatchFactsProvider` and memoizes `matches_for(...)` for the
+    lifetime of one dashboard build (Codex review, PR #159): building a
+    dashboard evaluates trigger activation once and then per-position lock
+    state for every team's lineup, each of which independently asks its
+    `match_facts` collaborator for this round's matches. Without this, a
+    ten-team round issues roughly one live AFL match-list request per team
+    (`app.afl_resilience.ResilientAflClient` retries/caches transport
+    failures, but still attempts a live request on every call) -- wildly
+    more than the round's evidence actually changes within one read.
+    `evaluation_at` is passed straight through, never cached, so replay/
+    live clock semantics are unaffected."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self._cache: dict[str, list] = {}
+
+    def matches_for(self, bbbffl_round_id: str) -> list:
+        if bbbffl_round_id not in self._cache:
+            self._cache[bbbffl_round_id] = self._inner.matches_for(bbbffl_round_id)
+        return self._cache[bbbffl_round_id]
+
+    def evaluation_at(self):
+        inner_evaluation_at = getattr(self._inner, "evaluation_at", None)
+        return inner_evaluation_at() if callable(inner_evaluation_at) else None
+
+
 def _ordinary_rounds(database, season_id: str) -> list[dict]:
     rows = database.execute(
         "SELECT r.bbbffl_round_id, r.label round_label, r.sequence, r.competition_id, "
@@ -544,6 +571,7 @@ def _determine_next_action(
     round_id: str,
     season_id: str,
     next_round_id: str | None,
+    all_matches_finished: bool,
 ) -> dict:
     round_url = ROUND_CENTRE_URL.format(round_id=round_id)
     preflight_url = PREFLIGHT_URL.format(round_id=round_id)
@@ -555,7 +583,12 @@ def _determine_next_action(
         )
         if not blockers and preflight is not None and preflight["readiness"]["safe_to_open"]:
             return NextAction(
-                "open_round", CATEGORY_BLOCKING, "Open round", "Preflight is satisfied; open the round.", preflight_url
+                "open_round",
+                CATEGORY_BLOCKING,
+                "Open round",
+                "Preflight is satisfied; open the round.",
+                preflight_url,
+                capability="roundsetup.manage",
             ).__dict__
         if lockout_only:
             return NextAction(
@@ -564,6 +597,7 @@ def _determine_next_action(
                 "Configure lockout plan",
                 "Mapping is accepted; configure the selective/main lockout trigger plan before opening.",
                 preflight_url,
+                capability="roundsetup.manage",
             ).__dict__
         return NextAction(
             "complete_preflight",
@@ -571,6 +605,7 @@ def _determine_next_action(
             "Complete round preflight",
             "Accept the AFL mapping and satisfy every preflight blocker before this round can open.",
             preflight_url,
+            capability="roundsetup.manage",
         ).__dict__
 
     missing = [t for t in team_rows if t["submission_state"] == SUBMISSION_MISSING]
@@ -587,6 +622,7 @@ def _determine_next_action(
                 "Configure lockout plan",
                 "This round has opened without a lockout trigger plan; configure it now.",
                 preflight_url,
+                capability="roundsetup.manage",
             ).__dict__
         if not any_activated:
             return NextAction(
@@ -603,6 +639,7 @@ def _determine_next_action(
                 "Review missed-submission adjudication",
                 "A trigger has locked at least one team with no submission; adjudicate under issue #146.",
                 LINEUP_ADJUDICATION_URL.format(round_id=round_id),
+                capability="lineup.adjudicate_missed_submission",
             ).__dict__
         if missing and not main_activated:
             return NextAction(
@@ -611,6 +648,7 @@ def _determine_next_action(
                 "Complete remaining lineups",
                 f"{len(missing)} team(s) have not submitted a lineup yet.",
                 DELEGATED_LINEUP_URL.format(round_id=round_id),
+                capability="lineup.proxy",
             ).__dict__
         if not main_activated:
             return NextAction(
@@ -626,6 +664,7 @@ def _determine_next_action(
             "Advance round to live",
             "The main lockout has activated; advance the round to live.",
             round_url,
+            capability="round.review",
         ).__dict__
 
     if lifecycle_state == "live":
@@ -636,13 +675,28 @@ def _determine_next_action(
                 "Review missed-submission adjudication",
                 "At least one team never submitted a lineup and lockout has activated; adjudicate under issue #146.",
                 LINEUP_ADJUDICATION_URL.format(round_id=round_id),
+                capability="lineup.adjudicate_missed_submission",
+            ).__dict__
+        if not all_matches_finished:
+            # `live` begins at main lockout and can span the entire set of
+            # mapped AFL matches -- `transition` performs no match-
+            # completion validation of its own, so this dashboard must
+            # never advertise "advance to review" as safe while games are
+            # still in progress (Codex review, PR #159).
+            return NextAction(
+                "await_match_completion",
+                CATEGORY_WAITING,
+                "Await match completion",
+                "Not every mapped AFL match has finished; advancing to review is not yet safe.",
+                round_url,
             ).__dict__
         return NextAction(
             "advance_to_review",
             CATEGORY_BLOCKING,
             "Advance round to review",
-            "Play is complete; advance the round to review before calculating official scores.",
+            "Every mapped match has finished; advance the round to review before calculating official scores.",
             round_url,
+            capability="round.review",
         ).__dict__
 
     if lifecycle_state == "review":
@@ -653,6 +707,7 @@ def _determine_next_action(
                 "Calculate/refresh scores",
                 "No calculation exists yet.",
                 round_url,
+                capability="round.review",
             ).__dict__
         if not all(m["evidence_fresh"] for m in round_review["matchups"]):
             return NextAction(
@@ -669,6 +724,7 @@ def _determine_next_action(
                 "Calculate/refresh scores",
                 "At least one matchup has not been calculated yet.",
                 round_url,
+                capability="round.review",
             ).__dict__
         if any(t.get("calculation_stale") for t in team_rows):
             return NextAction(
@@ -677,6 +733,7 @@ def _determine_next_action(
                 "Recalculate after correction",
                 "A correction or adjudication changed an effective submission after the last calculation.",
                 round_url,
+                capability="round.review",
             ).__dict__
         if not round_review["ready_for_signoff"]:
             return NextAction(
@@ -685,6 +742,7 @@ def _determine_next_action(
                 "Resolve scorer decisions",
                 "Unresolved DNP/Interchange rulings or matchup blockers remain before sign-off.",
                 round_url,
+                capability="round.review",
             ).__dict__
         return NextAction(
             "ready_for_signoff",
@@ -692,6 +750,7 @@ def _determine_next_action(
             "Ready for atomic sign-off",
             "Every matchup is calculated and blocker-free; publish all five results.",
             round_url,
+            capability="round.review",
         ).__dict__
 
     if lifecycle_state == "final":
@@ -702,6 +761,7 @@ def _determine_next_action(
                 "Published — prepare next round",
                 "This round is published. Move on to the next round's preflight.",
                 PREFLIGHT_URL.format(round_id=next_round_id),
+                capability="roundsetup.manage",
             ).__dict__
         return NextAction(
             "published_season_complete",
@@ -876,13 +936,20 @@ def _build_round_dashboard(
 
     lineups_repo = WeeklyLineupRepository(database)
     lockouts_repo = LockoutRepository(database)
-    match_facts = RoundMatchFactsProvider(RoundMappingRepository(database), afl_client)
+    # Cached for the lifetime of this one build (Codex review, PR #159): a
+    # ten-team round would otherwise ask `match_facts` for this round's
+    # matches roughly once per team (trigger materialisation plus each
+    # team's own position-lock read), each a live AFL request -- one real
+    # fetch is all this read ever needs.
+    match_facts = _CachedMatchFacts(RoundMatchFactsProvider(RoundMappingRepository(database), afl_client))
 
     trigger_rows: list[dict] = []
+    matches: list = []
     evidence_fresh = True
     evidence_batch = getattr(afl_client, "evidence_batch", None)
     scope = evidence_batch() if callable(evidence_batch) else nullcontext(afl_client)
     lockout_evidence_error = None
+    team_rows: list[dict] = []
     if lifecycle_state != "not_created":
         with scope as evidence:
             try:
@@ -896,22 +963,36 @@ def _build_round_dashboard(
             except (AflApiError, MatchResolutionError) as exc:
                 trigger_rows = []
                 lockout_evidence_error = str(exc)
+            any_trigger_activated = any(row["activated"] for row in trigger_rows)
+            team_rows = _build_team_readiness(
+                lineups_repo,
+                lockouts_repo,
+                identities,
+                match_facts,
+                season_id=season.season_id,
+                competition_id=competition_id,
+                round_id=round_id,
+                entry_ids=entry_ids,
+                lifecycle_state=lifecycle_state,
+                any_trigger_activated=any_trigger_activated,
+            )
             is_fresh = getattr(evidence, "is_evidence_fresh", None)
             evidence_fresh = is_fresh() if callable(is_fresh) else True
+    else:
+        team_rows = _build_team_readiness(
+            lineups_repo,
+            lockouts_repo,
+            identities,
+            match_facts,
+            season_id=season.season_id,
+            competition_id=competition_id,
+            round_id=round_id,
+            entry_ids=entry_ids,
+            lifecycle_state=lifecycle_state,
+            any_trigger_activated=False,
+        )
 
-    any_trigger_activated = any(row["activated"] for row in trigger_rows)
-    team_rows = _build_team_readiness(
-        lineups_repo,
-        lockouts_repo,
-        identities,
-        match_facts,
-        season_id=season.season_id,
-        competition_id=competition_id,
-        round_id=round_id,
-        entry_ids=entry_ids,
-        lifecycle_state=lifecycle_state,
-        any_trigger_activated=any_trigger_activated,
-    )
+    all_matches_finished = bool(matches) and all(match.state in ("postgame", "completed") for match in matches)
 
     matchups = lifecycle.list_matchups(round_id) if lifecycle_state != "not_created" else []
     round_review_view = None
@@ -972,6 +1053,7 @@ def _build_round_dashboard(
         round_id=round_id,
         season_id=season.season_id,
         next_round_id=next_round["bbbffl_round_id"] if next_round else None,
+        all_matches_finished=all_matches_finished,
     )
 
     matchup_ids = [m.matchup_id for m in matchups]

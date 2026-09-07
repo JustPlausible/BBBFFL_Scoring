@@ -318,3 +318,54 @@ def test_refresh_reflects_authoritative_state_after_a_linked_mutation():
     after = _dashboard(db, afl, _season_id(lifecycle, round_), round_id=round_.bbbffl_round_id)
     assert after["round"]["state"] == "final"
     assert after["round_options"][0]["state"] == "final"
+
+
+class _CountingFacts(Facts):
+    """`Facts` with a call counter (Codex review, PR #159): proves the
+    dashboard fetches this round's AFL match list once per build, never
+    once per team, even though every team's lineup readiness independently
+    needs it for its own position-lock read."""
+
+    def __init__(self, stats, status="CONCLUDED"):
+        super().__init__(stats, status)
+        self.calls = 0
+
+    def get_matches(self, round_id):
+        self.calls += 1
+        return super().get_matches(round_id)
+
+
+def test_dashboard_build_fetches_match_evidence_once_regardless_of_team_count():
+    db, lifecycle, round_, entries, stats, canon = full_round(year=8914, afl_round=100)
+    afl = _CountingFacts(stats)
+    view = _dashboard(db, afl, _season_id(lifecycle, round_), round_id=round_.bbbffl_round_id)
+    assert len(view["lineups"]) == 10
+    assert afl.calls == 1
+
+
+def test_live_round_with_matches_still_in_progress_waits_for_completion():
+    db, lifecycle, round_, entries, scope, pool, ownership = lockout_context(year=8915)
+    lineups = WeeklyLineupRepository(db)
+    triggers = LockoutTriggerRepository(db)
+    configure_main(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID])
+    for entry in entries:
+        establish(lineups, round_, entry, scope, {})
+    lifecycle.transition(round_.bbbffl_round_id, "live")
+    afl = type("Afl", (), {"get_matches": lambda self, rid: [early_match(status="LIVE", start=EARLY_START)]})()
+    view = _dashboard(db, afl, _season_id(lifecycle, round_), round_id=round_.bbbffl_round_id)
+    assert view["next_action"]["code"] == "await_match_completion"
+    assert view["next_action"]["category"] == "waiting"
+
+
+def test_live_round_with_all_matches_finished_offers_advance_to_review():
+    db, lifecycle, round_, entries, scope, pool, ownership = lockout_context(year=8916)
+    lineups = WeeklyLineupRepository(db)
+    triggers = LockoutTriggerRepository(db)
+    configure_main(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID])
+    for entry in entries:
+        establish(lineups, round_, entry, scope, {})
+    lifecycle.transition(round_.bbbffl_round_id, "live")
+    afl = type("Afl", (), {"get_matches": lambda self, rid: [early_match(status="CONCLUDED", start=EARLY_START)]})()
+    view = _dashboard(db, afl, _season_id(lifecycle, round_), round_id=round_.bbbffl_round_id)
+    assert view["next_action"]["code"] == "advance_to_review"
+    assert view["next_action"]["capability"] == "round.review"

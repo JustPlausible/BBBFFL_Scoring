@@ -256,3 +256,125 @@ def test_scorer_dashboard_alias_redirects_to_canonical_route(dashboard_client):
     response = client.get("/scorer/dashboard", follow_redirects=False)
     assert response.status_code == 307
     assert response.headers["location"] == "/scorer"
+
+
+def test_next_action_marks_actionability_by_the_active_roles_own_capabilities(dashboard_client):
+    """Codex review, PR #159: a Replay Operator is admitted to this
+    dashboard but does not hold `roundsetup.manage` -- the round preflight
+    capability an unconfigured-lockout next action needs. The dashboard
+    must say so rather than advertise a link that always 403s for that
+    role, while a Scorer (who does hold it) sees the same action as
+    actionable."""
+    from app.routes.scorer_dashboard import require_scorer_dashboard
+
+    client = dashboard_client
+    # `full_round` opens the round without configuring any lockout trigger
+    # plan, so the deterministic next action is "configure_lockout_plan"
+    # (capability `roundsetup.manage`) -- Role.REPLAY_OPERATOR's capability
+    # set does not include it (app.authorization.CAPABILITIES).
+    season_id, round_, entries = _seed(client, 9113)
+    replay_op_coach = client.app.state.identities.create_coach("Replay Operator", email="replay-9113@example.com")
+    client.app.state.role_grants.grant(
+        replay_op_coach.coach_id,
+        Role.REPLAY_OPERATOR.value,
+        season_id=season_id,
+        actor=ActorContext.anonymous_operator("admin"),
+    )
+    scorer_coach = client.app.state.identities.create_coach("Scorer", email="scorer-9113@example.com")
+    client.app.state.role_grants.grant(
+        scorer_coach.coach_id, Role.SCORER.value, season_id=None, actor=ActorContext.anonymous_operator("admin")
+    )
+
+    replay_operator = Principal(
+        Role.REPLAY_OPERATOR,
+        replay_op_coach.coach_id,
+        "Replay Operator",
+        granted_roles=frozenset({Role.REPLAY_OPERATOR}),
+        session_id="s1",
+    )
+    _override(client, require_scorer_dashboard, replay_operator)
+    try:
+        response = client.get("/api/scorer/dashboard", params={"season_id": season_id})
+        assert response.status_code == 200, response.text
+        next_action = response.json()["dashboard"]["next_action"]
+        assert next_action["code"] == "configure_lockout_plan"
+        assert next_action["capability"] == "roundsetup.manage"
+        assert next_action["actionable_by_you"] is False
+    finally:
+        _clear_overrides(client)
+
+    scorer = Principal(
+        Role.SCORER, scorer_coach.coach_id, "Scorer", granted_roles=frozenset({Role.SCORER}), session_id="s1"
+    )
+    _override(client, require_scorer_dashboard, scorer)
+    try:
+        response = client.get("/api/scorer/dashboard", params={"season_id": season_id})
+        assert response.status_code == 200, response.text
+        next_action = response.json()["dashboard"]["next_action"]
+        assert next_action["code"] == "configure_lockout_plan"
+        assert next_action["actionable_by_you"] is True
+    finally:
+        _clear_overrides(client)
+
+
+def _extract_csrf(html: str) -> str:
+    match = re.search(r'name="csrf_token" value="([^"]+)"', html)
+    assert match, "csrf_token hidden field not found in rendered page"
+    return match.group(1)
+
+
+def _login(client, *, email, password):
+    login_page = client.get("/login")
+    csrf_token = _extract_csrf(login_page.text)
+    response = client.post(
+        "/login",
+        data={"email": email, "password": password, "csrf_token": csrf_token},
+        cookies=login_page.cookies,
+        follow_redirects=False,
+    )
+    assert response.status_code == 303, response.text
+    return response.cookies.get("bbbffl_session")
+
+
+def test_a_freshly_authenticated_granted_scorer_can_reach_the_dashboard_via_the_advertised_link(dashboard_client):
+    """End-to-end regression for Codex's P1 finding on PR #159: a coach
+    identity holding a standing Scorer grant, but whose session has not
+    yet switched its *active* role away from the "coach" every login
+    starts as, must be able to reach `/api/scorer/dashboard` by following
+    exactly the sequence `/account`'s advertised button now performs --
+    without a 403 in between."""
+    client = dashboard_client
+    _seed(client, 9114)
+    password = "correct horse battery staple"  # noqa: S105 -- test fixture password, not a real credential
+    coach = client.app.state.identities.create_coach("Freshly Granted Scorer", email="fresh-scorer-9114@example.com")
+    client.app.state.credentials.set_password(coach.coach_id, password, actor=ActorContext.anonymous_operator("admin"))
+    client.app.state.role_grants.grant(
+        coach.coach_id, Role.SCORER.value, season_id=None, actor=ActorContext.anonymous_operator("admin")
+    )
+    session_cookie = _login(client, email="fresh-scorer-9114@example.com", password=password)
+
+    # A brand-new session's active role is always "coach" (app.auth.
+    # ActingContextService), so the dashboard API must still 403 here --
+    # this is the exact failure Codex flagged, reproduced before the fix
+    # is exercised.
+    still_coach = client.get("/api/scorer/dashboard", cookies={"bbbffl_session": session_cookie})
+    assert still_coach.status_code == 403
+
+    account_page = client.get("/account", cookies={"bbbffl_session": session_cookie})
+    assert account_page.status_code == 200
+    assert 'id="open-scorer-dashboard"' in account_page.text
+    assert '"scorer"' in account_page.text
+    csrf_token = _extract_csrf(account_page.text)
+    csrf_cookie = account_page.cookies.get("bbbffl_csrf")
+
+    # Exactly what the account page's button now does: activate the
+    # granted role, then reach the dashboard.
+    switch = client.post(
+        "/api/context/role",
+        json={"role": "scorer"},
+        cookies={"bbbffl_session": session_cookie, "bbbffl_csrf": csrf_cookie},
+        headers={"X-CSRF-Token": csrf_token},
+    )
+    assert switch.status_code == 200, switch.text
+    now_scorer = client.get("/api/scorer/dashboard", cookies={"bbbffl_session": session_cookie})
+    assert now_scorer.status_code == 200, now_scorer.text

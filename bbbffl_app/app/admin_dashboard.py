@@ -240,7 +240,13 @@ def build_season_portfolio(
                 "current_round": round_summary["current_round"],
                 "blockers": _season_blockers(entries, ordinary is not None, draft_status, window, fixture_draw),
                 "season_centre_url": SEASON_CENTRE_URL.format(season_id=season.season_id),
-                "public_season_url": PUBLIC_SEASON_URL.format(season_id=season.season_id),
+                # `app.routes.public_rounds.season_overview` 404s once no
+                # ordinary round has an opened lifecycle row for this
+                # season (Codex review, PR #160) -- never advertise a link
+                # that is guaranteed to be a dead destination.
+                "public_season_url": (
+                    PUBLIC_SEASON_URL.format(season_id=season.season_id) if round_summary["rounds_opened"] > 0 else None
+                ),
                 "scorer_dashboard_url": (
                     scorer_dashboard_link(
                         season.season_id,
@@ -407,6 +413,22 @@ def _attention_queue(
                 "draft:incomplete",
                 "Draft in progress",
                 f"{draft['completed_picks']}/{draft['total_picks']} picks complete.",
+                capability="draft.manage",
+                url=DRAFT_URL.format(season_id=season.season_id),
+            )
+        )
+    elif draft is None:
+        # Matches `_season_blockers`'s "Draft not yet started" and the
+        # workflow map's own STAGE_DRAFT determination -- without this,
+        # the attention queue had no item at all explaining why a season
+        # with a complete roster and an ordinary competition still cannot
+        # progress (Codex review, PR #160).
+        items.append(
+            _attention_item(
+                CATEGORY_BLOCKING_CONFIGURATION,
+                "draft:not_started",
+                "Draft not yet started",
+                "Accept the draft order to begin the season draft.",
                 capability="draft.manage",
                 url=DRAFT_URL.format(season_id=season.season_id),
             )
@@ -922,6 +944,8 @@ def build_admin_dashboard(
         "links": {
             **centre["links"],
             "season_centre": SEASON_CENTRE_URL.format(season_id=season_id),
-            "public_season": PUBLIC_SEASON_URL.format(season_id=season_id),
+            "public_season": (
+                PUBLIC_SEASON_URL.format(season_id=season_id) if round_summary["rounds_opened"] > 0 else None
+            ),
         },
     }

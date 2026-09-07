@@ -156,6 +156,23 @@ def test_setup_only_season_never_confuses_round_definitions_with_lifecycle_rows(
     assert dashboard["current_round"]["state"] == "not_created"
 
 
+def test_public_season_link_is_hidden_until_a_round_has_opened():
+    """Codex review, PR #160: `app.routes.public_rounds.season_overview`
+    404s once no ordinary round has an opened lifecycle row for a season
+    -- the public-season link must never be advertised as a live
+    destination before that."""
+    g = build_governed_season(year=9126)
+    dashboard = _dashboard(g)
+    assert dashboard["links"]["public_season"] is None
+    portfolio = build_season_portfolio(g.seasons, g.identities, g.draft, g.preseason, g.fixtures, g.database)
+    row = next(r for r in portfolio if r["season_id"] == g.season.season_id)
+    assert row["public_season_url"] is None
+
+    g2 = build_governed_season(year=9127, close_preseason=True, open_round=True)
+    dashboard2 = _dashboard(g2)
+    assert dashboard2["links"]["public_season"] == f"/seasons/{g2.season.season_id}"
+
+
 # -- Draft state -----------------------------------------------------------
 
 
@@ -165,6 +182,21 @@ def test_draft_in_progress_is_reported_with_pick_counts():
     assert next(s for s in dashboard["workflow_map"] if s["stage"] == STAGE_DRAFT)["is_current"]
     item = next(i for i in dashboard["attention"] if i["code"] == "draft:incomplete")
     assert "0/20" in item["detail"]
+
+
+def test_draft_not_started_at_all_is_a_blocking_attention_item():
+    """Codex review, PR #160: a season with a complete roster and an
+    ordinary competition but no accepted draft order previously had no
+    attention item explaining why it cannot progress -- both draft
+    branches required `draft is not None`. Matches `_season_blockers`'s
+    "Draft not yet started" and the workflow map's own STAGE_DRAFT
+    determination."""
+    g = build_governed_season(year=9128, accept_draft_order=False)
+    dashboard = _dashboard(g)
+    assert dashboard["readiness"]["draft"] is None
+    assert next(s for s in dashboard["workflow_map"] if s["stage"] == STAGE_DRAFT)["is_current"]
+    item = next(i for i in dashboard["attention"] if i["code"] == "draft:not_started")
+    assert item["category"] == CATEGORY_BLOCKING_CONFIGURATION
 
 
 def test_finalized_draft_advances_to_preseason_stage():

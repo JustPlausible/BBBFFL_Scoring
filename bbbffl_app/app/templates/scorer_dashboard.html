@@ -103,6 +103,13 @@ function msg(s){document.querySelector('#message').textContent=s||''}
 const initialParams=new URLSearchParams(window.location.search);
 let current={season_id:initialParams.get('season_id')||null,round_id:initialParams.get('round_id')||null};
 
+function updateUrlParams(seasonId,roundId){
+  const url=new URL(window.location.href);
+  if(seasonId)url.searchParams.set('season_id',seasonId);else url.searchParams.delete('season_id');
+  if(roundId)url.searchParams.set('round_id',roundId);else url.searchParams.delete('round_id');
+  history.replaceState(null,'',url);
+}
+
 function renderContext(ctx){
   document.querySelector('#context').textContent=ctx.coach_id
     ? `Signed in as ${ctx.display_name} · Acting as ${ctx.active_role}${ctx.is_replay_context?' · REPLAY CONTEXT':''}`
@@ -116,9 +123,9 @@ function renderSelectors(seasons,dashboard){
     ${seasons.length>1?`<label>Season <select id="season-select" aria-label="Select season">${seasonOptions}</select></label>`:''}
     ${dashboard&&dashboard.round_options&&dashboard.round_options.length?`<label>Round <select id="round-select" aria-label="Select round">${roundOptions}</select></label>`:''}`;
   const seasonSelect=document.querySelector('#season-select');
-  if(seasonSelect)seasonSelect.onchange=()=>{current.season_id=seasonSelect.value;current.round_id=null;load()};
+  if(seasonSelect)seasonSelect.onchange=()=>{current.season_id=seasonSelect.value;current.round_id=null;updateUrlParams(current.season_id,current.round_id);load()};
   const roundSelect=document.querySelector('#round-select');
-  if(roundSelect)roundSelect.onchange=()=>{current.round_id=roundSelect.value;load()};
+  if(roundSelect)roundSelect.onchange=()=>{current.round_id=roundSelect.value;updateUrlParams(current.season_id,current.round_id);load()};
 }
 
 function lockSummaryLine(s){
@@ -291,6 +298,7 @@ async function load(){
     renderContext(d.acting_context);
     current.season_id=d.dashboard?d.dashboard.season.season_id:(d.seasons[0]&&d.seasons[0].season_id)||current.season_id;
     current.round_id=d.dashboard&&d.dashboard.round?d.dashboard.round.bbbffl_round_id:null;
+    updateUrlParams(current.season_id,current.round_id);
     renderSelectors(d.seasons,d.dashboard);
     if(!d.seasons.length){
       document.querySelector('#app').innerHTML='<div class="card"><p class="muted">No seasons are authorised for the active role.</p></div>';

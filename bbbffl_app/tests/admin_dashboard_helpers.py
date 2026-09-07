@@ -43,6 +43,7 @@ def build_governed_season(
     year: int,
     entries: int = 10,
     squad_limit: int = 1,
+    accept_draft_order: bool = True,
     finalize_draft: bool = False,
     open_preseason: bool = False,
     close_preseason: bool = False,
@@ -99,7 +100,8 @@ def build_governed_season(
     ]
 
     draft = DraftRepository(db)
-    draft.accept_order(season.season_id, [entry.season_entry_id for entry in season_entries])
+    if accept_draft_order or finalize_draft or close_preseason:
+        draft.accept_order(season.season_id, [entry.season_entry_id for entry in season_entries])
     if finalize_draft or close_preseason:
         for _ in range(entries * squad_limit):
             pick = draft.next_pick(season.season_id)

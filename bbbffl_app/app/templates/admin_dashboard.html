@@ -132,7 +132,7 @@ function seasonCard(s,selectedSeasonId){
     ${blockers}
     <div class="grid-links">
       <a href="${esc(s.season_centre_url)}">Season Centre</a>
-      <a href="${esc(s.public_season_url)}">Public season</a>
+      ${s.public_season_url?`<a href="${esc(s.public_season_url)}">Public season</a>`:'<span class="disabled">Public season n/a</span>'}
       ${s.scorer_dashboard_url?`<a href="${esc(s.scorer_dashboard_url)}">Scorer Dashboard</a>`:'<span class="disabled">Scorer Dashboard n/a</span>'}
     </div>
   </div>`;
@@ -219,7 +219,7 @@ function renderDashboard(portfolioSectionHtml,dashboard){
       ${identityIssuesHtml(dashboard.identity_issues)}
       <div class="grid-links">
         <a href="${esc(dashboard.links.season_centre)}">Season Centre</a>
-        <a href="${esc(dashboard.links.public_season)}">Public season</a>
+        ${dashboard.links.public_season?`<a href="${esc(dashboard.links.public_season)}">Public season</a>`:'<span class="disabled">Public season n/a</span>'}
       </div>
     </section>
     <section class="card" aria-labelledby="workflow-heading">

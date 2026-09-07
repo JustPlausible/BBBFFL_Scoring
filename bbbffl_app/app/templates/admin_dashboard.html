@@ -83,7 +83,18 @@ function human(iso){if(!iso)return '—';try{return new Date(iso).toLocaleString
 async function api(path){const r=await fetch(path,{headers:{'Accept':'application/json'}});const d=await r.json().catch(()=>({detail:r.statusText}));if(!r.ok){const e=new Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail));e.status=r.status;throw e}return d}
 function msg(s){document.querySelector('#message').textContent=s||''}
 
-let current={season_id:null};
+// A handoff link (a bookmark, or a link from another surface) may name
+// exactly which season it means -- without reading it back, a refresh or
+// direct visit silently falls back to `portfolio[0]` (the newest season)
+// regardless of which one was actually selected (Codex review, PR #160).
+const initialParams=new URLSearchParams(window.location.search);
+let current={season_id:initialParams.get('season_id')||null};
+
+function updateUrlSeasonId(seasonId){
+  const url=new URL(window.location.href);
+  if(seasonId)url.searchParams.set('season_id',seasonId);else url.searchParams.delete('season_id');
+  history.replaceState(null,'',url);
+}
 
 function renderContext(ctx,authentication){
   const who=ctx.coach_id
@@ -107,7 +118,7 @@ function renderSelectors(portfolio,selectedSeasonId){
   if(portfolio.length<2){document.querySelector('#selectors').innerHTML='';return}
   const options=portfolio.map(s=>`<option value="${esc(s.season_id)}" ${s.season_id===selectedSeasonId?'selected':''}>${esc(s.label)} (${esc(s.year)})</option>`).join('');
   document.querySelector('#selectors').innerHTML=`<label>Season <select id="season-select" aria-label="Select season">${options}</select></label>`;
-  document.querySelector('#season-select').onchange=e=>{current.season_id=e.target.value;load()};
+  document.querySelector('#season-select').onchange=e=>{current.season_id=e.target.value;updateUrlSeasonId(current.season_id);load()};
 }
 
 function seasonCard(s,selectedSeasonId){
@@ -258,6 +269,7 @@ async function load(){
     msg('');
     renderContext(d.acting_context,d.authentication);
     current.season_id=d.selected_season_id||current.season_id;
+    updateUrlSeasonId(current.season_id);
     renderSelectors(d.portfolio,current.season_id);
     if(!d.portfolio.length){
       document.querySelector('#app').innerHTML='<div class="card"><p class="muted">No seasons exist yet. Create one from the Season Centre.</p></div>';

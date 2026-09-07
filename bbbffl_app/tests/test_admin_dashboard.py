@@ -258,6 +258,21 @@ def test_administrator_summary_agrees_with_the_underlying_scorer_state():
     assert dashboard["scorer_summary"]["next_action"]["code"] == scorer["next_action"]["code"]
 
 
+# -- Audit / integrity read model --------------------------------------
+
+
+def test_audit_summary_includes_round_mapping_and_matchup_events():
+    """Codex review, PR #160: round-level events (AFL mapping acceptance,
+    round-lifecycle transitions) previously never appeared in the audit
+    overview at all -- only season/coach/entry/draft/preseason/fixture/
+    role-grant entities were gathered."""
+    g = build_governed_season(year=9120, close_preseason=True, open_round=True)
+    dashboard = _dashboard(g)
+    entity_types = {e["entity_type"] for e in dashboard["audit"]}
+    assert "competition.round" in entity_types
+    assert "round.afl_mapping" in entity_types
+
+
 # -- Completed/archive season state ------------------------------------
 
 
@@ -385,6 +400,23 @@ def test_missing_competition_stream_is_a_blocking_item():
     codes = {item["code"] for item in dashboard["attention"]}
     assert "season:no_competition_configured" in codes
     assert dashboard["season"]["rules_label"] is None
+
+
+def test_non_ordinary_competition_stream_does_not_satisfy_readiness():
+    """Codex review, PR #160: a finals/replay/SuperScore-only stream must
+    not be mistaken for the ordinary competition a season needs to run
+    weekly rounds -- `competition_streams_configured` alone (any stream
+    type counted) previously let a season with only a non-ordinary stream
+    silently read as setup-complete."""
+    db = migrated_connection()
+    season, identities = _bare_season(db, 9119)
+    seasons_repo = SeasonRepository(db)
+    rules = seasons_repo.create_rules_version(season.season_id, "finals", 1, "Finals Rules")
+    seasons_repo.create_competition(season.season_id, rules.rules_version_id, "finals", "Finals", "finals")
+    dashboard = _dashboard_for(db, season.season_id, identities)
+    codes = {item["code"] for item in dashboard["attention"]}
+    assert "season:no_competition_configured" in codes
+    assert next(s for s in dashboard["workflow_map"] if s["stage"] == STAGE_SETUP)["is_current"]
 
 
 # -- Unknown season -------------------------------------------------------

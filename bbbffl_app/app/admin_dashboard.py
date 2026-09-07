@@ -54,7 +54,8 @@ contradict one another for the same season/round (see
 
 import dataclasses
 
-from app.audit import ROLE_GRANT_CREATED, ROLE_GRANT_REVOKED
+from app.audit import ENTITY_TYPE_LINEUP, ROLE_GRANT_CREATED, ROLE_GRANT_REVOKED
+from app.lineups import WeeklyLineupRepository
 from app.round_preflight import build_round_preflight
 from app.scorer_dashboard import (
     CATEGORY_BLOCKING,
@@ -329,6 +330,7 @@ def _attention_queue(
     season,
     entries,
     readiness: dict,
+    has_ordinary_competition: bool,
     fixture_draw,
     round_summary: dict,
     current_round_id: str | None,
@@ -364,13 +366,16 @@ def _attention_queue(
                 diagnostics={"season_entry_ids": issue["season_entry_ids"]},
             )
         )
-    if readiness["competition_streams_configured"] == 0:
+    if not has_ordinary_competition:
         items.append(
             _attention_item(
                 CATEGORY_BLOCKING_CONFIGURATION,
                 "season:no_competition_configured",
-                "No competition/rules stream configured",
-                "This season has no competition stream, so no rules version is accepted yet.",
+                "No ordinary competition/rules stream configured",
+                "This season has no ordinary competition stream, so it cannot run weekly rounds yet -- a "
+                "finals/replay/SuperScore-only stream does not satisfy this."
+                if readiness["competition_streams_configured"]
+                else "This season has no competition stream, so no rules version is accepted yet.",
                 capability="season.manage",
                 url=season_centre_url,
             )
@@ -526,10 +531,12 @@ def _attention_queue(
 # -- Workflow map ------------------------------------------------------
 
 
-def _current_stage(season, readiness: dict, window, fixture_draw, round_summary: dict) -> str:
+def _current_stage(
+    season, readiness: dict, has_ordinary_competition: bool, window, fixture_draw, round_summary: dict
+) -> str:
     if season.lifecycle_state == "completed":
         return STAGE_SEASON_COMPLETE
-    if readiness["entries_established"] != BBBFFL_TEAM_COUNT or readiness["competition_streams_configured"] == 0:
+    if readiness["entries_established"] != BBBFFL_TEAM_COUNT or not has_ordinary_competition:
         return STAGE_SETUP
     draft = readiness["draft"]
     if draft is None or not draft["is_finalized"]:
@@ -544,8 +551,10 @@ def _current_stage(season, readiness: dict, window, fixture_draw, round_summary:
     return STAGE_WEEKLY_OPERATIONS
 
 
-def _workflow_map(season, readiness, window, fixture_draw, round_summary, links, current_round_id) -> list[dict]:
-    current = _current_stage(season, readiness, window, fixture_draw, round_summary)
+def _workflow_map(
+    season, readiness, has_ordinary_competition, window, fixture_draw, round_summary, links, current_round_id
+) -> list[dict]:
+    current = _current_stage(season, readiness, has_ordinary_competition, window, fixture_draw, round_summary)
     # `current_round_id` (from `select_current_round`) only names a round
     # actually awaiting preparation while `current` is itself
     # STAGE_ROUND_PREPARATION -- once a round has opened, the *next*
@@ -649,7 +658,17 @@ _ADMIN_AUDIT_ACTION_LABELS = {
 
 
 def _audit_summary(
-    audit_events, role_grants, season, entries, draft_status, window, fixture_draw, limit: int = 20
+    database,
+    lifecycle,
+    audit_events,
+    role_grants,
+    season,
+    entries,
+    draft_status,
+    window,
+    fixture_draw,
+    current_round_id: str | None,
+    limit: int = 20,
 ) -> list[dict]:
     """Recent, high-value administrative events for this season, read
     straight from the existing immutable `audit_event` trail -- issue
@@ -657,7 +676,17 @@ def _audit_summary(
     create a parallel log". Gathers events by the same known entity ids
     the domain modules themselves recorded them against (see this
     module's docstring), mirroring `app.scorer_dashboard._recent_activity`'s
-    established per-entity-id gather-then-merge shape."""
+    established per-entity-id gather-then-merge shape.
+
+    Round-level events (mapping acceptance/correction, round lifecycle
+    transitions, published/corrected results) are gathered for every
+    ordinary round in the season (Codex review, PR #160) -- cheap,
+    bounded audit-table reads, no live AFL evidence involved. Lineup-level
+    correction/adjudication events are gathered only for the *current*
+    round, matching `app.scorer_dashboard`'s own single-round scope for
+    that same event class -- scanning every entry's private draft across
+    every historical round would be disproportionate for a 20-item recent-
+    activity summary."""
     events = list(audit_events.list_events(entity_type="season", entity_id=season.season_id, limit=limit))
     coach_ids = {entry.coach_id for entry in entries}
     for coach_id in coach_ids:
@@ -670,6 +699,28 @@ def _audit_summary(
         events += audit_events.list_events(entity_type="preseason.window", entity_id=window.window_id, limit=10)
     if fixture_draw is not None:
         events += audit_events.list_events(entity_type="fixture_draw", entity_id=fixture_draw.fixture_draw_id, limit=5)
+    rounds = ordinary_rounds_with_lifecycle(database, season.season_id)
+    for row in rounds:
+        events += audit_events.list_events(entity_type="competition.round", entity_id=row["bbbffl_round_id"], limit=5)
+        if row["mapping_id"]:
+            events += audit_events.list_events(entity_type="round.afl_mapping", entity_id=row["mapping_id"], limit=5)
+        if row["round_state"] is not None:
+            for matchup in lifecycle.list_matchups(row["bbbffl_round_id"]):
+                events += audit_events.list_events(
+                    entity_type="competition.matchup", entity_id=matchup.matchup_id, limit=5
+                )
+    current_round = next((r for r in rounds if r["bbbffl_round_id"] == current_round_id), None)
+    if current_round is not None:
+        lineups_repo = WeeklyLineupRepository(database)
+        for entry in entries:
+            draft = lineups_repo.get_draft(
+                season.season_id,
+                current_round["competition_id"],
+                current_round["bbbffl_round_id"],
+                entry.season_entry_id,
+            )
+            if draft is not None:
+                events += audit_events.list_events(entity_type=ENTITY_TYPE_LINEUP, entity_id=draft.lineup_id, limit=5)
     # Only this season's own role-grant changes -- a coach participating
     # here may separately hold a season-scoped grant for a *different*
     # season (or several); `list_all_for_coach` returns every grant that
@@ -780,6 +831,7 @@ def build_admin_dashboard(
         season=season,
         entries=entries,
         readiness=readiness,
+        has_ordinary_competition=ordinary is not None,
         fixture_draw=fixture_draw,
         round_summary=round_summary,
         current_round_id=current_round_id,
@@ -789,9 +841,20 @@ def build_admin_dashboard(
         scorer_summary=scorer_summary,
     )
     workflow_map = _workflow_map(
-        season, readiness, window, fixture_draw, round_summary, centre["links"], current_round_id
+        season, readiness, ordinary is not None, window, fixture_draw, round_summary, centre["links"], current_round_id
     )
-    audit_summary = _audit_summary(audit_events, role_grants, season, entries, draft_status, window, fixture_draw)
+    audit_summary = _audit_summary(
+        database,
+        lifecycle,
+        audit_events,
+        role_grants,
+        season,
+        entries,
+        draft_status,
+        window,
+        fixture_draw,
+        current_round_id,
+    )
 
     return {
         "season": {

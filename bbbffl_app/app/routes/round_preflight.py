@@ -7,11 +7,9 @@ from app.audit import ActorContext
 from app.authorization import Principal, require_capability, require_role_covers_season
 from app.config import BASE_DIR
 from app.csrf import issue_token, verify_token
-from app.lockouts import LockoutIntegrityError
 from app.round_preflight import (
     StaleMappingRevisionError,
     StaleTriggerRevisionError,
-    TriggerValidationError,
     accept_preflight_mapping,
     build_round_preflight,
     configure_preflight_trigger,
@@ -186,7 +184,7 @@ def configure_trigger(
         )
     except StaleTriggerRevisionError as exc:
         raise HTTPException(409, str(exc)) from exc
-    except (TriggerValidationError, LockoutIntegrityError, ValueError) as exc:
+    except ValueError as exc:  # covers TriggerValidationError and app.lockouts.LockoutIntegrityError
         raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc

@@ -507,12 +507,16 @@ class LockoutTriggerRepository:
         actor: ActorContext = ActorContext.anonymous_operator("admin"),
         reason: str | None = None,
         expected_revision: int | None = None,
+        expected_mapping_revision: int | None = None,
     ) -> LockoutTrigger:
         """Atomically create-or-replace one trigger slot for this round
         (issue #152's `app.round_preflight.configure_preflight_trigger` is
         this method's only production caller; membership-in-mapping
         validation, which needs an `afl_client` call, happens there,
-        deliberately outside any lock held here).
+        deliberately outside any lock held here -- `expected_mapping_revision`
+        instead carries *which* accepted mapping that membership check was
+        performed against, so this method can atomically confirm it is still
+        current).
 
         Unlike composing `get()`/`list_triggers()` then `create()`/
         `replace()` from outside a transaction, this reads every trigger
@@ -525,9 +529,36 @@ class LockoutTriggerRepository:
         (issue #152 review, P2). `create`/`replace` remain available for
         other callers (scripts, lower-level repository tests) that do not
         need this round-wide serialization.
+
+        A round with zero triggers yet has no trigger row to lock at all,
+        so two concurrent *first* configurations for that round would
+        otherwise both read the same empty set and both pass validation
+        against it (e.g. both becoming an unrejected duplicate "main").
+        Locking the stable `bbbffl_round` parent row before reading the
+        trigger set closes that gap by serializing every `configure()` call
+        for one round through this transaction regardless of how many
+        triggers currently exist (issue #152 review, second pass, P1).
         """
         match_ids = self._validated_matches(trigger_type, afl_match_ids)
         with transaction(self.database) as conn:
+            conn.execute(
+                "SELECT 1 FROM bbbffl_round WHERE bbbffl_round_id=?" + _for_update_suffix(self.database),
+                (bbbffl_round_id,),
+            )
+            if expected_mapping_revision is not None:
+                mapping_row = conn.execute(
+                    "SELECT r.revision FROM round_afl_mapping m "
+                    "JOIN round_afl_mapping_revision r ON r.mapping_id=m.mapping_id AND r.revision=m.current_revision "
+                    "WHERE m.bbbffl_round_id=? AND r.state='accepted'",
+                    (bbbffl_round_id,),
+                ).fetchone()
+                current_mapping_revision = mapping_row["revision"] if mapping_row else None
+                if current_mapping_revision != expected_mapping_revision:
+                    raise StaleTriggerRevisionError(
+                        "The round's accepted AFL mapping has changed since its matches were checked (expected "
+                        f"mapping revision {expected_mapping_revision}, current {current_mapping_revision}). "
+                        "Reload the current authoritative mapping and matches before configuring this trigger."
+                    )
             rows = conn.execute(
                 "SELECT t.trigger_id, t.trigger_key, t.current_revision, r.trigger_type, r.sequence "
                 "FROM bbbffl_round_lockout_trigger t "

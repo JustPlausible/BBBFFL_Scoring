@@ -125,6 +125,14 @@ def configure_preflight_trigger(database, round_id, payload, afl_client, *, acto
       P2: validating those against a snapshot read here, before any lock is
       held, cannot close the race where two concurrent configuration
       attempts for this round both pass validation before either commits).
+    - the accepted mapping's own revision, observed here alongside its
+      matches, is carried through as `expected_mapping_revision` so
+      `configure` can atomically confirm, under its own lock, that the
+      mapping has not been concurrently corrected between this membership
+      check and that write -- otherwise a trigger could be persisted
+      referencing a since-superseded mapping's matches, immediately
+      unresolved against the round's *new* current mapping (issue #152
+      review, second pass, P2).
     """
     mapping_repo = RoundMappingRepository(database)
     mapping = mapping_repo.resolve(round_id)
@@ -152,6 +160,7 @@ def configure_preflight_trigger(database, round_id, payload, afl_client, *, acto
         actor=actor,
         reason=reason,
         expected_revision=payload.expected_revision,
+        expected_mapping_revision=mapping.revision,
     )
 
 

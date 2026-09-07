@@ -268,6 +268,19 @@ class RoundMappingRepository:
         expected_revision: int | None = None,
     ) -> RoundMapping:
         with transaction(self.database) as conn:
+            # Lock the stable `bbbffl_round` row *first* -- a brand-new
+            # mapping has no `round_afl_mapping` row yet to lock, so two
+            # concurrent first-time accepts would otherwise both see no
+            # header, both pass the expected_revision==0 check below, and
+            # race each other on the INSERT (one losing with a raw
+            # IntegrityError instead of the promised StaleMappingRevisionError).
+            # Locking this always-present parent row instead serializes
+            # every accept/correct for one round through this transaction,
+            # regardless of whether a mapping row exists yet (issue #152
+            # review, second pass).
+            conn.execute(
+                "SELECT 1 FROM bbbffl_round WHERE bbbffl_round_id=?" + _for_update_suffix(self.database), (round_id,)
+            )
             head = conn.execute(
                 "SELECT * FROM round_afl_mapping WHERE bbbffl_round_id=?" + _for_update_suffix(self.database),
                 (round_id,),

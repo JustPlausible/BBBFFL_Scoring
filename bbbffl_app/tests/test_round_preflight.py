@@ -686,3 +686,38 @@ def test_final_results_checkpoint_recommendation_requires_concluded_match_eviden
     recommendations = replay_view["replay_checkpoint_recommendations"]
     final_results = next(r for r in recommendations if r["stage"] == "final-results")
     assert final_results["recommended_effective_at"] == "2026-03-12T11:00:00+00:00"  # "now", not the match's start
+
+
+class _AnyAflRoundExists:
+    def round_exists(self, season_id, round_id):
+        return True
+
+
+def test_configure_trigger_rejects_a_write_against_a_since_corrected_mapping():
+    """Issue #152 review (second pass, P2): `configure_preflight_trigger`
+    checks match membership against the mapping it observed, but that
+    membership check happens outside any lock. If the accepted mapping is
+    corrected between that check and `LockoutTriggerRepository.configure`'s
+    write, the trigger must not be silently persisted against the
+    now-superseded mapping's matches -- `expected_mapping_revision` closes
+    this by re-checking, atomically under `configure`'s own lock, that the
+    round's accepted mapping is still the one membership was verified
+    against."""
+    db = migrated_connection()
+    round_, _ = configured(db, 2026, 100)
+    observed_mapping = RoundMappingRepository(db).resolve(round_.bbbffl_round_id)
+    # A correction lands after membership was checked against `observed_mapping`.
+    RoundMappingRepository(db).correct(
+        round_.bbbffl_round_id, 2026, 101, _AnyAflRoundExists(), reason="concurrent correction"
+    )
+    with pytest.raises(StaleTriggerRevisionError, match="accepted AFL mapping has changed"):
+        LockoutTriggerRepository(db).configure(
+            round_.bbbffl_round_id,
+            "main",
+            "main",
+            1,
+            [9001],
+            reason="stale membership",
+            expected_mapping_revision=observed_mapping.revision,
+        )
+    assert LockoutTriggerRepository(db).list_triggers(round_.bbbffl_round_id) == []

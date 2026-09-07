@@ -13,7 +13,10 @@ Phase 2 begins with BBBFFL Round 10 and extends through:
 
 The first-half replay remains valuable as a completed weekly-workflow baseline;
 it does not need to be recoded merely because the mid-season draft occurs after
-Round 10.
+Round 10. This ordering reflects the confirmed historical 2026 chronology:
+Round 10 must use the pre-draft ownership state, and the resulting mid-season
+squads first apply from Round 11. The Round 9 boundary in the Phase 1 playbook
+is a replay-scope boundary, not a draft-timing rule.
 
 ## Start checklist
 
@@ -26,7 +29,10 @@ Before opening Round 10:
 - confirm the fixed AFL evidence package required for Round 10 onward;
 - create a new pre-Round-10 database/checkpoint recovery pair;
 - review open issues and merged changes since `3abc503`;
-- record the application image used for the second-half baseline.
+- record the application image used for the second-half baseline;
+- after each checkpoint change and application restart, perform an authoritative
+  lineup/lockout read (or the intended submission operation), then verify the
+  persisted trigger activation; restart alone does not materialise a trigger.
 
 ## Phase 2 validation priorities
 

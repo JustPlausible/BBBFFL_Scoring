@@ -72,6 +72,25 @@ def require_admin_dashboard(principal: Principal = Depends(resolve_principal)) -
     return require_admin_principal(principal)
 
 
+def _has_valid_coach_session(request: Request) -> bool:
+    """Whether the request's `bbbffl_session` cookie names a currently
+    valid session (not merely present) -- mirrors `app.authorization.
+    resolve_principal`'s own session/coach resolution exactly (Codex
+    review, PR #160), since `resolve_principal` never performs this check
+    itself once a legacy `X-Admin-Token` is also present (it returns
+    before ever looking at the cookie -- see its own docstring). An
+    expired, revoked or fabricated cookie must never be reported as a
+    shadowed authenticated session."""
+    token = request.cookies.get(SESSION_COOKIE_NAME)
+    if not token:
+        return False
+    state = request.app.state
+    session = state.sessions.get_valid(token)
+    if session is None:
+        return False
+    return state.identities.get_coach(session.coach_id) is not None
+
+
 def _authentication_provenance(request: Request, principal: Principal) -> dict:
     """Issue #148's "warn clearly if a legacy shared token is taking
     precedence over the authenticated session ... never expose secrets or
@@ -80,9 +99,15 @@ def _authentication_provenance(request: Request, principal: Principal) -> dict:
     session cookie (see its own docstring) -- so a request that carries
     both silently gets legacy-token authority with no signal that a real
     signed-in session was shadowed. This never reads or returns the token
-    value itself, only whether one was present."""
+    value itself, only whether one was present.
+
+    The precedence warning is only ever raised for a *currently valid*
+    session (Codex review, PR #160): an expired, revoked or fabricated
+    `bbbffl_session` cookie alongside a valid token is not a shadowed
+    session at all -- warning about it would tell the operator to remove
+    the token, which would leave them unauthenticated."""
     legacy_token_active = principal.coach_id is None and principal.authenticated
-    session_cookie_present = request.cookies.get(SESSION_COOKIE_NAME) is not None
+    valid_session_present = _has_valid_coach_session(request)
     if legacy_token_active:
         provenance = "legacy_shared_token"
     elif principal.coach_id is not None:
@@ -91,7 +116,7 @@ def _authentication_provenance(request: Request, principal: Principal) -> dict:
         provenance = "unauthenticated"
     return {
         "provenance": provenance,
-        "legacy_token_precedence_warning": legacy_token_active and session_cookie_present,
+        "legacy_token_precedence_warning": legacy_token_active and valid_session_present,
     }
 
 

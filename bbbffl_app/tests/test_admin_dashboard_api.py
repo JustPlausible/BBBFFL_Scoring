@@ -293,6 +293,104 @@ def test_legacy_token_precedence_is_warned_without_leaking_the_token(monkeypatch
     db_path.unlink(missing_ok=True)
 
 
+def _issued_session_cookie(client, *, display_name: str, email: str) -> tuple[str, str]:
+    """A coach identity plus a freshly issued, currently-valid session
+    token -- created directly through the repository layer rather than the
+    full `/login` form flow, so these focused precedence tests stay
+    narrowly about session validity, not authentication mechanics."""
+    coach = client.app.state.identities.create_coach(display_name, email=email)
+    issued = client.app.state.sessions.create(coach.coach_id, actor=ActorContext.anonymous_operator("admin"))
+    return coach.coach_id, issued.token
+
+
+def test_valid_session_with_admin_token_warns_about_precedence(monkeypatch):
+    """A currently valid `bbbffl_session` cookie accompanied by a valid
+    `X-Admin-Token` is a genuinely shadowed authenticated session -- the
+    dashboard must warn."""
+    db_path = Path(tempfile.mkstemp(suffix=".db")[1])
+    monkeypatch.setenv("BBBFFL_DATABASE_URL", f"sqlite:///{db_path}")
+    monkeypatch.setenv("BBBFFL_ENVIRONMENT", "test")
+    monkeypatch.setenv("BBBFFL_ADMIN_TOKEN", "super-secret-admin-token")
+    monkeypatch.setenv("BBBFFL_SESSION_SECRET", "a-real-configured-session-secret")
+
+    from app.main import app
+
+    with TestClient(app) as client:
+        _coach_id, token = _issued_session_cookie(
+            client, display_name="Valid Session Admin", email="valid-9420@example.com"
+        )
+        response = client.get(
+            "/api/admin/dashboard",
+            cookies={"bbbffl_session": token},
+            headers={"X-Admin-Token": "super-secret-admin-token"},
+        )
+        body = response.json()
+        assert body["authentication"]["provenance"] == "legacy_shared_token"
+        assert body["authentication"]["legacy_token_precedence_warning"] is True
+    db_path.unlink(missing_ok=True)
+
+
+def test_expired_revoked_or_fabricated_session_with_admin_token_does_not_warn(monkeypatch):
+    """Codex review, PR #160: an expired, revoked or fabricated
+    `bbbffl_session` cookie is not a shadowed authenticated session at all
+    -- `resolve_principal` would reject it via `sessions.get_valid` (it
+    just never reaches that check once a valid token is also present).
+    Warning here anyway would tell the operator to remove the token,
+    which would leave them completely unauthenticated."""
+    from app.db import transaction
+
+    db_path = Path(tempfile.mkstemp(suffix=".db")[1])
+    monkeypatch.setenv("BBBFFL_DATABASE_URL", f"sqlite:///{db_path}")
+    monkeypatch.setenv("BBBFFL_ENVIRONMENT", "test")
+    monkeypatch.setenv("BBBFFL_ADMIN_TOKEN", "super-secret-admin-token")
+    monkeypatch.setenv("BBBFFL_SESSION_SECRET", "a-real-configured-session-secret")
+
+    from app.main import app
+
+    with TestClient(app) as client:
+        admin_headers = {"X-Admin-Token": "super-secret-admin-token"}
+
+        # Expired: the session row exists but its own expires_at is in the past.
+        _coach_id, expired_token = _issued_session_cookie(
+            client, display_name="Expired Session Admin", email="expired-9421@example.com"
+        )
+        expired_session = client.app.state.sessions.get_valid(expired_token)
+        with transaction(client.app.state.database) as conn:
+            conn.execute(
+                "UPDATE coach_session SET expires_at=? WHERE session_id=?",
+                ("2000-01-01T00:00:00+00:00", expired_session.session_id),
+            )
+        expired_response = client.get(
+            "/api/admin/dashboard", cookies={"bbbffl_session": expired_token}, headers=admin_headers
+        )
+        expired_body = expired_response.json()
+        assert expired_body["authentication"]["provenance"] == "legacy_shared_token"
+        assert expired_body["authentication"]["legacy_token_precedence_warning"] is False
+
+        # Revoked: explicitly logged out/invalidated.
+        _coach_id, revoked_token = _issued_session_cookie(
+            client, display_name="Revoked Session Admin", email="revoked-9422@example.com"
+        )
+        client.app.state.sessions.revoke_by_token(revoked_token, actor=ActorContext.anonymous_operator("admin"))
+        revoked_response = client.get(
+            "/api/admin/dashboard", cookies={"bbbffl_session": revoked_token}, headers=admin_headers
+        )
+        revoked_body = revoked_response.json()
+        assert revoked_body["authentication"]["provenance"] == "legacy_shared_token"
+        assert revoked_body["authentication"]["legacy_token_precedence_warning"] is False
+
+        # Fabricated: a cookie value that was never issued at all.
+        fabricated_response = client.get(
+            "/api/admin/dashboard",
+            cookies={"bbbffl_session": "not-a-real-session-token"},
+            headers=admin_headers,
+        )
+        fabricated_body = fabricated_response.json()
+        assert fabricated_body["authentication"]["provenance"] == "legacy_shared_token"
+        assert fabricated_body["authentication"]["legacy_token_precedence_warning"] is False
+    db_path.unlink(missing_ok=True)
+
+
 # -- Freshly logged-in Administrator discoverability/role switching ---------
 
 

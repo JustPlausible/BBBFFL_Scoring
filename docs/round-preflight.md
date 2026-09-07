@@ -171,14 +171,16 @@ checkpoint schema already recognises:
   alone, since a trigger's own lock boundary is itself schedule-based
   (`evaluate_match_lock`);
 - one safe final-results checkpoint (`stage: "final-results"`), but **only**
-  once every relevant match's own currently observed status already reads
-  as concluded (postgame/completed) -- recommended as "right now"
-  (`afl_client.clock.now()`), never as a projected future instant from a
-  match's scheduled *start* time. Recommending the latest match's start as
-  a "final results" instant would suggest finalising the round the moment
-  its last match begins, before it has actually concluded; lacking any
-  other conclusion-time evidence, "now, once everything already shows
-  concluded" is the only claim this can safely make, so no final-results
+  once every relevant match's own currently observed status already
+  normalizes to `completed` -- never `postgame`, which means the siren has
+  sounded but afl-api has not yet declared statistics final -- recommended
+  as "right now" (`afl_client.clock.now()`), never as a projected future
+  instant from a match's scheduled *start* time. Recommending the latest
+  match's start as a "final results" instant would suggest finalising the
+  round the moment its last match begins, before it has actually
+  concluded; lacking any other conclusion-time evidence, "now, once
+  everything already shows completed" is the only claim this can safely
+  make, so no final-results
   recommendation is shown at all until that is true.
 
 These are suggestions only:

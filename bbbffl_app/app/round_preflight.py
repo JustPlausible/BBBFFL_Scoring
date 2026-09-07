@@ -133,6 +133,14 @@ def configure_preflight_trigger(database, round_id, payload, afl_client, *, acto
       referencing a since-superseded mapping's matches, immediately
       unresolved against the round's *new* current mapping (issue #152
       review, second pass, P2).
+    - the membership read itself is wrapped in an `evidence_batch()` (the
+      same freshness-scoping `build_round_preflight` uses) and rejected
+      unless that specific read was fresh -- a resilient client under a
+      live outage can return its last-known-good cached matches rather
+      than raising, and validating membership against a stale list could
+      let a match already dropped from the mapped round be accepted here,
+      only to be reported unresolved on the next successful refresh (issue
+      #152 review, third pass, P2).
     """
     mapping_repo = RoundMappingRepository(database)
     mapping = mapping_repo.resolve(round_id)
@@ -140,10 +148,20 @@ def configure_preflight_trigger(database, round_id, payload, afl_client, *, acto
         raise TriggerValidationError(
             "An accepted AFL mapping is required before configuring lockout triggers for this round."
         )
-    try:
-        mapped_matches = afl_client.get_matches(mapping.afl_round_id)
-    except Exception as exc:  # evidence failure must block trigger membership validation, never bypass it
-        raise TriggerValidationError(f"Mapped AFL match evidence is unavailable: {exc}") from exc
+    evidence_batch = getattr(afl_client, "evidence_batch", None)
+    scope = evidence_batch() if callable(evidence_batch) else nullcontext(afl_client)
+    with scope as evidence:
+        try:
+            mapped_matches = afl_client.get_matches(mapping.afl_round_id)
+        except Exception as exc:  # evidence failure must block trigger membership validation, never bypass it
+            raise TriggerValidationError(f"Mapped AFL match evidence is unavailable: {exc}") from exc
+        freshness = getattr(evidence, "is_evidence_fresh", None)
+        fresh = freshness() if callable(freshness) else True
+    if not fresh:
+        raise TriggerValidationError(
+            "Mapped AFL match evidence is being served from a stale cache; refresh live evidence before "
+            "configuring lockout triggers."
+        )
     valid_match_ids = {match.match_id for match in mapped_matches}
     unknown_ids = [match_id for match_id in payload.afl_match_ids if match_id not in valid_match_ids]
     if unknown_ids:

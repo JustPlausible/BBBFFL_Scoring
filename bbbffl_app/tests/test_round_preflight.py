@@ -741,3 +741,25 @@ def test_final_results_checkpoint_recommendation_never_treats_postgame_as_conclu
         db, CompetitionLifecycleRepository(db), IdentityRepository(db), replay_evidence, round_.bbbffl_round_id
     )
     assert not any(r["stage"] == "final-results" for r in view["replay_checkpoint_recommendations"])
+
+
+def test_configure_preflight_trigger_rejects_stale_cached_match_evidence():
+    """Codex review (third pass, P2): a resilient client under a live
+    outage can serve its last-known-good cached matches instead of raising.
+    Validating trigger membership against a stale list could accept a
+    match already dropped from the mapped round, only for it to be
+    reported unresolved on the next successful refresh -- so membership
+    must be checked inside an evidence batch and rejected unless that read
+    was fresh, exactly like `build_round_preflight`'s own match read."""
+    db = migrated_connection()
+    round_, _ = configured(db, 2026, 100)
+    with pytest.raises(TriggerValidationError, match="stale cache"):
+        configure_preflight_trigger(
+            db,
+            round_.bbbffl_round_id,
+            TriggerPayload("main", "main", 1, [9001]),
+            StaleEvidence([_match(9001)]),
+            actor=ActorContext.anonymous_operator("admin"),
+            reason="test",
+        )
+    assert LockoutTriggerRepository(db).list_triggers(round_.bbbffl_round_id) == []

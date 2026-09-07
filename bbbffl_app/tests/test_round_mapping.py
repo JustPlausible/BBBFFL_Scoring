@@ -2,8 +2,9 @@
 
 import pytest
 
+from app.afl_client import Round, Season
 from app.audit import AuditEventRepository
-from app.round_mapping import RoundMappingRepository
+from app.round_mapping import MappingRecommendation, RoundMappingRepository, recommend_mapping
 from app.season import SeasonRepository
 from tests.db_helpers import migrated_connection
 
@@ -14,6 +15,90 @@ class KnownRounds:
 
     def round_exists(self, season_id, round_id):
         return (season_id, round_id) in self.references
+
+
+class RecommendationEvidence:
+    """A minimal duck-typed AFL client double exposing only what
+    `recommend_mapping` reads -- `get_seasons`/`get_rounds` -- mirroring
+    the common contract shared by `AflApiClient` and the replay client."""
+
+    def __init__(self, seasons, rounds_by_season, *, error=None):
+        self._seasons = seasons
+        self._rounds_by_season = rounds_by_season
+        self._error = error
+
+    def get_seasons(self):
+        if self._error:
+            raise self._error
+        return self._seasons
+
+    def get_rounds(self, season_id):
+        if self._error:
+            raise self._error
+        return self._rounds_by_season.get(season_id, [])
+
+
+class NoSeasonListing:
+    """An older duck-typed double (e.g. tests elsewhere) that never grew a
+    `get_seasons` method -- recommend_mapping must fail closed, not crash."""
+
+    def get_rounds(self, season_id):
+        return []
+
+
+def test_recommend_mapping_matches_corresponding_year_and_round_number():
+    client = RecommendationEvidence(
+        seasons=[Season(season_id=85, is_current=True, current_round_number=1, year=2026, name="2026 Season")],
+        rounds_by_season={85: [Round(round_id=1300, round_number=1), Round(round_id=1301, round_number=2)]},
+    )
+    recommendation = recommend_mapping(client, bbbffl_year=2026, bbbffl_sequence=1)
+    assert recommendation == MappingRecommendation(
+        afl_season_id=85,
+        afl_round_id=1300,
+        afl_season_year=2026,
+        afl_round_number=1,
+        evidence=recommendation.evidence,
+    )
+    assert "2026" in recommendation.evidence and "1" in recommendation.evidence
+
+
+def test_recommend_mapping_returns_none_on_deliberate_finals_style_round_divergence():
+    """BBBFFL finals week 4 (sequence 4) maps to AFL round 24 -- a numeric
+    correspondence recommend_mapping must never invent (see
+    docs/round-afl-mapping.md's 2026 finals evidence)."""
+    client = RecommendationEvidence(
+        seasons=[Season(season_id=84, is_current=False, current_round_number=24, year=2026)],
+        rounds_by_season={84: [Round(round_id=1400, round_number=24)]},
+    )
+    assert recommend_mapping(client, bbbffl_year=2026, bbbffl_sequence=4) is None
+
+
+def test_recommend_mapping_returns_none_for_ambiguous_multi_season_year():
+    client = RecommendationEvidence(
+        seasons=[
+            Season(season_id=1, is_current=False, current_round_number=1, year=2026),
+            Season(season_id=2, is_current=True, current_round_number=1, year=2026),
+        ],
+        rounds_by_season={},
+    )
+    assert recommend_mapping(client, bbbffl_year=2026, bbbffl_sequence=1) is None
+
+
+def test_recommend_mapping_returns_none_for_ambiguous_multi_round_match():
+    client = RecommendationEvidence(
+        seasons=[Season(season_id=85, is_current=True, current_round_number=1, year=2026)],
+        rounds_by_season={85: [Round(round_id=1, round_number=1), Round(round_id=2, round_number=1)]},
+    )
+    assert recommend_mapping(client, bbbffl_year=2026, bbbffl_sequence=1) is None
+
+
+def test_recommend_mapping_returns_none_without_get_seasons_support():
+    assert recommend_mapping(NoSeasonListing(), bbbffl_year=2026, bbbffl_sequence=1) is None
+
+
+def test_recommend_mapping_returns_none_when_evidence_unavailable():
+    client = RecommendationEvidence(seasons=[], rounds_by_season={}, error=RuntimeError("afl-api unavailable"))
+    assert recommend_mapping(client, bbbffl_year=2026, bbbffl_sequence=1) is None
 
 
 @pytest.fixture

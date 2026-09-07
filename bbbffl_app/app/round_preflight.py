@@ -1,4 +1,18 @@
-"""Human-facing, fail-closed read model for opening an ordinary BBBFFL round."""
+"""Human-facing, fail-closed read model for opening an ordinary BBBFFL round.
+
+Issue #152 extends this from a raw-ID entry form into an evidence-backed
+recommendation surface: `build_round_preflight` still returns exactly the
+authoritative, persisted mapping/trigger/readiness state it always has, but
+now also surfaces purely advisory, deterministic suggestions (a recommended
+AFL season/round mapping, a recommended selective/main lockout plan,
+advisory replay-checkpoint instants) computed fresh on every read and never
+stored. Nothing here ever writes a recommendation; `accept_preflight_mapping`
+and `configure_preflight_trigger` remain the only mutation boundaries, and
+both still require an explicit operator decision (a reason, and for mapping
+acceptance an explicit confirmation) plus revision-matched concurrency
+protection -- an operator may always deliberately diverge from a
+recommendation, since BBBFFL and AFL round numbering can legitimately
+differ (see docs/round-afl-mapping.md)."""
 
 from contextlib import nullcontext
 
@@ -10,27 +24,140 @@ from app.opening_round import (
     build_opening_round_readiness,
     describe_accepted_rules,
 )
-from app.round_mapping import AflApiReferenceValidator, RoundMappingRepository
+from app.round_mapping import AflApiReferenceValidator, RoundMappingRepository, recommend_mapping
 
 
-def accept_preflight_mapping(database, lifecycle, afl_client, round_id, season_id, afl_round_id, *, actor, reason):
-    """Mutate mapping only before lifecycle has frozen its revision."""
+class TriggerValidationError(ValueError):
+    """A lockout-trigger configuration submitted through round preflight
+    fails BBBFFL's per-round ordering/membership rules -- distinct from
+    `app.lockouts.LockoutIntegrityError`, which governs the lower-level
+    repository's own invariants (e.g. at most one main trigger, unique match
+    IDs within one trigger) and is raised independently by
+    `LockoutTriggerRepository` itself; both surface as HTTP 400/409 (see
+    app/routes/round_preflight.py)."""
+
+
+class StaleMappingRevisionError(RuntimeError):
+    """A mapping mutation was submitted against a revision that is no
+    longer current -- a concurrent operator (or an earlier browser tab) has
+    already accepted/corrected this round's mapping since the caller last
+    observed it. The browser must reload authoritative state rather than
+    silently overwrite a newer accepted mapping (issue #152)."""
+
+
+class StaleTriggerRevisionError(RuntimeError):
+    """The same stale/concurrent-write protection as
+    `StaleMappingRevisionError`, scoped to one lockout trigger key."""
+
+
+def accept_preflight_mapping(
+    database,
+    lifecycle,
+    afl_client,
+    round_id,
+    season_id,
+    afl_round_id,
+    *,
+    actor,
+    reason,
+    confirmed=False,
+    expected_revision=None,
+):
+    """Mutate mapping only before lifecycle has frozen its revision.
+
+    `confirmed`/`reason` are both mandatory here regardless of whether the
+    chosen `(season_id, afl_round_id)` matches this round's own deterministic
+    recommendation (`app.round_mapping.recommend_mapping`) -- nothing is
+    ever auto-accepted; the operator must explicitly confirm and explain
+    every accepted mapping, including one that deliberately diverges from
+    the recommendation. `expected_revision`, when supplied, must match the
+    mapping's current revision (0 meaning "no accepted mapping yet") or this
+    raises `StaleMappingRevisionError` rather than silently overwriting a
+    revision a concurrent operator has since accepted/corrected.
+    """
     if lifecycle.get_round(round_id) is not None:
         raise RuntimeError(
             "The round lifecycle has already frozen its AFL mapping. A lifecycle-level recovery is required; "
             "the mapping cannot be changed underneath it."
         )
+    if not confirmed:
+        raise ValueError("Accepting an AFL round mapping requires explicit operator confirmation.")
+    if not reason:
+        raise ValueError("Accepting an AFL round mapping requires an explicit reason.")
     repo = RoundMappingRepository(database)
     validator = AflApiReferenceValidator(afl_client)
     existing = repo.resolve(round_id)
+    if expected_revision is not None:
+        current_revision = existing.revision if existing else 0
+        if current_revision != expected_revision:
+            raise StaleMappingRevisionError(
+                f"This mapping has changed since it was loaded (expected revision {expected_revision}, current "
+                f"revision {current_revision}). Reload the current authoritative mapping before deciding."
+            )
     if existing:
         return repo.correct(round_id, season_id, afl_round_id, validator, reason=reason, actor=actor)
     return repo.accept(round_id, season_id, afl_round_id, validator, reason=reason, actor=actor)
 
 
-def configure_preflight_trigger(database, round_id, payload, *, actor, reason):
+def configure_preflight_trigger(database, round_id, payload, afl_client, *, actor, reason):
+    """Configure one lockout-trigger slot from *this round's currently
+    accepted mapped matches only* -- issue #152 replaces routine free-typed
+    AFL match IDs with selection from that authoritative list, enforced
+    here server-side (never trusted from the browser alone):
+
+    - an accepted mapping must exist;
+    - every submitted AFL match ID must belong to that mapping's current
+      match evidence;
+    - sequence numbers must be unique within the round, every selective
+      trigger's sequence must precede the round's one main/remaining
+      trigger's sequence, and the main trigger's sequence must follow every
+      selective trigger's;
+    - `payload.expected_revision`, when supplied, must match this trigger
+      key's current revision (0 meaning "does not exist yet"), or this
+      raises `StaleTriggerRevisionError`.
+    """
+    mapping_repo = RoundMappingRepository(database)
+    mapping = mapping_repo.resolve(round_id)
+    if mapping is None:
+        raise TriggerValidationError(
+            "An accepted AFL mapping is required before configuring lockout triggers for this round."
+        )
+    try:
+        mapped_matches = afl_client.get_matches(mapping.afl_round_id)
+    except Exception as exc:  # evidence failure must block trigger membership validation, never bypass it
+        raise TriggerValidationError(f"Mapped AFL match evidence is unavailable: {exc}") from exc
+    valid_match_ids = {match.match_id for match in mapped_matches}
+    unknown_ids = [match_id for match_id in payload.afl_match_ids if match_id not in valid_match_ids]
+    if unknown_ids:
+        raise TriggerValidationError(
+            f"AFL match(es) {unknown_ids} are not part of the currently accepted mapping's matches."
+        )
+
     repo = LockoutTriggerRepository(database)
     existing = repo.get(round_id, payload.trigger_key)
+    if payload.expected_revision is not None:
+        current_revision = existing.revision if existing else 0
+        if current_revision != payload.expected_revision:
+            raise StaleTriggerRevisionError(
+                f"Trigger {payload.trigger_key!r} has changed since it was loaded (expected revision "
+                f"{payload.expected_revision}, current revision {current_revision}). Reload the current "
+                "authoritative lockout plan before deciding."
+            )
+
+    others = [trigger for trigger in repo.list_triggers(round_id) if trigger.trigger_key != payload.trigger_key]
+    if payload.sequence in {trigger.sequence for trigger in others}:
+        raise TriggerValidationError(f"Sequence {payload.sequence} is already used by another trigger in this round.")
+    selective_sequences = [trigger.sequence for trigger in others if trigger.trigger_type == "selective"]
+    main_sequences = [trigger.sequence for trigger in others if trigger.trigger_type == "main"]
+    if payload.trigger_type == "selective" and main_sequences and payload.sequence >= min(main_sequences):
+        raise TriggerValidationError(
+            "A selective trigger's sequence must precede the round's main/remaining trigger's sequence."
+        )
+    if payload.trigger_type == "main" and selective_sequences and payload.sequence <= max(selective_sequences):
+        raise TriggerValidationError(
+            "The main/remaining trigger's sequence must follow every selective trigger's sequence."
+        )
+
     kwargs = {
         "trigger_type": payload.trigger_type,
         "sequence": payload.sequence,
@@ -61,6 +188,110 @@ def open_preflight_round(lifecycle, round_id, *, actor):
     )
 
 
+def recommend_lockout_plan(match_views: list[dict]) -> dict | None:
+    """A deterministic, purely advisory "earliest plausible" selective/main
+    lockout plan (issue #152) computed from this round's currently mapped
+    matches -- never persisted by this function or any caller; an operator
+    must still explicitly configure each stage via `configure_preflight_trigger`.
+
+    Fails closed (`None`) whenever evidence is incomplete or ambiguous: any
+    match missing a scheduled start time, or carrying an unrecognised
+    status, makes the whole plan unsafe to suggest. Groups matches by their
+    earliest shared scheduled start: if every match shares one start time, a
+    single main trigger covering all of them is recommended; otherwise the
+    earliest-starting group becomes a selective trigger (sequence 1) and
+    every other match becomes the main trigger (sequence 2).
+    """
+    if not match_views:
+        return None
+    if any(match["start_time_utc"] is None or not is_recognized_match_status(match["status"]) for match in match_views):
+        return None
+    ordered = sorted(match_views, key=lambda match: (match["start_time_utc"], match["match_id"]))
+    earliest_start = ordered[0]["start_time_utc"]
+    earliest_ids = [match["match_id"] for match in ordered if match["start_time_utc"] == earliest_start]
+    remaining_ids = [match["match_id"] for match in ordered if match["match_id"] not in earliest_ids]
+    if not remaining_ids:
+        return {
+            "stages": [
+                {
+                    "trigger_key": "recommended-main",
+                    "trigger_type": "main",
+                    "sequence": 1,
+                    "afl_match_ids": [match["match_id"] for match in ordered],
+                    "evidence": (
+                        f"Every mapped AFL match is scheduled to start at {earliest_start}; a single "
+                        "main/remaining lockout covering all of them is the earliest plausible plan."
+                    ),
+                }
+            ]
+        }
+    return {
+        "stages": [
+            {
+                "trigger_key": "recommended-early",
+                "trigger_type": "selective",
+                "sequence": 1,
+                "afl_match_ids": earliest_ids,
+                "evidence": f"The earliest scheduled AFL match(es) in the mapped round start at {earliest_start}.",
+            },
+            {
+                "trigger_key": "recommended-main",
+                "trigger_type": "main",
+                "sequence": 2,
+                "afl_match_ids": remaining_ids,
+                "evidence": "Covers every other AFL match in the mapped round.",
+            },
+        ]
+    }
+
+
+def _replay_checkpoint_recommendations(afl_client, match_views: list[dict], triggers: list) -> list[dict]:
+    """Advisory-only replay checkpoint instants (issue #152) -- never a
+    filesystem path (see app/replay_checkpoint.py's schema: a checkpoint is
+    identified only by `stage`/`effective_at`/`finalised_round_ids`), and
+    never applied/written here: this is a read model suggestion for an
+    operator to action, if they choose, through the existing replay
+    checkpoint tooling. Only produced when the configured client carries
+    replay metadata at all (a `clock` attribute -- absent on the live
+    `AflApiClient`), and only from unambiguous scheduled-start evidence."""
+    if not hasattr(afl_client, "clock"):
+        return []
+    if not match_views or any(match["start_time_utc"] is None for match in match_views):
+        return []
+    recommendations = []
+    matches_by_id = {match["match_id"]: match for match in match_views}
+    for trigger in triggers:
+        covered = [matches_by_id[match_id] for match_id in trigger.afl_match_ids if match_id in matches_by_id]
+        if not covered:
+            continue
+        earliest = min(match["start_time_utc"] for match in covered)
+        recommendations.append(
+            {
+                "label": f"Just after {trigger.trigger_key} ({trigger.trigger_type})",
+                "stage": "scheduled",
+                "recommended_effective_at": earliest,
+                "evidence": (
+                    f"The earliest AFL match associated with trigger {trigger.trigger_key!r} is scheduled to "
+                    f"start at {earliest}; a replay checkpoint recorded just after this instant is expected to "
+                    "demonstrate this trigger's activation."
+                ),
+            }
+        )
+    latest = max(match["start_time_utc"] for match in match_views)
+    recommendations.append(
+        {
+            "label": "Safe final-results checkpoint",
+            "stage": "final-results",
+            "recommended_effective_at": latest,
+            "evidence": (
+                f"The latest relevant AFL match is scheduled to start at {latest}; a final-results checkpoint "
+                "recorded once every mapped match has concluded is expected to be safe to treat as final."
+            ),
+        }
+    )
+    return recommendations
+
+
 def build_round_preflight(database, lifecycle, identities, afl_client, round_id: str) -> dict:
     logical = database.execute(
         "SELECT r.*, c.season_id, c.label competition_label, c.stream_key, c.stream_type, "
@@ -88,6 +319,39 @@ def build_round_preflight(database, lifecycle, identities, afl_client, round_id:
                 ),
             }
         )
+
+    # -- Issue #152: human-readable AFL season/round selection evidence,
+    # advisory only -- never gates readiness, never itself resolved/accepted.
+    afl_seasons = []
+    list_seasons = getattr(afl_client, "get_seasons", None)
+    if callable(list_seasons):
+        try:
+            afl_seasons = [
+                {"season_id": s.season_id, "year": s.year, "name": s.name, "is_current": s.is_current}
+                for s in list_seasons()
+            ]
+        except Exception as exc:
+            advisories.append(
+                {"code": "afl_seasons_unavailable", "message": f"AFL season list is unavailable for selection: {exc}"}
+            )
+    mapping_recommendation = recommend_mapping(
+        afl_client, bbbffl_year=logical["year"], bbbffl_sequence=logical["sequence"]
+    )
+    mapping_context = None
+    if mapping is not None:
+        try:
+            season_year = next((s["year"] for s in afl_seasons if s["season_id"] == mapping.afl_season_id), None)
+            round_number = next(
+                (
+                    r.round_number
+                    for r in afl_client.get_rounds(mapping.afl_season_id)
+                    if r.round_id == mapping.afl_round_id
+                ),
+                None,
+            )
+            mapping_context = {"afl_season_year": season_year, "afl_round_number": round_number}
+        except Exception:
+            mapping_context = None
 
     draw = database.execute("SELECT * FROM season_fixture_draw WHERE season_id=?", (logical["season_id"],)).fetchone()
     pairs = []
@@ -140,6 +404,10 @@ def build_round_preflight(database, lifecycle, identities, afl_client, round_id:
         blockers.append(
             {"code": "afl_matches_missing", "message": "The mapped AFL round contains no resolvable match evidence."}
         )
+    # Issue #152: matches are always presented in scheduled-start
+    # chronological order (unresolved/missing start times sort last, never
+    # first, so a genuinely unscheduled match never masquerades as "next").
+    afl_matches = sorted(afl_matches, key=lambda m: (m.start_time_utc is None, m.start_time_utc or "", m.match_id))
     match_by_id = {match.match_id: match for match in afl_matches}
     match_views = [
         {
@@ -169,6 +437,24 @@ def build_round_preflight(database, lifecycle, identities, afl_client, round_id:
             )
 
     triggers = LockoutTriggerRepository(database).list_triggers(round_id)
+    # Issue #152: `observed_status`/`start_time_utc` on `activating_matches`
+    # above is always this match's *current* AFL evidence; the durable
+    # activation row queried here is BBBFFL's own, separate, irreversible
+    # record of whether *this trigger* has actually fired -- read-only, never
+    # materialized/recomputed from this view (see app/lockouts.py's
+    # "Historical irreversibility"), so simply viewing preflight can never
+    # itself cause or backdate an activation.
+    activation_by_trigger_id = {
+        row["trigger_id"]: dict(row)
+        for row in database.execute(
+            "SELECT a.trigger_id, a.afl_match_id, a.observed_status, a.effective_lock_at, a.activation_reason "
+            "FROM bbbffl_round_lockout_trigger_activation a "
+            "JOIN bbbffl_round_lockout_trigger t ON t.trigger_id=a.trigger_id "
+            "WHERE t.bbbffl_round_id=?",
+            (round_id,),
+        ).fetchall()
+    }
+    match_trigger_coverage: dict[int, list[dict]] = {}
     trigger_views = []
     for trigger in triggers:
         unresolved = [mid for mid in trigger.afl_match_ids if mid not in match_by_id]
@@ -179,6 +465,25 @@ def build_round_preflight(database, lifecycle, identities, afl_client, round_id:
                     "message": f"Lockout trigger {trigger.trigger_key} refers to AFL match(es) not in the mapped round: {unresolved}.",
                 }
             )
+        activation = activation_by_trigger_id.get(trigger.trigger_id)
+        activation_view = {
+            "activated": activation is not None,
+            "activation_reason": activation["activation_reason"] if activation else None,
+            "effective_lock_at": activation["effective_lock_at"] if activation else None,
+            "observed_status_at_activation": activation["observed_status"] if activation else None,
+        }
+        participating_clubs = sorted(
+            {
+                name
+                for mid in trigger.afl_match_ids
+                if mid in match_by_id
+                for name in (match_by_id[mid].home_team.name, match_by_id[mid].away_team.name)
+            }
+        )
+        for mid in trigger.afl_match_ids:
+            match_trigger_coverage.setdefault(mid, []).append(
+                {"trigger_key": trigger.trigger_key, "trigger_type": trigger.trigger_type, **activation_view}
+            )
         trigger_views.append(
             {
                 **trigger.__dict__,
@@ -187,12 +492,18 @@ def build_round_preflight(database, lifecycle, identities, afl_client, round_id:
                     if trigger.trigger_type == "selective"
                     else "All remaining selections"
                 ),
+                "participating_clubs": participating_clubs,
                 "activating_matches": [
                     next((v for v in match_views if v["match_id"] == mid), {"match_id": mid, "unresolved": True})
                     for mid in trigger.afl_match_ids
                 ],
+                # Never conflate this durable BBBFFL activation fact with the
+                # AFL match evidence shown in `activating_matches` above.
+                "activation": activation_view,
             }
         )
+    for view in match_views:
+        view["lockout_trigger_coverage"] = match_trigger_coverage.get(view["match_id"], [])
     mains = [t for t in triggers if t.trigger_type == "main"]
     if len(mains) != 1:
         blockers.append(
@@ -208,6 +519,9 @@ def build_round_preflight(database, lifecycle, identities, afl_client, round_id:
                 "message": "No selective early lockout is configured; the main trigger will lock all remaining selections.",
             }
         )
+
+    lockout_recommendation = recommend_lockout_plan(match_views) if mapping and match_views else None
+    replay_checkpoint_recommendations = _replay_checkpoint_recommendations(afl_client, match_views, triggers)
 
     # Issue #133: where an ordinary round depends on Opening Round deferred
     # selections (an accepted rule targets this round), the round remains
@@ -329,11 +643,16 @@ def build_round_preflight(database, lifecycle, identities, afl_client, round_id:
     return {
         "round": {**dict(logical), "lifecycle_state": state},
         "mapping": mapping.__dict__ if mapping else None,
+        "mapping_context": mapping_context,
         "mapping_history": [item.__dict__ for item in history],
+        "mapping_recommendation": mapping_recommendation.__dict__ if mapping_recommendation else None,
+        "afl_seasons": afl_seasons,
         "fixture_matchups": pairs,
         "afl_matches": match_views,
         "afl_evidence_fresh": evidence_fresh,
         "lockout_triggers": trigger_views,
+        "lockout_recommendation": lockout_recommendation,
+        "replay_checkpoint_recommendations": replay_checkpoint_recommendations,
         "opening_round": {"applies": bool(opening), "deferred_selections": opening},
         "readiness": {
             "safe_to_open": not blockers and state in {"not_created", "upcoming"},

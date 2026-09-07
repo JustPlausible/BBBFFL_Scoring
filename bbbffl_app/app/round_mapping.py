@@ -56,6 +56,78 @@ def _mapping(row: Mapping[str, Any]) -> RoundMapping:
     )
 
 
+@dataclass(frozen=True)
+class MappingRecommendation:
+    """A purely advisory BBBFFL-round -> AFL-round suggestion (issue #152).
+
+    Never persisted, never returned unless the evidence is unambiguous:
+    `recommend_mapping` below returns `None` rather than guessing whenever a
+    year/round-number correspondence cannot be established with confidence.
+    Acceptance remains exclusively `RoundMappingRepository.accept`/
+    `correct` -- an operator must still explicitly confirm (with a reason)
+    before any mapping this describes takes effect, and may deliberately
+    diverge from it (BBBFFL and AFL round numbering can legitimately
+    differ -- see docs/round-afl-mapping.md)."""
+
+    afl_season_id: int
+    afl_round_id: int
+    afl_season_year: int
+    afl_round_number: int
+    evidence: str
+
+
+def recommend_mapping(afl_client: Any, *, bbbffl_year: int, bbbffl_sequence: int) -> MappingRecommendation | None:
+    """Deterministic, evidence-backed mapping suggestion for the round
+    preflight UI (never for `RoundMappingRepository.accept`/`correct`
+    itself, which stays advisory-blind by design -- see this module's
+    docstring).
+
+    The only rule applied is "the AFL season whose published year equals
+    this BBBFFL season's year, and within it the AFL round whose published
+    round number equals this BBBFFL round's sequence" -- exactly what the
+    2026 evidence in docs/round-afl-mapping.md documents as the *normal*
+    case, never a general assumption. Fails closed (returns `None`) rather
+    than guessing whenever:
+
+    - the configured client cannot enumerate seasons at all (an older
+      duck-typed test double, or a transport failure);
+    - zero or more than one AFL season publishes this year (ambiguous --
+      e.g. a season rollover window);
+    - zero or more than one AFL round in that season publishes this round
+      number (ambiguous/incomplete -- e.g. finals weeks, where BBBFFL and
+      AFL round numbering deliberately diverge, per this module's 2026
+      evidence section); or
+    - the client raises for any other reason (evidence unavailable).
+    """
+    list_seasons = getattr(afl_client, "get_seasons", None)
+    if not callable(list_seasons):
+        return None
+    try:
+        seasons = list_seasons()
+        matching_seasons = [season for season in seasons if season.year == bbbffl_year]
+        if len(matching_seasons) != 1:
+            return None
+        season = matching_seasons[0]
+        rounds = afl_client.get_rounds(season.season_id)
+        matching_rounds = [round_ for round_ in rounds if round_.round_number == bbbffl_sequence]
+        if len(matching_rounds) != 1:
+            return None
+        afl_round = matching_rounds[0]
+    except Exception:  # evidence unavailable/malformed is never a guess
+        return None
+    return MappingRecommendation(
+        afl_season_id=season.season_id,
+        afl_round_id=afl_round.round_id,
+        afl_season_year=bbbffl_year,
+        afl_round_number=afl_round.round_number,
+        evidence=(
+            f"Exactly one AFL season ({season.season_id}) publishes year {bbbffl_year}, and within it exactly one "
+            f"AFL round ({afl_round.round_id}) publishes round number {bbbffl_sequence}, matching this BBBFFL "
+            f"round's sequence."
+        ),
+    )
+
+
 class RoundMappingRepository:
     def __init__(self, database: DatabaseConnection):
         self.database = database

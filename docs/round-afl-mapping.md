@@ -37,6 +37,31 @@ rather than inventing a rule. Modelling match-level/deferred-fact composition,
 if confirmed, belongs in a separate follow-up rather than this round-context
 foundation.
 
+## Evidence-backed mapping recommendations (issue #152)
+
+The Round Preflight workflow (see [`round-preflight.md`](round-preflight.md))
+lets an operator pick an AFL season and round from human-readable labels
+instead of copying opaque provider IDs, and offers a deterministic
+*recommended* mapping wherever one can be established with confidence:
+`app.round_mapping.recommend_mapping` looks for exactly one AFL season whose
+published year matches the BBBFFL season's year, and within it exactly one
+AFL round whose published round number matches the BBBFFL round's sequence.
+
+This recommendation is a read-only, advisory-only helper, entirely separate
+from `accept()`/`correct()` above, which remain exactly as ambivalent to it
+as this document already describes -- acceptance never consults the current
+AFL round, never compares round numbers, and never applies an offset, and
+never applies a recommendation automatically either. `recommend_mapping`
+fails closed (returns no recommendation) rather than guessing whenever the
+evidence is ambiguous or incomplete, which is expected and common: the 2026
+evidence above already establishes that finals week 4 maps to AFL round 24,
+not "round 4" -- a case this helper correctly declines to recommend anything
+for, leaving the operator's own deliberate identification of the correct AFL
+context as the only authoritative source, exactly as this document already
+requires. An operator remains free -- and, for finals-style rounds, required
+-- to accept a mapping that diverges from any recommendation shown, provided
+they explicitly confirm it and give a reason (see `round-preflight.md`).
+
 ## Whole-round mapping vs. player-level deferred scoring (issue #69)
 
 That follow-up is [`opening-round-deferred-selection.md`](opening-round-deferred-selection.md).

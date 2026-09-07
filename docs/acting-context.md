@@ -1,5 +1,10 @@
 # Multi-role / acting-context model
 
+The [Scorer Operations Dashboard](scorer-dashboard.md) (issue #147) is the
+primary consumer of this package's season-scoping (`require_role_covers_season`)
+for a Scorer/Replay-Operator identity that must move between several
+authorised seasons -- see that document's "Role and season boundaries".
+
 **Roadmap:** Milestone B½ — Season Operations UI (issue #107).
 
 **Implementation:** `bbbffl_app/app/auth.py` (`GRANTABLE_ROLES`,

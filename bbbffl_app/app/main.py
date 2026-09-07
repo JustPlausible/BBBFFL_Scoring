@@ -80,6 +80,7 @@ from app.routes import preseason as preseason_routes
 from app.routes import public_rounds as public_round_routes
 from app.routes import round_preflight as round_preflight_routes
 from app.routes import round_review as round_review_routes
+from app.routes import scorer_dashboard as scorer_dashboard_routes
 from app.routes import season_centre as season_centre_routes
 from app.routes import superscore as superscore_routes
 from app.scorer_decisions import (
@@ -280,6 +281,8 @@ app.include_router(lineup_correction_routes.router)
 app.include_router(lineup_correction_routes.page_router)
 app.include_router(lineup_adjudication_routes.router)
 app.include_router(lineup_adjudication_routes.page_router)
+app.include_router(scorer_dashboard_routes.router)
+app.include_router(scorer_dashboard_routes.page_router)
 
 
 @app.exception_handler(AflApiError)

@@ -212,6 +212,16 @@ REPLAY_BOOTSTRAP = {"app.replay_bootstrap"}
 # dependency on HTTP or the composition root.
 ROUND_PREFLIGHT = {"app.round_preflight"}
 
+# Scorer Operations Dashboard (issue #147): an aggregation/navigation read
+# model over the season model, lockouts, round preflight (#152), round
+# review (#58) and audit boundaries -- the same shape as
+# app.round_preflight/app.round_review/app.coach_lineup (see this file's
+# ROUND_REVIEW comment): intentionally imported directly by its thin route
+# (app.routes.scorer_dashboard), but must stay a sibling of the Grand Final
+# vertical and must never depend on routes or the composition root, and no
+# lower layer may depend back on it.
+SCORER_DASHBOARD = {"app.scorer_dashboard"}
+
 ROUTES = {
     "app.routes",
     "app.routes.admin",
@@ -232,6 +242,7 @@ ROUTES = {
     "app.routes.round_preflight",
     "app.routes.lineup_correction",
     "app.routes.lineup_adjudication",
+    "app.routes.scorer_dashboard",
 }
 
 COMPOSITION_ROOT = {"app.main"}
@@ -255,6 +266,7 @@ ALL_GROUPS = (
     | DRAFT_BOARD
     | REPLAY_BOOTSTRAP
     | ROUND_PREFLIGHT
+    | SCORER_DASHBOARD
     | ROUTES
     | COMPOSITION_ROOT
 )
@@ -603,6 +615,21 @@ def test_scorer_decisions_stays_repository_agnostic(graph):
     shaped object a caller passes in (HTTP route, admin script, replay,
     test) rather than hard-wiring a persistence dependency."""
     assert graph["app.scorer_decisions"] == {"app.audit", "app.scoring"}
+
+
+def test_scorer_dashboard_is_an_application_service(graph):
+    """`app.scorer_dashboard` (issue #147) sits above the season model,
+    lockouts, round preflight and round review -- but must stay a sibling
+    of the Grand Final vertical and must never depend on routes or the
+    composition root, exactly like app.round_preflight/app.round_review."""
+    forbidden = GRAND_FINAL_VERTICAL | ROUTES | COMPOSITION_ROOT
+    for module in sorted(SCORER_DASHBOARD):
+        offending = graph[module] & forbidden
+        assert not offending, f"{module} must not depend on {sorted(offending)}"
+
+    for module in sorted(SEASON_MODEL | LOCKOUTS | WEEKLY_SUBMISSION_SOURCES):
+        offending = graph[module] & SCORER_DASHBOARD
+        assert not offending, f"{module} must not depend on application orchestration {sorted(offending)}"
 
 
 def test_routes_never_import_persistence_or_season_model_directly(graph):

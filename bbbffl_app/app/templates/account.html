@@ -37,6 +37,46 @@
     <div class="muted">This confirms which coach identity your browser session is authenticated as.</div>
     <div class="field"><span>Coach:</span> {{ coach.display_name }}</div>
     <div class="field"><span>Coach ID:</span> {{ coach.coach_id }}</div>
+    {% if has_admin_dashboard_access %}<div class="rounds">
+      <button type="button" class="link-button" id="open-admin-dashboard">
+        <span class="round-label">Administrator Dashboard →</span>
+        <span class="round-meta">Season/platform governance, readiness, authority and audit -- your role home as Administrator.</span>
+      </button>
+      <p class="link-error" id="open-admin-dashboard-error" role="alert"></p>
+    </div>
+    <script>
+      (function () {
+        var button = document.getElementById('open-admin-dashboard');
+        var error = document.getElementById('open-admin-dashboard-error');
+        var preferredRole = {{ preferred_admin_role|tojson }};
+        var csrfToken = {{ csrf_token|tojson }};
+        button.addEventListener('click', function () {
+          button.disabled = true;
+          error.textContent = '';
+          // A freshly authenticated session's active role is always "coach"
+          // even when granted Administrator authority -- activate the
+          // granted role through the existing acting-context API before
+          // navigating, so /admin/dashboard never 403s on the very first
+          // click (issue #148, following #147's Codex review on PR #159).
+          fetch('/api/context/role', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ role: preferredRole })
+          }).then(function (response) {
+            if (!response.ok) {
+              return response.json().catch(function () { return {}; }).then(function (data) {
+                throw new Error(data.detail || response.statusText);
+              });
+            }
+            window.location.href = '/admin/dashboard';
+          }).catch(function (err) {
+            button.disabled = false;
+            error.textContent = 'Could not switch to the ' + preferredRole + ' role: ' + err.message;
+          });
+        });
+      })();
+    </script>
+    {% endif %}
     {% if has_scorer_dashboard_access %}<div class="rounds">
       <button type="button" class="link-button" id="open-scorer-dashboard">
         <span class="round-label">Scorer Operations Dashboard →</span>

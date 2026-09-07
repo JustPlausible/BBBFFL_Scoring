@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Administrator Dashboard · BBBFFL</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0d1117;color:#e6edf3;font:15px/1.45 system-ui,sans-serif}
+header,main{max-width:1180px;margin:auto;padding:14px}
+a{color:#79c0ff}
+h1{font-size:1.35rem;margin:.2em 0}
+h2{font-size:1.1rem;margin:.2em 0 .5em}
+h3{font-size:1rem;margin:.6em 0 .3em}
+button,select,input{font:inherit;padding:10px;border:1px solid #484f58;border-radius:6px;background:#161b22;color:inherit;min-height:44px}
+button{cursor:pointer}
+.bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.card{border:1px solid #30363d;border-radius:10px;background:#161b22;padding:14px;margin:14px 0}
+.muted{color:#8b949e}
+.pill{display:inline-block;padding:3px 10px;border-radius:999px;background:#30363d;font-size:.82rem;font-weight:600}
+.pill.state-setup{background:#30363d}
+.pill.state-active{background:#1f6feb}
+.pill.state-completed{background:#238636}
+.queue-group{margin:10px 0}
+.queue-group h3{display:flex;align-items:center;gap:8px}
+.queue-count{background:#30363d;border-radius:999px;padding:1px 9px;font-size:.8rem}
+ul.queue{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+li.item{border:1px solid #30363d;border-radius:8px;padding:10px 12px;background:#0d1117}
+li.item.category-blocking_configuration{border-color:#f85149}
+li.item.category-authority_security{border-color:#db6d28}
+li.item.category-data_evidence_readiness{border-color:#d29922}
+li.item.category-operational_handoff{border-color:#1f6feb}
+li.item.category-completed_recent{border-color:#238636}
+li.item .item-title{font-weight:700}
+li.item .item-detail{margin-top:3px}
+li.item a.item-link{display:inline-block;margin-top:6px}
+details.diag{margin-top:6px}
+details.diag summary{cursor:pointer;color:#8b949e;font-size:.78rem}
+details.diag div{font:11px monospace;color:#8b949e;white-space:pre-wrap;margin-top:4px}
+table{width:100%;border-collapse:collapse;font-size:.92rem}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid #30363d;vertical-align:top}
+th{color:#8b949e;font-weight:600}
+.table-scroll{overflow-x:auto}
+.cards{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+.season-card{border:1px solid #30363d;border-radius:8px;padding:10px 12px}
+.season-card.is-selected{border-color:#58a6ff}
+.season-card h4{margin:0 0 4px;font-size:1rem}
+.grid-links{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}
+.grid-links a,.grid-links span.disabled{font-size:.85rem;padding:6px 10px;border:1px solid #484f58;border-radius:6px;text-decoration:none;min-height:auto;display:inline-block}
+.grid-links span.disabled{color:#5a616b}
+.warn{color:#ff7b72}
+.ok{color:#56d364}
+.stages{display:flex;flex-wrap:wrap;gap:6px}
+.stage{border:1px solid #30363d;border-radius:999px;padding:5px 12px;font-size:.85rem}
+.stage.is-current{border-color:#58a6ff;background:#132339;font-weight:700}
+.stage a{color:inherit;text-decoration:none}
+#message:empty{display:none}
+#message{border:1px solid #f85149;background:#2a1414;border-radius:8px;padding:10px;margin:10px 0}
+#legacy-warning{border:1px solid #db6d28;background:#2a1f0f;border-radius:8px;padding:10px;margin:10px 0}
+.visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}
+@media(max-width:640px){
+  header,main{padding:10px}
+  table thead{display:none}
+  table tr{display:block;border-bottom:2px solid #30363d;padding:6px 0}
+  table td{display:flex;justify-content:space-between;gap:8px;border-bottom:none;padding:4px 2px}
+  table td::before{content:attr(data-label);color:#8b949e;font-weight:600}
+}
+</style></head><body>
+<header>
+<h1>Administrator Dashboard</h1>
+<div id="context" class="bar muted" role="status">Loading acting context…</div>
+<div id="legacy-warning" role="alert"></div>
+<div id="selectors" class="bar"></div>
+</header>
+<main>
+<div id="message" role="alert"></div>
+<section id="app" aria-live="polite"><p class="muted">Loading…</p></section>
+</main>
+<script>
+const csrfToken={{ csrf_token|tojson }};
+const adminDashboardRoles={{ admin_dashboard_roles|tojson }};
+let roleSwitchAttempted=false;
+const esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function human(iso){if(!iso)return '—';try{return new Date(iso).toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'})}catch(e){return iso}}
+async function api(path){const r=await fetch(path,{headers:{'Accept':'application/json'}});const d=await r.json().catch(()=>({detail:r.statusText}));if(!r.ok){const e=new Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail));e.status=r.status;throw e}return d}
+function msg(s){document.querySelector('#message').textContent=s||''}
+
+// A handoff link (a bookmark, or a link from another surface) may name
+// exactly which season it means -- without reading it back, a refresh or
+// direct visit silently falls back to `portfolio[0]` (the newest season)
+// regardless of which one was actually selected (Codex review, PR #160).
+const initialParams=new URLSearchParams(window.location.search);
+let current={season_id:initialParams.get('season_id')||null};
+
+function updateUrlSeasonId(seasonId){
+  const url=new URL(window.location.href);
+  if(seasonId)url.searchParams.set('season_id',seasonId);else url.searchParams.delete('season_id');
+  history.replaceState(null,'',url);
+}
+
+function renderContext(ctx,authentication){
+  const who=ctx.coach_id
+    ? `Signed in as ${ctx.display_name} · Acting as ${ctx.active_role}`
+    : `Legacy operator credential · Acting as ${ctx.active_role}`;
+  const granted=ctx.granted_roles&&ctx.granted_roles.length?` · Granted: ${ctx.granted_roles.join(', ')}`:'';
+  const replay=ctx.is_replay_context?' · REPLAY CONTEXT':'';
+  const env=authentication&&authentication.environment
+    ? ` · ${authentication.environment.afl_mode==='replay'?'REPLAY':'LIVE'} evidence${authentication.environment.is_production?' · production':''}`
+    : '';
+  document.querySelector('#context').textContent=who+granted+replay+env;
+  const warning=document.querySelector('#legacy-warning');
+  if(authentication&&authentication.legacy_token_precedence_warning){
+    warning.textContent='A legacy shared admin token is taking precedence over an authenticated coach session on this request. Session-native Administrator authority is not being used -- remove the X-Admin-Token credential from this client to act under your own identity.';
+  }else{
+    warning.textContent='';
+  }
+}
+
+function renderSelectors(portfolio,selectedSeasonId){
+  if(portfolio.length<2){document.querySelector('#selectors').innerHTML='';return}
+  const options=portfolio.map(s=>`<option value="${esc(s.season_id)}" ${s.season_id===selectedSeasonId?'selected':''}>${esc(s.label)} (${esc(s.year)})</option>`).join('');
+  document.querySelector('#selectors').innerHTML=`<label>Season <select id="season-select" aria-label="Select season">${options}</select></label>`;
+  document.querySelector('#season-select').onchange=e=>{current.season_id=e.target.value;updateUrlSeasonId(current.season_id);load()};
+}
+
+function seasonCard(s,selectedSeasonId){
+  const blockers=s.blockers.length?`<div class="warn">${s.blockers.map(esc).join(' · ')}</div>`:'<div class="ok">No major blockers</div>';
+  const round=s.current_round?`${esc(s.current_round.round_label)} · ${esc(s.current_round.state)}`:'No rounds configured';
+  return `<div class="season-card${s.season_id===selectedSeasonId?' is-selected':''}">
+    <h4>${esc(s.label)} (${esc(s.year)}) <span class="pill state-${esc(s.lifecycle_state)}">${esc(s.lifecycle_state)}</span></h4>
+    <div class="muted">${esc(s.competition_label||'No competition configured')} · ${esc(s.rules_label||'—')}</div>
+    <div>${esc(s.team_count)}/${esc(s.expected_team_count)} teams · ${esc(s.rounds_opened)}/${esc(s.rounds_defined)} rounds opened</div>
+    <div class="muted">Current round: ${round}</div>
+    ${blockers}
+    <div class="grid-links">
+      <a href="${esc(s.season_centre_url)}">Season Centre</a>
+      ${s.public_season_url?`<a href="${esc(s.public_season_url)}">Public season</a>`:'<span class="disabled">Public season n/a</span>'}
+      ${s.scorer_dashboard_url?`<a href="${esc(s.scorer_dashboard_url)}">Scorer Dashboard</a>`:'<span class="disabled">Scorer Dashboard n/a</span>'}
+    </div>
+  </div>`;
+}
+
+function portfolioHtml(portfolio,selectedSeasonId){
+  if(!portfolio.length)return '<p class="muted">No seasons exist yet. Create one from the Season Centre.</p>';
+  return `<div class="cards">${portfolio.map(s=>seasonCard(s,selectedSeasonId)).join('')}</div>`;
+}
+
+function workflowMapHtml(stages){
+  return `<div class="stages">${stages.map(s=>`<span class="stage${s.is_current?' is-current':''}">${s.url?`<a href="${esc(s.url)}">${esc(s.label)}</a>`:esc(s.label)}</span>`).join('')}</div>`;
+}
+
+function attentionGroup(category,label,items){
+  if(!items.length)return '';
+  const open=category==='blocking_configuration'||category==='authority_security';
+  return `<details class="queue-group" ${open?'open':''}><summary><h3 style="display:inline">${label} <span class="queue-count">${items.length}</span></h3></summary>
+    <ul class="queue">${items.map(i=>`<li class="item category-${esc(i.category)}"><div class="item-title">${esc(i.title)}</div><div class="item-detail">${esc(i.detail)}</div>${i.url?`<a class="item-link" href="${esc(i.url)}">Open workflow →</a>`:''}${i.capability?`<div class="muted">Requires <code>${esc(i.capability)}</code></div>`:''}${i.diagnostics?`<details class="diag"><summary>Diagnostics</summary><div>${esc(JSON.stringify(i.diagnostics))}</div></details>`:''}</li>`).join('')}</ul></details>`;
+}
+
+function attentionHtml(items){
+  if(!items.length)return '<p class="ok">No governance items require attention right now.</p>';
+  const byCategory=c=>items.filter(i=>i.category===c);
+  return attentionGroup('blocking_configuration','Blocking configuration',byCategory('blocking_configuration'))
+    +attentionGroup('authority_security','Authority / security',byCategory('authority_security'))
+    +attentionGroup('data_evidence_readiness','Data / evidence readiness',byCategory('data_evidence_readiness'))
+    +attentionGroup('operational_handoff','Operational handoff',byCategory('operational_handoff'))
+    +attentionGroup('completed_recent','Completed / recent',byCategory('completed_recent'));
+}
+
+function readinessHtml(readiness){
+  const draft=readiness.draft?`${readiness.draft.completed_picks}/${readiness.draft.total_picks} picks${readiness.draft.is_finalized?' · finalized':''}`:'Not started';
+  const preseason=readiness.preseason_window?(readiness.preseason_window.is_open?'Open':'Closed (opening squads frozen)'):'Not opened';
+  const fixture=readiness.fixture_draw?`${readiness.fixture_draw.state}${readiness.fixture_draw.frozen_at?` · ${human(readiness.fixture_draw.frozen_at)}`:''}`:'No draft saved';
+  const opening=readiness.opening_round?`${readiness.opening_round.total_confirmed}/${readiness.opening_round.total_entries} confirmed${readiness.opening_round.has_integrity_issues?' · integrity warning':''}`:'Not configured for this season';
+  return `<table><tbody>
+    <tr><th scope="row">Entries established</th><td>${esc(readiness.entries_established)} (${esc(readiness.distinct_coaches)} distinct coaches)</td></tr>
+    <tr><th scope="row">Competition streams</th><td>${esc(readiness.competition_streams_configured)}</td></tr>
+    <tr><th scope="row">Player pool</th><td>${esc(readiness.player_pool_loaded)} selectable players</td></tr>
+    <tr><th scope="row">Draft</th><td>${draft}</td></tr>
+    <tr><th scope="row">Preseason window</th><td>${preseason}</td></tr>
+    <tr><th scope="row">Fixture draw</th><td>${fixture}</td></tr>
+    <tr><th scope="row">Opening Round</th><td>${opening}</td></tr>
+    <tr><th scope="row">Ordinary rounds</th><td>${esc(readiness.rounds_opened)}/${esc(readiness.rounds_defined)} opened (definitions vs. lifecycle rows kept distinct)</td></tr>
+  </tbody></table>`;
+}
+
+function scorerSummaryHtml(summary){
+  if(!summary)return '<p class="muted">Weekly Scorer operations have not begun for this season yet.</p>';
+  return `<p><strong>${esc(summary.round_label)}</strong> · <span class="pill state-active">${esc(summary.round_state)}</span></p>
+    <p><strong>${esc(summary.next_action.title)}</strong> — ${esc(summary.next_action.detail)}</p>
+    <p class="muted">${Object.entries(summary.attention_counts||{}).map(([k,v])=>`${esc(v)} ${esc(k)}`).join(' · ')||'No attention items'}</p>
+    <a class="item-link" href="${esc(summary.scorer_dashboard_url)}">Open Scorer Dashboard →</a>`;
+}
+
+function roleOverviewHtml(overview){
+  const roles=Object.keys(overview.grants_by_role||{});
+  if(!roles.length)return `<p class="warn">No role grants exist for this season. <a href="${esc(overview.season_centre_url)}">Grant roles in the Season Centre</a>.</p>`;
+  const rows=roles.map(role=>`<tr><th scope="row">${esc(role)}</th><td>${overview.grants_by_role[role].map(g=>esc(g.display_name)+(g.season_scoped?' (season-scoped)':'')).join(', ')}</td></tr>`).join('');
+  return `<div class="table-scroll"><table><tbody>${rows}</tbody></table></div>
+    <p class="muted"><a href="${esc(overview.season_centre_url)}">Manage role grants in the Season Centre →</a></p>`;
+}
+
+function auditHtml(events){
+  if(!events.length)return '<p class="muted">No recent administrative activity for this season.</p>';
+  return `<ul class="queue">${events.map(e=>`<li class="item"><div class="item-title">${esc(e.label)}</div><div class="item-detail muted">${human(e.occurred_at)} · ${esc(e.actor_role||'system')}${e.reason?` · ${esc(e.reason)}`:''}</div></li>`).join('')}</ul>`;
+}
+
+function identityIssuesHtml(issues){
+  if(!issues.length)return '';
+  return `<div class="warn">${issues.map(i=>esc(i.detail)).join('<br>')}</div>`;
+}
+
+function renderDashboard(portfolioSectionHtml,dashboard){
+  if(!dashboard){
+    document.querySelector('#app').innerHTML=portfolioSectionHtml+'<div class="card"><p class="muted">Select a season, or create one from the Season Centre.</p></div>';
+    return;
+  }
+  document.querySelector('#app').innerHTML=portfolioSectionHtml+`
+    <section class="card" aria-labelledby="season-heading">
+      <h2 id="season-heading">${esc(dashboard.season.label)} (${esc(dashboard.season.year)})</h2>
+      <p><span class="pill state-${esc(dashboard.season.lifecycle_state)}">${esc(dashboard.season.lifecycle_state)}</span> ${esc(dashboard.season.rules_label||'No rules version')}</p>
+      ${identityIssuesHtml(dashboard.identity_issues)}
+      <div class="grid-links">
+        <a href="${esc(dashboard.links.season_centre)}">Season Centre</a>
+        ${dashboard.links.public_season?`<a href="${esc(dashboard.links.public_season)}">Public season</a>`:'<span class="disabled">Public season n/a</span>'}
+      </div>
+    </section>
+    <section class="card" aria-labelledby="workflow-heading">
+      <h2 id="workflow-heading">Workflow map</h2>
+      ${workflowMapHtml(dashboard.workflow_map)}
+    </section>
+    <section class="card" aria-labelledby="attention-heading">
+      <h2 id="attention-heading">Governance attention queue</h2>
+      ${attentionHtml(dashboard.attention)}
+    </section>
+    <section class="card" aria-labelledby="readiness-heading">
+      <h2 id="readiness-heading">Setup &amp; preseason readiness</h2>
+      ${readinessHtml(dashboard.readiness)}
+    </section>
+    <section class="card" aria-labelledby="scorer-heading">
+      <h2 id="scorer-heading">Scorer operational state</h2>
+      ${scorerSummaryHtml(dashboard.scorer_summary)}
+    </section>
+    <section class="card" aria-labelledby="roles-heading">
+      <h2 id="roles-heading">Role &amp; access overview</h2>
+      ${roleOverviewHtml(dashboard.role_overview)}
+    </section>
+    <section class="card" aria-labelledby="audit-heading">
+      <h2 id="audit-heading">Audit &amp; integrity overview</h2>
+      ${auditHtml(dashboard.audit)}
+    </section>`;
+}
+
+async function tryActivateQualifyingRole(){
+  try{
+    const ctx=await api('/api/context');
+    if(!ctx.coach_id)return false;
+    const granted=ctx.granted_roles||[];
+    const preferred=adminDashboardRoles.find(r=>granted.includes(r));
+    if(!preferred)return false;
+    const r=await fetch('/api/context/role',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},body:JSON.stringify({role:preferred})});
+    return r.ok;
+  }catch(e){
+    return false;
+  }
+}
+async function load(){
+  try{
+    const qs=new URLSearchParams();
+    if(current.season_id)qs.set('season_id',current.season_id);
+    const d=await api(`/api/admin/dashboard${qs.toString()?`?${qs}`:''}`);
+    msg('');
+    renderContext(d.acting_context,d.authentication);
+    current.season_id=d.selected_season_id||current.season_id;
+    updateUrlSeasonId(current.season_id);
+    renderSelectors(d.portfolio,current.season_id);
+    if(!d.portfolio.length){
+      document.querySelector('#app').innerHTML='<div class="card"><p class="muted">No seasons exist yet. Create one from the Season Centre.</p></div>';
+      return;
+    }
+    const portfolioSection=`<section class="card" aria-labelledby="portfolio-heading"><h2 id="portfolio-heading">Season portfolio</h2>${portfolioHtml(d.portfolio,current.season_id)}</section>`;
+    renderDashboard(portfolioSection,d.dashboard);
+  }catch(e){
+    if(e.status===403){
+      // A freshly authenticated session's active role is always "coach"
+      // even when granted Administrator authority (following #147's Codex
+      // review on PR #159) -- try switching to Administrator, once, before
+      // reporting a real authorization failure.
+      if(!roleSwitchAttempted){
+        roleSwitchAttempted=true;
+        const switched=await tryActivateQualifyingRole();
+        if(switched)return load();
+      }
+      document.querySelector('#app').innerHTML='<div class="card"><p class="warn">The active role is not authorised for the Administrator dashboard. Sign in with a coach identity granted Administrator authority, then reopen this page.</p></div>';
+      document.querySelector('#context').textContent='Not authorised';
+      return;
+    }
+    if(e.status===401){
+      window.location.href='/login?next=/admin/dashboard';
+      return;
+    }
+    msg('Unable to load the Administrator dashboard: '+e.message);
+  }
+}
+load();
+</script></body></html>

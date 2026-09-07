@@ -5,6 +5,33 @@ primary consumer of this package's season-scoping (`require_role_covers_season`)
 for a Scorer/Replay-Operator identity that must move between several
 authorised seasons -- see that document's "Role and season boundaries".
 
+## `/admin/dashboard` <-> `/scorer` role-switch/navigation (issue #148)
+
+The [Administrator Dashboard](admin-dashboard.md) (`/admin/dashboard`) and
+the Scorer Operations Dashboard (`/scorer`) are separate role homes over
+the same underlying state, following the same "freshly authenticated
+session starts as coach" recovery both pages already need:
+
+- `/account` offers a discoverable button for each dashboard a signed-in
+  coach identity's granted roles qualify for (`has_admin_dashboard_access`/
+  `has_scorer_dashboard_access` in `app.routes.auth.account_page`) -- a
+  session's *active* role is always `coach` immediately after login
+  regardless of what is granted, so each button first calls
+  `POST /api/context/role` to activate the preferred qualifying role, then
+  navigates. Both page shells (`admin_dashboard.html`/`scorer_dashboard.html`)
+  also perform this same recovery themselves on a direct/bookmarked 403,
+  so a role switch is never a dead end.
+- An Administrator who also holds (or is granted) Scorer capability moves
+  between the two dashboards exactly like any other role switch: activate
+  `scorer`/`replay_operator` via `POST /api/context/role`, or simply follow
+  the Administrator Dashboard's own link to `/scorer` -- Administrator's
+  capability set is already a strict superset of Scorer's (see
+  `app.authorization.CAPABILITIES`), so no separate Scorer grant is needed
+  and no authority is expanded by following that link.
+- Coach/account surfaces (`/account`, `/coach/...`) remain reachable
+  throughout without switching role at all -- "coach" is the one role a
+  session never loses.
+
 **Roadmap:** Milestone B½ — Season Operations UI (issue #107).
 
 **Implementation:** `bbbffl_app/app/auth.py` (`GRANTABLE_ROLES`,

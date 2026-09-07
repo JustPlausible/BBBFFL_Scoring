@@ -1,5 +1,11 @@
 # Season Centre
 
+Season Centre is *detailed management of one season*. For the
+Administrator's broader role home -- a multi-season portfolio, governance
+attention queue, workflow map, role/access and audit overview -- see the
+[Administrator Dashboard](admin-dashboard.md) (issue #148), which links
+here for every season it lists.
+
 Issue #100 gives the scorer/admin a browser surface over the season/coach/
 season-entry identity domain roadmap packages 09-10 (issues #19/#20)
 already established, so a human replay operator can establish and inspect

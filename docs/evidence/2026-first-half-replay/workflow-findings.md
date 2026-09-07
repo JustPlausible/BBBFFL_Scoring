@@ -28,9 +28,12 @@ scheduled time has legitimately activated a BBBFFL lockout.
 
 ### Trigger activation must be materialised
 
-Moving the replay checkpoint and restarting the application evaluates triggers
-against authoritative replay time. The persisted activation record, not a
-browser label, proves that a selective or main lockout occurred.
+Moving the replay checkpoint and restarting the application makes the new
+authoritative replay time available, but startup alone does not evaluate a
+trigger. An authoritative lineup/lockout read or a submission operation invokes
+lock evaluation and materialises any activation now due. The resulting
+persisted activation record, not a browser label or restart, proves that a
+selective or main lockout occurred.
 
 ### Main lockout includes vacancies
 

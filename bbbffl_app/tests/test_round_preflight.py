@@ -15,6 +15,7 @@ from app.audit import ActorContext, AuditEventRepository
 from app.competition_lifecycle import CompetitionLifecycleRepository
 from app.identity import IdentityRepository
 from app.lockouts import LockoutRepository, LockoutTriggerRepository, RoundMatchFactsProvider
+from app.replay import ReplayClock
 from app.round_mapping import RoundMappingRepository
 from app.round_preflight import (
     StaleMappingRevisionError,
@@ -647,7 +648,7 @@ def test_replay_checkpoint_recommendations_are_advisory_and_absent_for_live_clie
     db = migrated_connection()
     round_, _ = configured(db, 2026, 100)
     LockoutTriggerRepository(db).create(round_.bbbffl_round_id, "main", "main", 1, [9001])
-    matches = (_match(9001),)
+    matches = (_match(9001),)  # still UPCOMING -- not yet concluded
 
     live_view = _view(db, round_, matches=matches)
     assert live_view["replay_checkpoint_recommendations"] == []
@@ -657,8 +658,31 @@ def test_replay_checkpoint_recommendations_are_advisory_and_absent_for_live_clie
         db, CompetitionLifecycleRepository(db), IdentityRepository(db), replay_evidence, round_.bbbffl_round_id
     )
     recommendations = replay_view["replay_checkpoint_recommendations"]
-    assert recommendations, "replay metadata should produce at least the final-results checkpoint"
-    assert recommendations[-1]["stage"] == "final-results"
-    assert any(r["stage"] == "scheduled" for r in recommendations)  # "just after" the configured main trigger
+    assert recommendations, "replay metadata should produce at least the 'just after trigger' recommendation"
+    assert all(r["stage"] == "scheduled" for r in recommendations)
+    # No conclusion evidence yet -> no final-results recommendation at all.
+    assert not any(r["stage"] == "final-results" for r in recommendations)
     # Never a host filesystem path -- only stage/instant/evidence text.
     assert all("path" not in r and "file" not in r for r in recommendations)
+
+
+def test_final_results_checkpoint_recommendation_requires_concluded_match_evidence_not_start_time():
+    """Codex review (P1) on issue #152's PR: recommending the latest
+    match's *scheduled start* as the final-results instant would suggest
+    finalising the round the moment its last match begins, not once it has
+    actually concluded. The recommendation must instead be "now", and only
+    once every relevant match's own currently observed status already
+    reads as concluded."""
+    db = migrated_connection()
+    round_, _ = configured(db, 2026, 100)
+    LockoutTriggerRepository(db).create(round_.bbbffl_round_id, "main", "main", 1, [9001])
+    concluded_match = _match(9001, status="CONCLUDED")
+    now = ReplayClock(datetime(2026, 3, 12, 11, 0, tzinfo=timezone.utc))
+
+    replay_evidence = ReplayLikeEvidence([concluded_match], clock=now)
+    replay_view = build_round_preflight(
+        db, CompetitionLifecycleRepository(db), IdentityRepository(db), replay_evidence, round_.bbbffl_round_id
+    )
+    recommendations = replay_view["replay_checkpoint_recommendations"]
+    final_results = next(r for r in recommendations if r["stage"] == "final-results")
+    assert final_results["recommended_effective_at"] == "2026-03-12T11:00:00+00:00"  # "now", not the match's start

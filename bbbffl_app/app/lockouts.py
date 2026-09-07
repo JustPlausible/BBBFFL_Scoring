@@ -205,6 +205,22 @@ class TriggerAlreadyActivatedError(LockoutIntegrityError):
     irreversibility', layer 1)."""
 
 
+class TriggerValidationError(LockoutIntegrityError):
+    """A lockout-trigger configuration submitted through round preflight
+    fails BBBFFL's per-round sequence-ordering/uniqueness rules (issue
+    #152) -- raised by `LockoutTriggerRepository.configure` under the same
+    lock that reads every other trigger currently configured for this
+    round, so this can never be bypassed by a stale/racing snapshot."""
+
+
+class StaleTriggerRevisionError(RuntimeError):
+    """A trigger configuration was submitted against a revision that is no
+    longer current for that trigger key -- checked atomically under the
+    same lock `LockoutTriggerRepository.configure` uses to advance
+    `current_revision`, so a concurrent writer can never silently win
+    against a caller that observed a stale revision (issue #152 review)."""
+
+
 class LockState(str, Enum):
     EDITABLE = "editable"
     LOCKED = "locked"
@@ -474,6 +490,116 @@ class LockoutTriggerRepository:
                 action=LOCKOUT_TRIGGER_CONFIGURED,
                 entity_type=ENTITY_TYPE_LOCKOUT_TRIGGER,
                 entity_id=head["trigger_id"],
+                entity_version=str(revision),
+                reason=reason,
+                after_state={"trigger_type": trigger_type, "sequence": sequence, "afl_match_ids": list(match_ids)},
+            )
+        return self.get(bbbffl_round_id, trigger_key)
+
+    def configure(
+        self,
+        bbbffl_round_id: str,
+        trigger_key: str,
+        trigger_type: str,
+        sequence: int,
+        afl_match_ids,
+        *,
+        actor: ActorContext = ActorContext.anonymous_operator("admin"),
+        reason: str | None = None,
+        expected_revision: int | None = None,
+    ) -> LockoutTrigger:
+        """Atomically create-or-replace one trigger slot for this round
+        (issue #152's `app.round_preflight.configure_preflight_trigger` is
+        this method's only production caller; membership-in-mapping
+        validation, which needs an `afl_client` call, happens there,
+        deliberately outside any lock held here).
+
+        Unlike composing `get()`/`list_triggers()` then `create()`/
+        `replace()` from outside a transaction, this reads every trigger
+        currently configured for this round *and* validates
+        `expected_revision`/sequence-uniqueness/ordering *and* writes, all
+        under one lock spanning every one of this round's trigger header
+        rows -- closing the race where two concurrent configuration
+        attempts for the same round could each read the same stale
+        snapshot, each pass validation against it, and then both commit
+        (issue #152 review, P2). `create`/`replace` remain available for
+        other callers (scripts, lower-level repository tests) that do not
+        need this round-wide serialization.
+        """
+        match_ids = self._validated_matches(trigger_type, afl_match_ids)
+        with transaction(self.database) as conn:
+            rows = conn.execute(
+                "SELECT t.trigger_id, t.trigger_key, t.current_revision, r.trigger_type, r.sequence "
+                "FROM bbbffl_round_lockout_trigger t "
+                "JOIN bbbffl_round_lockout_trigger_revision r ON r.trigger_id=t.trigger_id AND r.revision=t.current_revision "
+                "WHERE t.bbbffl_round_id=?" + _for_update_suffix(self.database),
+                (bbbffl_round_id,),
+            ).fetchall()
+            existing = next((row for row in rows if row["trigger_key"] == trigger_key), None)
+            current_revision = existing["current_revision"] if existing else 0
+            if expected_revision is not None and current_revision != expected_revision:
+                raise StaleTriggerRevisionError(
+                    f"Trigger {trigger_key!r} has changed since it was loaded (expected revision "
+                    f"{expected_revision}, current revision {current_revision}). Reload the current authoritative "
+                    "lockout plan before deciding."
+                )
+            others = [row for row in rows if row["trigger_key"] != trigger_key]
+            if sequence in {row["sequence"] for row in others}:
+                raise TriggerValidationError(f"Sequence {sequence} is already used by another trigger in this round.")
+            selective_sequences = [row["sequence"] for row in others if row["trigger_type"] == "selective"]
+            main_sequences = [row["sequence"] for row in others if row["trigger_type"] == "main"]
+            if trigger_type == "selective" and main_sequences and sequence >= min(main_sequences):
+                raise TriggerValidationError(
+                    "A selective trigger's sequence must precede the round's main/remaining trigger's sequence."
+                )
+            if trigger_type == "main" and selective_sequences and sequence <= max(selective_sequences):
+                raise TriggerValidationError(
+                    "The main/remaining trigger's sequence must follow every selective trigger's sequence."
+                )
+            if trigger_type == "main":
+                other_main = next((row for row in others if row["trigger_type"] == "main"), None)
+                if other_main is not None:
+                    raise LockoutIntegrityError(
+                        f"round {bbbffl_round_id} already has a main trigger ({other_main['trigger_key']!r}); "
+                        "a round has at most one"
+                    )
+            if (
+                existing is not None
+                and conn.execute(
+                    "SELECT 1 FROM bbbffl_round_lockout_trigger_activation WHERE trigger_id=?",
+                    (existing["trigger_id"],),
+                ).fetchone()
+            ):
+                raise TriggerAlreadyActivatedError(
+                    f"trigger {trigger_key!r} has already activated; its configuration is now permanently frozen"
+                )
+
+            now = _now()
+            if existing is not None:
+                trigger_id = existing["trigger_id"]
+                revision = existing["current_revision"] + 1
+                conn.execute(
+                    "UPDATE bbbffl_round_lockout_trigger SET current_revision=? WHERE trigger_id=?",
+                    (revision, trigger_id),
+                )
+            else:
+                trigger_id, revision = _id(), 1
+                try:
+                    conn.execute(
+                        "INSERT INTO bbbffl_round_lockout_trigger VALUES (?, ?, ?, ?, ?)",
+                        (trigger_id, bbbffl_round_id, trigger_key, revision, now),
+                    )
+                except IntegrityError as exc:
+                    raise LockoutIntegrityError(
+                        f"trigger key {trigger_key!r} already exists for round {bbbffl_round_id}"
+                    ) from exc
+            self._insert_revision(conn, trigger_id, revision, trigger_type, sequence, match_ids, actor, reason, now)
+            append_event(
+                conn,
+                actor=actor,
+                action=LOCKOUT_TRIGGER_CONFIGURED,
+                entity_type=ENTITY_TYPE_LOCKOUT_TRIGGER,
+                entity_id=trigger_id,
                 entity_version=str(revision),
                 reason=reason,
                 after_state={"trigger_type": trigger_type, "sequence": sequence, "afl_match_ids": list(match_ids)},

@@ -16,38 +16,35 @@ differ (see docs/round-afl-mapping.md)."""
 
 from contextlib import nullcontext
 
-from app.afl_client import is_recognized_match_status
-from app.lockouts import LockoutTriggerRepository
+from app.afl_client import is_recognized_match_status, normalize_match_status
+from app.lockouts import LockoutTriggerRepository, StaleTriggerRevisionError, TriggerValidationError
 from app.opening_round import (
     OpeningRoundNominationRepository,
     OpeningRoundRuleRepository,
     build_opening_round_readiness,
     describe_accepted_rules,
 )
-from app.round_mapping import AflApiReferenceValidator, RoundMappingRepository, recommend_mapping
+from app.round_mapping import (
+    AflApiReferenceValidator,
+    RoundMappingRepository,
+    StaleMappingRevisionError,
+    recommend_mapping,
+)
 
-
-class TriggerValidationError(ValueError):
-    """A lockout-trigger configuration submitted through round preflight
-    fails BBBFFL's per-round ordering/membership rules -- distinct from
-    `app.lockouts.LockoutIntegrityError`, which governs the lower-level
-    repository's own invariants (e.g. at most one main trigger, unique match
-    IDs within one trigger) and is raised independently by
-    `LockoutTriggerRepository` itself; both surface as HTTP 400/409 (see
-    app/routes/round_preflight.py)."""
-
-
-class StaleMappingRevisionError(RuntimeError):
-    """A mapping mutation was submitted against a revision that is no
-    longer current -- a concurrent operator (or an earlier browser tab) has
-    already accepted/corrected this round's mapping since the caller last
-    observed it. The browser must reload authoritative state rather than
-    silently overwrite a newer accepted mapping (issue #152)."""
-
-
-class StaleTriggerRevisionError(RuntimeError):
-    """The same stale/concurrent-write protection as
-    `StaleMappingRevisionError`, scoped to one lockout trigger key."""
+# Re-exported for app/routes/round_preflight.py, which must not import
+# app.lockouts/app.round_mapping directly (see test_architecture.py's
+# route/persistence-boundary check) -- this service-layer module is its
+# only permitted source for these.
+__all__ = [
+    "StaleMappingRevisionError",
+    "StaleTriggerRevisionError",
+    "TriggerValidationError",
+    "accept_preflight_mapping",
+    "build_round_preflight",
+    "configure_preflight_trigger",
+    "open_preflight_round",
+    "recommend_lockout_plan",
+]
 
 
 def accept_preflight_mapping(
@@ -86,17 +83,30 @@ def accept_preflight_mapping(
         raise ValueError("Accepting an AFL round mapping requires an explicit reason.")
     repo = RoundMappingRepository(database)
     validator = AflApiReferenceValidator(afl_client)
+    # This `resolve()` only decides *which* repository method to call --
+    # never the revision comparison itself, which `accept`/`correct` (via
+    # `_activate`) perform atomically under the same row lock that advances
+    # `current_revision` (issue #152 review, P2: a check performed here,
+    # before that lock is taken, cannot close the race where two concurrent
+    # callers both observe the same stale revision and both pass a
+    # standalone comparison before either commits). A stale/wrong choice of
+    # accept-vs-correct is itself still safe: `_activate` independently
+    # rejects a mismatched correction/acceptance state regardless of what
+    # this read observed.
     existing = repo.resolve(round_id)
-    if expected_revision is not None:
-        current_revision = existing.revision if existing else 0
-        if current_revision != expected_revision:
-            raise StaleMappingRevisionError(
-                f"This mapping has changed since it was loaded (expected revision {expected_revision}, current "
-                f"revision {current_revision}). Reload the current authoritative mapping before deciding."
-            )
     if existing:
-        return repo.correct(round_id, season_id, afl_round_id, validator, reason=reason, actor=actor)
-    return repo.accept(round_id, season_id, afl_round_id, validator, reason=reason, actor=actor)
+        return repo.correct(
+            round_id,
+            season_id,
+            afl_round_id,
+            validator,
+            reason=reason,
+            actor=actor,
+            expected_revision=expected_revision,
+        )
+    return repo.accept(
+        round_id, season_id, afl_round_id, validator, reason=reason, actor=actor, expected_revision=expected_revision
+    )
 
 
 def configure_preflight_trigger(database, round_id, payload, afl_client, *, actor, reason):
@@ -107,14 +117,14 @@ def configure_preflight_trigger(database, round_id, payload, afl_client, *, acto
 
     - an accepted mapping must exist;
     - every submitted AFL match ID must belong to that mapping's current
-      match evidence;
-    - sequence numbers must be unique within the round, every selective
-      trigger's sequence must precede the round's one main/remaining
-      trigger's sequence, and the main trigger's sequence must follow every
-      selective trigger's;
-    - `payload.expected_revision`, when supplied, must match this trigger
-      key's current revision (0 meaning "does not exist yet"), or this
-      raises `StaleTriggerRevisionError`.
+      match evidence (this needs an `afl_client` call, so it happens here,
+      deliberately outside any lock);
+    - sequence uniqueness/ordering and `payload.expected_revision` are then
+      validated -- and the resulting write performed -- atomically, under
+      one lock, by `LockoutTriggerRepository.configure` (issue #152 review,
+      P2: validating those against a snapshot read here, before any lock is
+      held, cannot close the race where two concurrent configuration
+      attempts for this round both pass validation before either commits).
     """
     mapping_repo = RoundMappingRepository(database)
     mapping = mapping_repo.resolve(round_id)
@@ -133,41 +143,7 @@ def configure_preflight_trigger(database, round_id, payload, afl_client, *, acto
             f"AFL match(es) {unknown_ids} are not part of the currently accepted mapping's matches."
         )
 
-    repo = LockoutTriggerRepository(database)
-    existing = repo.get(round_id, payload.trigger_key)
-    if payload.expected_revision is not None:
-        current_revision = existing.revision if existing else 0
-        if current_revision != payload.expected_revision:
-            raise StaleTriggerRevisionError(
-                f"Trigger {payload.trigger_key!r} has changed since it was loaded (expected revision "
-                f"{payload.expected_revision}, current revision {current_revision}). Reload the current "
-                "authoritative lockout plan before deciding."
-            )
-
-    others = [trigger for trigger in repo.list_triggers(round_id) if trigger.trigger_key != payload.trigger_key]
-    if payload.sequence in {trigger.sequence for trigger in others}:
-        raise TriggerValidationError(f"Sequence {payload.sequence} is already used by another trigger in this round.")
-    selective_sequences = [trigger.sequence for trigger in others if trigger.trigger_type == "selective"]
-    main_sequences = [trigger.sequence for trigger in others if trigger.trigger_type == "main"]
-    if payload.trigger_type == "selective" and main_sequences and payload.sequence >= min(main_sequences):
-        raise TriggerValidationError(
-            "A selective trigger's sequence must precede the round's main/remaining trigger's sequence."
-        )
-    if payload.trigger_type == "main" and selective_sequences and payload.sequence <= max(selective_sequences):
-        raise TriggerValidationError(
-            "The main/remaining trigger's sequence must follow every selective trigger's sequence."
-        )
-
-    kwargs = {
-        "trigger_type": payload.trigger_type,
-        "sequence": payload.sequence,
-        "afl_match_ids": payload.afl_match_ids,
-        "actor": actor,
-        "reason": reason,
-    }
-    if existing:
-        return repo.replace(round_id, payload.trigger_key, **kwargs)
-    return repo.create(
+    return LockoutTriggerRepository(database).configure(
         round_id,
         payload.trigger_key,
         payload.trigger_type,
@@ -175,6 +151,7 @@ def configure_preflight_trigger(database, round_id, payload, afl_client, *, acto
         payload.afl_match_ids,
         actor=actor,
         reason=reason,
+        expected_revision=payload.expected_revision,
     )
 
 
@@ -253,15 +230,30 @@ def _replay_checkpoint_recommendations(afl_client, match_views: list[dict], trig
     operator to action, if they choose, through the existing replay
     checkpoint tooling. Only produced when the configured client carries
     replay metadata at all (a `clock` attribute -- absent on the live
-    `AflApiClient`), and only from unambiguous scheduled-start evidence."""
+    `AflApiClient`).
+
+    A "just after this trigger" instant (`stage="scheduled"`) is safe to
+    derive from scheduled start times alone, since a trigger's own lock
+    boundary is itself schedule-based (`evaluate_match_lock`). A
+    "final-results" instant is not: recommending the latest match's
+    scheduled *start* would suggest finalising the round the moment its
+    last match begins, before it has actually concluded (issue #152
+    review, P1). Lacking any actual conclusion-time evidence in `Match`,
+    the only safe evidence-backed final-results recommendation is "right
+    now", and only once every relevant match's own currently observed
+    status already reads as concluded (postgame/completed) -- otherwise no
+    final-results recommendation is made at all, rather than guessing one.
+    """
     if not hasattr(afl_client, "clock"):
-        return []
-    if not match_views or any(match["start_time_utc"] is None for match in match_views):
         return []
     recommendations = []
     matches_by_id = {match["match_id"]: match for match in match_views}
     for trigger in triggers:
-        covered = [matches_by_id[match_id] for match_id in trigger.afl_match_ids if match_id in matches_by_id]
+        covered = [
+            matches_by_id[match_id]
+            for match_id in trigger.afl_match_ids
+            if match_id in matches_by_id and matches_by_id[match_id]["start_time_utc"] is not None
+        ]
         if not covered:
             continue
         earliest = min(match["start_time_utc"] for match in covered)
@@ -277,18 +269,25 @@ def _replay_checkpoint_recommendations(afl_client, match_views: list[dict], trig
                 ),
             }
         )
-    latest = max(match["start_time_utc"] for match in match_views)
-    recommendations.append(
-        {
-            "label": "Safe final-results checkpoint",
-            "stage": "final-results",
-            "recommended_effective_at": latest,
-            "evidence": (
-                f"The latest relevant AFL match is scheduled to start at {latest}; a final-results checkpoint "
-                "recorded once every mapped match has concluded is expected to be safe to treat as final."
-            ),
-        }
-    )
+    if match_views and all(
+        is_recognized_match_status(match["status"])
+        and normalize_match_status(match["status"]) in ("postgame", "completed")
+        for match in match_views
+    ):
+        clock = getattr(afl_client, "clock", None)
+        now = clock.now() if clock is not None else None
+        if now is not None:
+            recommendations.append(
+                {
+                    "label": "Safe final-results checkpoint",
+                    "stage": "final-results",
+                    "recommended_effective_at": now.isoformat(),
+                    "evidence": (
+                        "Every relevant AFL match currently shows a concluded status (postgame/completed), so "
+                        "recording a final-results checkpoint now is expected to be safe."
+                    ),
+                }
+            )
     return recommendations
 
 
@@ -335,7 +334,10 @@ def build_round_preflight(database, lifecycle, identities, afl_client, round_id:
                 {"code": "afl_seasons_unavailable", "message": f"AFL season list is unavailable for selection: {exc}"}
             )
     mapping_recommendation = recommend_mapping(
-        afl_client, bbbffl_year=logical["year"], bbbffl_sequence=logical["sequence"]
+        afl_client,
+        bbbffl_year=logical["year"],
+        bbbffl_sequence=logical["sequence"],
+        bbbffl_stream_type=logical["stream_type"],
     )
     mapping_context = None
     if mapping is not None:

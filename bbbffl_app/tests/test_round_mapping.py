@@ -51,7 +51,7 @@ def test_recommend_mapping_matches_corresponding_year_and_round_number():
         seasons=[Season(season_id=85, is_current=True, current_round_number=1, year=2026, name="2026 Season")],
         rounds_by_season={85: [Round(round_id=1300, round_number=1), Round(round_id=1301, round_number=2)]},
     )
-    recommendation = recommend_mapping(client, bbbffl_year=2026, bbbffl_sequence=1)
+    recommendation = recommend_mapping(client, bbbffl_year=2026, bbbffl_sequence=1, bbbffl_stream_type="ordinary")
     assert recommendation == MappingRecommendation(
         afl_season_id=85,
         afl_round_id=1300,
@@ -70,7 +70,27 @@ def test_recommend_mapping_returns_none_on_deliberate_finals_style_round_diverge
         seasons=[Season(season_id=84, is_current=False, current_round_number=24, year=2026)],
         rounds_by_season={84: [Round(round_id=1400, round_number=24)]},
     )
-    assert recommend_mapping(client, bbbffl_year=2026, bbbffl_sequence=4) is None
+    assert recommend_mapping(client, bbbffl_year=2026, bbbffl_sequence=4, bbbffl_stream_type="ordinary") is None
+
+
+def test_recommend_mapping_gated_to_ordinary_stream_even_when_numbers_coincidentally_match():
+    """Codex review (P1) on issue #152's PR: a finals/superscore stream's
+    own sequence numbering restarts independently of AFL's -- e.g. the
+    repository's Grand Final fixture uses sequence 4
+    (`test_authorised_correction_preserves_history_and_audit` et al. use
+    `make(2026, ...)`; the real Grand Final round is `sequence=4` while its
+    correct AFL mapping is round 24, per docs/round-afl-mapping.md). If an
+    AFL season also happens to publish an (unrelated) round numbered 4,
+    the ordinary-stream equal-number heuristic must never be applied to a
+    non-ordinary stream just because the numbers happen to coincide."""
+    client = RecommendationEvidence(
+        seasons=[Season(season_id=84, is_current=False, current_round_number=24, year=2026)],
+        rounds_by_season={84: [Round(round_id=1390, round_number=4), Round(round_id=1400, round_number=24)]},
+    )
+    assert recommend_mapping(client, bbbffl_year=2026, bbbffl_sequence=4, bbbffl_stream_type="finals") is None
+    assert recommend_mapping(client, bbbffl_year=2026, bbbffl_sequence=4, bbbffl_stream_type="superscore") is None
+    # The same evidence *does* produce a recommendation for the ordinary stream.
+    assert recommend_mapping(client, bbbffl_year=2026, bbbffl_sequence=4, bbbffl_stream_type="ordinary") is not None
 
 
 def test_recommend_mapping_returns_none_for_ambiguous_multi_season_year():
@@ -81,7 +101,7 @@ def test_recommend_mapping_returns_none_for_ambiguous_multi_season_year():
         ],
         rounds_by_season={},
     )
-    assert recommend_mapping(client, bbbffl_year=2026, bbbffl_sequence=1) is None
+    assert recommend_mapping(client, bbbffl_year=2026, bbbffl_sequence=1, bbbffl_stream_type="ordinary") is None
 
 
 def test_recommend_mapping_returns_none_for_ambiguous_multi_round_match():
@@ -89,16 +109,18 @@ def test_recommend_mapping_returns_none_for_ambiguous_multi_round_match():
         seasons=[Season(season_id=85, is_current=True, current_round_number=1, year=2026)],
         rounds_by_season={85: [Round(round_id=1, round_number=1), Round(round_id=2, round_number=1)]},
     )
-    assert recommend_mapping(client, bbbffl_year=2026, bbbffl_sequence=1) is None
+    assert recommend_mapping(client, bbbffl_year=2026, bbbffl_sequence=1, bbbffl_stream_type="ordinary") is None
 
 
 def test_recommend_mapping_returns_none_without_get_seasons_support():
-    assert recommend_mapping(NoSeasonListing(), bbbffl_year=2026, bbbffl_sequence=1) is None
+    assert (
+        recommend_mapping(NoSeasonListing(), bbbffl_year=2026, bbbffl_sequence=1, bbbffl_stream_type="ordinary") is None
+    )
 
 
 def test_recommend_mapping_returns_none_when_evidence_unavailable():
     client = RecommendationEvidence(seasons=[], rounds_by_season={}, error=RuntimeError("afl-api unavailable"))
-    assert recommend_mapping(client, bbbffl_year=2026, bbbffl_sequence=1) is None
+    assert recommend_mapping(client, bbbffl_year=2026, bbbffl_sequence=1, bbbffl_stream_type="ordinary") is None
 
 
 @pytest.fixture

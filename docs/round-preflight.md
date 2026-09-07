@@ -73,10 +73,15 @@ rounds rather than following BBBFFL's own week numbering (see
 can always choose a season/round other than the recommended one (via the
 dropdowns, or the advanced manual AFL-ID fallback) and accept it, provided
 they give an explicit reason. `recommend_mapping` deliberately returns no
-recommendation at all for such rounds rather than guessing one, so
-"diverging from the recommendation" and "there simply is no recommendation"
-look the same to the operator: an unprompted, unaided, but always-required
-explicit decision.
+recommendation at all for such rounds -- it is gated to the ordinary
+(home-and-away) stream and returns `None` unconditionally for any other
+stream (finals, superscore, ...), since those streams' own sequence
+numbering can coincidentally match an unrelated AFL round number and would
+otherwise produce a confidently-labelled but wrong recommendation (see
+[`round-afl-mapping.md`](round-afl-mapping.md)). So "diverging from the
+recommendation" and "there simply is no recommendation" look the same to
+the operator: an unprompted, unaided, but always-required explicit
+decision.
 
 ## Chronological, human-readable match selection
 
@@ -158,12 +163,25 @@ authority on whether "Open Round" is enabled.
 Where the configured AFL client carries replay metadata (a `clock`
 attribute -- present only on `app.replay.ReplayAflDataSource`, never on the
 live `AflApiClient`), Round Preflight also shows advisory replay checkpoint
-instants: one "just after" each currently configured trigger's earliest
-covered match (recommended `stage: "scheduled"`), and one safe
-final-results checkpoint after the round's latest relevant match
-(`stage: "final-results"`) -- the same two stage values
-`app/replay_checkpoint.py`'s checkpoint schema already recognises. These
-are suggestions only:
+instants, using the same two stage values `app/replay_checkpoint.py`'s
+checkpoint schema already recognises:
+
+- one "just after" each currently configured trigger's earliest covered
+  match (`stage: "scheduled"`) -- safe to derive from scheduled start time
+  alone, since a trigger's own lock boundary is itself schedule-based
+  (`evaluate_match_lock`);
+- one safe final-results checkpoint (`stage: "final-results"`), but **only**
+  once every relevant match's own currently observed status already reads
+  as concluded (postgame/completed) -- recommended as "right now"
+  (`afl_client.clock.now()`), never as a projected future instant from a
+  match's scheduled *start* time. Recommending the latest match's start as
+  a "final results" instant would suggest finalising the round the moment
+  its last match begins, before it has actually concluded; lacking any
+  other conclusion-time evidence, "now, once everything already shows
+  concluded" is the only claim this can safely make, so no final-results
+  recommendation is shown at all until that is true.
+
+These are suggestions only:
 
 - they never expose a host filesystem path (only `stage`,
   `recommended_effective_at`, and human-readable `evidence` text);
@@ -197,21 +215,33 @@ a newer decision:
 
 - `POST .../mapping` accepts `expected_revision` (0 meaning "no accepted
   mapping observed yet"). If the mapping's current revision no longer
-  matches, `accept_preflight_mapping` raises `StaleMappingRevisionError`
-  (HTTP 409) instead of proceeding, and the existing mapping is left
-  completely untouched.
+  matches, `RoundMappingRepository.accept`/`correct` raises
+  `StaleMappingRevisionError` (HTTP 409) instead of proceeding, and the
+  existing mapping is left completely untouched.
 - `POST .../lockout-trigger` accepts `expected_revision` per trigger key (0
   meaning "this trigger key does not exist yet"). A mismatch raises
-  `StaleTriggerRevisionError` (HTTP 409) the same way.
+  `StaleTriggerRevisionError` (HTTP 409) the same way, from
+  `LockoutTriggerRepository.configure`.
+
+Both checks are performed *inside* the same row-locked transaction that
+advances the mapping's/trigger's `current_revision` -- not as a separate
+read-then-compare step beforehand. That distinction matters: two concurrent
+requests that both observe the same (soon-to-be-stale) revision would each
+pass a standalone comparison before either commits, so only checking the
+revision atomically, under the same lock that serializes the actual writes,
+closes that race (issue #152 review). `LockoutTriggerRepository.configure`
+additionally reads every trigger currently configured for the round under
+that same lock, so the sequence-ordering/uniqueness validation above is
+checked against a live, not stale, snapshot too.
 
 Both checks are opt-in at the function level (a caller that omits
 `expected_revision` skips them, preserving compatibility with any other
-caller of these functions), but the browser client always supplies the
-revision it last observed, so a normal operator session is always
-protected. Either rejection still triggers the page's existing
-reload-after-failure behaviour (issue #153): the browser reloads the
-authoritative view rather than continuing to display what it rendered
-before the rejected attempt.
+caller of `RoundMappingRepository`/`LockoutTriggerRepository`), but the
+browser client always supplies the revision it last observed, so a normal
+operator session is always protected. Either rejection still triggers the
+page's existing reload-after-failure behaviour (issue #153): the browser
+reloads the authoritative view rather than continuing to display what it
+rendered before the rejected attempt.
 
 ## Live/replay parity
 

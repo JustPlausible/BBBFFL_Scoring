@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Scorer Operations Dashboard · BBBFFL</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0d1117;color:#e6edf3;font:15px/1.45 system-ui,sans-serif}
+header,main{max-width:1180px;margin:auto;padding:14px}
+a{color:#79c0ff}
+h1{font-size:1.35rem;margin:.2em 0}
+h2{font-size:1.1rem;margin:.2em 0 .5em}
+h3{font-size:1rem;margin:.6em 0 .3em}
+button,select,input{font:inherit;padding:10px;border:1px solid #484f58;border-radius:6px;background:#161b22;color:inherit;min-height:44px}
+button{cursor:pointer}
+.bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.card{border:1px solid #30363d;border-radius:10px;background:#161b22;padding:14px;margin:14px 0}
+.muted{color:#8b949e}
+.pill{display:inline-block;padding:3px 10px;border-radius:999px;background:#30363d;font-size:.82rem;font-weight:600}
+.pill.state-upcoming{background:#30363d}
+.pill.state-open{background:#1f6feb}
+.pill.state-live{background:#a371f7}
+.pill.state-review{background:#d29922;color:#1a1200}
+.pill.state-final{background:#238636}
+.next-action{border-left:6px solid #58a6ff;padding-left:14px}
+.next-action.category-blocking{border-left-color:#f85149}
+.next-action.category-decision_required{border-left-color:#d29922}
+.next-action.category-waiting{border-left-color:#8b949e}
+.next-action.category-advisory{border-left-color:#3fb950}
+.queue-group{margin:10px 0}
+.queue-group h3{display:flex;align-items:center;gap:8px}
+.queue-count{background:#30363d;border-radius:999px;padding:1px 9px;font-size:.8rem}
+ul.queue{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+li.item{border:1px solid #30363d;border-radius:8px;padding:10px 12px;background:#0d1117}
+li.item.category-blocking{border-color:#f85149}
+li.item.category-decision_required{border-color:#d29922}
+li.item .item-title{font-weight:700}
+li.item .item-detail{margin-top:3px}
+li.item a.item-link{display:inline-block;margin-top:6px}
+details.diag{margin-top:6px}
+details.diag summary{cursor:pointer;color:#8b949e;font-size:.78rem}
+details.diag div{font:11px monospace;color:#8b949e;white-space:pre-wrap;margin-top:4px}
+table{width:100%;border-collapse:collapse;font-size:.92rem}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid #30363d;vertical-align:top}
+th{color:#8b949e;font-weight:600}
+.table-scroll{overflow-x:auto}
+.cards{display:grid;gap:10px}
+.team-card{border:1px solid #30363d;border-radius:8px;padding:10px 12px}
+.team-card h4{margin:0 0 4px;font-size:1rem}
+.state-badge{font-size:.78rem;font-weight:700;padding:2px 8px;border-radius:999px;background:#30363d}
+.state-badge.submission-submitted{background:#238636}
+.state-badge.submission-incomplete{background:#9e6a03}
+.state-badge.submission-diverged{background:#9e2a2b}
+.state-badge.submission-draft_only{background:#3b3f46}
+.state-badge.submission-missing{background:#6e1414}
+.grid-links{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}
+.grid-links a,.grid-links span.disabled{font-size:.85rem;padding:6px 10px;border:1px solid #484f58;border-radius:6px;text-decoration:none;min-height:auto;display:inline-block}
+.grid-links span.disabled{color:#5a616b}
+.warn{color:#ff7b72}
+.ok{color:#56d364}
+.exceptional{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+.exceptional .card{margin:0}
+#message:empty{display:none}
+#message{border:1px solid #f85149;background:#2a1414;border-radius:8px;padding:10px;margin:10px 0}
+.visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}
+@media(max-width:640px){
+  header,main{padding:10px}
+  table thead{display:none}
+  table tr{display:block;border-bottom:2px solid #30363d;padding:6px 0}
+  table td{display:flex;justify-content:space-between;gap:8px;border-bottom:none;padding:4px 2px}
+  table td::before{content:attr(data-label);color:#8b949e;font-weight:600}
+}
+</style></head><body>
+<header>
+<h1>Scorer Operations Dashboard</h1>
+<div id="context" class="bar muted" role="status">Loading acting context…</div>
+<div id="selectors" class="bar"></div>
+</header>
+<main>
+<div id="message" role="alert"></div>
+<section id="app" aria-live="polite"><p class="muted">Loading…</p></section>
+<section class="card exceptional" aria-labelledby="exceptional-heading">
+<h2 id="exceptional-heading">Which workflow do I need?</h2>
+<div class="card"><h3>Delegated lineup entry</h3><p class="muted">Ordinary proxy entry on behalf of a represented team, before that position locks. Use for any still-editable position.</p></div>
+<div class="card"><h3>Missed-submission adjudication</h3><p class="muted">A team never submitted at all before a trigger locked it. Resolves the round's first authoritative submission from evidenced pre-lockout intent or carry-forward -- never ordinary editing.</p></div>
+<div class="card"><h3>Locked-lineup correction</h3><p class="muted">An existing authoritative submission was recorded incorrectly and must be audited-corrected after lockout. Never used for a team that simply changed its mind.</p></div>
+<div class="card"><h3>Scorer Round Centre</h3><p class="muted">Calculation, DNP/Interchange decisions, manual overrides and atomic publication. The one place official results are produced.</p></div>
+</section>
+</main>
+<script>
+const esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function human(iso){if(!iso)return '—';try{return new Date(iso).toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'})}catch(e){return iso}}
+async function api(path){const r=await fetch(path,{headers:{'Accept':'application/json'}});const d=await r.json().catch(()=>({detail:r.statusText}));if(!r.ok){const e=new Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail));e.status=r.status;throw e}return d}
+function msg(s){document.querySelector('#message').textContent=s||''}
+
+let current={season_id:null,round_id:null};
+
+function renderContext(ctx){
+  document.querySelector('#context').textContent=ctx.coach_id
+    ? `Signed in as ${ctx.display_name} · Acting as ${ctx.active_role}${ctx.is_replay_context?' · REPLAY CONTEXT':''}`
+    : `Legacy operator credential · Acting as ${ctx.active_role}${ctx.is_replay_context?' · REPLAY CONTEXT':''}`;
+}
+
+function renderSelectors(seasons,dashboard){
+  const seasonOptions=seasons.map(s=>`<option value="${esc(s.season_id)}" ${s.season_id===current.season_id?'selected':''}>${esc(s.label)} (${esc(s.year)})</option>`).join('');
+  const roundOptions=(dashboard&&dashboard.round_options||[]).map(r=>`<option value="${esc(r.bbbffl_round_id)}" ${dashboard.round&&r.bbbffl_round_id===dashboard.round.bbbffl_round_id?'selected':''}>${esc(r.round_label)} · ${esc(r.state)}</option>`).join('');
+  document.querySelector('#selectors').innerHTML=`
+    ${seasons.length>1?`<label>Season <select id="season-select" aria-label="Select season">${seasonOptions}</select></label>`:''}
+    ${dashboard&&dashboard.round_options&&dashboard.round_options.length?`<label>Round <select id="round-select" aria-label="Select round">${roundOptions}</select></label>`:''}`;
+  const seasonSelect=document.querySelector('#season-select');
+  if(seasonSelect)seasonSelect.onchange=()=>{current.season_id=seasonSelect.value;current.round_id=null;load()};
+  const roundSelect=document.querySelector('#round-select');
+  if(roundSelect)roundSelect.onchange=()=>{current.round_id=roundSelect.value;load()};
+}
+
+function lockSummaryLine(s){
+  if(!s)return 'Lock state unavailable';
+  return `${s.editable} editable · ${s.locked_selective} selective-locked · ${s.locked_main} main-locked${s.indeterminate?` · ${s.indeterminate} indeterminate`:''}`;
+}
+
+function teamRow(t){
+  const links=[];
+  if(t.correction_available)links.push(`<a href="${esc(t.correction_url)}">Correct locked lineup</a>`);
+  else links.push(`<span class="disabled">Correction n/a</span>`);
+  if(t.adjudication_available)links.push(`<a href="${esc(t.adjudication_url)}">Adjudicate missed submission</a>`);
+  links.push(`<a href="${esc(t.delegated_lineup_url)}">Delegated entry</a>`);
+  return `<tr>
+    <td data-label="Team"><strong>${esc(t.team_name||'Unknown team')}</strong><div class="muted">${esc(t.coach_name||'')}</div></td>
+    <td data-label="State"><span class="state-badge submission-${esc(t.submission_state)}">${esc(t.submission_state.replace('_',' '))}</span>${t.calculation_stale?' <span class="warn">recalc needed</span>':''}</td>
+    <td data-label="Submission">${t.submission_version?`v${esc(t.submission_version)} · ${human(t.submitted_at)}`:'None'}${t.submission_source_type?` · ${esc(t.submission_source_type)}`:''}</td>
+    <td data-label="Private draft">${t.has_private_draft?`revision ${esc(t.draft_revision)} · ${human(t.draft_updated_at)}`:'None saved'}</td>
+    <td data-label="Locks">${lockSummaryLine(t.lock_summary)}</td>
+    <td data-label="Actions"><div class="grid-links">${links.join('')}</div></td>
+  </tr>`;
+}
+
+function teamCard(t){
+  const links=[];
+  if(t.correction_available)links.push(`<a href="${esc(t.correction_url)}">Correct locked lineup</a>`);
+  if(t.adjudication_available)links.push(`<a href="${esc(t.adjudication_url)}">Adjudicate missed submission</a>`);
+  links.push(`<a href="${esc(t.delegated_lineup_url)}">Delegated entry</a>`);
+  return `<div class="team-card">
+    <h4>${esc(t.team_name||'Unknown team')} <span class="state-badge submission-${esc(t.submission_state)}">${esc(t.submission_state.replace('_',' '))}</span></h4>
+    <div class="muted">${esc(t.coach_name||'')}</div>
+    <div>Submission: ${t.submission_version?`v${esc(t.submission_version)} · ${human(t.submitted_at)}`:'None'}</div>
+    <div>Private draft: ${t.has_private_draft?`revision ${esc(t.draft_revision)}`:'None saved'}</div>
+    <div>${lockSummaryLine(t.lock_summary)}</div>
+    ${t.calculation_stale?'<div class="warn">Recalculation required</div>':''}
+    <div class="grid-links">${links.join('')}</div>
+  </div>`;
+}
+
+function lineupsHtml(teams){
+  if(!teams.length)return '<p class="muted">No teams to show for this round.</p>';
+  return `<div class="table-scroll"><table><caption class="visually-hidden">Per-team lineup readiness</caption>
+    <thead><tr><th scope="col">Team</th><th scope="col">State</th><th scope="col">Submission</th><th scope="col">Private draft</th><th scope="col">Locks</th><th scope="col">Actions</th></tr></thead>
+    <tbody>${teams.map(teamRow).join('')}</tbody></table></div>`;
+}
+
+function triggerRow(t){
+  const matches=t.configured_matches.map(m=>`${esc(m.home_team||'?')} v ${esc(m.away_team||'?')} — observed ${esc(m.observed_status||'unknown')}${m.start_time_utc?` · ${human(m.start_time_utc)} (local) / ${esc(m.start_time_utc)} UTC`:''}`).join('; ');
+  return `<tr>
+    <td data-label="Seq">${esc(t.sequence)}</td>
+    <td data-label="Trigger">${esc(t.trigger_key)} <span class="muted">(${esc(t.trigger_type)})</span></td>
+    <td data-label="Matches">${matches||'—'}</td>
+    <td data-label="Activation">${t.activated?`<span class="ok">Activated</span> — ${esc(t.activation_reason||'')}`:'<span class="muted">Not yet activated</span>'}</td>
+    <td data-label="Effective lock">${t.effective_lock_at?`${human(t.effective_lock_at)} (local) / ${esc(t.effective_lock_at)} UTC`:'—'}</td>
+  </tr>`;
+}
+
+function lockoutHtml(lockout){
+  if(!lockout||!lockout.triggers.length)return '<p class="muted">No lockout trigger plan configured for this round yet.</p>';
+  return `<div class="table-scroll"><table><caption class="visually-hidden">Lockout trigger plan</caption>
+    <thead><tr><th scope="col">Seq</th><th scope="col">Trigger</th><th scope="col">Configured AFL matchup evidence</th><th scope="col">Persisted activation</th><th scope="col">Effective lock time</th></tr></thead>
+    <tbody>${lockout.triggers.map(triggerRow).join('')}</tbody></table></div>
+    <p class="muted">Observed AFL status is shown separately from the persisted activation fact — a trigger can already be <strong>Activated</strong> while its own match still reads <strong>UPCOMING</strong>, whenever evaluation time reached its scheduled start (<code>match_time_reached</code>).</p>`;
+}
+
+function reviewHtml(review){
+  if(!review)return '<p class="muted">Calculation has not started for this round yet.</p>';
+  const rows=review.matchups.map(m=>`<li class="item ${m.blockers.length?'category-blocking':''}"><div class="item-title">Matchup ${esc(m.matchup_order)}: ${esc(m.home.team_name||'Unknown')} v ${esc(m.away.team_name||'Unknown')}</div><div class="item-detail muted">Calculation revision ${esc(m.calculation_revision??'none')} · rules ${esc(m.rules_version_label||m.rules_version_id||'—')} · evidence ${m.evidence_fresh?'fresh':'stale'}</div>${m.blockers.map(b=>`<div class="warn">⚠ ${esc(b)}</div>`).join('')}</li>`).join('');
+  return `<p><span class="pill ${review.ready_for_signoff?'state-final':'state-review'}">${review.ready_for_signoff?'Ready for sign-off':'Not ready for sign-off'}</span></p>
+    ${review.blockers.map(b=>`<div class="warn">⚠ ${esc(b)}</div>`).join('')}
+    <ul class="queue">${rows}</ul>`;
+}
+
+function activityHtml(items){
+  if(!items.length)return '<p class="muted">No recent audited activity for this round.</p>';
+  return `<ul class="queue">${items.map(e=>`<li class="item"><div class="item-title">${esc(e.label)}${e.team_name?` — ${esc(e.team_name)}`:''}</div><div class="item-detail muted">${human(e.occurred_at)} · ${esc(e.actor_role||'system')}${e.reason?` · ${esc(e.reason)}`:''}</div><details class="diag"><summary>Diagnostics</summary><div>entity: ${esc(e.diagnostics.entity_type)} ${esc(e.diagnostics.entity_id)}\ncorrelation: ${esc(e.diagnostics.correlation_id)}</div></details></li>`).join('')}</ul>`;
+}
+
+function attentionGroup(category,label,items){
+  if(!items.length)return '';
+  const open=category!=='completed'&&category!=='advisory';
+  return `<details class="queue-group" ${open?'open':''}><summary><h3 style="display:inline">${label} <span class="queue-count">${items.length}</span></h3></summary>
+    <ul class="queue">${items.map(i=>`<li class="item category-${esc(i.category)}"><div class="item-title">${esc(i.title)}</div><div class="item-detail">${esc(i.detail)}</div>${i.url?`<a class="item-link" href="${esc(i.url)}">Open workflow →</a>`:''}${i.diagnostics?`<details class="diag"><summary>Diagnostics</summary><div>${esc(JSON.stringify(i.diagnostics))}</div></details>`:''}</li>`).join('')}</ul></details>`;
+}
+
+function attentionHtml(items){
+  if(!items.length)return '<p class="ok">Nothing requires scorer attention right now.</p>';
+  const byCategory=c=>items.filter(i=>i.category===c);
+  return attentionGroup('blocking','Blocking',byCategory('blocking'))
+    +attentionGroup('decision_required','Decision required',byCategory('decision_required'))
+    +attentionGroup('waiting','Waiting',byCategory('waiting'))
+    +attentionGroup('advisory','Advisory',byCategory('advisory'))
+    +attentionGroup('completed','Completed / recent',byCategory('completed'));
+}
+
+function renderDashboard(dashboard){
+  if(!dashboard||!dashboard.round){
+    document.querySelector('#app').innerHTML='<div class="card"><p class="muted">No ordinary rounds are configured for this season yet.</p></div>';
+    return;
+  }
+  const r=dashboard.round,na=dashboard.next_action;
+  document.querySelector('#app').innerHTML=`
+    <section class="card">
+      <h2>${esc(dashboard.season.label)} · ${esc(r.round_label)}</h2>
+      <p><span class="pill state-${esc(r.state)}">${esc(r.state)}</span> AFL season ${esc(r.afl_season_id??'—')} / round ${esc(r.afl_round_id??'—')} (mapping revision ${esc(r.mapping_revision??'—')})</p>
+      <div class="grid-links"><a href="${esc(r.public_round_centre_url)}">Public Round Centre</a><a href="${esc(r.round_centre_url)}">Scorer Round Centre</a><a href="${esc(r.preflight_url)}">Round Preflight</a></div>
+    </section>
+    <section class="card next-action category-${esc(na.category)}" aria-labelledby="next-action-heading">
+      <h2 id="next-action-heading">Next safe action</h2>
+      <p style="font-size:1.05rem;font-weight:700">${esc(na.title)}</p>
+      <p>${esc(na.detail)}</p>
+      ${na.url?`<a class="item-link" href="${esc(na.url)}">Open workflow →</a>`:''}
+    </section>
+    <section class="card" aria-labelledby="attention-heading">
+      <h2 id="attention-heading">Scorer attention queue</h2>
+      ${attentionHtml(dashboard.attention)}
+    </section>
+    <section class="card" aria-labelledby="lineups-heading">
+      <h2 id="lineups-heading">Lineup readiness (${dashboard.lineups.length} teams)</h2>
+      ${lineupsHtml(dashboard.lineups)}
+    </section>
+    <section class="card" aria-labelledby="lockout-heading">
+      <h2 id="lockout-heading">Lockout &amp; trigger state</h2>
+      ${lockoutHtml(dashboard.lockout)}
+    </section>
+    <section class="card" aria-labelledby="review-heading">
+      <h2 id="review-heading">Review &amp; publication readiness</h2>
+      ${reviewHtml(dashboard.review)}
+    </section>
+    <section class="card" aria-labelledby="activity-heading">
+      <h2 id="activity-heading">Recent audited activity</h2>
+      ${activityHtml(dashboard.recent_activity)}
+    </section>`;
+}
+
+async function load(){
+  try{
+    const qs=new URLSearchParams();
+    if(current.season_id)qs.set('season_id',current.season_id);
+    if(current.round_id)qs.set('round_id',current.round_id);
+    const d=await api(`/api/scorer/dashboard${qs.toString()?`?${qs}`:''}`);
+    msg('');
+    renderContext(d.acting_context);
+    current.season_id=d.dashboard?d.dashboard.season.season_id:(d.seasons[0]&&d.seasons[0].season_id)||current.season_id;
+    current.round_id=d.dashboard&&d.dashboard.round?d.dashboard.round.bbbffl_round_id:null;
+    renderSelectors(d.seasons,d.dashboard);
+    if(!d.seasons.length){
+      document.querySelector('#app').innerHTML='<div class="card"><p class="muted">No seasons are authorised for the active role.</p></div>';
+      return;
+    }
+    renderDashboard(d.dashboard);
+  }catch(e){
+    if(e.status===403){
+      document.querySelector('#app').innerHTML='<div class="card"><p class="warn">The active role is not authorised for the Scorer dashboard. Switch to Scorer, Replay Operator or Administrator via the account context switcher.</p></div>';
+      document.querySelector('#context').textContent='Not authorised';
+      return;
+    }
+    if(e.status===401){
+      window.location.href='/login?next=/scorer';
+      return;
+    }
+    msg('Unable to load the Scorer dashboard: '+e.message);
+  }
+}
+load();
+</script></body></html>

@@ -141,6 +141,9 @@ async def login_submit(request: Request):
     return response
 
 
+_SCORER_DASHBOARD_ROLES = frozenset({"scorer", "replay_operator", "admin"})
+
+
 @router.get("/account", response_class=HTMLResponse)
 def account_page(request: Request):
     coach = get_current_coach(request)
@@ -150,8 +153,21 @@ def account_page(request: Request):
     lineup_rounds = CoachLineupService(request.app.state.database, request.app.state.afl_client).list_rounds(
         coach.coach_id
     )
+    # Issue #147: make the Scorer Operations Dashboard the discoverable
+    # primary operational destination for a coach identity that holds any
+    # role able to reach it -- never a redirect (this page still confirms
+    # "coach" identity first), just an unmistakable link alongside it.
+    granted_roles = request.app.state.acting_context.available_roles(coach.coach_id)
+    has_scorer_dashboard_access = bool(granted_roles & _SCORER_DASHBOARD_ROLES)
     response = templates.TemplateResponse(
-        request, "account.html", {"coach": coach, "csrf_token": token, "lineup_rounds": lineup_rounds}
+        request,
+        "account.html",
+        {
+            "coach": coach,
+            "csrf_token": token,
+            "lineup_rounds": lineup_rounds,
+            "has_scorer_dashboard_access": has_scorer_dashboard_access,
+        },
     )
     _attach_csrf_cookie(request, response, token)
     return response

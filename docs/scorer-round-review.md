@@ -1,5 +1,11 @@
 # Scorer round review, sign-off and correction
 
+The [Scorer Operations Dashboard](scorer-dashboard.md) (issue #147) is the
+Scorer's normal aggregation/navigation entry point into this workflow --
+review readiness, calculation staleness and unresolved decisions surface
+there first, each linking straight back to the Round Centre described
+below for the actual mutation.
+
 Roadmap package 28 (issue #58) is the boundary between a *calculated*
 BBBFFL result and an *official* one. Calculated scores and AFL match
 completion are never automatically finalised: a scorer's explicit sign-off

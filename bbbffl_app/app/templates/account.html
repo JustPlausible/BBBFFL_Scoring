@@ -33,6 +33,10 @@
     <div class="muted">This confirms which coach identity your browser session is authenticated as.</div>
     <div class="field"><span>Coach:</span> {{ coach.display_name }}</div>
     <div class="field"><span>Coach ID:</span> {{ coach.coach_id }}</div>
+    {% if has_scorer_dashboard_access %}<div class="rounds"><a href="/scorer">
+      <span class="round-label">Scorer Operations Dashboard →</span>
+      <span class="round-meta">Your normal operational home once acting as Scorer, Replay Operator or Administrator.</span>
+    </a></div>{% endif %}
     {% if lineup_rounds %}<h2>Weekly selections</h2><div class="rounds">{% for round in lineup_rounds %}<a class="state-{{ round.state }}" href="/coach/seasons/{{ round.season_id }}/rounds/{{ round.round_id }}/lineup">
       <span class="round-label">{{ round.round_label }} →</span>
       <span class="round-status">{% if round.state == 'submitted_with_changes' %}Submitted + private changes{% elif round.state == 'submitted' %}Submitted{% elif round.state == 'draft_saved' %}Draft saved{% else %}Not submitted{% endif %}</span>

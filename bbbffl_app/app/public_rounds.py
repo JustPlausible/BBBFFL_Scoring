@@ -221,7 +221,7 @@ def _round_summary(round_number, definition):
 
 
 def _select_default_round_number(rounds):
-    """"Current round" policy for the season landing page: the earliest
+    """Current-round policy for the season landing page: the earliest
     *opened* round that is not yet final (a round actually in progress)
     wins; otherwise the most recently *published* round; otherwise (nothing
     has ever been opened yet) the season's first fixture round.

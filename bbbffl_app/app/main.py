@@ -41,6 +41,12 @@ from app.lineup_adjudication import (
 )
 from app.lineup_correction import UnauthorizedCorrectionActorError
 from app.lineups import EffectiveSubmissionExistsError, LineupConflictError, RoundPublishedError, WeeklyLineupRepository
+from app.midseason_draft import (
+    MidseasonDraftRepository,
+    MidseasonDraftStateError,
+    MidseasonPendingTradesError,
+    MidseasonTradeValidationError,
+)
 from app.migrations import migrate
 from app.opening_round import OpeningRoundError
 from app.player_pool import PlayerPoolRepository, PlayerUnavailableError, SquadCapacityError
@@ -77,6 +83,7 @@ from app.routes import fixture_setup as fixture_setup_routes
 from app.routes import lineup_adjudication as lineup_adjudication_routes
 from app.routes import lineup_correction as lineup_correction_routes
 from app.routes import lineups as lineup_routes
+from app.routes import midseason_draft as midseason_draft_routes
 from app.routes import preseason as preseason_routes
 from app.routes import public_rounds as public_round_routes
 from app.routes import round_preflight as round_preflight_routes
@@ -193,6 +200,11 @@ async def lifespan(app: FastAPI):
     # app/routes/preseason.py) is an operator surface over this same
     # authoritative repository -- see docs/preseason-trades.md.
     app.state.preseason = PreseasonRepository(database)
+    # Issue #164's mid-season draft workflow (app/routes/midseason_draft.py)
+    # continues the 2026 replay -- and any future live season -- past its
+    # configured trigger round, reusing this same `app.draft.DraftRepository`
+    # (under draft_kind="midseason") for the selection phase.
+    app.state.midseason_draft = MidseasonDraftRepository(database)
     # Roadmap package 28's scorer round-review/sign-off/correction workflow
     # (issue #58, app/routes/round_review.py) sits on top of the persisted
     # ordinary-round lifecycle (#32) and generalised match scoring (#35) --
@@ -267,6 +279,7 @@ app.include_router(draft_routes.router)
 app.include_router(draft_routes.page_router)
 app.include_router(preseason_routes.router)
 app.include_router(preseason_routes.page_router)
+app.include_router(midseason_draft_routes.router)
 app.include_router(round_review_routes.router)
 app.include_router(round_review_routes.page_router)
 app.include_router(round_preflight_routes.router)
@@ -514,6 +527,32 @@ async def preseason_snapshot_error_handler(request: Request, exc: PreseasonSnaps
 
 @app.exception_handler(PreseasonStateError)
 async def preseason_state_error_handler(request: Request, exc: PreseasonStateError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+# app.midseason_draft raises plain domain exceptions for the same reason
+# app.preseason does (see its handlers above) -- these are the sole place
+# that translates each one to an HTTP status for
+# app/routes/midseason_draft.py (issue #164). More specific subclasses
+# (MidseasonPendingTradesError, MidseasonTradeValidationError) get their own
+# handlers so their structured `.trade_ids`/`.issues` reach the client;
+# every other MidseasonDraftStateError (including MidseasonRoundNotFinalError
+# and MidseasonDraftExistsError) falls through to the generic 409 handler
+# below via FastAPI's most-derived-registered-class dispatch.
+@app.exception_handler(MidseasonPendingTradesError)
+async def midseason_pending_trades_error_handler(request: Request, exc: MidseasonPendingTradesError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc), "trade_ids": exc.trade_ids})
+
+
+@app.exception_handler(MidseasonTradeValidationError)
+async def midseason_trade_validation_error_handler(
+    request: Request, exc: MidseasonTradeValidationError
+) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc), "issues": exc.issues})
+
+
+@app.exception_handler(MidseasonDraftStateError)
+async def midseason_draft_state_error_handler(request: Request, exc: MidseasonDraftStateError) -> JSONResponse:
     return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 

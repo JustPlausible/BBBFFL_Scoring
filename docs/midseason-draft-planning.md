@@ -4,6 +4,8 @@
 
 This document records the agreed planning for the BBBFFL mid-season draft workflow. It is a design and competition-process specification, not a statement that all described functionality is currently implemented.
 
+Issue #164 implements the replay-capable lifecycle and audit behaviour described here -- see `docs/midseason-draft.md` for what was actually built, and its "Deferred" section for the 2027 coach-facing conveniences (private planning tags, a dedicated dashboard page, in-app dual trade confirmation, timed auto-pick) this plan describes but issue #164 does not require.
+
 The immediate use case is continuation of the 2026 historical replay. The design should also provide a sound basis for normal live operation from 2027 onward.
 
 For 2026, the confirmed sequence is:

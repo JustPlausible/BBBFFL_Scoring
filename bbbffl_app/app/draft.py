@@ -76,6 +76,11 @@ class DraftStatus:
     finalized_note: str | None
     total_picks: int
     completed_picks: int
+    # Issue #164: which draft this season's `season_draft` row is -- the
+    # original preseason draft, or a later mid-season draft
+    # (`app.midseason_draft`). Defaulted so every pre-existing positional
+    # construction of this dataclass keeps working unchanged.
+    draft_kind: str = "preseason"
 
     @property
     def is_paused(self) -> bool:
@@ -131,21 +136,14 @@ class DraftRepository:
     def accept_order(
         self, season_id, ordered_entry_ids, *, actor=ActorContext.anonymous_operator("admin"), reason=None
     ):
-        """Freeze a complete order and materialise every stable pick atomically."""
+        """Freeze a complete preseason order and materialise every stable
+        pick atomically -- a snake draft over the season's configured squad
+        limit. See `materialize_draft_in_transaction` for the shared,
+        kind-agnostic mechanics this delegates to."""
         ordered_entry_ids = list(ordered_entry_ids)
         with transaction(self.database) as conn:
             if self.database.engine.dialect.name == "sqlite":
                 conn.execute("UPDATE bbbffl_season SET updated_at=updated_at WHERE season_id=?", (season_id,))
-            if conn.execute("SELECT 1 FROM season_draft WHERE season_id=?", (season_id,)).fetchone():
-                raise DraftOrderError("the accepted draft order is frozen")
-            expected = {
-                row["season_entry_id"]
-                for row in conn.execute(
-                    "SELECT season_entry_id FROM season_entry WHERE season_id=?", (season_id,)
-                ).fetchall()
-            }
-            if not expected or len(ordered_entry_ids) != len(expected) or set(ordered_entry_ids) != expected:
-                raise DraftOrderError("draft order must contain every participating season entry exactly once")
             config = conn.execute(
                 "SELECT squad_limit FROM season_squad_configuration WHERE season_id=?"
                 + _for_update_suffix(self.database),
@@ -153,38 +151,121 @@ class DraftRepository:
             ).fetchone()
             if not config:
                 raise DraftOrderError("season squad limit must be configured before accepting the draft order")
-            draft_id, accepted_at = _id(), _now()
-            conn.execute(
-                "INSERT INTO season_draft VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL)",
-                (draft_id, season_id, config["squad_limit"], accepted_at),
-            )
-            for position, entry_id in enumerate(ordered_entry_ids, 1):
-                conn.execute(
-                    "INSERT INTO draft_order_position VALUES (?, ?, ?, ?)", (draft_id, season_id, position, entry_id)
-                )
-            for overall, round_number, round_position, entry_id in snake_allocations(
-                ordered_entry_ids, config["squad_limit"]
-            ):
-                conn.execute(
-                    "INSERT INTO draft_pick VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)",
-                    (_id(), draft_id, season_id, overall, round_number, round_position, entry_id, entry_id),
-                )
-            append_event(
+            draft_id = self.materialize_draft_in_transaction(
                 conn,
+                season_id,
+                "preseason",
+                ordered_entry_ids,
+                (
+                    (overall, round_number, round_position, entry_id, entry_id)
+                    for overall, round_number, round_position, entry_id in snake_allocations(
+                        ordered_entry_ids, config["squad_limit"]
+                    )
+                ),
+                config["squad_limit"],
                 actor=actor,
-                action="draft.order.accepted",
-                entity_type="draft",
-                entity_id=draft_id,
                 reason=reason,
-                after_state={
-                    "season_id": season_id,
-                    "entry_ids": ordered_entry_ids,
-                    "target_squad_size": config["squad_limit"],
-                },
             )
         return draft_id
 
-    def picks(self, season_id, *, include_superseded=False):
+    def materialize_draft_in_transaction(
+        self,
+        conn,
+        season_id,
+        draft_kind,
+        ordered_entry_ids,
+        allocations,
+        target_squad_size,
+        *,
+        actor=ActorContext.anonymous_operator("admin"),
+        reason=None,
+    ):
+        """Freeze a complete team order and materialise every stable pick
+        for one draft of `draft_kind` ('preseason' or 'midseason'),
+        atomically, on the caller's own transaction-scoped `conn` -- so a
+        caller with preceding writes of its own in the same transaction
+        (e.g. `app.midseason_draft.MidseasonDraftRepository.
+        generate_selection_table`, which releases delisted players'
+        ownership and computes each entry's vacancy count before calling
+        this) gets one atomic commit rather than two separate transactions.
+
+        `allocations` is an iterable of `(overall, round_number,
+        round_position, original_season_entry_id, current_season_entry_id)`
+        -- `snake_allocations` for the preseason draft's uniform
+        picks-per-team count, or `app.midseason_draft.vacancy_allocations`
+        for a draft whose picks-per-team varies with each entry's vacancy
+        count. `original_season_entry_id`/`current_season_entry_id` may
+        already differ on insert (a mid-season round-based pick trade
+        approved before generation), exactly like a later `transfer_pick`.
+
+        A season may have at most one draft of each kind
+        (`uq_draft_season_kind`); `ordered_entry_ids` must be exactly every
+        `season_entry` for the season, once each, regardless of kind -- the
+        *team* order always covers every team, even one with zero picks in
+        a vacancy-based mid-season allocation.
+        """
+        ordered_entry_ids = list(ordered_entry_ids)
+        if self.database.engine.dialect.name == "sqlite":
+            conn.execute("UPDATE bbbffl_season SET updated_at=updated_at WHERE season_id=?", (season_id,))
+        if conn.execute(
+            "SELECT 1 FROM season_draft WHERE season_id=? AND draft_kind=?", (season_id, draft_kind)
+        ).fetchone():
+            raise DraftOrderError(f"the accepted {draft_kind} draft order is frozen")
+        expected = {
+            row["season_entry_id"]
+            for row in conn.execute(
+                "SELECT season_entry_id FROM season_entry WHERE season_id=?", (season_id,)
+            ).fetchall()
+        }
+        if not expected or len(ordered_entry_ids) != len(expected) or set(ordered_entry_ids) != expected:
+            raise DraftOrderError("draft order must contain every participating season entry exactly once")
+        draft_id, accepted_at = _id(), _now()
+        conn.execute(
+            "INSERT INTO season_draft "
+            "(draft_id, season_id, target_squad_size, accepted_at, paused_at, paused_reason, "
+            "finalized_at, finalized_note, draft_kind) VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, ?)",
+            (draft_id, season_id, target_squad_size, accepted_at, draft_kind),
+        )
+        for position, entry_id in enumerate(ordered_entry_ids, 1):
+            conn.execute(
+                "INSERT INTO draft_order_position VALUES (?, ?, ?, ?)", (draft_id, season_id, position, entry_id)
+            )
+        pick_count = 0
+        for overall, round_number, round_position, original_entry_id, current_entry_id in allocations:
+            conn.execute(
+                "INSERT INTO draft_pick VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)",
+                (
+                    _id(),
+                    draft_id,
+                    season_id,
+                    overall,
+                    round_number,
+                    round_position,
+                    original_entry_id,
+                    current_entry_id,
+                ),
+            )
+            pick_count += 1
+        if pick_count == 0:
+            raise DraftOrderError("a draft requires at least one pick")
+        append_event(
+            conn,
+            actor=actor,
+            action="draft.order.accepted",
+            entity_type="draft",
+            entity_id=draft_id,
+            reason=reason,
+            after_state={
+                "season_id": season_id,
+                "draft_kind": draft_kind,
+                "entry_ids": ordered_entry_ids,
+                "target_squad_size": target_squad_size,
+                "pick_count": pick_count,
+            },
+        )
+        return draft_id
+
+    def picks(self, season_id, *, draft_kind="preseason", include_superseded=False):
         """The draft board's picks, one row per slot (overall_number) by
         default -- a corrected pick's original, superseded attempt is
         omitted here (see `corrections`/`pick_history` for that trail), so
@@ -192,33 +273,36 @@ class DraftRepository:
         clause = "" if include_superseded else " AND p.superseded_by_draft_pick_id IS NULL"
         rows = self.database.execute(
             "SELECT p.* FROM draft_pick p JOIN season_draft d ON d.draft_id=p.draft_id "
-            f"WHERE d.season_id=?{clause} ORDER BY overall_number",
-            (season_id,),
+            f"WHERE d.season_id=? AND d.draft_kind=?{clause} ORDER BY overall_number",
+            (season_id, draft_kind),
         ).fetchall()
         return [DraftPick(**dict(row)) for row in rows]
 
-    def order(self, season_id):
-        """The accepted, frozen draft order as `(position, season_entry_id)`
+    def order(self, season_id, *, draft_kind="preseason"):
+        """The accepted, frozen team order as `(position, season_entry_id)`
         pairs -- the configured order a board displays, independent of
         which entry currently owns any individual pick (see `picks` for
         that, once trades are applied)."""
         rows = self.database.execute(
             "SELECT o.position, o.season_entry_id FROM draft_order_position o "
-            "JOIN season_draft d ON d.draft_id=o.draft_id WHERE d.season_id=? ORDER BY o.position",
-            (season_id,),
+            "JOIN season_draft d ON d.draft_id=o.draft_id WHERE d.season_id=? AND d.draft_kind=? ORDER BY o.position",
+            (season_id, draft_kind),
         ).fetchall()
         return [(row["position"], row["season_entry_id"]) for row in rows]
 
-    def corrections(self, season_id):
+    def corrections(self, season_id, *, draft_kind="preseason"):
         rows = self.database.execute(
             "SELECT c.* FROM draft_pick_correction c JOIN draft_pick p ON p.draft_pick_id=c.original_draft_pick_id "
-            "WHERE p.season_id=? ORDER BY c.corrected_at, c.correction_id",
-            (season_id,),
+            "JOIN season_draft d ON d.draft_id=p.draft_id "
+            "WHERE d.season_id=? AND d.draft_kind=? ORDER BY c.corrected_at, c.correction_id",
+            (season_id, draft_kind),
         ).fetchall()
         return [DraftPickCorrection(**dict(row)) for row in rows]
 
-    def status(self, season_id):
-        row = self.database.execute("SELECT * FROM season_draft WHERE season_id=?", (season_id,)).fetchone()
+    def status(self, season_id, *, draft_kind="preseason"):
+        row = self.database.execute(
+            "SELECT * FROM season_draft WHERE season_id=? AND draft_kind=?", (season_id, draft_kind)
+        ).fetchone()
         if not row:
             return None
         counts = self.database.execute(
@@ -237,21 +321,23 @@ class DraftRepository:
             finalized_note=row["finalized_note"],
             total_picks=counts["total"],
             completed_picks=counts["completed"] or 0,
+            draft_kind=row["draft_kind"],
         )
 
-    def _locked_draft(self, conn, season_id):
+    def _locked_draft(self, conn, season_id, draft_kind="preseason"):
         draft = conn.execute(
-            "SELECT * FROM season_draft WHERE season_id=?" + _for_update_suffix(self.database), (season_id,)
+            "SELECT * FROM season_draft WHERE season_id=? AND draft_kind=?" + _for_update_suffix(self.database),
+            (season_id, draft_kind),
         ).fetchone()
         if not draft:
-            raise DraftOrderError("season has no accepted draft order")
+            raise DraftOrderError(f"season has no accepted {draft_kind} draft order")
         return draft
 
-    def pause(self, season_id, *, actor=ActorContext.anonymous_operator("admin"), reason=None):
+    def pause(self, season_id, *, draft_kind="preseason", actor=ActorContext.anonymous_operator("admin"), reason=None):
         with transaction(self.database) as conn:
             if self.database.engine.dialect.name == "sqlite":
                 conn.execute("UPDATE bbbffl_season SET updated_at=updated_at WHERE season_id=?", (season_id,))
-            draft = self._locked_draft(conn, season_id)
+            draft = self._locked_draft(conn, season_id, draft_kind)
             if draft["finalized_at"] is not None:
                 raise DraftFinalizedError("draft is already finalized")
             if draft["paused_at"] is not None:
@@ -271,13 +357,13 @@ class DraftRepository:
                 before_state={"paused_at": None},
                 after_state={"paused_at": at},
             )
-        return self.status(season_id)
+        return self.status(season_id, draft_kind=draft_kind)
 
-    def resume(self, season_id, *, actor=ActorContext.anonymous_operator("admin"), reason=None):
+    def resume(self, season_id, *, draft_kind="preseason", actor=ActorContext.anonymous_operator("admin"), reason=None):
         with transaction(self.database) as conn:
             if self.database.engine.dialect.name == "sqlite":
                 conn.execute("UPDATE bbbffl_season SET updated_at=updated_at WHERE season_id=?", (season_id,))
-            draft = self._locked_draft(conn, season_id)
+            draft = self._locked_draft(conn, season_id, draft_kind)
             if draft["finalized_at"] is not None:
                 raise DraftFinalizedError("draft is already finalized")
             if draft["paused_at"] is None:
@@ -296,13 +382,14 @@ class DraftRepository:
                 before_state={"paused_at": paused_at},
                 after_state={"paused_at": None},
             )
-        return self.status(season_id)
+        return self.status(season_id, draft_kind=draft_kind)
 
     def correct_pick(
         self,
         season_id,
         draft_pick_id,
         *,
+        draft_kind="preseason",
         actor=ActorContext.anonymous_operator("admin"),
         reason=None,
         corrected_at=None,
@@ -331,7 +418,7 @@ class DraftRepository:
                 # migrations/versions/0016_draft_operations.py) -- deferred
                 # for the whole transaction, reset automatically at commit.
                 conn.execute("PRAGMA defer_foreign_keys = ON")
-            draft = self._locked_draft(conn, season_id)
+            draft = self._locked_draft(conn, season_id, draft_kind)
             if draft["finalized_at"] is not None:
                 raise DraftFinalizedError("draft is already finalized")
             original = conn.execute(
@@ -381,6 +468,13 @@ class DraftRepository:
                 actor=actor,
                 reason=reason or "draft pick corrected",
                 correlation_id=correlation,
+                # The preseason window is open (or does not exist yet) for
+                # the preseason draft's own picks; a mid-season draft always
+                # runs after that window has long closed (issue #164), so
+                # its ownership mutations must use this escape hatch --
+                # `app.midseason_draft`'s trades/delisting-lock releases use
+                # it the same way.
+                allow_closed_window=(draft_kind != "preseason"),
             )
             # The original row must be marked superseded (deactivating it
             # for the partial-unique "one active row per slot" index)
@@ -426,13 +520,13 @@ class DraftRepository:
                 "INSERT INTO draft_pick_correction VALUES (?, ?, ?, ?, ?, ?)",
                 (_id(), draft_pick_id, replacement_id, at, reason, correction_event.event_id),
             )
-        return self.picks(season_id)[original["overall_number"] - 1]
+        return self.picks(season_id, draft_kind=draft_kind)[original["overall_number"] - 1]
 
-    def finalize(self, season_id, *, actor=ActorContext.anonymous_operator("admin"), note=None):
+    def finalize(self, season_id, *, draft_kind="preseason", actor=ActorContext.anonymous_operator("admin"), note=None):
         with transaction(self.database) as conn:
             if self.database.engine.dialect.name == "sqlite":
                 conn.execute("UPDATE bbbffl_season SET updated_at=updated_at WHERE season_id=?", (season_id,))
-            draft = self._locked_draft(conn, season_id)
+            draft = self._locked_draft(conn, season_id, draft_kind)
             if draft["finalized_at"] is not None:
                 raise DraftFinalizedError("draft is already finalized")
             counts = conn.execute(
@@ -480,9 +574,9 @@ class DraftRepository:
                 before_state={"finalized_at": None},
                 after_state={"finalized_at": at, "finalized_note": note},
             )
-        return self.status(season_id)
+        return self.status(season_id, draft_kind=draft_kind)
 
-    def reopen(self, season_id, *, actor=ActorContext.anonymous_operator("admin"), reason):
+    def reopen(self, season_id, *, draft_kind="preseason", actor=ActorContext.anonymous_operator("admin"), reason):
         """Deliberately separate from `finalize`/ordinary controls -- see
         the module docstring. Callers (routes/scripts) must gate this behind
         their own explicit, hard-to-mistake confirmation step; this method
@@ -492,7 +586,7 @@ class DraftRepository:
         with transaction(self.database) as conn:
             if self.database.engine.dialect.name == "sqlite":
                 conn.execute("UPDATE bbbffl_season SET updated_at=updated_at WHERE season_id=?", (season_id,))
-            draft = self._locked_draft(conn, season_id)
+            draft = self._locked_draft(conn, season_id, draft_kind)
             if draft["finalized_at"] is None:
                 raise DraftStateError("draft is not finalized")
             finalized_at = draft["finalized_at"]
@@ -510,13 +604,13 @@ class DraftRepository:
                 before_state={"finalized_at": finalized_at},
                 after_state={"finalized_at": None},
             )
-        return self.status(season_id)
+        return self.status(season_id, draft_kind=draft_kind)
 
-    def next_pick(self, season_id):
+    def next_pick(self, season_id, *, draft_kind="preseason"):
         row = self.database.execute(
             "SELECT p.* FROM draft_pick p JOIN season_draft d ON d.draft_id=p.draft_id "
-            "WHERE d.season_id=? AND p.completed_at IS NULL ORDER BY p.overall_number LIMIT 1",
-            (season_id,),
+            "WHERE d.season_id=? AND d.draft_kind=? AND p.completed_at IS NULL ORDER BY p.overall_number LIMIT 1",
+            (season_id, draft_kind),
         ).fetchone()
         return DraftPick(**dict(row)) if row else None
 
@@ -585,6 +679,7 @@ class DraftRepository:
         season_player_id,
         *,
         pick_id=None,
+        draft_kind="preseason",
         actor=ActorContext.anonymous_operator("admin"),
         reason="draft selection",
         completed_at=None,
@@ -594,16 +689,16 @@ class DraftRepository:
         with transaction(self.database) as conn:
             if self.database.engine.dialect.name == "sqlite":
                 conn.execute("UPDATE bbbffl_season SET updated_at=updated_at WHERE season_id=?", (season_id,))
-            draft = self._locked_draft(conn, season_id)
+            draft = self._locked_draft(conn, season_id, draft_kind)
             if draft["finalized_at"] is not None:
                 raise DraftFinalizedError("draft is already finalized")
             if draft["paused_at"] is not None:
                 raise DraftPausedError("draft is currently paused")
             next_row = conn.execute(
                 "SELECT p.* FROM draft_pick p JOIN season_draft d ON d.draft_id=p.draft_id "
-                "WHERE d.season_id=? AND p.completed_at IS NULL ORDER BY p.overall_number LIMIT 1"
+                "WHERE d.season_id=? AND d.draft_kind=? AND p.completed_at IS NULL ORDER BY p.overall_number LIMIT 1"
                 + _for_update_suffix(self.database),
-                (season_id,),
+                (season_id, draft_kind),
             ).fetchone()
             if not next_row:
                 raise DraftStateError("draft has no executable pick")
@@ -622,6 +717,8 @@ class DraftRepository:
                 actor=actor,
                 reason=reason,
                 correlation_id=correlation,
+                # See the matching comment in `correct_pick`.
+                allow_closed_window=(draft_kind != "preseason"),
             )
             result = conn.execute(
                 "UPDATE draft_pick SET selected_season_player_id=?, completed_at=? "
@@ -644,4 +741,4 @@ class DraftRepository:
                     "overall_number": next_row["overall_number"],
                 },
             )
-        return self.picks(season_id)[next_row["overall_number"] - 1]
+        return self.picks(season_id, draft_kind=draft_kind)[next_row["overall_number"] - 1]

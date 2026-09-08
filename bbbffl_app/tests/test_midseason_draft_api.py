@@ -155,3 +155,23 @@ def test_confirm_ladder_before_configured_trigger_round_is_a_409(midseason_clien
         json={"competition_id": competition.competition_id},
     )
     assert response.status_code == 409
+
+
+def test_trigger_round_can_be_set_via_the_admin_api_then_confirm_ladder_succeeds(midseason_client):
+    client = midseason_client
+    database = client.app.state.database
+    ctx = build_season(database, trigger_round=10)
+    season, competition = ctx["season"], ctx["competition"]
+
+    set_round = client.post(
+        f"/api/admin/midseason-draft/{season.season_id}/trigger-round",
+        json={"trigger_round": 10, "reason": "season setup"},
+    )
+    assert set_round.status_code == 200, set_round.text
+
+    confirmed = client.post(
+        f"/api/admin/midseason-draft/{season.season_id}/confirm-ladder",
+        json={"competition_id": competition.competition_id},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["draft"]["state"] == "ladder_confirmed"

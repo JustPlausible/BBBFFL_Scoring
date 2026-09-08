@@ -38,6 +38,12 @@ def _authorise(request: Request, principal: Principal, season_id: str) -> None:
     require_role_covers_season(request, principal, season_id)
 
 
+class SetTriggerRoundRequest(BaseModel):
+    trigger_round: int
+    reason: str | None = None
+    scorer_name: str | None = None
+
+
 class ConfirmLadderRequest(BaseModel):
     competition_id: str
     reason: str | None = None
@@ -152,6 +158,21 @@ def _status(request: Request, season_id: str) -> dict:
 @router.get("/{season_id}/status")
 def status(season_id: str, request: Request, principal: Principal = Depends(manage)):
     _authorise(request, principal, season_id)
+    return _status(request, season_id)
+
+
+@router.post("/{season_id}/trigger-round")
+def set_trigger_round(
+    season_id: str, payload: SetTriggerRoundRequest, request: Request, principal: Principal = Depends(manage)
+):
+    """Record the BBBFFL round after which the mid-season draft occurs --
+    required before `confirm-ladder` will accept the season. Separate from
+    season setup proper so an already-established season (e.g. the 2026
+    replay) can still configure it."""
+    _authorise(request, principal, season_id)
+    request.app.state.seasons.set_midseason_draft_trigger_round(
+        season_id, payload.trigger_round, actor=_actor(principal, payload.scorer_name), reason=payload.reason
+    )
     return _status(request, season_id)
 
 

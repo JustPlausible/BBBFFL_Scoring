@@ -307,6 +307,13 @@ class MidseasonDraftRepository:
                 raise MidseasonDraftStateError("season has no configured mid-season draft trigger round")
             if conn.execute("SELECT 1 FROM midseason_draft WHERE season_id=?", (season_id,)).fetchone():
                 raise MidseasonDraftExistsError("a mid-season draft already exists for this season")
+            competition = conn.execute(
+                "SELECT season_id, stream_type FROM competition_stream WHERE competition_id=?", (competition_id,)
+            ).fetchone()
+            if not competition or competition["season_id"] != season_id or competition["stream_type"] != "ordinary":
+                raise MidseasonDraftStateError(
+                    "competition_id must name an ordinary competition belonging to this season"
+                )
             self._require_rounds_final(conn, competition_id, trigger)
             entries = [
                 row["season_entry_id"]
@@ -718,9 +725,30 @@ class MidseasonDraftRepository:
         first, then acquire every leg, matching `app.preseason.submit_trade`
         so a multi-leg trade's squad-capacity checks see each entry's net
         position). A *pick* leg is recorded as approved but not applied
-        until `generate_selection_table` builds the allocation."""
+        until `generate_selection_table` builds the allocation.
+
+        Only legal while the draft is in `delisting_open` or
+        `draft_complete` -- the two states in which a trade can legitimately
+        still be pending (`lock_delistings` already refuses to run while any
+        trade is pending, so no trade is ever pending during
+        `delistings_locked`/`draft_open`); once `close_post_draft_trading`
+        moves the draft to the terminal `complete` state, a trade left
+        pending through that boundary can no longer be decided at all,
+        never approved to mutate ownership after the phase has closed.
+
+        Re-verifies each player leg's claimed `from_season_entry_id` against
+        the *current* owner under this transaction's lock before releasing
+        it -- a proposal's ownership was only ever checked at proposal time,
+        and a different trade approved in between can have moved the player
+        on since. A stale leg refuses the whole decision rather than
+        silently releasing a new owner's player on an old declaration.
+        """
         with transaction(self.database) as conn:
             draft = self._locked_draft(conn, season_id)
+            if draft["state"] not in ("delisting_open", "draft_complete"):
+                raise MidseasonDraftStateError(
+                    "trades can only be decided while the delisting window is open, or after the draft completes"
+                )
             trade = conn.execute(
                 "SELECT * FROM midseason_trade WHERE trade_id=?" + _for_update_suffix(self.database), (trade_id,)
             ).fetchone()
@@ -735,6 +763,19 @@ class MidseasonDraftRepository:
                 for leg in legs:
                     if leg["leg_type"] != "player":
                         continue
+                    current = conn.execute(
+                        "SELECT season_entry_id FROM player_ownership_period "
+                        "WHERE season_player_id=? AND released_at IS NULL" + _for_update_suffix(self.database),
+                        (leg["season_player_id"],),
+                    ).fetchone()
+                    if not current or current["season_entry_id"] != leg["from_season_entry_id"]:
+                        raise MidseasonDraftStateError(
+                            f"player {leg['season_player_id']} is no longer owned by "
+                            f"{leg['from_season_entry_id']} -- this trade is stale and cannot be approved"
+                        )
+                for leg in legs:
+                    if leg["leg_type"] != "player":
+                        continue
                     self.ownership.release_in_transaction(
                         conn,
                         leg["season_player_id"],
@@ -744,6 +785,35 @@ class MidseasonDraftRepository:
                         correlation_id=trade["correlation_id"],
                         allow_closed_window=True,
                     )
+                    # A trade moving a player supersedes any still-active
+                    # formal delisting of that same player -- the delisting
+                    # was that player's *previous* owner's declaration, and
+                    # `lock_delistings` must never release a player from
+                    # whoever now actually owns it based on that stale
+                    # declaration. Auto-withdraw it, audited, as part of
+                    # this approval rather than leaving it to silently
+                    # mismatch at lock time.
+                    stale_delisting = conn.execute(
+                        "SELECT * FROM midseason_delisting WHERE midseason_draft_id=? AND season_player_id=? "
+                        "AND withdrawn_at IS NULL" + _for_update_suffix(self.database),
+                        (draft["midseason_draft_id"], leg["season_player_id"]),
+                    ).fetchone()
+                    if stale_delisting:
+                        conn.execute(
+                            "UPDATE midseason_delisting SET withdrawn_at=? WHERE delisting_id=?",
+                            (now, stale_delisting["delisting_id"]),
+                        )
+                        append_event(
+                            conn,
+                            actor=actor,
+                            action="midseason.delisting.withdrawn",
+                            entity_type="midseason.delisting",
+                            entity_id=stale_delisting["delisting_id"],
+                            correlation_id=trade["correlation_id"],
+                            reason="superseded by an approved trade moving this player",
+                            before_state={"withdrawn_at": None},
+                            after_state={"withdrawn_at": now},
+                        )
                 for leg in legs:
                     if leg["leg_type"] != "player":
                         continue
@@ -915,16 +985,43 @@ class MidseasonDraftRepository:
             ]
             if not allocations:
                 raise MidseasonDraftStateError("no team requires a mid-season draft selection")
-            by_round_and_owner = {(a["round"], a["current"]): a for a in allocations}
-            unapplied_leg_ids = []
-            for leg in approved_pick_legs:
-                key = (leg["draft_round"], leg["from_season_entry_id"])
-                allocation = by_round_and_owner.pop(key, None)
-                if allocation is None:
-                    unapplied_leg_ids.append(leg["leg_id"])
-                    continue
-                allocation["current"] = leg["to_season_entry_id"]
-                by_round_and_owner[(leg["draft_round"], leg["to_season_entry_id"])] = allocation
+            # Resolve every approved pick-trade leg against each
+            # allocation's *original* vacancy-owner, not a shared
+            # (round, current_owner) lookup mutated leg-by-leg: overwriting
+            # that lookup as legs are applied silently drops one side of a
+            # same-round two-way swap (leg 1's write clobbers the very key
+            # leg 2 needs to find leg 2's own original allocation). Walking
+            # the redirect chain from each allocation's original owner
+            # instead handles a swap (a two-node cycle -- stop once a
+            # revisit is detected, leaving the chain's last resolved owner)
+            # and a longer trade chain (A's pick traded to B, then that same
+            # pick traded on by B to C) identically and correctly.
+            redirect = {
+                (leg["draft_round"], leg["from_season_entry_id"]): leg["to_season_entry_id"]
+                for leg in approved_pick_legs
+            }
+            visited = set()
+
+            def _resolve(round_number, owner):
+                seen = {owner}
+                current = owner
+                visited.add((round_number, current))
+                while (round_number, current) in redirect:
+                    following = redirect[(round_number, current)]
+                    if following in seen:
+                        break
+                    seen.add(following)
+                    current = following
+                    visited.add((round_number, current))
+                return current
+
+            for allocation in allocations:
+                allocation["current"] = _resolve(allocation["round"], allocation["current"])
+            unapplied_leg_ids = [
+                leg["leg_id"]
+                for leg in approved_pick_legs
+                if (leg["draft_round"], leg["from_season_entry_id"]) not in visited
+            ]
             self.drafts.materialize_draft_in_transaction(
                 conn,
                 season_id,
@@ -1043,27 +1140,44 @@ class MidseasonDraftRepository:
     def reopen_draft(self, season_id, *, actor, reason):
         """Exceptional audited correction of a completed mid-season draft
         (e.g. an agreed erroneous selection) -- reopens the underlying
-        engine draft and this module's own lifecycle state together."""
+        engine draft and this module's own lifecycle state together.
+
+        Only legal from `draft_complete`: refuses outright (before ever
+        touching the engine draft) once the season has moved past it --
+        most importantly the terminal `complete` state, reached via
+        `close_post_draft_trading` -- rather than silently unfinalizing the
+        engine while leaving this module's own lifecycle state unchanged,
+        which would desynchronise the two (an unfinalized engine draft
+        accepting corrections with no matching `midseason.draft.reopened`
+        transition)."""
+        draft = self.get_draft(season_id)
+        if draft is None:
+            raise KeyError(season_id)
+        if draft.state != "draft_complete":
+            raise MidseasonDraftStateError(
+                f"the mid-season draft can only be reopened from draft_complete, not {draft.state!r}"
+            )
         self.drafts.reopen(season_id, draft_kind=MIDSEASON_DRAFT_KIND, actor=actor, reason=reason)
         with transaction(self.database) as conn:
-            draft = self._locked_draft(conn, season_id)
-            if draft["state"] == "draft_complete":
-                now = _now()
-                conn.execute(
-                    "UPDATE midseason_draft SET state='draft_open', updated_at=?, version=version+1 "
-                    "WHERE midseason_draft_id=?",
-                    (now, draft["midseason_draft_id"]),
-                )
-                append_event(
-                    conn,
-                    actor=actor,
-                    action="midseason.draft.reopened",
-                    entity_type="midseason.draft",
-                    entity_id=draft["midseason_draft_id"],
-                    reason=reason,
-                    before_state={"state": "draft_complete"},
-                    after_state={"state": "draft_open"},
-                )
+            locked = self._locked_draft(conn, season_id)
+            if locked["state"] != "draft_complete":
+                raise MidseasonDraftStateError("mid-season draft state changed concurrently; reopen aborted")
+            now = _now()
+            conn.execute(
+                "UPDATE midseason_draft SET state='draft_open', updated_at=?, version=version+1 "
+                "WHERE midseason_draft_id=?",
+                (now, locked["midseason_draft_id"]),
+            )
+            append_event(
+                conn,
+                actor=actor,
+                action="midseason.draft.reopened",
+                entity_type="midseason.draft",
+                entity_id=locked["midseason_draft_id"],
+                reason=reason,
+                before_state={"state": "draft_complete"},
+                after_state={"state": "draft_open"},
+            )
         return self.get_draft(season_id)
 
     # -- 17/18. Post-draft trading, transition to Round 11 -----------------

@@ -25,6 +25,9 @@ Usage
 -----
 
     cd bbbffl_app
+    python -m scripts.replay_2026_midseason_draft set-trigger-round \\
+        --database-url sqlite:///$(pwd)/data/2026-first-half.db \\
+        --season-id <season_id> --trigger-round 10
     python -m scripts.replay_2026_midseason_draft confirm-ladder \\
         --database-url sqlite:///$(pwd)/data/2026-first-half.db \\
         --season-id <season_id> --competition-id <competition_id>
@@ -47,6 +50,7 @@ from app.audit import ActorContext
 from app.db import connect
 from app.midseason_draft import MidseasonDraftRepository, MidseasonDraftStateError
 from app.migrations import migrate
+from app.season import SeasonRepository
 
 ACTOR = ActorContext.anonymous_operator("replay_operator")
 
@@ -188,7 +192,20 @@ def cmd_status(midseason: MidseasonDraftRepository, args: argparse.Namespace) ->
     return 0
 
 
+def cmd_set_trigger_round(midseason: MidseasonDraftRepository, args: argparse.Namespace) -> int:
+    """Record the BBBFFL round after which the mid-season draft occurs --
+    required before `confirm-ladder` will accept the season (it has no
+    default; a season bootstrapped before this column existed, such as the
+    2026 first-half replay, always starts with it unset)."""
+    season = SeasonRepository(midseason.database).set_midseason_draft_trigger_round(
+        args.season_id, args.trigger_round, actor=ACTOR, reason=args.reason or "2026 replay: trigger round configured"
+    )
+    print(f"Mid-season draft trigger round set to {season.midseason_draft_trigger_round}.")
+    return 0
+
+
 COMMANDS = {
+    "set-trigger-round": cmd_set_trigger_round,
     "confirm-ladder": cmd_confirm_ladder,
     "override-order": cmd_override_order,
     "open-delisting-window": cmd_open_delisting_window,
@@ -216,6 +233,10 @@ def build_parser() -> argparse.ArgumentParser:
         return sub
 
     base("status")
+
+    p = base("set-trigger-round")
+    p.add_argument("--trigger-round", type=int, required=True)
+    p.add_argument("--reason")
 
     p = base("confirm-ladder")
     p.add_argument("--competition-id", required=True)

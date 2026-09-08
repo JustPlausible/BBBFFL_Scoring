@@ -358,6 +358,226 @@ def test_pick_leg_trade_rejected_once_delistings_are_locked():
         )
 
 
+def test_confirm_ladder_rejects_a_competition_from_a_different_season():
+    ctx = _setup(trigger_round=10)
+    other = build_season(trigger_round=10)
+    m, season = ctx["midseason"], ctx["season"]
+    with pytest.raises(MidseasonDraftStateError):
+        m.confirm_ladder(season.season_id, other["competition"].competition_id, actor=ACTOR)
+
+
+def test_decide_trade_rejects_a_stale_leg_whose_ownership_moved_since_proposal():
+    """Codex review: two approved-in-sequence trades must not let the
+    second one release a player from whoever the first one already moved
+    it to, based on a stale `from_season_entry_id`."""
+    ctx = _delisting_open(trigger_round=10)
+    m, season, entries = ctx["midseason"], ctx["season"], ctx["entries"]
+    a, b, c = entries[0], entries[1], entries[2]
+    player = next(iter(m.ownership.current_squad(a.season_entry_id))).season_player_id
+    b_player = next(iter(m.ownership.current_squad(b.season_entry_id))).season_player_id
+    c_player = next(iter(m.ownership.current_squad(c.season_entry_id))).season_player_id
+
+    trade_to_b = m.propose_trade(
+        season.season_id,
+        [
+            {
+                "leg_type": "player",
+                "from_season_entry_id": a.season_entry_id,
+                "to_season_entry_id": b.season_entry_id,
+                "season_player_id": player,
+            },
+            {
+                "leg_type": "player",
+                "from_season_entry_id": b.season_entry_id,
+                "to_season_entry_id": a.season_entry_id,
+                "season_player_id": b_player,
+            },
+        ],
+        actor=ACTOR,
+    )
+    stale_trade_from_a = m.propose_trade(
+        season.season_id,
+        [
+            {
+                "leg_type": "player",
+                "from_season_entry_id": a.season_entry_id,
+                "to_season_entry_id": c.season_entry_id,
+                "season_player_id": player,
+            },
+            {
+                "leg_type": "player",
+                "from_season_entry_id": c.season_entry_id,
+                "to_season_entry_id": a.season_entry_id,
+                "season_player_id": c_player,
+            },
+        ],
+        actor=ACTOR,
+    )
+
+    m.decide_trade(season.season_id, trade_to_b.trade_id, True, actor=ACTOR, reason="approved first")
+    assert player in {p.season_player_id for p in m.ownership.current_squad(b.season_entry_id)}
+
+    with pytest.raises(MidseasonDraftStateError):
+        m.decide_trade(season.season_id, stale_trade_from_a.trade_id, True, actor=ACTOR, reason="stale, must refuse")
+
+    # Ownership is unchanged by the refused decision: still with b, not c.
+    assert player in {p.season_player_id for p in m.ownership.current_squad(b.season_entry_id)}
+    assert player not in {p.season_player_id for p in m.ownership.current_squad(c.season_entry_id)}
+
+
+def test_approving_a_player_trade_auto_withdraws_the_players_active_delisting():
+    """Codex review: a stale delisting recorded against the player's
+    previous owner must not survive an approved trade that moves the
+    player on, or `lock_delistings` would release it from the new owner
+    based on the old owner's declaration."""
+    ctx = _delisting_open(trigger_round=10)
+    m, season, entries = ctx["midseason"], ctx["season"], ctx["entries"]
+    a, b = entries[0], entries[1]
+    player = next(iter(m.ownership.current_squad(a.season_entry_id))).season_player_id
+    b_player = next(iter(m.ownership.current_squad(b.season_entry_id))).season_player_id
+
+    delisting = m.submit_delisting(
+        season.season_id, a.season_entry_id, player, actor=ACTOR, reason="considering cutting"
+    )
+    trade = m.propose_trade(
+        season.season_id,
+        [
+            {
+                "leg_type": "player",
+                "from_season_entry_id": a.season_entry_id,
+                "to_season_entry_id": b.season_entry_id,
+                "season_player_id": player,
+            },
+            {
+                "leg_type": "player",
+                "from_season_entry_id": b.season_entry_id,
+                "to_season_entry_id": a.season_entry_id,
+                "season_player_id": b_player,
+            },
+        ],
+        actor=ACTOR,
+    )
+    m.decide_trade(season.season_id, trade.trade_id, True, actor=ACTOR, reason="approved")
+
+    reloaded = m.get_delisting(delisting.delisting_id)
+    assert reloaded.withdrawn_at is not None
+
+    m.lock_delistings(season.season_id, actor=ACTOR)
+    # The player now belongs to b and must not have been released by a's
+    # stale delisting.
+    assert player in {p.season_player_id for p in m.ownership.current_squad(b.season_entry_id)}
+
+
+def test_decide_trade_is_blocked_once_post_draft_trading_is_closed():
+    ctx = _delisting_open(trigger_round=10, squad_limit=4)
+    m, season, entries = ctx["midseason"], ctx["season"], ctx["entries"]
+    worst = entries[9]
+    squad = m.ownership.current_squad(worst.season_entry_id)
+    m.submit_delisting(season.season_id, worst.season_entry_id, squad[0].season_player_id, actor=ACTOR)
+    m.lock_delistings(season.season_id, actor=ACTOR)
+    m.generate_selection_table(season.season_id, actor=ACTOR)
+    pool = list(m.available_player_pool(season.season_id))
+    while True:
+        nxt = m.next_pick(season.season_id)
+        if nxt is None:
+            break
+        m.execute_pick(season.season_id, nxt.current_season_entry_id, pool.pop(0).season_player_id, actor=ACTOR)
+    assert m.get_draft(season.season_id).state == "draft_complete"
+
+    a, b = entries[0], entries[1]
+    player = next(iter(m.ownership.current_squad(a.season_entry_id))).season_player_id
+    b_player = next(iter(m.ownership.current_squad(b.season_entry_id))).season_player_id
+    trade = m.propose_trade(
+        season.season_id,
+        [
+            {
+                "leg_type": "player",
+                "from_season_entry_id": a.season_entry_id,
+                "to_season_entry_id": b.season_entry_id,
+                "season_player_id": player,
+            },
+            {
+                "leg_type": "player",
+                "from_season_entry_id": b.season_entry_id,
+                "to_season_entry_id": a.season_entry_id,
+                "season_player_id": b_player,
+            },
+        ],
+        actor=ACTOR,
+    )
+
+    m.close_post_draft_trading(season.season_id, actor=ACTOR, reason="Round 11 lockout")
+    with pytest.raises(MidseasonDraftStateError):
+        m.decide_trade(season.season_id, trade.trade_id, True, actor=ACTOR, reason="too late")
+    # Ownership is unaffected by the refused decision.
+    assert player in {p.season_player_id for p in m.ownership.current_squad(a.season_entry_id)}
+
+
+def test_reopen_draft_refused_once_post_draft_trading_is_closed():
+    ctx = _delisting_open(trigger_round=10, squad_limit=4)
+    m, season, entries = ctx["midseason"], ctx["season"], ctx["entries"]
+    worst = entries[9]
+    squad = m.ownership.current_squad(worst.season_entry_id)
+    m.submit_delisting(season.season_id, worst.season_entry_id, squad[0].season_player_id, actor=ACTOR)
+    m.lock_delistings(season.season_id, actor=ACTOR)
+    m.generate_selection_table(season.season_id, actor=ACTOR)
+    pool = list(m.available_player_pool(season.season_id))
+    while True:
+        nxt = m.next_pick(season.season_id)
+        if nxt is None:
+            break
+        m.execute_pick(season.season_id, nxt.current_season_entry_id, pool.pop(0).season_player_id, actor=ACTOR)
+    m.close_post_draft_trading(season.season_id, actor=ACTOR, reason="Round 11 lockout")
+
+    with pytest.raises(MidseasonDraftStateError):
+        m.reopen_draft(season.season_id, actor=ACTOR, reason="too late, already complete")
+    # The engine draft must remain finalized -- the guard fires before the
+    # engine is ever touched.
+    assert m.status(season.season_id).is_finalized
+
+
+def test_same_round_pick_swap_correctly_exchanges_both_slots():
+    """Codex review: applying same-round two-way pick-trade legs by
+    overwriting a shared (round, current_owner) lookup silently loses one
+    side of the swap. Both entries need a vacancy in the same round for
+    each to have its own round-1 slot to swap."""
+    ctx = _delisting_open(trigger_round=10, squad_limit=4)
+    m, season, entries = ctx["midseason"], ctx["season"], ctx["entries"]
+    worst, second_worst = entries[9], entries[8]
+    worst_squad = m.ownership.current_squad(worst.season_entry_id)
+    second_squad = m.ownership.current_squad(second_worst.season_entry_id)
+    m.submit_delisting(season.season_id, worst.season_entry_id, worst_squad[0].season_player_id, actor=ACTOR)
+    m.submit_delisting(season.season_id, second_worst.season_entry_id, second_squad[0].season_player_id, actor=ACTOR)
+
+    trade = m.propose_trade(
+        season.season_id,
+        [
+            {
+                "leg_type": "pick",
+                "from_season_entry_id": worst.season_entry_id,
+                "to_season_entry_id": second_worst.season_entry_id,
+                "draft_round": 1,
+            },
+            {
+                "leg_type": "pick",
+                "from_season_entry_id": second_worst.season_entry_id,
+                "to_season_entry_id": worst.season_entry_id,
+                "draft_round": 1,
+            },
+        ],
+        actor=ACTOR,
+    )
+    m.decide_trade(season.season_id, trade.trade_id, True, actor=ACTOR, reason="same-round swap")
+    m.lock_delistings(season.season_id, actor=ACTOR)
+    m.generate_selection_table(season.season_id, actor=ACTOR)
+
+    picks = m.picks(season.season_id)
+    assert len(picks) == 2
+    by_original = {p.original_season_entry_id: p.current_season_entry_id for p in picks}
+    assert by_original[worst.season_entry_id] == second_worst.season_entry_id
+    assert by_original[second_worst.season_entry_id] == worst.season_entry_id
+
+
 # -- 9/10/11/12. Generate selections, pool eligibility, ownership -----------
 
 

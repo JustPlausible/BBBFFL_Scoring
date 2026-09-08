@@ -2,7 +2,7 @@
 
 ## A. Purpose and scope
 
-This is the authoritative Milestone B½ historical BBBFFL Rounds 1–9 operational replay. It supersedes earlier R1–R9 procedural fragments where they conflict. It acquires real AFL Opening Round and Rounds 1–9 evidence once, then uses the normal lineup, lockout, calculation, review, official-result and ladder services with no AFL network. `round1-rehearsal.md` remains a separate **synthetic browser rehearsal**; hermetic automated tests are a third, software-validation workflow. This run ends in the official state immediately before future mid-season-draft work.
+This is the authoritative Milestone B½ historical BBBFFL Rounds 1–9 operational replay. It supersedes earlier R1–R9 procedural fragments where they conflict. It acquires real AFL Opening Round and Rounds 1–9 evidence once, then uses the normal lineup, lockout, calculation, review, official-result and ladder services with no AFL network. `round1-rehearsal.md` remains a separate **synthetic browser rehearsal**; hermetic automated tests are a third, software-validation workflow. This run ends after Round 9 at an operational phase boundary. It does not assert that the mid-season window opens at that point. The confirmed historical 2026 sequence is to complete Round 10 using the pre-draft squads, then conduct the mid-season draft before Round 11.
 
 ## B. Checkout and commit verification
 
@@ -197,4 +197,4 @@ Do not declare B½ successful until all are checked:
 - [ ] No unexpected draft is open and no unexpected lineup draft/submission remains.
 - [ ] Round 9 database backup/checkpoint exists.
 - [ ] Evidence package, package checksum, logs and operator replay record are retained.
-- [ ] The same season/database is ready to continue into the future mid-season draft without rebuilding the competition.
+- [ ] The same season/database is ready to continue into Round 10 and the subsequent mid-season draft without rebuilding the competition.

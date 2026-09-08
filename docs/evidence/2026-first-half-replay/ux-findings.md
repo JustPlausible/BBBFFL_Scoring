@@ -1,114 +1,84 @@
-# UX and role-surface findings
+# UX findings
 
-The core domain protections held during Rounds 1–4. Most remaining findings
-concern discoverability, human-readable identity and clear separation of draft,
-submission, lockout and review state.
+The replay produced several usability improvements without weakening
+authoritative server-side controls.
 
-## Priority groups
+## Delivered during Phase 1
 
-### 1. Human-readable identity projection
+- Team, player and rules identities are presented human-readably on operational
+  surfaces, with stable identifiers retained as diagnostics (PR #154).
+- Operational pages reload authoritative state after successful or rejected
+  mutations, avoiding stale lifecycle and draft renders (PR #156).
+- Vacant positions display as locked after main lockout, matching submission
+  enforcement (PR #157).
+- Round preflight offers evidence-backed AFL season/round recommendations and
+  human-readable match choices (PR #158).
+- Scorer and Administrator role dashboards provide central workflow and
+  governance entry points (PRs #159 and #160).
 
-Several Scorer/Admin surfaces expose stable internal identifiers even though
-the application already holds human-readable identities:
+## Remaining findings
 
-- scorer-attention messages prefix warnings with a season-entry UUID instead
-  of the current BBBFFL team name;
-- the Scorer ladder shows entry UUIDs rather than team names;
-- scorer player-evidence cards lead with a provider/internal player ID rather
-  than the player's name;
-- missed-submission adjudication previews show season-player UUIDs for both
-  evidenced-draft and carry-forward outcomes;
-- some correction and carry-forward errors expose player UUIDs.
+### Final rounds should not appear as blockers
 
-These should be solved through shared server-side read models. Team and player
-names should be primary; stable identifiers should remain available in
-expandable diagnostics and audit payloads. Browser-side joins should not become
-an alternative identity authority.
+The Scorer attention queue and review/publication readiness panel currently
+treat a published `final` round as “not review” and therefore blocking/not
+ready. Once publication is complete, those panels should show a completed state
+and direct attention to the next actionable round.
 
-### 2. Scorer operational dashboard
+### Acting context should follow authorised dashboard actions
 
-Issue [#147](https://github.com/JustPlausible/BBBFFL_Scoring/issues/147)
-should give the Scorer one role-aware home surface containing:
+Some Scorer dashboard actions require a separate visit to Season Centre to
+activate the appropriate role or represented team. An explicit dashboard action
+should establish the permitted acting context before navigation while
+preserving the signed-in human as the audit actor. It must never silently grant
+authority.
 
-- current season/round and lifecycle/evidence state;
-- the next safe action and blocking reason;
-- lineup readiness and staged-lockout status;
-- links to delegated entry, missed-submission adjudication, locked correction,
-  scorer review and publication;
-- attention grouped as blocking, decision required, waiting for evidence,
-  advisory and completed;
-- brief explanations of why each exceptional authority exists and when it must
-  not be used.
+### Workflow guidance should be actionable
 
-The dashboard should aggregate existing authoritative services rather than
-implementing new mutation logic.
+The “Which workflow do I need?” content is useful documentation but does not
+link to the corresponding operational pages. Context-aware links would reduce
+navigation errors, especially for delegated submission, correction and
+adjudication.
 
-### 3. Administrator governance dashboard
+### Preflight defaults need clearer feedback
 
-Issue [#148](https://github.com/JustPlausible/BBBFFL_Scoring/issues/148)
-should focus on season setup, identity/role governance, preseason readiness,
-competition health, exceptional administrative attention and audit integrity.
-It should link into Scorer operations without duplicating ordinary round tasks.
+- “Use recommended values” can populate a collapsed Advanced section without an
+  obvious visible result; it should expand or confirm the populated values.
+- Trigger sequence should default to the next unused sequence.
+- A recommended main stage may associate every remaining match. This is safe,
+  but selecting the intended first main-lock match directly better expresses
+  the league rule and simplifies diagnostics.
+- Trigger keys are operator labels; guidance should recommend a consistent
+  convention such as `early-1` and `main`.
 
-### 4. Mapping and lockout configuration
+### Local dates should use Australian presentation
 
-Round preflight currently requires opaque AFL season, round and match IDs.
-Improve it by:
+Where both UTC and browser-local time are displayed, the local date should use
+Australian day/month/year order (for example, `16/4/2026`) and identify the
+timezone. UTC should remain visible as authoritative evidence.
 
-- offering evidence-backed AFL season and round choices;
-- recommending the likely corresponding round while retaining explicit
-  confirmation because BBBFFL and AFL numbering can diverge;
-- listing relevant AFL matches chronologically;
-- using human match labels as trigger options;
-- displaying operator-local time alongside retained UTC provenance;
-- recommending a safe post-final checkpoint after the latest relevant match.
+### Ladder presentation needs completion
 
-### 5. Navigation and acting context
+- The public ladder may display points per game as an informative statistic,
+  but it must not use PPG as an ordering criterion because it is derived from
+  PF and provides no additional tiebreak information.
+- Ladder order remains competition points, percentage, then PF. Exact equality
+  after those criteria should be escalated for a recorded, audited Scorer
+  decision rather than resolved by an invented automatic tiebreaker.
+- Scorer ladder presentation should remain aligned with the public ladder's
+  human-readable table and columns.
 
-Role-specific tasks often require manually constructed UUID routes or returning
-to Season Centre solely to change represented team. Improve discoverability by:
+### Public round browsing is a low-priority roadmap item
 
-- providing direct links for Coach lineup, delegated lineup, preflight,
-  correction, adjudication, scorer review and public round views;
-- keeping the signed-in person, active role and represented team conspicuous;
-- preventing shared represented-entry state across browser tabs from causing
-  accidental cross-team work, or clearly warning when it changes;
-- replacing stuck loading states with recoverable instructions;
-- returning operators to a role-appropriate landing page after login.
+Public viewers should eventually be able to browse previous and upcoming
+rounds, preview matchups, open match detail/evidence and view the ladder as at a
+selected round. This can sit on top of the existing published round data and
+does not block the replay.
 
-### 6. Draft and lock presentation
+## Capture context
 
-Delegated and Coach views should consistently distinguish:
-
-- private draft versus effective authoritative submission;
-- editable, selective-locked, main-locked and deferred positions;
-- saved versus submitted state;
-- stale-draft conflict and the required reload/rebase action.
-
-PR [#143](https://github.com/JustPlausible/BBBFFL_Scoring/pull/143)
-improved delegated staged-lock presentation. Continue testing this shared read
-model rather than reconstructing lock state in templates.
-
-### 7. Smaller presentation items
-
-- Correct the finalized Draft Board readiness title that can still say “Needs
-  attention” while its explanatory text correctly says the draft is finalized.
-- Sort transaction-window squads by draft selection order by default, with
-  optional player name, AFL club and draft-order sorting.
-- Make lineup position ordering consistent across nomination, Coach, delegated
-  and correction views to reduce transcription mistakes.
-- Refresh round selectors after publication so they do not retain stale `open`
-  labels until a hard refresh.
-- Add Points Per Game to the public ladder if confirmed as the final accepted
-  ranking criterion.
-- Keep mobile selection controls fully within the viewport.
-
-## Suggested issue boundaries
-
-Before implementing the dashboards, triage these as shared prerequisites:
-
-1. one human-readable team/player identity issue across Scorer/Admin surfaces;
-2. one round-preflight evidence-picker and chronological lockout-planning issue;
-3. one role/task navigation issue, coordinated with dashboard Issues #147/#148;
-4. a small presentation batch for stale labels, position ordering and mobile
-   layout where changes do not affect sporting authority.
+Final dashboard and public-page captures were retained privately as supporting
+operator evidence. A “Failed to fetch” message visible in an offline capture
+occurred because the application containers had already been stopped while the
+page's live refresh was still running; it is not recorded as an application
+defect.

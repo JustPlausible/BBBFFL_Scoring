@@ -1,75 +1,99 @@
 # Workflow findings
 
-This document records durable process findings from the 2026 first-half replay.
-Implementation-specific details belong in the linked domain documentation and
-issues; this is the evidence-led summary.
+## Verified behaviour through Round 9
 
-## Verified behaviour
+The replay verified the intended end-to-end path:
 
-| Area | Finding | Status |
-|---|---|---|
-| Bootstrap | Ten entries, accepted draft order, player pool, squad limit, nine logical rounds and Opening Round rules can be established reproducibly before drafting. | Verified |
-| Draft | All 220 selections, reversions and finalisation completed across desktop, tablet and phone-sized views. | Verified; minor mobile layout finding |
-| Opening squads | Transaction-window review, validation and immutable opening-squad freeze completed. | Verified |
-| Opening Round | Sixty nominations across ten confirmed submissions were reconstructed. Zero or partial nomination sets remain valid. | Verified after Issues [#131](https://github.com/JustPlausible/BBBFFL_Scoring/issues/131), [#133](https://github.com/JustPlausible/BBBFFL_Scoring/issues/133) and [#135](https://github.com/JustPlausible/BBBFFL_Scoring/issues/135) |
-| Mapping | Explicit BBBFFL-to-AFL mapping with an operator reason is authoritative even when logical round numbers differ. | Verified; selection UX remains manual |
-| Lockout | A replay checkpoint advances evidence time; an authorised lineup request materialises durable trigger activation. Selective lockout protects only covered players, then main lockout protects all remaining positions. | Verified |
-| Live submission | A round becomes lifecycle `live` at the first match while submissions remain valid for unlocked positions. | Verified after [#144](https://github.com/JustPlausible/BBBFFL_Scoring/issues/144) / PR [#145](https://github.com/JustPlausible/BBBFFL_Scoring/pull/145) |
-| Locked correction | A Scorer/Admin can make a reasoned, immutable correction to an existing authoritative submission without weakening ordinary lock enforcement. | Verified after [#137](https://github.com/JustPlausible/BBBFFL_Scoring/issues/137) / PR [#142](https://github.com/JustPlausible/BBBFFL_Scoring/pull/142) |
-| Missed initial submission | A saved pre-lockout draft can support a narrowly authorised first-submission adjudication when per-position evidence proves the locked values. External league consultation remains outside the app. | Implemented by [#146](https://github.com/JustPlausible/BBBFFL_Scoring/issues/146) / PR [#149](https://github.com/JustPlausible/BBBFFL_Scoring/pull/149); workflow verified, but not used to fabricate evidence for an operator omission |
-| Final evidence | Scoring must wait until the replay releases final results for the current AFL round and every earlier source round used by deferred players. | Verified |
-| Scorer review | Missing-stat evidence remains conservative: without a stat row or independent participation fact, DNP cannot be inferred and requires a scorer ruling. | Verified |
-| Publication | Atomic sign-off publishes all matchups and updates public round results and the cumulative ladder. | Verified through Round 4 |
+1. bootstrap the season, competition, player pool and draft;
+2. freeze the opening squads and record Opening Round deferred nominations;
+3. map each BBBFFL round to authoritative AFL evidence;
+4. configure selective and main lockout triggers;
+5. open the round and collect Coach, delegated or carry-forward submissions;
+6. activate lockouts from scheduled match-time evidence;
+7. advance the round from open to live, review and final;
+8. calculate scores, resolve DNP/interchange decisions, sign off and publish;
+9. accumulate the public ladder across final rounds.
 
-## Operational lessons
+All nine ordinary rounds completed with ten authoritative lineups. Opening
+Round deferred evidence was fully consumed by Round 4.
 
-### Lifecycle and replay evidence are separate
+## Durable findings
 
-The BBBFFL lifecycle (`open`, `live`, `review`, `final`) and replay evidence
-stage (`scheduled`, `final-results`) serve different purposes. A round can be
-correctly `live` while replay evidence remains `scheduled`. Scoring requires
-both the BBBFFL lifecycle to be `review` and the necessary AFL source rounds to
-be released as final evidence.
+### Lifecycle and evidence are separate authorities
 
-### Trigger materialisation must be visible
+The BBBFFL lifecycle controls which workflow is available. AFL evidence controls
+match scheduling, lockout activation and whether final statistics are
+available. A match may still report provider status `UPCOMING` while its
+scheduled time has legitimately activated a BBBFFL lockout.
 
-Changing the checkpoint does not, by itself, persist a trigger activation. A
-lineup/lockout read evaluates the authoritative facts and records the durable
-activation. Operator guidance or a dashboard should make that evaluation and
-its result explicit instead of relying on knowledge of which page causes it.
+### Trigger activation must be materialised
 
-### Carry-forward stays conservative
+Moving the replay checkpoint and restarting the application makes the new
+authoritative replay time available, but startup alone does not evaluate a
+trigger. An authoritative lineup/lockout read or a submission operation invokes
+lock evaluation and materialises any activation now due. The resulting
+persisted activation record, not a browser label or restart, proves that a
+selective or main lockout occurred.
 
-Exact carry-forward must refuse when a carried position conflicts with an
-Opening Round deferred nomination. The system should not silently merge,
-relocate or reinterpret players. Human review is preferable for uncommon
-historical exceptions.
+### Main lockout includes vacancies
 
-### Corrections must preserve history
+After main lockout, an authoritative vacant position is locked even though no
+fabricated player-level lock row can exist for it. PR #157 aligned the shared
+read model with the server-side enforcement already rejecting a late fill.
 
-Direct database edits and backward checkpoint changes are not correction
-workflows. Existing submissions use audited locked-lineup correction. A missed
-initial submission may use evidenced-draft adjudication only where the app
-actually retained qualifying evidence. A replay-operator transcription omission
-without such evidence requires restoration to an earlier consistent database
-and checkpoint.
+### Corrections preserve history
 
-### Historical standings may differ from recomputation
+Ordinary submission never bypasses a lock. An authorised Scorer correction
+creates a new audited submission version with a substantive reason. The
+original submission and actor history remain intact.
 
-Current authoritative AFL statistics can differ from a contemporaneous manual
-spreadsheet because of original entry error or later provider revision. Future
-mid-season/finals reconstruction may need an audited distinction between the
-calculated ladder and a historical seeding position. Any such facility must
-preserve both states and state why the historical override was used.
+### Missed first submissions are adjudicated, not silently repaired
 
-## Outstanding workflow work
+A private draft is not an authoritative submission. Acceptance of an evidenced
+draft is limited to its latest snapshot and per-position evidence that predates
+the relevant lock. Values without that proof become vacant. The alternative
+carry-forward resolution sources only the previous round's effective submitted
+lineup and never merges rejected draft content. Any league discussion occurs
+outside the application; the Scorer records its outcome in the required reason.
 
-- Provide explicit Scorer and Administrator operational dashboards: Issues
-  [#147](https://github.com/JustPlausible/BBBFFL_Scoring/issues/147) and
-  [#148](https://github.com/JustPlausible/BBBFFL_Scoring/issues/148).
-- Review whether historical ladder/seeding reconstruction requires a narrowly
-  scoped audited workflow before the mid-season draft or finals replay.
-- Update replay guidance so final-evidence checkpoints include every deferred
-  source round required by the target BBBFFL round.
-- Provide safer backup/checkpoint pairing guidance for destructive replay
-  restoration.
+### Carry-forward is deliberately conservative
+
+Round 9 demonstrated that carry-forward may disagree with an informal
+historical reconstruction. The system correctly preferred the previous
+authoritative lineup. Historical convenience is not a reason to invent or merge
+a selection.
+
+### Final statistics can differ from historical worksheets
+
+The replay uses the available authoritative provider evidence. Later provider
+corrections or historical manual-entry errors can therefore alter PF, PA,
+percentage or points-per-game without changing a matchup winner. Any manual
+alignment required for draft or finals seeding needs a distinct audited
+administrative workflow.
+
+### Replay recovery requires a paired restore point
+
+A useful replay restore point consists of a validated database archive and its
+matching replay checkpoint. Restoring only one can place lifecycle data and AFL
+evidence time on different sides of a lockout boundary.
+
+## Implementation outcomes during the replay
+
+- Human-readable team, player and rules labels: PR #154.
+- Authoritative browser refresh after mutations: PR #156.
+- Main-lock treatment of vacant positions: PR #157.
+- Guided round mapping and lockout preflight: PR #158.
+- Scorer Operations Dashboard: PR #159.
+- Administrator governance dashboard: PR #160.
+- Closing tested baseline: `3abc503`, migration
+  `0026_lineup_adjudication`.
+
+## Follow-up boundaries
+
+- Reconcile material historical-stat variance before it affects draft or finals
+  qualification.
+- Keep replay checkpoint controls outside ordinary 2027 user workflows.
+- Treat multiple prepared future rounds as configuration, not simultaneous
+  current rounds; each lifecycle and trigger remains independently scoped.
+- Build the second-half replay around Round 10, the mid-season draft,
+  Rounds 11–20, regular finals and SuperScore.

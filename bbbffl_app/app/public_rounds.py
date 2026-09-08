@@ -210,11 +210,17 @@ def _round_definition(database, competition_id, round_number):
 
 
 def _round_summary(round_number, definition):
-    state = (definition["state"] if definition else None) or "scheduled"
+    # A bare `bbbffl_round` definition with no lifecycle row yet (state is
+    # NULL from the LEFT JOIN in `_round_definition`) is not "opened" --
+    # its `bbbffl_round_id` must never be exposed as a linkable `round_id`
+    # here, or `_select_default_round_number` below would treat a merely
+    # pre-defined future round as "in progress" the instant it exists.
+    opened = definition is not None and definition["state"] is not None
+    state = definition["state"] if opened else "scheduled"
     return {
         "round_number": round_number,
         "label": (definition["label"] if definition else None) or f"Round {round_number}",
-        "round_id": definition["bbbffl_round_id"] if definition else None,
+        "round_id": definition["bbbffl_round_id"] if opened else None,
         "state": state,
         "published": state == "final",
     }
@@ -267,15 +273,22 @@ def build_public_season_rounds(database, seasons, season_id):
     }
 
 
-def _build_round_preview(identities, fixtures, season_id, round_number, definition):
+def _build_round_preview(identities, fixtures, season_id, round_number):
     """A scheduled-matchup preview for a fixture round that has not been
     administratively opened yet: team names only, drawn straight from the
-    frozen fixture draw (`app.fixtures.FixtureRepository`) -- never a
-    lineup, a score, or anything implying either is authoritative."""
-    matchups = fixtures.list_matchups(season_id, round_number)
+    *frozen* fixture draw (`app.fixtures.FixtureRepository`) -- never a
+    lineup, a score, or anything implying either is authoritative. Nothing
+    is shown while the draw is still a mutable draft: an operator's
+    in-progress edits are never published as though they were the
+    scheduled fixture. `round_id` is always ``None`` here -- a bare
+    `bbbffl_round` definition with no lifecycle row yet is still unopened,
+    and its id must never be exposed as a linkable `round_id` (it would
+    404 against the detailed view, see `_round_summary`)."""
+    draw = fixtures.get_draw(season_id)
+    matchups = fixtures.list_matchups(season_id, round_number) if draw is not None and draw.state == "frozen" else []
     return {
         "season_id": season_id,
-        "round_id": definition["bbbffl_round_id"] if definition else None,
+        "round_id": None,
         "round_number": round_number,
         "round_state": "scheduled",
         "matchups": [
@@ -303,7 +316,7 @@ def build_public_round_by_number(
     if definition is not None and definition["state"] is not None:
         result = build_public_round(database, lifecycle, review_repo, identities, definition["bbbffl_round_id"])
     else:
-        result = _build_round_preview(identities, fixtures, season_id, round_number, definition)
+        result = _build_round_preview(identities, fixtures, season_id, round_number)
     result["label"] = (definition["label"] if definition else None) or f"Round {round_number}"
     result["published"] = result["round_state"] == "final"
     result["prev_round_number"] = round_number - 1 if round_number > 1 else None

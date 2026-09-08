@@ -119,6 +119,69 @@ def test_default_round_prefers_an_opened_round_still_in_progress_over_a_publishe
     assert index["default_round_number"] == 2
 
 
+def test_unopened_round_definition_is_never_treated_as_in_progress_or_linkable(season_client):
+    """Regression (Codex review, PR #171): a season that pre-creates every
+    logical `bbbffl_round` definition up front (e.g. a first-half replay
+    bootstrap) must not have those bare definitions -- no lifecycle row,
+    hence never opened -- mistaken for "in progress", nor have their
+    internal id handed out as a `round_id` a matchup card would link to
+    (that link would 404 against the detailed view, since no lifecycle
+    round exists yet)."""
+    client = season_client
+    database = client.app.state.database
+    round_one, _ = _publish_round_one(database, 9021)
+    season_id = round_one.season_id
+
+    from app.season import SeasonRepository
+
+    SeasonRepository(database).create_round(round_one.competition_id, "round-2", "Round 2", 2)
+
+    index = client.get(f"/api/public/seasons/{season_id}/rounds").json()
+    assert index["default_round_number"] == 1  # Round 1 stays current, not merely-defined Round 2
+    round_two_summary = index["rounds"][1]
+    assert round_two_summary["round_number"] == 2
+    assert round_two_summary["round_id"] is None
+    assert round_two_summary["state"] == "scheduled"
+
+    preview = client.get(f"/api/public/seasons/{season_id}/rounds/2").json()
+    assert preview["round_id"] is None  # nothing to link a matchup card to yet
+
+    overview = client.get(f"/seasons/{season_id}", follow_redirects=False)
+    assert overview.headers["location"] == f"/seasons/{season_id}/rounds/1"
+
+
+def test_unfrozen_fixture_draft_never_leaks_as_a_public_preview(season_client):
+    """Regression (Codex review, PR #171): FixtureRepository.list_matchups
+    does not filter by draw state, so a round preview must check the draw
+    is frozen itself -- otherwise an operator's still-mutable draft
+    pairings would be shown to spectators as "the scheduled fixture" and
+    could silently change underneath them before the draw is frozen."""
+    client = season_client
+    database = client.app.state.database
+    from app.fixtures import FixtureRepository
+    from app.identity import IdentityRepository
+    from app.season import SeasonRepository
+
+    seasons = SeasonRepository(database)
+    identities = IdentityRepository(database)
+    fixtures = FixtureRepository(database)
+
+    season = seasons.create_season(9022, "9022")
+    rules = seasons.create_rules_version(season.season_id, "ordinary", 1, "Rules")
+    seasons.create_competition(season.season_id, rules.rules_version_id, "ordinary", "Ordinary", "ordinary")
+    entries = []
+    for number in range(10):
+        coach = identities.create_coach(f"Draft Coach {number}")
+        entries.append(
+            identities.create_entry(season.season_id, f"draft-licence-{number}", coach.coach_id, f"Draft Team {number}")
+        )
+    fixtures.save_draft(season.season_id, [entry.season_entry_id for entry in entries])  # never frozen
+
+    body = client.get(f"/api/public/seasons/{season.season_id}/rounds/1").json()
+    assert body["round_state"] == "scheduled"
+    assert body["matchups"] == []
+
+
 def test_previous_and_next_navigation(season_client):
     client = season_client
     round_row, _ = _publish_round_one(client.app.state.database, 9004)

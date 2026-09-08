@@ -75,7 +75,9 @@ before SuperScore.
 - Preflight recommendations should expose populated values and default the next
   available trigger sequence.
 - Local dates should use Australian day/month/year presentation with timezone.
-- Public/scorer ladders should include points per game where required.
+- Public/scorer ladders may display points per game for interest, but must
+  order by competition points, percentage and PF only; exact equality requires
+  an audited Scorer decision.
 - Public round browsing remains a low-priority roadmap enhancement.
 
 ## Evidence additions during Phase 2

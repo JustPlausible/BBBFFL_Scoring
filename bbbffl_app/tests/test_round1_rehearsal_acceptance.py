@@ -160,7 +160,10 @@ def test_round1_rehearsal_browser_vertical(rehearsal_client):
 
     season_overview = client.get(f"/seasons/{result.season_id}", follow_redirects=False)
     assert season_overview.status_code == 302
-    assert season_overview.headers["location"] == f"/seasons/{result.season_id}/rounds/{result.bbbffl_round_id}"
+    # Issue #161: the season landing page redirects to the canonical,
+    # round-number-keyed browser URL (Round 1's fixture round number),
+    # never the round's internal UUID.
+    assert season_overview.headers["location"] == f"/seasons/{result.season_id}/rounds/1"
 
     ladder = client.get(f"/api/public/seasons/{result.season_id}/rounds/{result.bbbffl_round_id}/ladder")
     assert ladder.status_code == 200

@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BBBFFL Season</title><style>
+*{box-sizing:border-box}body{margin:0;background:#f4f6f8;color:#18202a;font:15px system-ui,sans-serif}header,main{max-width:960px;margin:auto;padding:14px}header{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}nav a{margin-left:12px;color:#0757a5}
+.round-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:12px 0}
+.round-bar select{font:inherit;padding:6px 8px;border-radius:8px;border:1px solid #ccd3da;max-width:100%}
+.round-bar button{font:inherit;padding:6px 12px;border-radius:8px;border:1px solid #ccd3da;background:white;cursor:pointer}
+.round-bar button:disabled{opacity:.4;cursor:default}
+.badge{display:inline-block;font-size:.75rem;font-weight:700;padding:2px 8px;border-radius:999px;background:#e7eaee;color:#3a4450}
+.badge.published{background:#dcf3e2;color:#1a6b34}
+.badge.scheduled{background:#eef1f4;color:#5b6570}
+.card{background:white;border:1px solid #ccd3da;border-radius:10px;padding:14px;margin:12px 0}
+.matches{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.match{border-left:6px solid #6e7781;text-decoration:none;color:inherit;display:block}
+.match.official,.match.corrected_official{border-left-color:#238636}
+.match.under_review{border-left-color:#9a6700}
+.match.upcoming{border-left-color:#6e7781}
+.match.scheduled{border-left-color:#9aa4ae}
+.status{font-weight:700;font-size:.85rem}
+.scoreline{display:grid;grid-template-columns:1fr auto 1fr;gap:8px;align-items:center;margin-top:6px}
+.scoreline>:last-child{text-align:right}
+.score{font-size:1.5rem;font-weight:750}
+.note{font-size:.8rem;color:#575f68;margin-top:6px}
+.ladder{width:100%;border-collapse:collapse}
+.ladder th,.ladder td{padding:7px 4px;text-align:right;border-bottom:1px solid #ddd}
+.ladder th:nth-child(2),.ladder td:nth-child(2){text-align:left}
+@media(max-width:640px){.matches{grid-template-columns:1fr}.card{padding:11px}.wide{display:none}}
+</style></head><body>
+<header><div><strong>BBBFFL</strong><div id="heading">Season</div></div><nav><a href="/">Home</a></nav></header>
+<main>
+<div id="error" role="alert"></div>
+<div class="round-bar">
+  <button id="prevBtn" type="button">← Previous round</button>
+  <select id="roundSelect" aria-label="Select round"></select>
+  <button id="nextBtn" type="button">Next round →</button>
+  <span id="roundBadge"></span>
+</div>
+<section id="matches" class="matches"></section>
+<section id="ladder" class="card"><h2>Ladder <span class="note" id="ladderThrough"></span></h2><div id="ladder-body">Loading…</div></section>
+</main>
+<script>
+const season={{ season_id|tojson }};
+let roundNumber={{ round_number|tojson }};
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// Australian local time only -- public BBBFFL pages never show raw UTC
+// outside diagnostics (issue #161); the JSON API still carries UTC ISO
+// instants for anything that needs them.
+const auTime=iso=>{if(!iso)return null;try{return new Intl.DateTimeFormat('en-AU',{timeZone:'Australia/Melbourne',dateStyle:'medium',timeStyle:'short'}).format(new Date(iso))}catch(_){return null}};
+function seasonUrl(n){return `/seasons/${encodeURIComponent(season)}/rounds/${n}`}
+function apiUrl(n){return `/api/public/seasons/${encodeURIComponent(season)}/rounds/${n}`}
+
+function matchCard(m, detailRoundId){
+  let scoreline='';
+  if(m.status!=='scheduled'){
+    scoreline=`<div class="scoreline"><div><strong>${esc(m.home.team.name)}</strong><div class="score">${esc(m.home.official_score??m.home.calculated_score??'–')}</div></div><span>v</span><div><strong>${esc(m.away.team.name)}</strong><div class="score">${esc(m.away.official_score??m.away.calculated_score??'–')}</div></div></div>`;
+  } else {
+    scoreline=`<div class="scoreline"><div><strong>${esc(m.home.team.name)}</strong></div><span>v</span><div><strong>${esc(m.away.team.name)}</strong></div></div>`;
+  }
+  let published=auTime(m.published_at);
+  let note=published?`<div class="note">Published ${esc(published)} (AEST/AEDT)</div>`:(m.status==='scheduled'?`<div class="note">Preview only -- lineups and scores are not yet available.</div>`:'');
+  let inner=`<div class="status">${esc(m.status_label)}</div>${scoreline}${note}`;
+  if(detailRoundId){
+    return `<a class="card match ${esc(m.status)}" href="/seasons/${encodeURIComponent(season)}/rounds/${encodeURIComponent(detailRoundId)}#match-${esc(m.order)}">${inner}</a>`;
+  }
+  return `<div class="card match ${esc(m.status)}">${inner}</div>`;
+}
+
+function renderRoundOptions(rounds){
+  const select=document.querySelector('#roundSelect');
+  select.innerHTML=rounds.map(r=>`<option value="${r.round_number}"${r.round_number===roundNumber?' selected':''}>${esc(r.label)}${r.published?' ✓':''}</option>`).join('');
+}
+
+async function loadRoundIndex(){
+  const resp=await fetch(`/api/public/seasons/${encodeURIComponent(season)}/rounds`);
+  if(!resp.ok) throw Error('Season data is temporarily unavailable');
+  return resp.json();
+}
+
+async function loadRound(n){
+  const [roundResp, ladderResp]=await Promise.all([fetch(apiUrl(n)), fetch(apiUrl(n)+'/ladder')]);
+  if(!roundResp.ok||!ladderResp.ok) throw Error('Round data is temporarily unavailable');
+  return Promise.all([roundResp.json(), ladderResp.json()]);
+}
+
+async function render(){
+  try{
+    const index=await loadRoundIndex();
+    renderRoundOptions(index.rounds);
+    const [round, ladder]=await loadRound(roundNumber);
+
+    document.querySelector('#heading').textContent=`${round.label} — ${round.published?'Published':round.round_state==='scheduled'?'Scheduled':'In progress'}`;
+    document.title=`BBBFFL — ${round.label}`;
+    const badge=document.querySelector('#roundBadge');
+    badge.innerHTML=round.published?'<span class="badge published">Published</span>':round.round_state==='scheduled'?'<span class="badge scheduled">Scheduled</span>':`<span class="badge">${esc(round.round_state)}</span>`;
+
+    document.querySelector('#prevBtn').disabled = round.prev_round_number===null || round.prev_round_number===undefined;
+    document.querySelector('#prevBtn').onclick=()=>{ if(round.prev_round_number) location.href=seasonUrl(round.prev_round_number); };
+    document.querySelector('#nextBtn').disabled = round.next_round_number===null || round.next_round_number===undefined;
+    document.querySelector('#nextBtn').onclick=()=>{ if(round.next_round_number) location.href=seasonUrl(round.next_round_number); };
+
+    document.querySelector('#matches').innerHTML=round.matchups.map(m=>matchCard(m, round.round_id)).join('');
+
+    document.querySelector('#ladderThrough').textContent=`(through Round ${ladder.through_round})`;
+    document.querySelector('#ladder-body').innerHTML=`<table class="ladder"><thead><tr><th>#</th><th>Team</th><th>Pts</th><th>W</th><th>D</th><th>L</th><th class="wide">PF</th><th class="wide">PA</th><th>%</th></tr></thead><tbody>${ladder.rows.map(x=>`<tr><td>${x.rank}</td><td>${esc(x.team_name)}${x.tied?' =':''}</td><td>${x.competition_points}</td><td>${x.wins}</td><td>${x.draws}</td><td>${x.losses}</td><td class="wide">${x.points_for}</td><td class="wide">${x.points_against}</td><td>${Number(x.percentage).toFixed(1)}</td></tr>`).join('')}</tbody></table>`;
+    document.querySelector('#error').textContent='';
+  }catch(e){
+    document.querySelector('#error').textContent=e.message;
+  }
+}
+
+document.querySelector('#roundSelect').addEventListener('change', e=>{ location.href=seasonUrl(Number(e.target.value)); });
+render();
+</script></body></html>

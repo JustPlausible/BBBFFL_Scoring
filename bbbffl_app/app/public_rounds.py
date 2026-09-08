@@ -151,6 +151,10 @@ def build_public_round(database, lifecycle, review_repo, identities, round_id):
                     "official": "Official final",
                     "corrected_official": "Corrected official final",
                 }[score_state],
+                # UTC on the wire, always -- public templates render this in
+                # Australian local time and keep the raw UTC value only for
+                # diagnostics (issue #161).
+                "published_at": official.published_at if official is not None else None,
                 "home": _side(
                     matchup.home,
                     submissions.get(matchup.home.season_entry_id),
@@ -174,6 +178,161 @@ def build_public_round(database, lifecycle, review_repo, identities, round_id):
         "round_state": round_.state,
         "matchups": matchups,
     }
+
+
+def _team_name(identities, entry_id):
+    team = identities.get_public_team(entry_id)
+    return team.team_name if team else "Team"
+
+
+def _ordinary_competition_id(database, season_id):
+    row = database.execute(
+        "SELECT competition_id FROM competition_stream WHERE season_id=? AND stream_type='ordinary'",
+        (season_id,),
+    ).fetchone()
+    return row["competition_id"] if row else None
+
+
+def _round_definition(database, competition_id, round_number):
+    """The `bbbffl_round`/`bbbffl_round_lifecycle` row for one fixture round
+    number, or ``None`` when no round has been administratively defined yet
+    for that number -- this is the one allow-listed place the public surface
+    distinguishes "not yet opened" from "opened", the same way
+    `app.scorer_dashboard.ordinary_rounds_with_lifecycle` does for the
+    Scorer/Admin dashboards, without importing that Scorer-only module into
+    the public read model."""
+    return database.execute(
+        "SELECT r.bbbffl_round_id, r.label, l.state "
+        "FROM bbbffl_round r LEFT JOIN bbbffl_round_lifecycle l ON l.bbbffl_round_id=r.bbbffl_round_id "
+        "WHERE r.competition_id=? AND r.sequence=?",
+        (competition_id, round_number),
+    ).fetchone()
+
+
+def _round_summary(round_number, definition):
+    # A bare `bbbffl_round` definition with no lifecycle row yet (state is
+    # NULL from the LEFT JOIN in `_round_definition`) is not "opened" --
+    # its `bbbffl_round_id` must never be exposed as a linkable `round_id`
+    # here, or `_select_default_round_number` below would treat a merely
+    # pre-defined future round as "in progress" the instant it exists.
+    opened = definition is not None and definition["state"] is not None
+    state = definition["state"] if opened else "scheduled"
+    return {
+        "round_number": round_number,
+        "label": (definition["label"] if definition else None) or f"Round {round_number}",
+        "round_id": definition["bbbffl_round_id"] if opened else None,
+        "state": state,
+        "published": state == "final",
+    }
+
+
+def _select_default_round_number(rounds):
+    """Current-round policy for the season landing page: the earliest
+    *opened* round that is not yet final (a round actually in progress)
+    wins; otherwise the most recently *published* round; otherwise (nothing
+    has ever been opened yet) the season's first fixture round.
+
+    Deliberately does not treat an unopened future round number (no
+    ``round_id`` -- see ``_round_summary``) as "current" merely because it
+    is technically not final: `app.scorer_dashboard.select_current_round`
+    avoids the same trap by only ever considering rounds an operator has
+    opened; this mirrors that policy while still covering every fixture
+    round number the season defines, opened or not, for navigation."""
+    if not rounds:
+        return None
+    in_progress = next((row for row in rounds if row["round_id"] is not None and row["state"] != "final"), None)
+    if in_progress is not None:
+        return in_progress["round_number"]
+    published = [row for row in rounds if row["state"] == "final"]
+    if published:
+        return published[-1]["round_number"]
+    return rounds[0]["round_number"]
+
+
+def build_public_season_rounds(database, seasons, season_id):
+    """Every fixture round number 1..N for a season's ordinary competition
+    -- the allow-listed index behind the public round selector/previous-
+    next navigation and the season landing page's default-round choice.
+    Round numbers ahead of whatever an operator has opened so far carry no
+    `round_id` and state ``"scheduled"`` rather than being omitted."""
+    season = seasons.get_season(season_id)
+    if season is None:
+        raise KeyError(season_id)
+    competition_id = _ordinary_competition_id(database, season_id)
+    if competition_id is None:
+        raise KeyError(season_id)
+    rounds = [
+        _round_summary(number, _round_definition(database, competition_id, number))
+        for number in range(1, season.regular_season_round_count + 1)
+    ]
+    return {
+        "season_id": season_id,
+        "competition_id": competition_id,
+        "rounds": rounds,
+        "default_round_number": _select_default_round_number(rounds),
+    }
+
+
+def _build_round_preview(identities, fixtures, season_id, round_number):
+    """A scheduled-matchup preview for a fixture round that has not been
+    administratively opened yet: team names only, drawn straight from the
+    *frozen* fixture draw (`app.fixtures.FixtureRepository`) -- never a
+    lineup, a score, or anything implying either is authoritative. Nothing
+    is shown while the draw is still a mutable draft: an operator's
+    in-progress edits are never published as though they were the
+    scheduled fixture. `round_id` is always ``None`` here -- a bare
+    `bbbffl_round` definition with no lifecycle row yet is still unopened,
+    and its id must never be exposed as a linkable `round_id` (it would
+    404 against the detailed view, see `_round_summary`)."""
+    draw = fixtures.get_draw(season_id)
+    matchups = fixtures.list_matchups(season_id, round_number) if draw is not None and draw.state == "frozen" else []
+    return {
+        "season_id": season_id,
+        "round_id": None,
+        "round_number": round_number,
+        "round_state": "scheduled",
+        "matchups": [
+            {
+                "order": matchup.matchup_order,
+                "status": "scheduled",
+                "status_label": "Scheduled — not yet started; teams, lineups and scores are not authoritative.",
+                "home": {"team": {"name": _team_name(identities, matchup.home_season_entry_id)}},
+                "away": {"team": {"name": _team_name(identities, matchup.away_season_entry_id)}},
+            }
+            for matchup in matchups
+        ],
+    }
+
+
+def build_public_round_by_number(
+    database, lifecycle, review_repo, identities, fixtures, season_id, competition_id, round_number, total_rounds
+):
+    """The public round-browser DTO for one fixture round number: the full
+    `build_public_round` result (scores, statuses, lineups) once the round
+    has been opened, or a scheduled-only preview beforehand -- either way
+    wrapped with the same navigation/labelling fields so a template can
+    render both uniformly."""
+    definition = _round_definition(database, competition_id, round_number)
+    if definition is not None and definition["state"] is not None:
+        result = build_public_round(database, lifecycle, review_repo, identities, definition["bbbffl_round_id"])
+    else:
+        result = _build_round_preview(identities, fixtures, season_id, round_number)
+    result["label"] = (definition["label"] if definition else None) or f"Round {round_number}"
+    result["published"] = result["round_state"] == "final"
+    result["prev_round_number"] = round_number - 1 if round_number > 1 else None
+    result["next_round_number"] = round_number + 1 if round_number < total_rounds else None
+    return result
+
+
+def latest_ordinary_season_id(database, seasons):
+    """The most recent (by year) season that has an ordinary competition at
+    all -- lets `/` land on a season's public landing page as soon as its
+    ordinary competition exists, rather than only once its first round has
+    been opened."""
+    for season in seasons.list_seasons():
+        if _ordinary_competition_id(database, season.season_id) is not None:
+            return season.season_id
+    return None
 
 
 def build_public_ladder(ladder_repository, identities, competition_id, through_round):

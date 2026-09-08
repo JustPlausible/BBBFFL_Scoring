@@ -61,8 +61,11 @@ resolved during BBBFFL Round 4.
 | 10 | Wolverines | 12 | 3 | 0 | 6 | 1567 | 1593 | 98.4 |
 
 The table is a replay closeout observation, not a replacement for the
-authoritative published ladder. Points-per-game remains a required public
-ladder field and final ordering input where the competition rules call for it.
+authoritative published ladder. Ladder order is competition points, percentage,
+then PF. Points per game may be displayed for interest, but it is derived from
+PF and is not an additional ordering criterion. Exact equality after the three
+published criteria requires a recorded, audited Scorer decision rather than an
+invented automatic tiebreaker.
 
 ## Historical-stat variance
 

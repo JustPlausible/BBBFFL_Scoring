@@ -23,8 +23,9 @@ The 2026 replay may use Scorer/replay-operator controls where coach-facing funct
 - Draft-order exceptions and genuine unresolved ties may be determined outside the app by the competition and recorded by the Scorer as audited draft-order decisions.
 - Corrections to an actually incorrect ladder should instead be made through the existing audited match/result/player-stat correction pathways so the ladder recalculates from corrected facts.
 - Private coach planning must remain distinct from public competition declarations.
+- Coaches may propose or socially agree trades, but no ownership-changing trade becomes authoritative until an authorised Scorer/Admin records or approves it and the transaction is auditable.
 - Delistings remain reversible until the Scorer explicitly locks them.
-- The final numbered selection table cannot be generated until delistings are locked.
+- The final numbered selection table cannot be generated until delistings are locked and all relevant pending trades have been resolved.
 - Where practical, the actual player-selection phase should reuse the pre-season draft machinery rather than create a separate selection engine.
 
 ## Expected application workflow
@@ -73,8 +74,10 @@ Examples include:
 
 - Team A's first-round mid-season pick;
 - Team B's second-round mid-season pick;
-- Team A and Team B swapping their first-round picks; or
-- Team A trading Player 101 to Team B for Team B's second-round pick.
+- Team A and Team B agreeing to swap their first-round picks; or
+- Team A agreeing to trade Player 101 to Team B for Team B's second-round pick.
+
+These examples describe proposed or socially agreed trades only. Pick ownership or player ownership does not change until an authorised Scorer/Admin records or approves the trade.
 
 A specific overall Pick 1, Pick 2, Pick 3, etc. cannot be reliably assigned yet because the number of selections required by each team remains unknown until delistings are locked.
 
@@ -94,15 +97,25 @@ This private planning facility is not required for the 2026 replay.
 
 ### 8. Open formal delisting and trading
 
-Once the Scorer opens the mid-season process, coaches may formally submit delistings and conduct permitted trades.
+Once the Scorer opens the mid-season process, coaches may formally submit delistings and may negotiate or propose permitted trades.
 
-Trading may include players and round-based draft selections. The application should not assume that every valid trade leaves each team's visible player count temporarily equal to the final required squad size.
+Trading may include players and round-based draft selections. The intended commissioner/scorer workflow is:
 
-The relevant end-state invariant is that each team's retained players and draft entitlements must allow it to return to the configured required squad size. Conceptually:
+1. coaches agree the trade socially;
+2. the trade is proposed or communicated in the app or to the league/Scorer;
+3. an authorised Scorer/Admin records or approves it;
+4. only then do player or draft-pick ownership changes become authoritative; and
+5. the transaction remains auditable.
 
-`listed/retained players - departures/delistings + draft selections to be exercised = required squad size`
+The application should therefore distinguish pending/proposed trades from approved trades. A pending trade must not affect authoritative squad ownership, draft-pick ownership or the final draft table.
 
-A player-for-pick trade can therefore create a temporary visible imbalance while still producing a valid final list structure.
+The application should not assume that every approved trade leaves each team's visible player count temporarily equal to the final required squad size.
+
+The relevant end-state invariant is that each team's retained players and approved draft entitlements must allow it to return to the configured required squad size. Conceptually:
+
+`retained players - locked delistings - approved outgoing players + approved incoming players + approved draft selections to be exercised = required squad size`
+
+A player-for-pick trade can therefore create a temporary visible imbalance after approval while still producing a valid final list structure.
 
 ### 9. Publish formal delistings progressively
 
@@ -112,13 +125,15 @@ Only formal delistings are public. Private Keep, Potential delist and Potential 
 
 A coach may submit zero delistings.
 
-### 10. Permit changes before the delisting lock
+### 10. Permit changes and resolve trades before the delisting lock
 
 Published delistings remain reversible until the Scorer locks the phase. A coach may withdraw or amend a delisting, including withdrawing a player because a trade opportunity has arisen.
 
-Trading may continue during this period.
+Trade negotiation and proposal may continue during this period. Proposed trades may be approved or rejected by an authorised Scorer/Admin. Only approved trades affect ownership and downstream squad/draft calculations.
 
-The Scorer should also be able to act as an audited proxy for a coach who cannot use the application, including submitting or amending delistings on that coach's behalf.
+Before the Scorer can lock delistings and generate the final selection table, all pending trades that could affect players, vacancies or draft-pick ownership for the mid-season draft must be resolved. The Scorer may approve them, reject them, or require the coaches to withdraw/correct the proposal.
+
+The Scorer should also be able to act as an audited proxy for a coach who cannot use the application, including submitting or amending delistings or recording an agreed trade on that coach's behalf.
 
 If a coach does not participate and the competition determines offline that it can wait no longer, the Scorer may proceed with that team effectively having zero delistings. The application does not need to automate the competition's quorum decision; it needs to support and audit the resulting operational action.
 
@@ -126,12 +141,14 @@ If a coach does not participate and the competition determines offline that it c
 
 The Scorer explicitly moves the competition to **Delistings Locked**. This is the decisive boundary.
 
+The application should not allow this transition while a relevant trade remains pending approval/rejection.
+
 After this action:
 
 - formal delistings cannot be withdrawn or amended through normal coach actions;
 - the final vacancies for each squad are known;
 - delisted players can enter the available-player pool;
-- completed trades and ownership of round-based draft selections are known; and
+- all approved trades and ownership of round-based draft selections are known; and
 - the application can generate the final selection table.
 
 There should not be an automatic 12- or 24-hour expiry. The league may use such expectations socially, but the Scorer decides when the phase is closed.
@@ -144,7 +161,7 @@ The draft proceeds in rounds through the reverse-ladder team order, with teams s
 
 For example, if one team has three vacancies and another has one, both may participate in the first pass, but only the team still requiring players participates in later passes.
 
-Round-based pick trades are applied to ownership when the table is generated. Only at this point do the abstract assets become concrete overall Pick 1, Pick 2, Pick 3, and so on.
+Approved round-based pick trades are applied to ownership when the table is generated. Only at this point do the abstract assets become concrete overall Pick 1, Pick 2, Pick 3, and so on.
 
 The number of selections ultimately available to a team must reconcile its list to the configured required squad size.
 
@@ -184,31 +201,33 @@ The audit record should preserve what originally occurred, what was changed, who
 
 ### 17. Continue post-draft trading
 
-Draft completion does not itself freeze the new squads. Trading may continue during the remaining break before the next BBBFFL round.
+Draft completion does not itself freeze the new squads. Coaches may continue to negotiate and propose trades during the remaining break before the next BBBFFL round, but the same Scorer/Admin approval requirement applies before any ownership change becomes authoritative.
 
-For the 2026 example, trading remains possible until the first Round 11 lockout trigger, using the same broad boundary already established between the pre-season draft/trading period and Round 1.
+For the 2026 example, proposed post-draft trades may be submitted until the first Round 11 lockout trigger. Any trade intended to affect the Round 11 squad must also have been approved before that trigger. A merely pending proposal does not take effect simply because it was lodged before the deadline.
 
 ### 18. Resume normal weekly operation
 
 At the first lockout trigger for the following round, squad-changing activity closes and the normal weekly competition lifecycle resumes.
 
-For 2026, Round 11 onward then proceeds using the post-mid-season-draft squads.
+Any still-pending trade proposal remains non-authoritative and cannot alter the locked Round 11 squad unless a later exceptional Scorer correction is made under the established audited correction process.
+
+For 2026, Round 11 onward then proceeds using the approved post-mid-season-draft squads.
 
 ## Suggested competition states
 
 The process is best represented as explicit competition states rather than a single large wizard. A provisional state progression is:
 
-`Normal season -> Mid-season draft pending -> Ladder/draft-order confirmation -> Delisting and trading open -> Delistings locked -> Mid-season draft open -> Draft complete/post-draft trading -> Normal season`
+`Normal season -> Mid-season draft pending -> Ladder/draft-order confirmation -> Delisting and trading open -> Resolve pending trades -> Delistings locked -> Mid-season draft open -> Draft complete/post-draft trading -> Normal season`
 
-The exact implementation names may differ. The important requirement is that permissions and valid actions are clear at each boundary.
+The exact implementation names may differ. `Resolve pending trades` may be implemented as a gating condition rather than a separately persisted state. The important requirement is that permissions and valid actions are clear at each boundary and that unresolved ownership-changing trades cannot silently pass into the final draft table.
 
 ## Information and privacy layers
 
 The design should keep three kinds of information separate:
 
 1. **Private coach planning** - Keep, Potential delist, Potential trade and similar preparatory notes.
-2. **Official competition declarations** - submitted delistings and completed trades.
-3. **Competition state** - locked delistings, draft-order decisions, final numbered selections, completed picks and resulting squads.
+2. **Official competition declarations** - submitted delistings plus proposed/agreed trades awaiting approval and Scorer/Admin-approved trades.
+3. **Competition state** - locked delistings, authoritative approved trade effects, draft-order decisions, final numbered selections, completed picks and resulting squads.
 
 A coach's private planning must never become public merely because the formal delisting window has opened.
 
@@ -221,10 +240,12 @@ Subject to the current competition state, a coach may:
 - maintain private list-planning information;
 - formally submit zero or more delistings;
 - amend or withdraw submitted delistings before the lock;
-- negotiate and complete permitted trades;
-- trade round-based draft selections where permitted;
+- negotiate, agree socially and propose permitted trades;
+- propose trades involving round-based draft selections where permitted;
 - make draft selections when entitled; and
-- continue permitted post-draft trading until the next round's first lockout trigger.
+- continue proposing permitted post-draft trades until the next round's first lockout trigger.
+
+A coach action alone must not make an ownership-changing trade authoritative.
 
 ### Scorer
 
@@ -235,6 +256,8 @@ The Scorer may:
 - confirm the ladder snapshot;
 - record audited draft-order tie-break or exceptional determinations without altering the mathematical ladder;
 - act as an audited proxy for a coach where required;
+- record, approve or reject proposed trades, with the completed transaction remaining auditable;
+- ensure relevant pending trades are resolved before locking delistings and generating the selection table;
 - explicitly lock delistings;
 - make exceptional audited corrections to draft ordering or selections; and
 - allow the normal next-round lockout mechanism to end the post-draft trading period.
@@ -250,8 +273,9 @@ The 2026 replay should establish and validate at least:
 - Round 10 completion before the draft;
 - the post-Round-10 ladder snapshot;
 - any necessary audited historical draft-order determination;
-- historical trades, if evidence shows they occurred;
+- historical trades, if evidence shows they occurred, recorded/approved through the Scorer with audit provenance;
 - formal delistings and their lock boundary;
+- resolution of any relevant pending trade before that lock;
 - generation of the correct selection table;
 - the available-player pool including delisted and previously undrafted players;
 - the historical mid-season selections;
@@ -288,6 +312,7 @@ The following can be decided during implementation without reopening the core co
 - exact dashboard and page layouts;
 - labels and button wording;
 - whether private planning is presented as tags, dropdowns or another control;
+- whether both coaches must explicitly confirm a proposed trade in-app before Scorer/Admin approval;
 - notification and reminder mechanisms;
 - visual treatment of withdrawn delistings and audit history;
 - exact internal names for competition states; and

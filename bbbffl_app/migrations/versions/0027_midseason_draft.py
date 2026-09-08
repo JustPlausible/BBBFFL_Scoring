@@ -314,11 +314,22 @@ def downgrade():
     ):
         op.drop_table(table)
 
+    # draft_order_position/draft_pick/season_preseason_window all hold
+    # foreign keys into season_draft.draft_id -- with a guaranteed-empty
+    # midseason draft_kind (checked above) there is at most an ordinary
+    # preseason draft's own rows, which the batch recreate below preserves
+    # unchanged (same draft_id values, copied then renamed back), but
+    # SQLite's FK enforcement still refuses the transient DROP of the old
+    # table underneath them unless checking is suspended for this operation.
+    if bind.dialect.name == "sqlite":
+        op.execute("PRAGMA foreign_keys=OFF")
     with op.batch_alter_table("season_draft") as batch:
         batch.drop_constraint("ck_draft_kind_valid", type_="check")
         batch.drop_constraint("uq_draft_season_kind", type_="unique")
         batch.create_unique_constraint("uq_draft_season", ["season_id"])
         batch.drop_column("draft_kind")
+    if bind.dialect.name == "sqlite":
+        op.execute("PRAGMA foreign_keys=ON")
 
     if bind.dialect.name == "sqlite":
         op.execute("ALTER TABLE bbbffl_season DROP COLUMN midseason_draft_trigger_round")

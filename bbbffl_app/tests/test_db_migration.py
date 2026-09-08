@@ -87,6 +87,14 @@ EXPECTED_TABLES = {
     "weekly_lineup_correction_slot",
     "lineup_adjudication",
     "lineup_adjudication_slot",
+    "midseason_draft",
+    "midseason_ladder_snapshot",
+    "midseason_ladder_snapshot_row",
+    "midseason_ladder_snapshot_reference",
+    "midseason_draft_order",
+    "midseason_delisting",
+    "midseason_trade",
+    "midseason_trade_leg",
 }
 
 

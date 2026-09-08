@@ -774,6 +774,29 @@ class MidseasonDraftRepository:
                             f"{leg['from_season_entry_id']} -- this trade is stale and cannot be approved"
                         )
                 for leg in legs:
+                    if leg["leg_type"] != "pick":
+                        continue
+                    # A pick entitlement is not tracked by a live ownership
+                    # row the way a player is, so two separate proposals can
+                    # both claim to sell the same (round, from_entity)
+                    # entitlement without either one being individually
+                    # invalid at proposal time. Refuse here, at approval,
+                    # rather than letting `generate_selection_table` silently
+                    # apply whichever one happens to sort last and discard
+                    # the other's already-audited approval.
+                    conflicting = conn.execute(
+                        "SELECT t.trade_id FROM midseason_trade_leg l JOIN midseason_trade t ON t.trade_id=l.trade_id "
+                        "WHERE t.midseason_draft_id=? AND t.status='approved' AND l.leg_type='pick' "
+                        "AND l.draft_round=? AND l.from_season_entry_id=?" + _for_update_suffix(self.database),
+                        (draft["midseason_draft_id"], leg["draft_round"], leg["from_season_entry_id"]),
+                    ).fetchone()
+                    if conflicting:
+                        raise MidseasonDraftStateError(
+                            f"entry {leg['from_season_entry_id']}'s round {leg['draft_round']} pick was already "
+                            f"traded away in an approved trade ({conflicting['trade_id']}) -- reject or withdraw "
+                            "the conflicting proposal first"
+                        )
+                for leg in legs:
                     if leg["leg_type"] != "player":
                         continue
                     self.ownership.release_in_transaction(
@@ -1086,15 +1109,24 @@ class MidseasonDraftRepository:
             actor=actor,
             reason=reason,
         )
-        self._reconcile_completion(season_id, actor=actor)
+        self.reconcile_completion(season_id, actor=actor)
         return pick
 
-    def _reconcile_completion(self, season_id, *, actor):
+    def reconcile_completion(self, season_id, *, actor):
         """Idempotent/safely-repeatable: complete automatically once the
         final required selection has been made, without a routine
         additional Scorer lock. Safe to call any number of times, and safe
         to resume after an interruption between finalising the underlying
-        draft and updating this module's own lifecycle state."""
+        draft and updating this module's own lifecycle state.
+
+        Public (not just `execute_pick`'s own internal step) so a caller can
+        retry it directly after an interruption between the final pick's
+        own commit and this reconciliation -- `execute_pick` cannot itself
+        be retried once the final pick is already completed (there is no
+        next pick left), so recovery needs its own, separately callable,
+        safely-repeatable entry point. Exposed via
+        `POST /{season_id}/reconcile-completion` and the replay CLI's
+        `reconcile-completion` subcommand."""
         status = self.drafts.status(season_id, draft_kind=MIDSEASON_DRAFT_KIND)
         if status is None:
             return
@@ -1145,23 +1177,22 @@ class MidseasonDraftRepository:
         Only legal from `draft_complete`: refuses outright (before ever
         touching the engine draft) once the season has moved past it --
         most importantly the terminal `complete` state, reached via
-        `close_post_draft_trading` -- rather than silently unfinalizing the
-        engine while leaving this module's own lifecycle state unchanged,
-        which would desynchronise the two (an unfinalized engine draft
-        accepting corrections with no matching `midseason.draft.reopened`
-        transition)."""
-        draft = self.get_draft(season_id)
-        if draft is None:
-            raise KeyError(season_id)
-        if draft.state != "draft_complete":
-            raise MidseasonDraftStateError(
-                f"the mid-season draft can only be reopened from draft_complete, not {draft.state!r}"
-            )
-        self.drafts.reopen(season_id, draft_kind=MIDSEASON_DRAFT_KIND, actor=actor, reason=reason)
+        `close_post_draft_trading`. Reopens the engine draft and updates
+        this module's own lifecycle state in one transaction (via
+        `DraftRepository.reopen_in_transaction`), so a concurrent
+        `close_post_draft_trading` can never race in between the two: either
+        both commit together, or (if the lock finds the state has already
+        moved on) neither does -- there is no window where the engine is
+        unfinalized but the lifecycle still reads `complete`."""
         with transaction(self.database) as conn:
             locked = self._locked_draft(conn, season_id)
             if locked["state"] != "draft_complete":
-                raise MidseasonDraftStateError("mid-season draft state changed concurrently; reopen aborted")
+                raise MidseasonDraftStateError(
+                    f"the mid-season draft can only be reopened from draft_complete, not {locked['state']!r}"
+                )
+            self.drafts.reopen_in_transaction(
+                conn, season_id, draft_kind=MIDSEASON_DRAFT_KIND, actor=actor, reason=reason
+            )
             now = _now()
             conn.execute(
                 "UPDATE midseason_draft SET state='draft_open', updated_at=?, version=version+1 "

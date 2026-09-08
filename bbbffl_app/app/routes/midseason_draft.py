@@ -315,6 +315,16 @@ def submit_pick(season_id: str, payload: PickRequest, request: Request, principa
     return _status(request, season_id)
 
 
+@router.post("/{season_id}/reconcile-completion")
+def reconcile_completion(season_id: str, request: Request, principal: Principal = Depends(manage)):
+    """Retry automatic completion after an interruption between the final
+    selection's own commit and finalising/transitioning the draft -- safe
+    to call any number of times, including when there is nothing to do."""
+    _authorise(request, principal, season_id)
+    request.app.state.midseason_draft.reconcile_completion(season_id, actor=_actor(principal))
+    return _status(request, season_id)
+
+
 @router.post("/{season_id}/correct-selection")
 def correct_selection(
     season_id: str, payload: CorrectionRequest, request: Request, principal: Principal = Depends(manage)

@@ -153,6 +153,16 @@ def cmd_pick(midseason: MidseasonDraftRepository, args: argparse.Namespace) -> i
     return 0
 
 
+def cmd_reconcile_completion(midseason: MidseasonDraftRepository, args: argparse.Namespace) -> int:
+    """Retry automatic completion after an interruption between the final
+    selection's own commit and finalising/transitioning the draft -- safe
+    to run any number of times, including when there is nothing to do."""
+    midseason.reconcile_completion(args.season_id, actor=ACTOR)
+    print("Completion reconciled (a no-op if there was nothing pending).")
+    _print_status(midseason, args.season_id)
+    return 0
+
+
 def cmd_auto_complete(midseason: MidseasonDraftRepository, args: argparse.Namespace) -> int:
     """Fill any remaining unresolved selections from the available pool, in
     canonical-id order -- a deliberately synthetic convenience for
@@ -216,6 +226,7 @@ COMMANDS = {
     "lock-delistings": cmd_lock_delistings,
     "generate-selections": cmd_generate_selections,
     "pick": cmd_pick,
+    "reconcile-completion": cmd_reconcile_completion,
     "auto-complete": cmd_auto_complete,
     "close-post-draft-trading": cmd_close_post_draft_trading,
     "status": cmd_status,
@@ -268,9 +279,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = base("decide-trade")
     p.add_argument("--trade-id", required=True)
-    p.add_argument("--approve", action="store_true")
-    p.add_argument("--reject", dest="approve", action="store_false")
-    p.set_defaults(approve=True)
+    decision = p.add_mutually_exclusive_group(required=True)
+    decision.add_argument("--approve", dest="approve", action="store_true")
+    decision.add_argument("--reject", dest="approve", action="store_false")
     p.add_argument("--reason")
 
     p = base("lock-delistings")
@@ -283,6 +294,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--season-entry-id", required=True)
     p.add_argument("--season-player-id", required=True)
     p.add_argument("--reason")
+
+    base("reconcile-completion")
 
     base("auto-complete")
 

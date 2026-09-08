@@ -581,30 +581,41 @@ class DraftRepository:
         the module docstring. Callers (routes/scripts) must gate this behind
         their own explicit, hard-to-mistake confirmation step; this method
         itself only enforces that a reason is always given."""
+        with transaction(self.database) as conn:
+            self.reopen_in_transaction(conn, season_id, draft_kind=draft_kind, actor=actor, reason=reason)
+        return self.status(season_id, draft_kind=draft_kind)
+
+    def reopen_in_transaction(
+        self, conn, season_id, *, draft_kind="preseason", actor=ActorContext.anonymous_operator("admin"), reason
+    ):
+        """As `reopen`, but on the caller's own transaction-scoped `conn` --
+        for a compound command that must reopen the engine draft and update
+        its own higher-level lifecycle state atomically, in one transaction
+        (e.g. `app.midseason_draft.MidseasonDraftRepository.reopen_draft`),
+        rather than the engine change committing independently and racing a
+        concurrent transition of that higher-level state."""
         if not reason or not reason.strip():
             raise ValueError("reopening a finalized draft requires an explicit reason")
-        with transaction(self.database) as conn:
-            if self.database.engine.dialect.name == "sqlite":
-                conn.execute("UPDATE bbbffl_season SET updated_at=updated_at WHERE season_id=?", (season_id,))
-            draft = self._locked_draft(conn, season_id, draft_kind)
-            if draft["finalized_at"] is None:
-                raise DraftStateError("draft is not finalized")
-            finalized_at = draft["finalized_at"]
-            conn.execute(
-                "UPDATE season_draft SET finalized_at=NULL, finalized_note=NULL WHERE draft_id=?",
-                (draft["draft_id"],),
-            )
-            append_event(
-                conn,
-                actor=actor,
-                action="draft.reopened",
-                entity_type="draft",
-                entity_id=draft["draft_id"],
-                reason=reason,
-                before_state={"finalized_at": finalized_at},
-                after_state={"finalized_at": None},
-            )
-        return self.status(season_id, draft_kind=draft_kind)
+        if self.database.engine.dialect.name == "sqlite":
+            conn.execute("UPDATE bbbffl_season SET updated_at=updated_at WHERE season_id=?", (season_id,))
+        draft = self._locked_draft(conn, season_id, draft_kind)
+        if draft["finalized_at"] is None:
+            raise DraftStateError("draft is not finalized")
+        finalized_at = draft["finalized_at"]
+        conn.execute(
+            "UPDATE season_draft SET finalized_at=NULL, finalized_note=NULL WHERE draft_id=?",
+            (draft["draft_id"],),
+        )
+        append_event(
+            conn,
+            actor=actor,
+            action="draft.reopened",
+            entity_type="draft",
+            entity_id=draft["draft_id"],
+            reason=reason,
+            before_state={"finalized_at": finalized_at},
+            after_state={"finalized_at": None},
+        )
 
     def next_pick(self, season_id, *, draft_kind="preseason"):
         row = self.database.execute(

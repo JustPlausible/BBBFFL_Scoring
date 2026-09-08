@@ -751,6 +751,82 @@ def test_pick_for_pick_swap_trade_keeps_every_team_at_its_own_vacancy_count():
         assert len(m.ownership.current_squad(entry.season_entry_id)) == 4
 
 
+def test_decide_trade_rejects_a_second_approval_of_an_already_traded_pick_entitlement():
+    """Codex review: two separately-proposed trades that both sell entry
+    A's round-1 pick must not both be approved -- the second approval
+    would otherwise silently discard the first's already-audited effect at
+    generation time."""
+    ctx = _delisting_open(trigger_round=10)
+    m, season, entries = ctx["midseason"], ctx["season"], ctx["entries"]
+    a, b, c = entries[9], entries[8], entries[7]
+
+    trade_to_b = m.propose_trade(
+        season.season_id,
+        [
+            {
+                "leg_type": "pick",
+                "from_season_entry_id": a.season_entry_id,
+                "to_season_entry_id": b.season_entry_id,
+                "draft_round": 1,
+            }
+        ],
+        actor=ACTOR,
+    )
+    trade_to_c = m.propose_trade(
+        season.season_id,
+        [
+            {
+                "leg_type": "pick",
+                "from_season_entry_id": a.season_entry_id,
+                "to_season_entry_id": c.season_entry_id,
+                "draft_round": 1,
+            }
+        ],
+        actor=ACTOR,
+    )
+    m.decide_trade(season.season_id, trade_to_b.trade_id, True, actor=ACTOR, reason="approved first")
+
+    with pytest.raises(MidseasonDraftStateError):
+        m.decide_trade(season.season_id, trade_to_c.trade_id, True, actor=ACTOR, reason="conflicting, must refuse")
+
+    assert m.get_trade(trade_to_c.trade_id).status == "pending"
+    # Rejecting the conflicting proposal instead is still fine.
+    m.decide_trade(season.season_id, trade_to_c.trade_id, False, actor=ACTOR, reason="withdrawn by agreement")
+
+
+def test_reconcile_completion_is_publicly_retryable_and_idempotent():
+    """Codex review: recovery from an interruption between the final
+    pick's own commit and finalising/transitioning the draft needs its own
+    separately callable, safely-repeatable entry point -- `execute_pick`
+    cannot itself be retried once the final pick is already completed."""
+    ctx = _delisting_open(trigger_round=10, squad_limit=4)
+    m, season, entries = ctx["midseason"], ctx["season"], ctx["entries"]
+    worst = entries[9]
+    squad = m.ownership.current_squad(worst.season_entry_id)
+    m.submit_delisting(season.season_id, worst.season_entry_id, squad[0].season_player_id, actor=ACTOR)
+    m.lock_delistings(season.season_id, actor=ACTOR)
+    m.generate_selection_table(season.season_id, actor=ACTOR)
+    pool = list(m.available_player_pool(season.season_id))
+
+    # Complete the final pick via the raw engine call, bypassing
+    # execute_pick's own reconciliation step entirely -- simulating a crash
+    # right after the pick commits but before reconciliation runs.
+    nxt = m.next_pick(season.season_id)
+    m.drafts.execute_pick(
+        season.season_id, nxt.current_season_entry_id, pool[0].season_player_id, draft_kind="midseason", actor=ACTOR
+    )
+    assert m.get_draft(season.season_id).state == "draft_open"
+    assert not m.status(season.season_id).is_finalized
+
+    m.reconcile_completion(season.season_id, actor=ACTOR)
+    assert m.get_draft(season.season_id).state == "draft_complete"
+    assert m.status(season.season_id).is_finalized
+
+    # Calling it again is a safe no-op.
+    m.reconcile_completion(season.season_id, actor=ACTOR)
+    assert m.get_draft(season.season_id).state == "draft_complete"
+
+
 # -- 13/15. Squad-size validation, automatic completion, Round 11 ---------
 
 

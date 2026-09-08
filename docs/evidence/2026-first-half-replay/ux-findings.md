@@ -59,8 +59,12 @@ timezone. UTC should remain visible as authoritative evidence.
 
 ### Ladder presentation needs completion
 
-- The public ladder should display points per game because it is a competition
-  ordering input when earlier criteria remain tied.
+- The public ladder may display points per game as an informative statistic,
+  but it must not use PPG as an ordering criterion because it is derived from
+  PF and provides no additional tiebreak information.
+- Ladder order remains competition points, percentage, then PF. Exact equality
+  after those criteria should be escalated for a recorded, audited Scorer
+  decision rather than resolved by an invented automatic tiebreaker.
 - Scorer ladder presentation should remain aligned with the public ladder's
   human-readable table and columns.
 

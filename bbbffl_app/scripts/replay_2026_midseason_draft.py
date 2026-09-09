@@ -43,6 +43,9 @@ it must come *before* the subcommand name, not after it.
     python -m scripts.replay_2026_midseason_draft --database-url ... generate-selections ...
     python -m scripts.replay_2026_midseason_draft --database-url ... pick --season-entry-id ... --season-player-id ...
     python -m scripts.replay_2026_midseason_draft --database-url ... auto-complete ...
+    python -m scripts.replay_2026_midseason_draft --database-url ... \\
+        correct-selection --draft-pick-id <pick_id> --reason "..."
+    python -m scripts.replay_2026_midseason_draft --database-url ... reopen-draft --reason "..."
     python -m scripts.replay_2026_midseason_draft --database-url ... close-post-draft-trading ...
 """
 
@@ -230,6 +233,28 @@ def cmd_auto_complete(midseason: MidseasonDraftRepository, args: argparse.Namesp
     return 0
 
 
+def cmd_correct_selection(midseason: MidseasonDraftRepository, args: argparse.Namespace) -> int:
+    """Undo the most recently completed mid-season selection and reopen the
+    same slot for re-selection -- only legal on the active (not yet
+    draft_complete) mid-season draft; use reopen-draft first once the draft
+    has already completed."""
+    midseason.correct_selection(args.season_id, args.draft_pick_id, actor=ACTOR, reason=args.reason)
+    print(f"Selection {args.draft_pick_id} corrected; the slot is open for re-selection.")
+    _print_status(midseason, args.season_id)
+    return 0
+
+
+def cmd_reopen_draft(midseason: MidseasonDraftRepository, args: argparse.Namespace) -> int:
+    """Exceptional audited correction of a completed mid-season draft
+    (draft_complete) -- reopens it so correct-selection/pick can run again.
+    Refuses once the season has moved past draft_complete (e.g. after
+    close-post-draft-trading)."""
+    midseason.reopen_draft(args.season_id, actor=ACTOR, reason=args.reason)
+    print("Mid-season draft reopened.")
+    _print_status(midseason, args.season_id)
+    return 0
+
+
 def cmd_close_post_draft_trading(midseason: MidseasonDraftRepository, args: argparse.Namespace) -> int:
     midseason.close_post_draft_trading(
         args.season_id, actor=ACTOR, reason=args.reason or "2026 replay: post-draft trading closed for Round 11"
@@ -270,6 +295,8 @@ COMMANDS = {
     "pick": cmd_pick,
     "reconcile-completion": cmd_reconcile_completion,
     "auto-complete": cmd_auto_complete,
+    "correct-selection": cmd_correct_selection,
+    "reopen-draft": cmd_reopen_draft,
     "close-post-draft-trading": cmd_close_post_draft_trading,
     "status": cmd_status,
 }
@@ -349,6 +376,13 @@ def build_parser() -> argparse.ArgumentParser:
     base("reconcile-completion")
 
     base("auto-complete")
+
+    p = base("correct-selection")
+    p.add_argument("--draft-pick-id", required=True)
+    p.add_argument("--reason", required=True)
+
+    p = base("reopen-draft")
+    p.add_argument("--reason", required=True)
 
     p = base("close-post-draft-trading")
     p.add_argument("--reason")

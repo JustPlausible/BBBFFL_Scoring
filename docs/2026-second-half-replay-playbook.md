@@ -129,12 +129,27 @@ opening step brings the app up, once that evidence exists.
      | $SECOND exec -T database psql -U bbbffl -d bbbffl_2026_second_half
    ```
 
-3. **Copy the checkpoint file alongside it** (the `state` directory already
-   exists from step 1; the app service is not started here — see above):
+3. **Initialise a fresh second-half checkpoint — do not copy the first-half
+   `checkpoint.json` verbatim.** It carries first-half `finalised_round_ids`
+   (AFL rounds 1343–1352, per `phase-one-closeout.md`), and once section E's
+   evidence package exists (AFL rounds mapped to BBBFFL Rounds 10–20, not
+   1343–1352), `ReplayAflDataSource._load` rejects any `finalised_round_ids`
+   entry absent from the loaded evidence (`app/replay.py`) — a copied
+   first-half checkpoint would fail validation and application startup as
+   soon as the new evidence is in place. `scripts/first_half_replay.py`'s
+   `checkpoint` subcommand is itself evidence-agnostic (it only reads/writes
+   the checkpoint JSON at `--state`, never the evidence file), so it is
+   reused here to create a genuinely new checkpoint at the target path
+   instead — starting from the preserved first-half closing effective time,
+   with nothing yet finalised against the new evidence (the `state`
+   directory already exists from step 1; the app service is not started
+   here — see above):
 
    ```bash
-   cp replay/2026-first-half/state/checkpoint.json \
-      replay/2026-second-half/state/checkpoint.json
+   $SECOND run --rm -v "$PWD/bbbffl_app:/app" \
+     -v "$PWD/replay/2026-second-half/state:/replay/state" app \
+     python -m scripts.first_half_replay checkpoint --state /replay/state/checkpoint.json \
+     --effective-at 2026-05-10T10:15:00Z --stage scheduled
    ```
 
 4. **Confirm the migration baseline.** This runs the migrator as a one-off
@@ -381,9 +396,20 @@ directly against the Postgres connection string from the host instead.
    Use `auto-complete` only once no further historical evidence exists for
    the remaining picks — it is a deliberately synthetic convenience, always
    logged as `SIMULATION`, and must never override a known selection. If a
-   pick is entered incorrectly, correct it through the same `app.draft`
-   `correct_pick` machinery the preseason draft uses (see
-   `docs/scorer-draft-workflow.md`), not by re-running `pick` over it.
+   pick is entered incorrectly, **do not** use the ordinary scorer draft
+   correction workflow (`docs/scorer-draft-workflow.md`): its endpoint calls
+   `DraftRepository.correct_pick` with the default `draft_kind="preseason"`,
+   and once a mid-season draft exists this season carries both a preseason
+   and a mid-season draft, so it would look for the pick under the wrong
+   `draft_kind` and fail. Use the mid-season-specific correction instead —
+   `msd correct-selection --draft-pick-id <pick_id> --reason "..."` (only
+   while the draft is still open; after `draft_complete`, run `msd
+   reopen-draft --reason "..."` first):
+
+   ```bash
+   msd correct-selection --season-id <season_id> --draft-pick-id <pick_id> --reason "..."
+   msd reopen-draft --season-id <season_id> --reason "..."   # only if already draft_complete
+   ```
 8. **Apply any audited exceptional Scorer correction** here — an
    `override-order` reason, a `reverse-trade`, or a draft-pick correction —
    and record each one in `docs/evidence/2026-second-half-replay/
@@ -535,7 +561,7 @@ made through an existing audited application workflow, use it instead of
 any recovery procedure below.
 
 - **The Round 10 replay needs to be restarted.** Restore the working
-  database from the pre-Round-10 backup (section D step 7) and its paired
+  database from the pre-Round-10 backup (section D step 6) and its paired
   checkpoint JSON, then re-run section F from the start. Never restart by
   editing Round 10 rows in place.
 - **An error is discovered after Round 10 finalisation but before the
@@ -550,12 +576,13 @@ any recovery procedure below.
   For a single wrong action still within the draft's own lifecycle, prefer
   the matching audited in-workflow correction: `reverse-trade` for an
   approved trade (only before `lock-delistings`), `override-order` for the
-  draft order, or a draft-pick correction (`docs/scorer-draft-workflow.md`)
-  for a wrong pick. For a deeper reconstruction error (wrong delistings
-  discovered after `lock-delistings`, or a corrupted draft state), restore
-  the working database from the Round 10/pre-draft checkpoint (section G
-  step 3) and redo section H from `set-trigger-round`/`confirm-ladder`
-  onward.
+  draft order, or `msd correct-selection`/`reopen-draft` (section H step 7 —
+  not the ordinary `docs/scorer-draft-workflow.md` correction, which targets
+  the wrong draft once both a preseason and mid-season draft exist) for a
+  wrong pick. For a deeper reconstruction error (wrong delistings discovered
+  after `lock-delistings`, or a corrupted draft state), restore the working
+  database from the Round 10/pre-draft checkpoint (section G step 3) and
+  redo section H from `set-trigger-round`/`confirm-ladder` onward.
 - **A later Round 11–20 replay step damages or invalidates the working
   database.** Restore from the most recent verified round backup
   (`after-round-N.dump` + its paired checkpoint JSON) and redo only the
@@ -563,13 +590,21 @@ any recovery procedure below.
 - **The current working database needs to be abandoned and recreated from
   the most recent verified checkpoint.** Stop the second-half installation,
   confirm which backup is the most recent one already recorded in
-  `provenance-manifest.md` as validated (not merely taken), then repeat
-  section D steps 2–3 using that backup instead of the original first-half
-  archive — this always restores into the existing `bbbffl_2026_second_half`
-  database (`pg_restore --clean --if-exists` drops and recreates conflicting
-  objects), never by deleting and recreating the `second-half-database`
-  volume. As at every step, the original first-half checkpoint (section C)
-  is never touched by this recovery.
+  `provenance-manifest.md` as validated (not merely taken) — e.g.
+  `after-round-15.dump` and its paired `checkpoint-after-round-15.json`.
+  Restore that database backup using section D step 2's `pg_restore`/`psql`
+  commands (`pg_restore --clean --if-exists` drops and recreates conflicting
+  objects, so this always restores into the existing
+  `bbbffl_2026_second_half` database, never by deleting and recreating the
+  `second-half-database` volume) **and** copy that backup's own paired
+  checkpoint JSON over `replay/2026-second-half/state/checkpoint.json` — do
+  not re-run section D step 3's fresh-checkpoint initialisation here, and
+  never leave the database and the checkpoint file at different rounds'
+  state: a database restored to after Round 15 paired with, say, the
+  original pre-Round-10 checkpoint would present a lifecycle/lockout state
+  from Round 15 alongside a replay clock and finalised-round set from
+  before Round 10. As at every step, the original first-half checkpoint
+  (section C) is never touched by this recovery.
 
 ## O. Hard Round 20 exit gate
 

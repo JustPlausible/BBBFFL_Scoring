@@ -47,6 +47,10 @@ AFL round 1352.
   retained evidence and recovery posture.
 - [Second-half handoff](second-half-handoff.md) provides the starting context
   and validation priorities for the next replay phase.
+- [`2026-second-half-replay-playbook.md`](../../2026-second-half-replay-playbook.md)
+  is the operational playbook for that next phase (Round 10, the mid-season
+  draft, and Rounds 11–20), with its own evidence record at
+  [`docs/evidence/2026-second-half-replay/`](../2026-second-half-replay/).
 
 ## Evidence policy
 

@@ -85,13 +85,24 @@ this playbook.
 
 ## D. Create the second-half working copy
 
+The app service is deliberately not started in this section. `BBBFFL_AFL_
+MODE=replay` makes application startup (`app.main`'s lifespan handler)
+eagerly construct a `ReplayAflDataSource` against `BBBFFL_AFL_REPLAY_
+EVIDENCE_PATH`, which fails closed if that file does not exist — and section
+E below has not acquired it yet at this point in the playbook. Section F's
+opening step brings the app up, once that evidence exists.
+
 1. **Stand up an empty second-half installation.** This installation is
    deliberately named `bbbffl-2026-second-half`, listens at
    <http://localhost:8019/login>, uses its own `second-half-database`
    project volume, and bind-mounts `replay/2026-second-half/{evidence,state,
    logs,backups,config}`. It cannot reuse the first-half database or volume.
+   Create the bind-mount directories explicitly first — `$SECOND config`/
+   `build`/`up -d database` do not create them, since they belong to the
+   `app` service, not `database`:
 
    ```bash
+   mkdir -p replay/2026-second-half/{evidence,state,logs,backups,config}
    cp bbbffl_app/.env.second-half-replay.example bbbffl_app/.env.second-half-replay
    # Set unique session/admin/operator secrets; set no live AFL endpoint.
    SECOND='docker compose -p bbbffl-2026-second-half -f compose.second-half-replay.yaml'
@@ -118,22 +129,21 @@ this playbook.
      | $SECOND exec -T database psql -U bbbffl -d bbbffl_2026_second_half
    ```
 
-3. **Copy the checkpoint file alongside it**, then bring up the app and
-   confirm it starts against the restored data:
+3. **Copy the checkpoint file alongside it** (the `state` directory already
+   exists from step 1; the app service is not started here — see above):
 
    ```bash
    cp replay/2026-first-half/state/checkpoint.json \
       replay/2026-second-half/state/checkpoint.json
-   $SECOND up -d app
-   $SECOND ps
-   curl --fail http://localhost:8019/health
    ```
 
-4. **Confirm the migration baseline.** The restored database was already at
-   the first-half closing migration; running the current application's
-   migrator against it must be a no-op upgrade to the current head
-   (`0027_midseason_draft` as of this playbook, which carries no schema this
-   playbook's Round 10 steps depend on — see section H):
+4. **Confirm the migration baseline.** This runs the migrator as a one-off
+   container, not the long-running app service, so it needs no evidence
+   file. The restored database was already at the first-half closing
+   migration; running the current application's migrator against it must be
+   a no-op upgrade to the current head (`0027_midseason_draft` as of this
+   playbook, which carries no schema this playbook's Round 10 steps depend
+   on — see section H):
 
    ```bash
    $SECOND run --rm -v "$PWD/bbbffl_app:/app" app python -m app.migrations current
@@ -141,15 +151,7 @@ this playbook.
    $SECOND run --rm -v "$PWD/bbbffl_app:/app" app python -m app.migrations current
    ```
 
-5. **Confirm prior history survived the copy.** Before touching anything,
-   verify Rounds 1–9 still read `final` with ten submissions each (Season
-   Centre / Round Centre), the Round 9 ladder matches
-   [`round-results.md`](evidence/2026-first-half-replay/round-results.md)'s
-   closing ladder table, squads/ownership match the first-half closing
-   squads, and the first-half audit history is present. A mismatch here is a
-   restore defect — stop and re-restore from the verified source rather than
-   proceeding.
-6. **Record the working-copy identity and provenance** in
+5. **Record the working-copy identity and provenance** in
    `docs/evidence/2026-second-half-replay/provenance-manifest.md`: the
    restored database's own new checkpoint file hash, the application commit
    (`git rev-parse HEAD`) and confirmed migration head from step 4, and an
@@ -157,7 +159,7 @@ this playbook.
    recorded in section C step 2. This is the provenance chain the acceptance
    criteria require between the first-half checkpoint and the second-half
    working database.
-7. **Take a fresh pre-Round-10 backup** of the working copy immediately, the
+6. **Take a fresh pre-Round-10 backup** of the working copy immediately, the
    same way section G below backs up every later round, before any Round 10
    action:
 
@@ -191,19 +193,39 @@ Once that acquisition path exists, section F's evidence step is the same
 `acquire` → `validate` → `checkpoint` sequence as
 `2026-first-half-replay-playbook.md` section C, pointed at
 `replay/2026-second-half/evidence/2026-second-half.json` and validated the
-same way (`PASS`, season 2026, the ten included AFL round identities for
-rounds 10–20, every match with stat coverage). Record this in the playbook
-test log's Notes column as a genuine prerequisite, not silently worked
-around with fabricated evidence.
+same way (`PASS`, season 2026, the **eleven** included AFL round identities
+for rounds 10–20 inclusive, every match with stat coverage — do not accept
+a package validated against a count of ten; that silently permits one
+missing round to pass acquisition and fail later at preflight or replay).
+Record this in the playbook test log's Notes column as a genuine
+prerequisite, not silently worked around with fabricated evidence.
 
-## F. Replay Round 10 (pre-mid-season-draft squads)
+## F. Bring up the application and replay Round 10 (pre-mid-season-draft squads)
 
-Round 10 is replayed **exactly like an ordinary round of Rounds 1–9** —
-follow `2026-first-half-replay-playbook.md` section G's fourteen-step
-canonical procedure unchanged, against the second-half installation
-(`$SECOND` in place of `$FIRST`, `replay/2026-second-half/...` in place of
-`replay/2026-first-half/...`), using Round 10's own AFL mapping and
-evidence. This document does not re-list those fourteen steps; only the
+1. **Bring up the app now that the evidence package exists**, and confirm it
+   starts against the restored data:
+
+   ```bash
+   $SECOND up -d app
+   $SECOND ps
+   curl --fail http://localhost:8019/health
+   ```
+
+2. **Confirm prior history survived the copy.** Before touching anything,
+   verify Rounds 1–9 still read `final` with ten submissions each (Season
+   Centre / Round Centre), the Round 9 ladder matches
+   [`round-results.md`](evidence/2026-first-half-replay/round-results.md)'s
+   closing ladder table, squads/ownership match the first-half closing
+   squads, and the first-half audit history is present. A mismatch here is a
+   restore defect — stop and re-restore from the verified source (section D)
+   rather than proceeding.
+
+Round 10 itself is replayed **exactly like an ordinary round of Rounds
+1–9** — follow `2026-first-half-replay-playbook.md` section G's
+fourteen-step canonical procedure unchanged, against the second-half
+installation (`$SECOND` in place of `$FIRST`, `replay/2026-second-half/...`
+in place of `replay/2026-first-half/...`), using Round 10's own AFL mapping
+and evidence. This document does not re-list those fourteen steps; only the
 Round-10-specific boundary is called out here and in section G.
 
 Make especially clear to whoever executes this:
@@ -258,16 +280,22 @@ section). This playbook does not repeat that design; it lists the
 procedural checkpoints the replay operator drives through `scripts/
 replay_2026_midseason_draft.py`, one real `app.midseason_draft.
 MidseasonDraftRepository` action at a time, exactly as the script's own
-module docstring describes. Every command below is prefixed with:
+module docstring describes. Every command below is run through this
+`msd` shell function:
 
 ```bash
-MSD='python -m scripts.replay_2026_midseason_draft --database-url <second-half-database-url>'
+msd() {
+  $SECOND run --rm -v "$PWD/bbbffl_app:/app" app \
+    python -m scripts.replay_2026_midseason_draft --database-url <second-half-database-url> "$@"
+}
 ```
 
-Run it from `bbbffl_app`, e.g. inside the second-half container
-(`$SECOND run --rm app` with the same database URL as
-`.env.second-half-replay`), or directly against the Postgres connection
-string if running the script from the host.
+The checkout must be mounted (`-v "$PWD/bbbffl_app:/app"`) for this to
+work: `bbbffl_app/Dockerfile` deliberately does not copy `scripts/` into
+the built image, only `app`/`migrations`/`data` — the same reason section
+D's migration commands mount the checkout too. Run this from the repository
+root (so `$PWD/bbbffl_app` resolves correctly), or invoke the script
+directly against the Postgres connection string from the host instead.
 
 1. **Configure/verify the trigger round.** `set-trigger-round` records the
    BBBFFL round after which the draft occurs; it has no default, so a
@@ -275,8 +303,8 @@ string if running the script from the host.
    starts unset. Set it to 10 and confirm with `status`:
 
    ```bash
-   $MSD set-trigger-round --season-id <season_id> --trigger-round 10
-   $MSD status --season-id <season_id>
+   msd set-trigger-round --season-id <season_id> --trigger-round 10
+   msd status --season-id <season_id>
    ```
 
 2. **Confirm/freeze the Round 10 ladder basis.** `confirm-ladder` requires
@@ -289,7 +317,7 @@ string if running the script from the host.
    proceeding:
 
    ```bash
-   $MSD confirm-ladder --season-id <season_id> --competition-id <competition_id>
+   msd confirm-ladder --season-id <season_id> --competition-id <competition_id>
    ```
 
    If the draft order needs an audited exception (a genuine tie
@@ -303,12 +331,12 @@ string if running the script from the host.
    invent a delisting or trade with no supporting evidence:
 
    ```bash
-   $MSD open-delisting-window --season-id <season_id>
-   $MSD delist --season-id <season_id> --season-entry-id <entry> --season-player-id <player> --reason "..."
-   $MSD trade --season-id <season_id> \
+   msd open-delisting-window --season-id <season_id>
+   msd delist --season-id <season_id> --season-entry-id <entry> --season-player-id <player> --reason "..."
+   msd trade --season-id <season_id> \
      --leg player:<from_entry>:<to_entry>:<season_player_id> \
      --leg pick:<from_entry>:<to_entry>:<draft_round> --reason "..."
-   $MSD decide-trade --season-id <season_id> --trade-id <trade_id> --approve --reason "..."
+   msd decide-trade --season-id <season_id> --trade-id <trade_id> --approve --reason "..."
    ```
 
    `reverse-trade` (`reverse_trade_approval`) is the audited correction for
@@ -329,7 +357,7 @@ string if running the script from the host.
    forcing past it:
 
    ```bash
-   $MSD lock-delistings --season-id <season_id>
+   msd lock-delistings --season-id <season_id>
    ```
 
 6. **Generate selections and build the available-player pool.**
@@ -339,15 +367,15 @@ string if running the script from the host.
    (straight to `draft_complete`, no picks to make) — not an error:
 
    ```bash
-   $MSD generate-selections --season-id <season_id>
+   msd generate-selections --season-id <season_id>
    ```
 
 7. **Execute/reconstruct picks** in generated order, one real historical
    selection at a time:
 
    ```bash
-   $MSD pick --season-id <season_id> --season-entry-id <entry> --season-player-id <player> --reason "..."
-   $MSD status --season-id <season_id>
+   msd pick --season-id <season_id> --season-entry-id <entry> --season-player-id <player> --reason "..."
+   msd status --season-id <season_id>
    ```
 
    Use `auto-complete` only once no further historical evidence exists for
@@ -372,7 +400,7 @@ string if running the script from the host.
     further historical post-draft trade is expected, before Round 11 opens:
 
     ```bash
-    $MSD close-post-draft-trading --season-id <season_id> --reason "..."
+    msd close-post-draft-trading --season-id <season_id> --reason "..."
     ```
 
 ## I. Post-draft checkpoint

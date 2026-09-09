@@ -24,6 +24,18 @@ on a *copy* of the completed, locked first-half database. The original
 first-half checkpoint is never started, mutated, or deleted by anything in
 this playbook.
 
+**The first-half bootstrap's 9-round season length was a deliberate
+replay-harness boundary, not the real 2026 BBBFFL season length.**
+`scripts/bootstrap_2026_first_half.py`/`app.replay_bootstrap` intentionally
+configured the restored season as a 9-round competition so the first-half
+replay had a clean, self-contained stopping point at the historical Round
+9/mid-season-draft boundary. The genuine 2026 BBBFFL season is a 20-round
+home-and-away competition. Section D step 5 below runs the one supported
+operation (issue [#178](https://github.com/JustPlausible/BBBFFL_Scoring/issues/178))
+that extends the restored season from 9 to the correct 20 regular-season
+rounds before Round 10 is touched — never treat the inherited 9-round
+configuration as anything other than that first-half harness boundary.
+
 ## B. Database continuity requirement (read first)
 
 - The completed first-half replay database is the single source of truth
@@ -166,15 +178,69 @@ opening step brings the app up, once that evidence exists.
    $SECOND run --rm -v "$PWD/bbbffl_app:/app" app python -m app.migrations current
    ```
 
-5. **Record the working-copy identity and provenance** in
+5. **Continue the season from 9 to 20 regular-season rounds (issue
+   [#178](https://github.com/JustPlausible/BBBFFL_Scoring/issues/178)).**
+   The restored database still carries the first-half bootstrap's
+   intentional 9-round harness boundary (section A) — the frozen fixture
+   draw has only Rounds 1–9, and there are no logical BBBFFL Round 10–20
+   definitions yet, so neither the Administrator nor Scorer surfaces nor
+   Round Preflight can see Round 10 at all. `app.replay_continuation`
+   (invoked here through `scripts.replay_2026_second_half_continuation`, the
+   one supported operator command for this) preserves every Round 1–9
+   identity, fixture matchup, and lifecycle/submission/result/audit record
+   exactly, appends Rounds 10–20 to the *same* frozen fixture draw using the
+   preserved fixture-number assignments and `bbbffl-workbook-2026-v1`
+   rotation, and creates the missing logical Round 10–20 definitions — see
+   that module's docstring for why this must be a dedicated, audited
+   continuation rather than an ordinary fixture edit (a frozen draw is
+   genuinely immutable at the database level). It never opens Round 10
+   itself; that remains the normal Round Preflight workflow's job (section F
+   below, and issue #166).
+
+   `status` first, to confirm the database is at the expected pre-
+   continuation baseline before mutating anything:
+
+   ```bash
+   $SECOND run --rm -v "$PWD/bbbffl_app:/app" app \
+     python -m scripts.replay_2026_second_half_continuation \
+     --database-url postgresql+psycopg://bbbffl:second-half-only@database/bbbffl_2026_second_half \
+     status
+   ```
+
+   Then run the continuation itself. It fails closed with a concrete
+   diagnostic (and makes no change at all) if the restored database is not
+   at the expected verified Phase 1 (9-round) baseline, and is safe to
+   re-run — an already-continued database is reported as an idempotent
+   success rather than creating duplicate rounds/matchups:
+
+   ```bash
+   $SECOND run --rm -v "$PWD/bbbffl_app:/app" app \
+     python -m scripts.replay_2026_second_half_continuation \
+     --database-url postgresql+psycopg://bbbffl:second-half-only@database/bbbffl_2026_second_half \
+     continue --reason "2026 second-half replay: continuation per issue #178"
+   ```
+
+   Confirm the printed report shows `regular_season_round_count: 20`,
+   `preserved_rounds: [1, 9]`, and `appended_rounds: [10, 20]`, then verify
+   through the ordinary application surfaces (Season Centre / Round Centre)
+   that BBBFFL Rounds 1–20 now exist, Rounds 1–9 still read exactly as they
+   did before this step, the fixture draw is still frozen, and Round 10
+   remains unopened. The operation records its own audit events
+   (`replay.season.continued` on the season, `fixture.draw.continued` on the
+   fixture draw) with the before/after round count, fixture draw id/version,
+   preserved/appended round ranges, and the reason/operator provenance
+   above — record its `fixture_draw_version` in the provenance manifest
+   alongside the other identifiers step 6 below captures.
+6. **Record the working-copy identity and provenance** in
    `docs/evidence/2026-second-half-replay/provenance-manifest.md`: the
    restored database's own new checkpoint file hash, the application commit
-   (`git rev-parse HEAD`) and confirmed migration head from step 4, and an
-   explicit `restored_from` pointer back to the source archive's SHA-256
-   recorded in section C step 2. This is the provenance chain the acceptance
-   criteria require between the first-half checkpoint and the second-half
-   working database.
-6. **Take a fresh pre-Round-10 backup** of the working copy immediately, the
+   (`git rev-parse HEAD`), confirmed migration head from step 4, the Round
+   10–20 continuation report from step 5 (fixture draw id/version, audit
+   event ids), and an explicit `restored_from` pointer back to the source
+   archive's SHA-256 recorded in section C step 2. This is the provenance
+   chain the acceptance criteria require between the first-half checkpoint
+   and the second-half working database.
+7. **Take a fresh pre-Round-10 backup** of the working copy immediately, the
    same way section G below backs up every later round, before any Round 10
    action:
 
@@ -340,6 +406,15 @@ a side effect of this command.
    squads, and the first-half audit history is present. A mismatch here is a
    restore defect — stop and re-restore from the verified source (section D)
    rather than proceeding.
+3. **Confirm the season/fixture now contains BBBFFL Rounds 1–20.** Section D
+   step 5's continuation must already have run before this point. In Season
+   Centre, confirm the season reports 20 regular-season rounds; in Round
+   Centre / Round Preflight, confirm Round 10 (and every later round through
+   20) is now a selectable logical round with a five-matchup fixture, and
+   that Round 10 itself is still `upcoming`/unopened — Round Preflight has
+   not been run against it yet. If Round 10 is not visible here, stop and
+   re-run section D step 5 (`status` first) rather than proceeding into the
+   replay below.
 
 Round 10 itself is replayed **exactly like an ordinary round of Rounds
 1–9** — follow `2026-first-half-replay-playbook.md` section G's
@@ -680,6 +755,7 @@ G, I, and K (a template lives in
 | Git commit SHA / tagged application baseline | `git rev-parse HEAD` at the time the checkpoint was taken |
 | Migration/schema version | `python -m app.migrations current` output |
 | Relevant environment/configuration assumptions | `.env.second-half-replay` values actually used (never the secrets themselves) |
+| 9-to-20-round continuation identity | Section D step 5's printed report (season id, fixture draw id/version before and after) and its `replay.season.continued`/`fixture.draw.continued` audit event ids |
 | Round 10 pre-draft checkpoint identity | Section G step 4 |
 | Post-mid-season-draft checkpoint identity | Section I |
 | Round 20 checkpoint identity | Section K step 3 |
@@ -702,7 +778,7 @@ made through an existing audited application workflow, use it instead of
 any recovery procedure below.
 
 - **The Round 10 replay needs to be restarted.** Restore the working
-  database from the pre-Round-10 backup (section D step 6) and its paired
+  database from the pre-Round-10 backup (section D step 7) and its paired
   checkpoint JSON, then re-run section F from the start. Never restart by
   editing Round 10 rows in place.
 - **An error is discovered after Round 10 finalisation but before the

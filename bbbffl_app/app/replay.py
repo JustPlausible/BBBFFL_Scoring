@@ -156,7 +156,7 @@ class ReplayAflDataSource:
             seen_ids: set = set()
             for index, record in enumerate(self._list(payload, section)):
                 self._validate_provenance(record, f"{section}[{index}]")
-                identity = record.get(id_key)
+                identity = self._normalize_identity(record.get(id_key))
                 if identity in seen_ids:
                     raise ReplayEvidenceError(f"replay evidence has duplicate {label} identity: {identity!r}")
                 seen_ids.add(identity)
@@ -166,7 +166,7 @@ class ReplayAflDataSource:
             seen_stat_players: set = set()
             for index, record in enumerate(records):
                 self._validate_provenance(record, f"player_stats[{match_id!r}][{index}]")
-                stat_player_id = record.get("canonical_player_id")
+                stat_player_id = self._normalize_identity(record.get("canonical_player_id"))
                 if stat_player_id in seen_stat_players:
                     raise ReplayEvidenceError(
                         f"replay evidence has duplicate player_stat identity for match {match_id!r}: "
@@ -265,6 +265,25 @@ class ReplayAflDataSource:
                 raise ReplayEvidenceError(
                     f"lineup {lineup.get('historical_entry')!r} references missing players {sorted(unknown)}"
                 )
+
+    @staticmethod
+    def _normalize_identity(value: Any) -> Any:
+        """Coerce an identity value the same way the dict comprehensions
+        below key on it (``int(...)``), so a duplicate-identity comparison
+        made against the raw, un-coerced value can't miss a collision that
+        would still occur once both values are converted -- e.g. raw
+        identities `1` and `"1"` compare unequal here otherwise, while
+        `int(1) == int("1")` collapses them into the same dict key. A value
+        that isn't int-coercible (a dict, `None`, non-numeric text) is
+        returned unchanged: it isn't a duplicate of anything by this
+        comparison, and the malformed identity itself is caught later by
+        the same `int(...)` conversion inside the record-building loops
+        below, via the existing `(KeyError, TypeError, ValueError)`
+        handling."""
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return value
 
     @staticmethod
     def _validate_provenance(record: dict, location: str) -> None:

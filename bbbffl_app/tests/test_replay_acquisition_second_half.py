@@ -398,14 +398,62 @@ def test_validate_replay_package_rejects_unsupported_package_version(tmp_path):
         )
 
 
-def test_validate_replay_package_rejects_wrong_season(tmp_path):
+def test_validate_replay_package_rejects_wrong_season_manifest_label(tmp_path):
     payload = acquire_second_half_2026(Api(no_roster=True), source_base_url="http://api")
     payload["manifest"]["afl_season"] = 2025
     evidence = tmp_path / "evidence.json"
     write_package(payload, evidence)
     state = tmp_path / "checkpoint.json"
     apply_checkpoint(state, effective_at="2026-06-01T00:00:00Z", stage="scheduled", round_id=None)
-    with pytest.raises(ReplayEvidenceError, match="resolves AFL season 2025"):
+    with pytest.raises(ReplayEvidenceError, match="manifest declares AFL season 2025"):
+        validate_replay_package(
+            evidence,
+            state,
+            expected_package_version="bbbffl.second-half/v1",
+            expected_afl_season=2026,
+            expected_round_numbers=SECOND_HALF_ROUND_NUMBERS,
+        )
+
+
+def test_validate_replay_package_rejects_season_mismatch_between_manifest_and_evidence(tmp_path):
+    """The manifest's afl_season is a label the acquirer wrote, not proof by
+    itself -- a manifest that still claims 2026 while the evidence's own
+    `seasons` record actually declares a different year must fail, not
+    read PASS for evidence that doesn't actually resolve 2026."""
+    payload = acquire_second_half_2026(Api(no_roster=True), source_base_url="http://api")
+    payload["seasons"][0]["year"] = 2025  # manifest.afl_season is left at 2026
+    evidence = tmp_path / "evidence.json"
+    write_package(payload, evidence)
+    state = tmp_path / "checkpoint.json"
+    apply_checkpoint(state, effective_at="2026-06-01T00:00:00Z", stage="scheduled", round_id=None)
+    with pytest.raises(ReplayEvidenceError, match="does not resolve exactly one season for year 2026"):
+        validate_replay_package(
+            evidence,
+            state,
+            expected_package_version="bbbffl.second-half/v1",
+            expected_afl_season=2026,
+            expected_round_numbers=SECOND_HALF_ROUND_NUMBERS,
+        )
+
+
+def test_validate_replay_package_rejects_undeclared_extra_round_in_evidence(tmp_path):
+    """A round physically present in the evidence's `rounds` section but
+    not declared in manifest.included_rounds must fail closed -- otherwise
+    it stays silently reachable through the returned, supposedly
+    fully-validated source (e.g. via get_rounds()) even though validation
+    only ever walked the manifest's declared entries."""
+    payload = acquire_second_half_2026(Api(no_roster=True), source_base_url="http://api")
+    season_id = payload["seasons"][0]["season_id"]
+    extra_round = dict(payload["rounds"][0])
+    extra_round["round_id"] = 999999
+    extra_round["round_number"] = 21
+    extra_round["season_id"] = season_id
+    payload["rounds"].append(extra_round)
+    evidence = tmp_path / "evidence.json"
+    write_package(payload, evidence)
+    state = tmp_path / "checkpoint.json"
+    apply_checkpoint(state, effective_at="2026-06-01T00:00:00Z", stage="scheduled", round_id=None)
+    with pytest.raises(ReplayEvidenceError, match="not declared in manifest.included_rounds"):
         validate_replay_package(
             evidence,
             state,

@@ -464,9 +464,23 @@ def validate_replay_package(
             f"unsupported replay package version: {manifest.get('package_version')!r}, "
             f"expected {expected_package_version!r}"
         )
+    # The manifest's afl_season is a label the acquirer wrote; it is not
+    # itself proof the evidence resolves that season. Resolve the season
+    # independently from what ReplayAflDataSource actually loaded, so a
+    # manifest that claims 2026 while its own `seasons` evidence record
+    # declares a different year fails here instead of validation reading
+    # PASS for evidence that does not resolve the requested AFL season.
+    matching_seasons = [season for season in source.get_seasons() if season.year == expected_afl_season]
+    if len(matching_seasons) != 1:
+        raise ReplayEvidenceError(
+            f"replay package evidence does not resolve exactly one season for year {expected_afl_season}; "
+            f"found {len(matching_seasons)}"
+        )
+    resolved_season = matching_seasons[0]
     if manifest.get("afl_season") != expected_afl_season:
         raise ReplayEvidenceError(
-            f"replay package resolves AFL season {manifest.get('afl_season')!r}, expected {expected_afl_season}"
+            f"replay package manifest declares AFL season {manifest.get('afl_season')!r}, "
+            f"expected {expected_afl_season}"
         )
     expected_numbers = set(expected_round_numbers)
     included = manifest.get("included_rounds")
@@ -483,27 +497,39 @@ def validate_replay_package(
             f"replay package rounds {sorted(set(included_numbers))} do not match the required set "
             f"{sorted(expected_numbers)}"
         )
+    for round_row in included:
+        if round_row.get("round_id") is None:
+            raise ReplayEvidenceError("manifest.included_rounds entry is missing round_id")
     # manifest.included_rounds is a summary the acquirer wrote alongside the
     # authoritative `rounds` evidence, not itself authoritative -- cross-check
-    # every declared (round_id, round_number) pair against the round record
-    # ReplayAflDataSource actually loaded, so a corrupted/mislabelled summary
-    # (e.g. round_id resolving to a round the evidence itself declares as
-    # round_number 21) fails here rather than only surfacing later, deep
-    # inside replay, as `get_round(season_id, 20)` unable to find it.
-    actual_round_numbers: dict[int, int] = {}
-    for season in source.get_seasons():
-        for round_ in source.get_rounds(season.season_id):
-            actual_round_numbers[round_.round_id] = round_.round_number
+    # it against the round records ReplayAflDataSource actually loaded for
+    # the resolved season, in *both* directions: every declared round_id
+    # must resolve to a matching evidence round_number (a corrupted/
+    # mislabelled summary entry fails here rather than only surfacing later,
+    # deep inside replay's own `get_round` lookup), and every round the
+    # resolved season's evidence actually carries must itself be declared
+    # (a physically-present-but-undeclared extra round -- e.g. an AFL Round
+    # 21 record smuggled into "rounds" while the manifest still claims
+    # exactly 10-20 -- fails here instead of silently remaining reachable
+    # through the returned, supposedly fully-validated source).
+    declared_round_ids = {row["round_id"] for row in included}
+    actual_rounds = {round_.round_id: round_.round_number for round_ in source.get_rounds(resolved_season.season_id)}
+    missing_from_evidence = declared_round_ids - set(actual_rounds)
+    if missing_from_evidence:
+        raise ReplayEvidenceError(
+            f"manifest.included_rounds references round_id(s) {sorted(missing_from_evidence)} not present "
+            f"in the evidence's rounds for season {resolved_season.season_id}"
+        )
+    undeclared_in_manifest = set(actual_rounds) - declared_round_ids
+    if undeclared_in_manifest:
+        raise ReplayEvidenceError(
+            f"replay package's season {resolved_season.season_id} evidence contains round_id(s) "
+            f"{sorted(undeclared_in_manifest)} not declared in manifest.included_rounds"
+        )
     all_matches = []
     for round_row in included:
-        round_id = round_row.get("round_id")
-        if round_id is None:
-            raise ReplayEvidenceError("manifest.included_rounds entry is missing round_id")
-        actual_number = actual_round_numbers.get(round_id)
-        if actual_number is None:
-            raise ReplayEvidenceError(
-                f"manifest.included_rounds references round_id {round_id} not present in the evidence's rounds"
-            )
+        round_id = round_row["round_id"]
+        actual_number = actual_rounds[round_id]
         if actual_number != round_row.get("round_number"):
             raise ReplayEvidenceError(
                 f"manifest.included_rounds declares round_id {round_id} as round_number "

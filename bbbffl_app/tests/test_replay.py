@@ -82,6 +82,34 @@ def test_duplicate_identities_in_raw_evidence_fail_closed(tmp_path):
         ReplayAflDataSource(write(payload))
 
 
+def test_duplicate_identity_detection_normalizes_int_and_string_forms(tmp_path):
+    """A duplicate whose second record spells the same identity as a string
+    (`"66001"` vs `66001`) must still be caught -- both forms collapse to
+    the same key once the dict comprehensions below apply `int(...)`, so
+    comparing the raw, un-normalized values would miss exactly this
+    collision (issue #174 Codex review, second round)."""
+    base = json.loads(FIXTURE.read_text())
+
+    def write(payload):
+        path = tmp_path / "dup-string-id.json"
+        path.write_text(json.dumps(payload))
+        return path
+
+    payload = json.loads(json.dumps(base))
+    duplicate_player = dict(payload["players"][0])
+    duplicate_player["canonical_player_id"] = str(duplicate_player["canonical_player_id"])
+    payload["players"].append(duplicate_player)
+    with pytest.raises(ReplayEvidenceError, match="duplicate player identity"):
+        ReplayAflDataSource(write(payload))
+
+    payload = json.loads(json.dumps(base))
+    duplicate_match = dict(payload["matches"][0])
+    duplicate_match["match_id"] = str(duplicate_match["match_id"])
+    payload["matches"].append(duplicate_match)
+    with pytest.raises(ReplayEvidenceError, match="duplicate match identity"):
+        ReplayAflDataSource(write(payload))
+
+
 def test_match_lifecycle_is_selected_by_replay_clock_from_same_evidence():
     before = ReplayAflDataSource(FIXTURE, clock=ReplayClock.from_iso("2026-03-19T08:29:00Z"))
     during = ReplayAflDataSource(FIXTURE, clock=ReplayClock.from_iso("2026-03-19T08:31:00Z"))

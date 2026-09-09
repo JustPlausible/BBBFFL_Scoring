@@ -36,6 +36,9 @@ it must come *before* the subcommand name, not after it.
         confirm-ladder --season-id <season_id> --competition-id <competition_id>
     python -m scripts.replay_2026_midseason_draft --database-url ... open-delisting-window ...
     python -m scripts.replay_2026_midseason_draft --database-url ... delist --season-entry-id ... --season-player-id ...
+    python -m scripts.replay_2026_midseason_draft --database-url ... trade \\
+        --leg player:<from_entry>:<to_entry>:<season_player_id> \\
+        --leg pick:<from_entry>:<to_entry>:<draft_round> --reason "player-for-pick"
     python -m scripts.replay_2026_midseason_draft --database-url ... lock-delistings ...
     python -m scripts.replay_2026_midseason_draft --database-url ... generate-selections ...
     python -m scripts.replay_2026_midseason_draft --database-url ... pick --season-entry-id ... --season-player-id ...
@@ -107,18 +110,47 @@ def cmd_withdraw_delisting(midseason: MidseasonDraftRepository, args: argparse.N
     return 0
 
 
+def parse_trade_leg(spec: str) -> dict:
+    """Parse one `--leg` value into a `propose_trade` leg mapping.
+
+    A trade often needs more than one leg to represent the actual agreement
+    atomically -- a player-for-pick trade, or a same-round pick swap --
+    rather than as separate, independently approvable/reversible trades
+    each covering only half of it. Accepted forms:
+
+        player:FROM_ENTRY:TO_ENTRY:SEASON_PLAYER_ID
+        pick:FROM_ENTRY:TO_ENTRY:DRAFT_ROUND
+    """
+    parts = spec.split(":")
+    leg_type = parts[0] if parts else ""
+    if leg_type == "player" and len(parts) == 4:
+        _, from_entry, to_entry, season_player_id = parts
+        return {
+            "leg_type": "player",
+            "from_season_entry_id": from_entry,
+            "to_season_entry_id": to_entry,
+            "season_player_id": season_player_id,
+        }
+    if leg_type == "pick" and len(parts) == 4:
+        _, from_entry, to_entry, draft_round = parts
+        try:
+            draft_round_int = int(draft_round)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"pick leg's DRAFT_ROUND must be an integer, got {draft_round!r}")
+        return {
+            "leg_type": "pick",
+            "from_season_entry_id": from_entry,
+            "to_season_entry_id": to_entry,
+            "draft_round": draft_round_int,
+        }
+    raise argparse.ArgumentTypeError(
+        f"invalid --leg {spec!r}: expected 'player:FROM:TO:SEASON_PLAYER_ID' or 'pick:FROM:TO:DRAFT_ROUND'"
+    )
+
+
 def cmd_trade(midseason: MidseasonDraftRepository, args: argparse.Namespace) -> int:
-    leg = {
-        "leg_type": args.leg_type,
-        "from_season_entry_id": args.from_entry,
-        "to_season_entry_id": args.to_entry,
-    }
-    if args.leg_type == "player":
-        leg["season_player_id"] = args.season_player_id
-    else:
-        leg["draft_round"] = args.draft_round
-    trade = midseason.propose_trade(args.season_id, [leg], actor=ACTOR, reason=args.reason)
-    print(f"Trade proposed: {trade.trade_id} (status={trade.status})")
+    trade = midseason.propose_trade(args.season_id, args.legs, actor=ACTOR, reason=args.reason)
+    print(f"Trade proposed: {trade.trade_id} (status={trade.status}, {len(args.legs)} leg(s))")
     return 0
 
 
@@ -280,11 +312,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reason")
 
     p = base("trade")
-    p.add_argument("--leg-type", choices=("player", "pick"), required=True)
-    p.add_argument("--from-entry", required=True)
-    p.add_argument("--to-entry", required=True)
-    p.add_argument("--season-player-id")
-    p.add_argument("--draft-round", type=int)
+    p.add_argument(
+        "--leg",
+        dest="legs",
+        action="append",
+        required=True,
+        type=parse_trade_leg,
+        metavar="player:FROM:TO:SEASON_PLAYER_ID|pick:FROM:TO:DRAFT_ROUND",
+        help="repeatable -- one per leg of the trade, so a multi-leg agreement "
+        "(player-for-pick, a same-round pick swap) is proposed atomically",
+    )
     p.add_argument("--reason")
 
     p = base("decide-trade")

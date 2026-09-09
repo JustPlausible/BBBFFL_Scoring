@@ -559,7 +559,12 @@ async def midseason_pick_reconciliation_error_handler(
 ) -> JSONResponse:
     return JSONResponse(
         status_code=409,
-        content={"detail": str(exc), "mismatched": exc.mismatched, "unapplied_leg_ids": exc.unapplied_leg_ids},
+        content={
+            "detail": str(exc),
+            "mismatched": exc.mismatched,
+            "unapplied_leg_ids": exc.unapplied_leg_ids,
+            "overfull": exc.overfull,
+        },
     )
 
 

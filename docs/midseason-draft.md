@@ -88,12 +88,17 @@ re-plans the eventual selection allocation before ever committing (shared
 with `generate_selection_table` via `_plan_selection_allocations`) and
 refuses to lock -- rolling back cleanly, including any delisted-player
 releases already applied -- if any entry's final selection count doesn't
-exactly match its own vacancies, or if any approved pick leg has no
-vacancy to apply to at all (`MidseasonPickReconciliationError`, carrying
-`.mismatched` and `.unapplied_leg_ids`). The capacity-overage bypass is
-itself bounded the same way: outside `delisting_open`, or without a
-covering active delisting, `decide_trade` refuses the acquisition outright
-instead of creating an overage nothing will ever resolve. Redirects are
+exactly match its own vacancies, if any approved pick leg has no vacancy
+to apply to at all, or if any entry's *live* squad size is still over the
+configured limit (`MidseasonPickReconciliationError`, carrying
+`.mismatched`, `.unapplied_leg_ids` and `.overfull`) -- the last of these
+catches a delisting that covered a capacity-overage acquisition at
+approval time being withdrawn again before lock, which `max(squad_limit -
+count, 0)` alone would otherwise silently clamp away. The capacity-overage
+bypass is itself bounded the same way: outside `delisting_open`, or
+without a covering active delisting, `decide_trade` refuses the
+acquisition outright instead of creating an overage nothing will ever
+resolve. Redirects are
 resolved as a single direct hop from each allocation's own original
 vacancy-owner -- never chained through a leg's destination -- since a leg
 only ever names its sender's own original entitlement, not a specifically

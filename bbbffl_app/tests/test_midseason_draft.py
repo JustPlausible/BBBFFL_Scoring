@@ -588,6 +588,57 @@ def test_decide_trade_refuses_a_capacity_overage_once_the_draft_is_complete():
     assert len(m.ownership.current_squad(receiving.season_entry_id)) == 4
 
 
+def test_lock_delistings_refuses_an_entry_left_overfull_by_a_withdrawn_covering_delisting():
+    """Codex review: the delisting that covered a squad-capacity-overage
+    acquisition at approval time can still be withdrawn any time before
+    lock -- `max(squad_limit - count, 0)` would then silently clamp that
+    entry's vacancy to 0, hiding the fact that it is still over its limit
+    (both `allocated` and `vacancies` land on 0, so the mismatch check
+    alone never catches it). `lock_delistings` must catch this directly."""
+    ctx = _delisting_open(trigger_round=10, squad_limit=4)
+    m, season, entries = ctx["midseason"], ctx["season"], ctx["entries"]
+    receiving, giving = entries[0], entries[1]
+    outgoing_player = next(iter(m.ownership.current_squad(receiving.season_entry_id))).season_player_id
+    covering = m.submit_delisting(season.season_id, receiving.season_entry_id, outgoing_player, actor=ACTOR)
+
+    incoming_player = next(iter(m.ownership.current_squad(giving.season_entry_id))).season_player_id
+    trade = m.propose_trade(
+        season.season_id,
+        [
+            {
+                "leg_type": "player",
+                "from_season_entry_id": giving.season_entry_id,
+                "to_season_entry_id": receiving.season_entry_id,
+                "season_player_id": incoming_player,
+            }
+        ],
+        actor=ACTOR,
+    )
+    m.decide_trade(season.season_id, trade.trade_id, True, actor=ACTOR, reason="player-for-nothing")
+    assert len(m.ownership.current_squad(receiving.season_entry_id)) == 5
+
+    # The covering delisting is withdrawn before lock -- still legal while
+    # the window is open -- leaving `receiving` permanently overfull unless
+    # caught here.
+    m.withdraw_delisting(season.season_id, covering.delisting_id, actor=ACTOR, reason="changed my mind")
+
+    with pytest.raises(MidseasonPickReconciliationError) as excinfo:
+        m.lock_delistings(season.season_id, actor=ACTOR)
+    assert excinfo.value.overfull == {receiving.season_entry_id: 5}
+
+    draft = m.get_draft(season.season_id)
+    assert draft.state == "delisting_open"
+    assert len(m.ownership.current_squad(receiving.season_entry_id)) == 5
+
+    # Recovery: submit a fresh covering delisting instead.
+    another_player = next(
+        p for p in m.ownership.current_squad(receiving.season_entry_id) if p.season_player_id != incoming_player
+    ).season_player_id
+    m.submit_delisting(season.season_id, receiving.season_entry_id, another_player, actor=ACTOR)
+    m.lock_delistings(season.season_id, actor=ACTOR)
+    assert len(m.ownership.current_squad(receiving.season_entry_id)) == 4
+
+
 def test_decide_trade_is_blocked_once_post_draft_trading_is_closed():
     ctx = _delisting_open(trigger_round=10, squad_limit=4)
     m, season, entries = ctx["midseason"], ctx["season"], ctx["entries"]
@@ -991,6 +1042,94 @@ def test_reverse_trade_approval_refused_once_delistings_are_locked():
     m.lock_delistings(season.season_id, actor=ACTOR)
     with pytest.raises(MidseasonDraftStateError):
         m.reverse_trade_approval(season.season_id, trade.trade_id, actor=ACTOR, reason="too late")
+
+
+def test_reverse_trade_approval_undoes_a_balanced_player_for_player_swap_between_full_squads():
+    """Codex review: reversing a two-way player-for-player swap leg-by-leg
+    (release then immediately reacquire, one leg at a time) refuses a
+    balanced swap between two full squads outright -- reacquiring leg 1's
+    player back into its original owner fails capacity validation while
+    that owner still holds leg 2's incoming player (not yet released).
+    Every leg must release first, then every leg reacquires, matching
+    `decide_trade`'s own ordering."""
+    ctx = _delisting_open(trigger_round=10, squad_limit=4)
+    m, season, entries = ctx["midseason"], ctx["season"], ctx["entries"]
+    a, b = entries[0], entries[1]
+    a_player = next(iter(m.ownership.current_squad(a.season_entry_id))).season_player_id
+    b_player = next(iter(m.ownership.current_squad(b.season_entry_id))).season_player_id
+
+    trade = m.propose_trade(
+        season.season_id,
+        [
+            {
+                "leg_type": "player",
+                "from_season_entry_id": a.season_entry_id,
+                "to_season_entry_id": b.season_entry_id,
+                "season_player_id": a_player,
+            },
+            {
+                "leg_type": "player",
+                "from_season_entry_id": b.season_entry_id,
+                "to_season_entry_id": a.season_entry_id,
+                "season_player_id": b_player,
+            },
+        ],
+        actor=ACTOR,
+    )
+    m.decide_trade(season.season_id, trade.trade_id, True, actor=ACTOR, reason="swap approved")
+    assert len(m.ownership.current_squad(a.season_entry_id)) == 4
+    assert len(m.ownership.current_squad(b.season_entry_id)) == 4
+
+    reversed_trade = m.reverse_trade_approval(season.season_id, trade.trade_id, actor=ACTOR, reason="undo the swap")
+    assert reversed_trade.status == "rejected"
+    a_squad = {p.season_player_id for p in m.ownership.current_squad(a.season_entry_id)}
+    b_squad = {p.season_player_id for p in m.ownership.current_squad(b.season_entry_id)}
+    assert a_player in a_squad and a_player not in b_squad
+    assert b_player in b_squad and b_player not in a_squad
+    assert len(a_squad) == 4 and len(b_squad) == 4
+
+
+def test_reverse_trade_approval_withdraws_a_stale_delisting_placed_by_the_current_holder():
+    """Codex review: if the entry currently holding a traded-in player
+    formally delists it and the Scorer then reverses the trade's approval,
+    the reacquisition returns the player to its original owner but the
+    delisting (naming the now-former holder) would otherwise remain
+    active -- `lock_delistings` releases whichever ownership period is
+    currently open, stripping the player from the *original* owner based
+    on that obsolete declaration. Reversal must withdraw it, mirroring
+    what approval itself does for the same situation."""
+    ctx = _delisting_open(trigger_round=10, squad_limit=4)
+    m, season, entries = ctx["midseason"], ctx["season"], ctx["entries"]
+    a, b = entries[0], entries[1]
+    player = next(iter(m.ownership.current_squad(a.season_entry_id))).season_player_id
+    # `b` needs a covering delisting for the capacity-overage bypass to let
+    # this one-way acquisition through at all -- unrelated to what's under
+    # test here (the reversal's stale-delisting handling).
+    b_covering_player = next(iter(m.ownership.current_squad(b.season_entry_id))).season_player_id
+    m.submit_delisting(season.season_id, b.season_entry_id, b_covering_player, actor=ACTOR)
+
+    trade = m.propose_trade(
+        season.season_id,
+        [
+            {
+                "leg_type": "player",
+                "from_season_entry_id": a.season_entry_id,
+                "to_season_entry_id": b.season_entry_id,
+                "season_player_id": player,
+            }
+        ],
+        actor=ACTOR,
+    )
+    m.decide_trade(season.season_id, trade.trade_id, True, actor=ACTOR, reason="approved")
+    stale_delisting = m.submit_delisting(season.season_id, b.season_entry_id, player, actor=ACTOR)
+
+    m.reverse_trade_approval(season.season_id, trade.trade_id, actor=ACTOR, reason="undoing a mistaken approval")
+    assert m.get_delisting(stale_delisting.delisting_id).withdrawn_at is not None
+
+    m.lock_delistings(season.season_id, actor=ACTOR)
+    # The player must still belong to `a` (its original owner) -- not
+    # released based on `b`'s now-stale delisting declaration.
+    assert player in {p.season_player_id for p in m.ownership.current_squad(a.season_entry_id)}
 
 
 def test_lock_delistings_and_generate_selection_table_complete_trivially_when_nobody_delists():

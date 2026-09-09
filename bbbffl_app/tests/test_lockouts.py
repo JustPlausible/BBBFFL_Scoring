@@ -1603,6 +1603,42 @@ def test_persisted_lock_state_projects_durable_evidence_without_match_facts():
     assert projected.positions["M1"].reason == "main_lockout_triggered"
 
 
+def test_persisted_lock_state_honors_main_activation_for_a_never_materialized_named_position():
+    """Codex review (PR #177): a persisted main-trigger activation
+    conclusively locks *every remaining position* once it has fired --
+    including a named occupant whose own `weekly_lineup_lock` row was never
+    separately materialized. Lock rows are written lazily, per lineup
+    (`_materialize_lineup`), and nothing guarantees every lineup was
+    re-observed again after main lockout actually activated -- so this must
+    never be reported `INDETERMINATE` merely because that lazy write never
+    happened for this one lineup."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_main(triggers, round_.bbbffl_round_id, [LATE_MATCH_ID], sequence=1)
+    named = acquire(pool, ownership, scope, entry, 900003, EARLY_HOME)
+    lineups = WeeklyLineupRepository(db)
+    draft, submitted = establish(lineups, round_, entry, scope, {"F1": named.season_player_id})
+    lock_repo = LockoutRepository(db)
+
+    # Durably activate the main trigger -- but deliberately never call
+    # `lock_state`/`materialize_lineup` for this lineup, so no
+    # `weekly_lineup_lock` row is ever written for F1.
+    lock_repo.materialize_round_triggers(
+        round_.bbbffl_round_id,
+        match_facts=FakeMatchFacts([late_match(status="CONCLUDED")]),
+        evaluation_at=LATE_START + timedelta(hours=1),
+    )
+
+    projected = lock_repo.persisted_lock_state(
+        draft.lineup_id, round_.bbbffl_round_id, entry.season_entry_id, submitted.positions
+    )
+
+    assert projected.positions["F1"].state == LockState.LOCKED
+    assert projected.positions["F1"].reason == "main_lockout_triggered"
+    assert projected.positions["F1"].irreversible is False
+
+
 def test_persisted_lock_state_reports_indeterminate_for_a_never_materialized_position():
     """A named position that never durably locked (its match was never
     supplied to any prior `lock_state`/materialization call) must be

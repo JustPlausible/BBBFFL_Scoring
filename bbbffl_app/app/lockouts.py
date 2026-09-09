@@ -927,11 +927,19 @@ class LockoutRepository:
         positions: dict,
     ) -> LineupLockView:
         """`lock_state`'s persisted-only counterpart: every position that
-        already has a `weekly_lineup_lock` row (or resolves from the round's
-        persisted main-trigger activation alone, for a genuine vacancy) is
-        reported exactly as `lock_state` would; a named position with
-        neither is reported `INDETERMINATE` rather than resolved live --
-        this method never calls `resolve_match`."""
+        already has a `weekly_lineup_lock` row is reported exactly as
+        `lock_state` would; a position with neither -- named or a genuine
+        vacancy -- falls back to the round's persisted main-trigger
+        activation alone, which (per this module's docstring) conclusively
+        locks *every remaining position once activated, regardless of its
+        player or match*: `weekly_lineup_lock` rows are materialized lazily,
+        per lineup, and a `final` round's own `publish_results` gives no
+        guarantee every lineup was ever re-observed after main lockout
+        actually fired (Codex review, PR #177). Only a named position with
+        neither a persisted row nor an activated main trigger is reported
+        `INDETERMINATE` -- this method never calls `resolve_match`, so it
+        has no way to know whether some *other*, still-unactivated trigger
+        might eventually cover that position's own match."""
         with transaction(self.database) as conn:
             existing = self._existing_locks(conn, lineup_id)
             coverage = self._trigger_coverage(conn, bbbffl_round_id)
@@ -949,13 +957,13 @@ class LockoutRepository:
                         row["observed_status"],
                         True,
                     )
+                elif coverage.main_activated:
+                    view[position] = PositionLockState(
+                        position, season_player_id, LockState.LOCKED, "main_lockout_triggered", None, None, None, False
+                    )
                 elif season_player_id is None:
-                    view[position] = (
-                        PositionLockState(
-                            position, None, LockState.LOCKED, "main_lockout_triggered", None, None, None, False
-                        )
-                        if coverage.main_activated
-                        else PositionLockState(position, None, LockState.EDITABLE, "empty", None, None, None, False)
+                    view[position] = PositionLockState(
+                        position, None, LockState.EDITABLE, "empty", None, None, None, False
                     )
                 else:
                     view[position] = PositionLockState(

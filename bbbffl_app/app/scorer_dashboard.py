@@ -1050,6 +1050,12 @@ def _build_round_dashboard(
     # persisted trigger/lock facts are still shown, via `LockoutRepository`'s
     # persisted-only projection, exactly like a round still being played.
     if lifecycle_state == "final":
+        # Never asserted as confirmed fresh (Codex review, PR #177): no live
+        # evidence was fetched to confirm anything here, and `evidence_fresh
+        # =True` would misrepresent a check that was deliberately skipped as
+        # one that was performed and passed. `build_round_review` treats
+        # `None` distinctly from both `True` and `False` for exactly this.
+        evidence_fresh = None
         trigger_plan_configured = bool(LockoutTriggerRepository(database).list_triggers(round_id))
         trigger_rows = _build_trigger_rows(lockouts_repo.persisted_trigger_state(round_id), {})
         any_trigger_activated = any(row["activated"] for row in trigger_rows)

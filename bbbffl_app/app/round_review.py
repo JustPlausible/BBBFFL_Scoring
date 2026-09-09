@@ -547,7 +547,14 @@ class MatchupReview:
     rules_version_id: str | None
     calculation_revision: int | None
     calculation_fingerprint: str | None
-    evidence_fresh: bool
+    # `None` means freshness was never evaluated for this read (issue #176:
+    # a `final` round's read-only historical redisplay deliberately never
+    # asks for live AFL evidence) -- distinct from `False` (evaluated and
+    # found stale). Neither ever blocks sign-off differently here, since a
+    # round outside `review` state already cannot sign off for that reason
+    # alone, but a caller displaying this must never conflate "not checked"
+    # with "confirmed fresh".
+    evidence_fresh: bool | None
     home: SideReview
     away: SideReview
     effective_official_version: int | None
@@ -788,7 +795,7 @@ def calculation_staleness_for_entry(lifecycle, round_review, matchup, season_ent
 
 
 def build_matchup_review(
-    lifecycle, review_repo, identities, matchup, *, evidence_fresh: bool = True, season_repo=None
+    lifecycle, review_repo, identities, matchup, *, evidence_fresh: bool | None = True, season_repo=None
 ) -> MatchupReview:
     """Build the review for one matchup -- issue #58 requirement 1's
     per-matchup surface. `lifecycle` is a `CompetitionLifecycleRepository`
@@ -798,7 +805,11 @@ def build_matchup_review(
     display-only and optional), `season_repo` a `SeasonRepository`-shaped
     object or None (issue #151: the human rules name/version is likewise
     display-only and optional -- `rules_version_id` remains the audit/
-    mutation identifier either way)."""
+    mutation identifier either way). `evidence_fresh=None` means freshness
+    was never evaluated (issue #176) -- see `MatchupReview.evidence_fresh`;
+    it never adds this method's own staleness blocker, exactly like `True`,
+    but is still carried through to the returned view unchanged so a caller
+    displaying it can distinguish "not checked" from "confirmed fresh"."""
     calc = lifecycle.get_calculation(matchup.matchup_id)
     dnp_rulings = review_repo.get_slot_rulings(matchup.matchup_id)
     interchange_rulings = review_repo.get_interchange_rulings(matchup.matchup_id)
@@ -833,7 +844,7 @@ def build_matchup_review(
         )
         rules_version_id = calculation_revision = calculation_fingerprint = None
     else:
-        if not evidence_fresh:
+        if evidence_fresh is False:
             blockers.append("AFL evidence behind the calculated result was not confirmed fresh; refresh and retry")
         for side_name, side_snapshot in (("home", calc.snapshot["home"]), ("away", calc.snapshot["away"])):
             current_version = review_repo.current_lineup_version(side_snapshot.get("lineup_id"))
@@ -904,7 +915,7 @@ def build_matchup_review(
 
 
 def build_round_review(
-    lifecycle, review_repo, identities, round_id, *, evidence_fresh: bool = True, season_repo=None
+    lifecycle, review_repo, identities, round_id, *, evidence_fresh: bool | None = True, season_repo=None
 ) -> RoundReview:
     """Build the full round review -- issue #58 requirement 1's round-level
     surface. Makes it immediately apparent whether any of the five

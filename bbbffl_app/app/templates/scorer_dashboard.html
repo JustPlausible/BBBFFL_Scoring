@@ -193,7 +193,7 @@ function lockoutHtml(lockout){
 
 function reviewHtml(review){
   if(!review)return '<p class="muted">Calculation has not started for this round yet.</p>';
-  const rows=review.matchups.map(m=>`<li class="item ${m.blockers.length?'category-blocking':''}"><div class="item-title">Matchup ${esc(m.matchup_order)}: ${esc(m.home.team_name||'Unknown')} v ${esc(m.away.team_name||'Unknown')}</div><div class="item-detail muted">Calculation revision ${esc(m.calculation_revision??'none')} · rules ${esc(m.rules_version_label||m.rules_version_id||'—')} · evidence ${m.evidence_fresh?'fresh':'stale'}</div>${m.blockers.map(b=>`<div class="warn">⚠ ${esc(b)}</div>`).join('')}</li>`).join('');
+  const rows=review.matchups.map(m=>`<li class="item ${m.blockers.length?'category-blocking':''}"><div class="item-title">Matchup ${esc(m.matchup_order)}: ${esc(m.home.team_name||'Unknown')} v ${esc(m.away.team_name||'Unknown')}</div><div class="item-detail muted">Calculation revision ${esc(m.calculation_revision??'none')} · rules ${esc(m.rules_version_label||m.rules_version_id||'—')} · evidence ${m.evidence_fresh===false?'stale':m.evidence_fresh===true?'fresh':'not confirmed (historical)'}</div>${m.blockers.map(b=>`<div class="warn">⚠ ${esc(b)}</div>`).join('')}</li>`).join('');
   return `<p><span class="pill ${review.ready_for_signoff?'state-final':'state-review'}">${review.ready_for_signoff?'Ready for sign-off':'Not ready for sign-off'}</span></p>
     ${review.blockers.map(b=>`<div class="warn">⚠ ${esc(b)}</div>`).join('')}
     <ul class="queue">${rows}</ul>`;

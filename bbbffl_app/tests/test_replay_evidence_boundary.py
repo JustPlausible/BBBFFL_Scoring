@@ -216,6 +216,22 @@ def test_live_mode_first_half_style_final_round_still_renders_with_evidence_pres
     assert PRIOR_PHASE_AFL_ROUND not in client.requested_round_ids
 
 
+def test_final_round_review_never_asserts_skipped_evidence_as_confirmed_fresh():
+    """Codex review (PR #177): a `final` round's redisplay performs no live
+    evidence check at all, so it must never report `evidence_fresh=True`
+    (a claim that freshness was confirmed) -- `None` ("not evaluated") is
+    the only honest value, distinct from both `True` and `False`."""
+    g = _prior_phase_season(year=17610)
+    client = BoundaryReplayAflClient(available_round_ids={CURRENT_PHASE_AFL_ROUND})
+
+    view = _scorer_dashboard(g, client)
+
+    assert view["review"] is not None
+    assert view["review"]["matchups"]
+    assert all(m["evidence_fresh"] is None for m in view["review"]["matchups"])
+    assert PRIOR_PHASE_AFL_ROUND not in client.requested_round_ids
+
+
 # -- Persisted lockout history must survive, not just "not crash" -----------
 
 _TRIGGER_AFL_MATCH_ID = 555001

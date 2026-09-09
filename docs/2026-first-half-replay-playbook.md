@@ -198,3 +198,8 @@ Do not declare B½ successful until all are checked:
 - [ ] Round 9 database backup/checkpoint exists.
 - [ ] Evidence package, package checksum, logs and operator replay record are retained.
 - [ ] The same season/database is ready to continue into Round 10 and the subsequent mid-season draft without rebuilding the competition.
+
+> **Next phase:** [`2026-second-half-replay-playbook.md`](2026-second-half-replay-playbook.md)
+> is the authoritative operational playbook for Round 10, the mid-season
+> draft, and Rounds 11–20, starting from a preserved copy of this playbook's
+> completed checkpoint.

@@ -1,5 +1,13 @@
 # Second-half replay handoff
 
+> **Operational scope:** the operational playbook implementing this handoff
+> (issue #165) is
+> [`docs/2026-second-half-replay-playbook.md`](../../2026-second-half-replay-playbook.md),
+> with its findings recorded at
+> [`docs/evidence/2026-second-half-replay/`](../2026-second-half-replay/).
+> This document remains the Phase 1 operator's forward-looking handoff notes
+> that playbook was written from.
+
 ## Intended scope
 
 Phase 2 begins with BBBFFL Round 10 and extends through:

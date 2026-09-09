@@ -137,14 +137,42 @@ class ReplayAflDataSource:
         if self.clock is None and manifest.get("replay_effective_at") is not None:
             self.clock = ReplayClock.from_iso(manifest["replay_effective_at"])
         self._payload = payload
+        # Duplicate-identity detection runs here, against the raw record
+        # lists, deliberately before any of the dict comprehensions below
+        # build self._seasons/_rounds/_matches/_players/_stats. Those dict
+        # comprehensions key on the very same identity fields, so two raw
+        # records sharing an identity would otherwise silently collapse to
+        # "last one wins" with no trace -- exactly the kind of undetectable
+        # conflicting/duplicate evidence replay must fail closed on, not
+        # just accidentally overwrite.
+        section_id_key = {
+            "seasons": ("season_id", "season"),
+            "rounds": ("round_id", "round"),
+            "matches": ("match_id", "match"),
+            "players": ("canonical_player_id", "player"),
+        }
         for section in ("seasons", "rounds", "matches", "players"):
+            id_key, label = section_id_key[section]
+            seen_ids: set = set()
             for index, record in enumerate(self._list(payload, section)):
                 self._validate_provenance(record, f"{section}[{index}]")
+                identity = self._normalize_identity(record.get(id_key))
+                if identity in seen_ids:
+                    raise ReplayEvidenceError(f"replay evidence has duplicate {label} identity: {identity!r}")
+                seen_ids.add(identity)
         for match_id, records in payload.get("player_stats", {}).items():
             if not isinstance(records, list):
                 raise ReplayEvidenceError(f"player_stats[{match_id!r}] must be a list")
+            seen_stat_players: set = set()
             for index, record in enumerate(records):
                 self._validate_provenance(record, f"player_stats[{match_id!r}][{index}]")
+                stat_player_id = self._normalize_identity(record.get("canonical_player_id"))
+                if stat_player_id in seen_stat_players:
+                    raise ReplayEvidenceError(
+                        f"replay evidence has duplicate player_stat identity for match {match_id!r}: "
+                        f"player {stat_player_id!r}"
+                    )
+                seen_stat_players.add(stat_player_id)
         for index, record in enumerate(self._list(payload, "lineups")):
             self._validate_provenance(record, f"lineups[{index}]")
         try:
@@ -237,6 +265,25 @@ class ReplayAflDataSource:
                 raise ReplayEvidenceError(
                     f"lineup {lineup.get('historical_entry')!r} references missing players {sorted(unknown)}"
                 )
+
+    @staticmethod
+    def _normalize_identity(value: Any) -> Any:
+        """Coerce an identity value the same way the dict comprehensions
+        below key on it (``int(...)``), so a duplicate-identity comparison
+        made against the raw, un-coerced value can't miss a collision that
+        would still occur once both values are converted -- e.g. raw
+        identities `1` and `"1"` compare unequal here otherwise, while
+        `int(1) == int("1")` collapses them into the same dict key. A value
+        that isn't int-coercible (a dict, `None`, non-numeric text) is
+        returned unchanged: it isn't a duplicate of anything by this
+        comparison, and the malformed identity itself is caught later by
+        the same `int(...)` conversion inside the record-building loops
+        below, via the existing `(KeyError, TypeError, ValueError)`
+        handling."""
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return value
 
     @staticmethod
     def _validate_provenance(record: dict, location: str) -> None:

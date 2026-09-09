@@ -58,10 +58,19 @@ repository (see the [README](README.md)'s evidence policy).
 | Home-and-away ladder verified | |
 | Known unresolved historical uncertainty | |
 
+## AFL evidence acquisition (section E)
+
+| Field | Value |
+|---|---|
+| Acquired package identity (`manifest.id` / `package_version`) | |
+| Acquisition timestamp (`manifest.acquired_at`) | |
+| Source API host (`manifest.source_api`, never credentials) | |
+| Included AFL round identities (10–24 inclusive, fifteen rounds -- R10–20 for the ordinary second-half replay, R21–24 acquired now for the later finals/SuperScore replay) | |
+| Match/stat/roster coverage (`validate` PASS output) | |
+| `scripts.second_half_replay validate` result | |
+| AFL-api disconnected after acquisition | |
+
 ## Known replay deviations / unresolved historical uncertainty
 
 Record anything that could not be resolved with available evidence here, in
-addition to the round-specific rows above. See
-`docs/2026-second-half-replay-playbook.md` section E for the one known
-pre-existing prerequisite (AFL evidence acquisition for rounds 10–20 does
-not yet have an implemented acquisition path).
+addition to the round-specific rows above.

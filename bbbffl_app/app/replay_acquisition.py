@@ -1,15 +1,25 @@
-"""Supported exporter for hermetic 2026 first-half AFL replay evidence."""
+"""Supported exporter for hermetic 2026 AFL replay evidence (first- and
+second-half).
+
+The first-half (Opening Round + AFL R1-9) and second-half (AFL R10-24)
+acquisition entry points below share the same season-resolution,
+player-pool pagination, and per-round match/stat/roster acquisition
+boundaries -- only round selection/validation and package manifest identity
+differ between them. Neither half falls back to live AFL data once
+acquisition has produced a package: both are consumed strictly offline
+afterwards (see `app.replay.ReplayAflDataSource`)."""
 
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from app.replay import EvidenceClass, ReplayAflDataSource, ReplayEvidenceError
+from app.replay import EvidenceClass, ReplayAflDataSource, ReplayClock, ReplayEvidenceError
 
 
 class ConsumerApi(Protocol):
@@ -129,11 +139,10 @@ def _acquire_season_players(api: ConsumerApi, players_path: str) -> tuple[dict[i
     return players, page_count
 
 
-def acquire_first_half_2026(api: ConsumerApi, *, source_base_url: str, acquired_at: datetime | None = None) -> dict:
-    """Acquire Opening Round and rounds 1--9; fail before returning partial evidence."""
-    acquired_at = acquired_at or datetime.now(timezone.utc)
-    if acquired_at.tzinfo is None:
-        raise ReplayEvidenceError("acquisition timestamp must be timezone-aware")
+def _resolve_2026_season_and_players(api: ConsumerApi) -> tuple[dict, int, str, list[dict], int, dict[int, dict]]:
+    """Resolve the single AFL 2026 season and its full season-player pool
+    through API metadata (never a hard-coded database ID), shared by both
+    the first- and second-half acquisition entry points."""
     seasons = _rows(api.get("/api/v1/seasons"), "seasons", path="/api/v1/seasons")
     candidates = [s for s in seasons if s.get("year") == 2026]
     if len(candidates) != 1:
@@ -146,22 +155,26 @@ def acquire_first_half_2026(api: ConsumerApi, *, source_base_url: str, acquired_
     all_rounds = _rows(api.get(rounds_path), "rounds", path=rounds_path)
     players_path = f"/api/v1/seasons/{season_id}/players"
     players, player_page_count = _acquire_season_players(api, players_path)
+    return season, season_id, rounds_path, all_rounds, player_page_count, players
 
-    def wanted(row: dict) -> bool:
-        number = row.get("round_number")
-        label = " ".join(str(row.get(k, "")) for k in ("name", "abbreviation")).strip().lower()
-        return number in range(1, 10) or number == 0 or "opening round" in label
 
-    rounds = [r for r in all_rounds if wanted(r)]
-    ordinary = {r.get("round_number") for r in rounds if r.get("round_number") in range(1, 10)}
-    opening = [r for r in rounds if r.get("round_number") == 0 or "opening round" in str(r.get("name", "")).lower()]
-    if ordinary != set(range(1, 10)) or len(opening) != 1:
-        raise ReplayEvidenceError(
-            f"AFL season {season_id} requires one Opening Round and rounds 1-9; "
-            f"found ordinary={sorted(ordinary)}, opening={len(opening)}"
-        )
-    rounds.sort(key=lambda r: (r.get("round_number", 999), r.get("round_id", 0)))
-    matches_out, stats_out, rosters, roster_missing = [], {}, {}, []
+def _acquire_match_evidence(
+    api: ConsumerApi, rounds: list[dict], players: dict[int, dict], season_id: int
+) -> tuple[list[dict], dict[str, list[dict]], dict[str, Any], list[dict]]:
+    """Acquire every match, its required final player stats, and optional
+    roster evidence for `rounds`. Shared by both acquisition halves: this is
+    the acquisition/domain boundary the second-half entry point reuses
+    rather than reimplementing.
+
+    Fails closed on a match acquired twice under two different selected
+    rounds (an ambiguous/duplicate round selection upstream) and on a
+    duplicate player-stat row within one match's response, neither of which
+    the underlying dict/list accumulation below would otherwise notice
+    silently."""
+    matches_out: list[dict] = []
+    stats_out: dict[str, list[dict]] = {}
+    rosters: dict[str, Any] = {}
+    roster_missing: list[dict] = []
     for round_row in rounds:
         round_id = round_row.get("round_id")
         if round_id is None:
@@ -176,6 +189,11 @@ def acquire_first_half_2026(api: ConsumerApi, *, source_base_url: str, acquired_
                 raise ReplayEvidenceError(f"AFL round {round_id} contains a match missing match_id")
             if match.get("round_id", round_id) != round_id:
                 raise ReplayEvidenceError(f"AFL match {match_id} references inconsistent round {match.get('round_id')}")
+            if str(match_id) in stats_out:
+                raise ReplayEvidenceError(
+                    f"AFL match {match_id} was already acquired under a different selected round "
+                    "(duplicate/ambiguous round selection)"
+                )
             for field in ("home_team", "away_team", "start_time_utc", "status"):
                 if not match.get(field):
                     raise ReplayEvidenceError(f"AFL match {match_id} is missing required {field}")
@@ -202,6 +220,7 @@ def acquire_first_half_2026(api: ConsumerApi, *, source_base_url: str, acquired_
             if not stat_rows:
                 raise ReplayEvidenceError(f"required final player stats missing for AFL match {match_id}")
             exported_stats = []
+            seen_stat_players: set[int] = set()
             for row in stat_rows:
                 pid = row.get("canonical_player_id")
                 if pid is None or row.get("team_id") is None or not isinstance(row.get("stats"), dict):
@@ -212,6 +231,9 @@ def acquire_first_half_2026(api: ConsumerApi, *, source_base_url: str, acquired_
                     raise ReplayEvidenceError(
                         f"AFL match {match_id} stats reference player {pid} missing from season {season_id} player pool"
                     )
+                if pid in seen_stat_players:
+                    raise ReplayEvidenceError(f"AFL match {match_id} has duplicate player-stat rows for player {pid}")
+                seen_stat_players.add(pid)
                 stat = row["stats"]
                 exported_stats.append(
                     {
@@ -230,9 +252,18 @@ def acquire_first_half_2026(api: ConsumerApi, *, source_base_url: str, acquired_
                 roster_missing.append({"match_id": match_id, "reason": type(exc).__name__})
             else:
                 rosters[str(match_id)] = roster
+    return matches_out, stats_out, rosters, roster_missing
+
+
+def _safe_source_string(source_base_url: str) -> str:
+    """Strip credentials/paths, keeping only scheme://host[:port] for the
+    committed manifest -- never expose an embedded API key."""
     source = urlsplit(source_base_url)
-    safe_source = f"{source.scheme}://{source.hostname}" + (f":{source.port}" if source.port else "")
-    included = [
+    return f"{source.scheme}://{source.hostname}" + (f":{source.port}" if source.port else "")
+
+
+def _included_rounds_summary(rounds: list[dict]) -> list[dict]:
+    return [
         {
             "round_id": r["round_id"],
             "round_number": r.get("round_number"),
@@ -241,6 +272,44 @@ def acquire_first_half_2026(api: ConsumerApi, *, source_base_url: str, acquired_
         }
         for r in rounds
     ]
+
+
+def acquire_first_half_2026(api: ConsumerApi, *, source_base_url: str, acquired_at: datetime | None = None) -> dict:
+    """Acquire Opening Round and rounds 1--9; fail before returning partial evidence."""
+    acquired_at = acquired_at or datetime.now(timezone.utc)
+    if acquired_at.tzinfo is None:
+        raise ReplayEvidenceError("acquisition timestamp must be timezone-aware")
+    season, season_id, rounds_path, all_rounds, player_page_count, players = _resolve_2026_season_and_players(api)
+
+    def wanted(row: dict) -> bool:
+        number = row.get("round_number")
+        label = " ".join(str(row.get(k, "")) for k in ("name", "abbreviation")).strip().lower()
+        return number in range(1, 10) or number == 0 or "opening round" in label
+
+    rounds = [r for r in all_rounds if wanted(r)]
+    round_ids = [r.get("round_id") for r in rounds]
+    if len(round_ids) != len(set(round_ids)):
+        raise ReplayEvidenceError(
+            f"AFL season {season_id} has duplicate round_id entries among selected Opening Round/R1-9 rounds: "
+            f"{round_ids}"
+        )
+    ordinary_numbers = [r.get("round_number") for r in rounds if r.get("round_number") in range(1, 10)]
+    if len(ordinary_numbers) != len(set(ordinary_numbers)):
+        raise ReplayEvidenceError(
+            f"AFL season {season_id} has duplicate/ambiguous round_number entries among rounds 1-9: "
+            f"{sorted(ordinary_numbers)}"
+        )
+    ordinary = set(ordinary_numbers)
+    opening = [r for r in rounds if r.get("round_number") == 0 or "opening round" in str(r.get("name", "")).lower()]
+    if ordinary != set(range(1, 10)) or len(opening) != 1:
+        raise ReplayEvidenceError(
+            f"AFL season {season_id} requires one Opening Round and rounds 1-9; "
+            f"found ordinary={sorted(ordinary)}, opening={len(opening)}"
+        )
+    rounds.sort(key=lambda r: (r.get("round_number", 999), r.get("round_id", 0)))
+    matches_out, stats_out, rosters, roster_missing = _acquire_match_evidence(api, rounds, players, season_id)
+    safe_source = _safe_source_string(source_base_url)
+    included = _included_rounds_summary(rounds)
     return {
         "schema": ReplayAflDataSource.SCHEMA,
         "manifest": {
@@ -278,6 +347,275 @@ def acquire_first_half_2026(api: ConsumerApi, *, source_base_url: str, acquired_
         "rosters": rosters,
         "lineups": [],
     }
+
+
+SECOND_HALF_ROUND_NUMBERS = tuple(range(10, 25))
+
+
+def acquire_second_half_2026(api: ConsumerApi, *, source_base_url: str, acquired_at: datetime | None = None) -> dict:
+    """Acquire AFL rounds 10--24 inclusive (15 rounds) -- every remaining
+    2026 home-and-away round after the verified Round 9 boundary, through
+    the end of the ordinary season; fail before returning partial evidence.
+
+    Rounds 21-24 are acquired now alongside the second-half ordinary
+    replay's own Rounds 10-20 even though BBBFFL's second-half ordinary
+    replay (#168) does not itself consume them: the later finals/SuperScore
+    replay will need the same AFL match/player-stat historical facts, and
+    acquiring them once into this hermetic offline package avoids a second
+    acquisition workflow later. This is evidence acquisition only and does
+    not expand #166's or #168's own execution scope.
+
+    Reuses the same season-resolution, player-pool pagination, and
+    match/stat/roster acquisition boundaries as `acquire_first_half_2026`
+    (see `_resolve_2026_season_and_players` / `_acquire_match_evidence`) --
+    only round selection/validation and package manifest identity differ.
+    There is no Opening Round concept in the second half: every selected
+    round must carry an ordinary `round_number` in 10-24, and the set must
+    be exactly that range, no more and no fewer, with no duplicate/ambiguous
+    round identity."""
+    acquired_at = acquired_at or datetime.now(timezone.utc)
+    if acquired_at.tzinfo is None:
+        raise ReplayEvidenceError("acquisition timestamp must be timezone-aware")
+    season, season_id, rounds_path, all_rounds, player_page_count, players = _resolve_2026_season_and_players(api)
+
+    expected = set(SECOND_HALF_ROUND_NUMBERS)
+
+    def wanted(row: dict) -> bool:
+        return row.get("round_number") in expected
+
+    rounds = [r for r in all_rounds if wanted(r)]
+    round_ids = [r.get("round_id") for r in rounds]
+    if len(round_ids) != len(set(round_ids)):
+        raise ReplayEvidenceError(
+            f"AFL season {season_id} has duplicate round_id entries among selected AFL rounds 10-24: {round_ids}"
+        )
+    numbers = [r.get("round_number") for r in rounds]
+    if len(numbers) != len(set(numbers)):
+        raise ReplayEvidenceError(
+            f"AFL season {season_id} has duplicate/ambiguous round_number entries among AFL rounds 10-24: "
+            f"{sorted(numbers)}"
+        )
+    if set(numbers) != expected:
+        raise ReplayEvidenceError(
+            f"AFL season {season_id} requires exactly AFL rounds 10-24 inclusive (15 rounds); "
+            f"found {sorted(set(numbers))}"
+        )
+    rounds.sort(key=lambda r: (r.get("round_number", 999), r.get("round_id", 0)))
+    matches_out, stats_out, rosters, roster_missing = _acquire_match_evidence(api, rounds, players, season_id)
+    safe_source = _safe_source_string(source_base_url)
+    included = _included_rounds_summary(rounds)
+    return {
+        "schema": ReplayAflDataSource.SCHEMA,
+        "manifest": {
+            "id": "afl-2026-second-half",
+            "version": "1",
+            "package_version": "bbbffl.second-half/v1",
+            "evidence_class": EvidenceClass.KNOWN_FACT.value,
+            "acquired_at": acquired_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "afl_season": 2026,
+            "source_api": safe_source,
+            "source_api_version": "v1",
+            "exporter": "bbbffl replay acquisition v1",
+            "included_rounds": included,
+            "match_count": len(matches_out),
+            "player_stat_match_count": len(stats_out),
+            "roster_coverage": {"available": len(matches_out) - len(roster_missing), "unavailable": roster_missing},
+            "player_pool_count": len(players),
+            "player_pool_page_count": player_page_count,
+            "lifecycle_semantics": "scheduled-start-plus-final-results-checkpoint",
+        },
+        "seasons": [
+            {
+                "season_id": season_id,
+                "year": 2026,
+                "is_current": True,
+                "current_round_number": season.get("current_round_number"),
+                "identifiers": season.get("identifiers", {}),
+                "provenance": _prov("/api/v1/seasons"),
+            }
+        ],
+        "rounds": [{**r, "season_id": season_id, "provenance": _prov(rounds_path)} for r in rounds],
+        "matches": matches_out,
+        "players": sorted(players.values(), key=lambda p: p["canonical_player_id"]),
+        "player_stats": stats_out,
+        "rosters": rosters,
+        "lineups": [],
+    }
+
+
+def validate_replay_package(
+    evidence_path: str | Path,
+    checkpoint_path: str | Path,
+    *,
+    expected_package_version: str,
+    expected_afl_season: int,
+    expected_round_numbers: Iterable[int],
+) -> ReplayAflDataSource:
+    """Load and validate a deterministic replay evidence package offline,
+    failing closed on anything short of full completeness for the required
+    round set. This is a stricter, package-shape-aware validation layered
+    on top of `ReplayAflDataSource`'s own structural/provenance checks
+    (schema, cross-references, required player_stats coverage per match),
+    which already run as part of loading it.
+
+    Beyond that structural loading, this additionally proves: the package
+    declares a supported `package_version`; it resolves the expected AFL
+    season; it carries exactly the expected (unique) set of AFL round
+    numbers; its declared `match_count`/`player_stat_match_count` manifest
+    counters are consistent with what was actually loaded and are complete;
+    and every required match carries a valid, parseable, timezone-aware
+    scheduled start time. Never accessed live -- `ReplayAflDataSource`
+    loading here is purely local file I/O."""
+    source = ReplayAflDataSource(evidence_path, checkpoint_path=checkpoint_path)
+    manifest = source.manifest
+    if manifest.get("package_version") != expected_package_version:
+        raise ReplayEvidenceError(
+            f"unsupported replay package version: {manifest.get('package_version')!r}, "
+            f"expected {expected_package_version!r}"
+        )
+    # The manifest's afl_season is a label the acquirer wrote; it is not
+    # itself proof the evidence resolves that season. Resolve the season
+    # independently from what ReplayAflDataSource actually loaded, so a
+    # manifest that claims 2026 while its own `seasons` evidence record
+    # declares a different year fails here instead of validation reading
+    # PASS for evidence that does not resolve the requested AFL season.
+    matching_seasons = [season for season in source.get_seasons() if season.year == expected_afl_season]
+    if len(matching_seasons) != 1:
+        raise ReplayEvidenceError(
+            f"replay package evidence does not resolve exactly one season for year {expected_afl_season}; "
+            f"found {len(matching_seasons)}"
+        )
+    resolved_season = matching_seasons[0]
+    if manifest.get("afl_season") != expected_afl_season:
+        raise ReplayEvidenceError(
+            f"replay package manifest declares AFL season {manifest.get('afl_season')!r}, "
+            f"expected {expected_afl_season}"
+        )
+    expected_numbers = set(expected_round_numbers)
+    included = manifest.get("included_rounds")
+    if not isinstance(included, list):
+        raise ReplayEvidenceError("manifest.included_rounds must be a list")
+    included_numbers = [round_row.get("round_number") for round_row in included]
+    if len(included_numbers) != len(expected_numbers) or len(included_numbers) != len(set(included_numbers)):
+        raise ReplayEvidenceError(
+            f"replay package must include exactly {len(expected_numbers)} unique AFL rounds; "
+            f"found {len(included_numbers)}: {sorted(n for n in included_numbers if n is not None)}"
+        )
+    if set(included_numbers) != expected_numbers:
+        raise ReplayEvidenceError(
+            f"replay package rounds {sorted(set(included_numbers))} do not match the required set "
+            f"{sorted(expected_numbers)}"
+        )
+    for round_row in included:
+        if round_row.get("round_id") is None:
+            raise ReplayEvidenceError("manifest.included_rounds entry is missing round_id")
+    # manifest.included_rounds is a summary the acquirer wrote alongside the
+    # authoritative `rounds` evidence, not itself authoritative -- cross-check
+    # it against the round records ReplayAflDataSource actually loaded for
+    # the resolved season, in *both* directions: every declared round_id
+    # must resolve to a matching evidence round_number (a corrupted/
+    # mislabelled summary entry fails here rather than only surfacing later,
+    # deep inside replay's own `get_round` lookup), and every round the
+    # resolved season's evidence actually carries must itself be declared
+    # (a physically-present-but-undeclared extra round -- e.g. an AFL Round
+    # 25 record smuggled into "rounds" while the manifest still claims
+    # exactly 10-24 -- fails here instead of silently remaining reachable
+    # through the returned, supposedly fully-validated source).
+    declared_round_ids = {row["round_id"] for row in included}
+    actual_rounds = {round_.round_id: round_.round_number for round_ in source.get_rounds(resolved_season.season_id)}
+    missing_from_evidence = declared_round_ids - set(actual_rounds)
+    if missing_from_evidence:
+        raise ReplayEvidenceError(
+            f"manifest.included_rounds references round_id(s) {sorted(missing_from_evidence)} not present "
+            f"in the evidence's rounds for season {resolved_season.season_id}"
+        )
+    undeclared_in_manifest = set(actual_rounds) - declared_round_ids
+    if undeclared_in_manifest:
+        raise ReplayEvidenceError(
+            f"replay package's season {resolved_season.season_id} evidence contains round_id(s) "
+            f"{sorted(undeclared_in_manifest)} not declared in manifest.included_rounds"
+        )
+    all_matches = []
+    for round_row in included:
+        round_id = round_row["round_id"]
+        actual_number = actual_rounds[round_id]
+        if actual_number != round_row.get("round_number"):
+            raise ReplayEvidenceError(
+                f"manifest.included_rounds declares round_id {round_id} as round_number "
+                f"{round_row.get('round_number')!r}, but the evidence round record itself declares "
+                f"round_number {actual_number!r}"
+            )
+        all_matches.extend(source.get_matches(round_id))
+    match_ids = [match.match_id for match in all_matches]
+    if len(match_ids) != len(set(match_ids)):
+        raise ReplayEvidenceError(f"replay package contains duplicate match identities: {sorted(match_ids)}")
+    if manifest.get("match_count") != len(match_ids):
+        raise ReplayEvidenceError(
+            f"replay package manifest.match_count {manifest.get('match_count')!r} does not match "
+            f"{len(match_ids)} matches loaded for its included rounds"
+        )
+    if manifest.get("player_stat_match_count") != len(match_ids):
+        raise ReplayEvidenceError(
+            "replay package final-stat coverage is incomplete: "
+            f"player_stat_match_count={manifest.get('player_stat_match_count')!r}, match_count={len(match_ids)}"
+        )
+    for match in all_matches:
+        if match.start_time_utc is None:
+            raise ReplayEvidenceError(f"match {match.match_id} has no scheduled start time")
+        try:
+            parsed = datetime.fromisoformat(str(match.start_time_utc).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                raise ValueError("timestamp is not timezone-aware")
+        except (TypeError, ValueError) as exc:
+            raise ReplayEvidenceError(
+                f"match {match.match_id} has an invalid scheduled start time: {match.start_time_utc!r}"
+            ) from exc
+    return source
+
+
+def apply_checkpoint(state_path: str | Path, *, effective_at: str, stage: str, round_id: int | None) -> dict[str, Any]:
+    """Advance (or initialise) a replay checkpoint JSON file at `state_path`.
+
+    Deliberately evidence-agnostic: this only ever reads/writes the
+    checkpoint file itself, never the evidence package it will later be
+    paired with, so a fresh second-half checkpoint never needs -- and this
+    function never requires -- the first-half evidence namespace's
+    `finalised_round_ids` (see `docs/2026-second-half-replay-playbook.md`
+    section D step 3). `ReplayAflDataSource._load` separately rejects any
+    `finalised_round_ids` entry absent from whichever evidence package is
+    actually loaded alongside this checkpoint."""
+    if stage not in ("scheduled", "final-results"):
+        raise ReplayEvidenceError(f"unsupported replay checkpoint stage: {stage!r}")
+    clock = ReplayClock.from_iso(effective_at)
+    target = Path(state_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    finalised_round_ids: set[int] = set()
+    if target.exists():
+        existing = json.loads(target.read_text(encoding="utf-8"))
+        if existing.get("schema") != "bbbffl.replay-checkpoint/v1":
+            raise ReplayEvidenceError(f"unsupported replay checkpoint schema: {existing.get('schema')!r}")
+        previous = ReplayClock.from_iso(existing["effective_at"])
+        if clock.now() < previous.now():
+            raise ReplayEvidenceError(
+                f"replay effective time cannot move backwards: {clock.now().isoformat()} < {previous.now().isoformat()}"
+            )
+        finalised_round_ids.update(int(value) for value in existing.get("finalised_round_ids", []))
+    if stage == "final-results":
+        if round_id is None:
+            raise ReplayEvidenceError("--round-id is required with --stage final-results")
+        finalised_round_ids.add(round_id)
+    elif round_id is not None:
+        raise ReplayEvidenceError("--round-id is only valid with --stage final-results")
+    payload = {
+        "schema": "bbbffl.replay-checkpoint/v1",
+        "effective_at": clock.now().isoformat(),
+        "stage": stage,
+        "finalised_round_ids": sorted(finalised_round_ids),
+    }
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2) + "\n")
+    temporary.replace(target)
+    return payload
 
 
 def write_json_pair_atomic(items: list[tuple[dict, str | Path]]) -> None:

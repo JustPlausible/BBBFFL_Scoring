@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
 
 from app.afl_client import AflApiClient
-from app.replay import ReplayAflDataSource, ReplayClock
-from app.replay_acquisition import acquire_first_half_2026, package_summary, write_json_pair_atomic
+from app.replay import ReplayAflDataSource
+from app.replay_acquisition import acquire_first_half_2026, apply_checkpoint, package_summary, write_json_pair_atomic
 
 
 class Api:
@@ -87,41 +86,8 @@ def main() -> int:
         if args.command == "validate":
             print(package_summary(ReplayAflDataSource(args.evidence, checkpoint_path=args.state)))
             return 0
-        clock = ReplayClock.from_iso(args.effective_at)
-        target = Path(args.state)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        finalised_round_ids: set[int] = set()
-        if target.exists():
-            existing = json.loads(target.read_text(encoding="utf-8"))
-            if existing.get("schema") != "bbbffl.replay-checkpoint/v1":
-                raise ValueError(f"unsupported replay checkpoint schema: {existing.get('schema')!r}")
-            previous = ReplayClock.from_iso(existing["effective_at"])
-            if clock.now() < previous.now():
-                raise ValueError(
-                    f"replay effective time cannot move backwards: {clock.now().isoformat()} < {previous.now().isoformat()}"
-                )
-            finalised_round_ids.update(int(value) for value in existing.get("finalised_round_ids", []))
-        if args.stage == "final-results":
-            if args.round_id is None:
-                raise ValueError("--round-id is required with --stage final-results")
-            finalised_round_ids.add(args.round_id)
-        elif args.round_id is not None:
-            raise ValueError("--round-id is only valid with --stage final-results")
-        temporary = target.with_suffix(target.suffix + ".tmp")
-        temporary.write_text(
-            json.dumps(
-                {
-                    "schema": "bbbffl.replay-checkpoint/v1",
-                    "effective_at": clock.now().isoformat(),
-                    "stage": args.stage,
-                    "finalised_round_ids": sorted(finalised_round_ids),
-                },
-                indent=2,
-            )
-            + "\n"
-        )
-        temporary.replace(target)
-        print(f"checkpoint {args.stage} at {clock.now().isoformat()} -> {target}")
+        payload = apply_checkpoint(args.state, effective_at=args.effective_at, stage=args.stage, round_id=args.round_id)
+        print(f"checkpoint {payload['stage']} at {payload['effective_at']} -> {Path(args.state)}")
         return 0
     except Exception as exc:
         print(f"replay operation FAILED: {exc}", file=sys.stderr)

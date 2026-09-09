@@ -526,10 +526,17 @@ class OwnershipRepository:
         reason=None,
         correlation_id=None,
         allow_closed_window=False,
+        allow_capacity_overage=False,
     ):
         """Acquire using an existing transaction (for compound domain commands).
         `allow_closed_window` -- see `_assert_ownership_mutation_allowed` --
-        must only be set by an explicitly authorised correction call site."""
+        must only be set by an explicitly authorised correction call site.
+        `allow_capacity_overage` skips the squad-limit ceiling check entirely;
+        it exists for mid-season player-for-pick trades, where the plan
+        explicitly tolerates a temporary visible imbalance (e.g. the outgoing
+        player's own delisting has not been locked/released yet) -- callers
+        using it are responsible for the surrounding workflow resolving the
+        imbalance."""
         at = effective_at or _now()
         correlation_id = correlation_id or new_correlation_id()
         if self.database.engine.dialect.name == "sqlite":
@@ -561,7 +568,8 @@ class OwnershipRepository:
         ).fetchone()
         if overlap:
             raise PlayerUnavailableError("player ownership would overlap an existing period")
-        self.validate_squad_capacity(season_entry_id, effective_at=at, connection=conn)
+        if not allow_capacity_overage:
+            self.validate_squad_capacity(season_entry_id, effective_at=at, connection=conn)
         item = OwnershipPeriod(_id(), season_player_id, player["season_id"], season_entry_id, at, None, reason, _now())
         try:
             conn.execute(

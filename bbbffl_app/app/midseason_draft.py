@@ -142,6 +142,24 @@ class MidseasonTradeValidationError(MidseasonDraftStateError):
         self.issues = issues
 
 
+class MidseasonPickReconciliationError(MidseasonDraftStateError):
+    """Raised by `lock_delistings` when, after resolving approved
+    round-based pick-trade legs, one or more entries' final mid-season
+    selection counts don't exactly match their own roster vacancies --
+    either direction is a defect: too many would strand the draft (a pick
+    for that entry could never be legally executed once its squad is
+    full), too few would silently leave that entry's roster permanently
+    short. Raising here rolls back the whole lock (including any
+    delisted-player releases already applied in this same transaction) and
+    leaves the delisting window open, so the Scorer can rebalance with a
+    compensating trade before retrying the lock. `.mismatched` maps each
+    affected `season_entry_id` to `{"allocated": n, "vacancies": n}`."""
+
+    def __init__(self, message, mismatched):
+        super().__init__(message)
+        self.mismatched = mismatched
+
+
 @dataclass(frozen=True)
 class MidseasonDraft:
     midseason_draft_id: str
@@ -621,6 +639,7 @@ class MidseasonDraftRepository:
                 )
             issues = []
             resolved = []
+            seen_pick_entitlements = set()
             for index, leg in enumerate(legs):
                 leg_type = leg.get("leg_type")
                 from_entry = leg.get("from_season_entry_id")
@@ -676,6 +695,19 @@ class MidseasonDraftRepository:
                             {"leg": index, "problem": "draft_round must be a positive integer for a pick leg"}
                         )
                         continue
+                    entitlement = (draft_round, from_entry)
+                    if entitlement in seen_pick_entitlements:
+                        issues.append(
+                            {
+                                "leg": index,
+                                "problem": (
+                                    f"entry {from_entry}'s round {draft_round} pick is already committed to "
+                                    "another leg of this same trade"
+                                ),
+                            }
+                        )
+                        continue
+                    seen_pick_entitlements.add(entitlement)
                     resolved.append(
                         {
                             "leg_type": "pick",
@@ -723,9 +755,19 @@ class MidseasonDraftRepository:
         """Only an authorised Scorer/Admin decision changes ownership --
         approval applies every *player* leg immediately (release every leg
         first, then acquire every leg, matching `app.preseason.submit_trade`
-        so a multi-leg trade's squad-capacity checks see each entry's net
-        position). A *pick* leg is recorded as approved but not applied
-        until `generate_selection_table` builds the allocation.
+        so a multi-leg trade sees each entry's net position). A *pick* leg
+        is recorded as approved but not applied until
+        `generate_selection_table` builds the allocation.
+
+        Player-leg acquisitions bypass the normal squad-capacity ceiling
+        (`allow_capacity_overage=True`) -- the plan explicitly tolerates a
+        temporary visible imbalance in a player-for-pick trade, e.g. a squad
+        that is only still full because its own matching delisting has not
+        been released yet (that happens later, atomically, in
+        `lock_delistings`). This does not relax anything else: a stale or
+        duplicate leg is still refused below, and `lock_delistings` itself
+        re-validates that every entry's final pick allocation reconciles
+        with its actual vacancies before it ever commits.
 
         Only legal while the draft is in `delisting_open` or
         `draft_complete` -- the two states in which a trade can legitimately
@@ -849,6 +891,7 @@ class MidseasonDraftRepository:
                         reason=reason or "mid-season trade approved",
                         correlation_id=trade["correlation_id"],
                         allow_closed_window=True,
+                        allow_capacity_overage=True,
                     )
             conn.execute(
                 "UPDATE midseason_trade SET status=?, decided_at=?, decision_reason=? WHERE trade_id=?",
@@ -900,7 +943,23 @@ class MidseasonDraftRepository:
         still pending, then releases every still-active delisted player
         (they immediately enter the available pool) and marks delistings
         locked. Formal delistings cannot be withdrawn through normal action
-        after this point."""
+        after this point.
+
+        Before committing, re-plans the eventual selection allocation (the
+        same computation `generate_selection_table` will materialise) and
+        verifies every entry's final pick count -- after resolving approved
+        round-based pick-trade legs -- does not exceed its own roster
+        vacancies. An approved pick trade can only ever move *who* exercises
+        an existing vacancy slot; it cannot manufacture a vacancy that isn't
+        there. If a chain of pick trades would hand an entry more
+        selections than it has room for, raising here rolls back this
+        entire call -- including the delisted-player releases just applied
+        -- so nothing is lost: the Scorer can reject or withdraw the
+        offending imbalance -- typically by trading the excess pick(s) on to
+        an entry with spare vacancy while the delisting window is still
+        open -- and retry the lock, rather than the draft only discovering
+        the problem later when that entry's pick can never be legally
+        executed."""
         with transaction(self.database) as conn:
             draft = self._locked_draft(conn, season_id)
             if draft["state"] != "delisting_open":
@@ -915,6 +974,20 @@ class MidseasonDraftRepository:
                     "delistings cannot be locked while trades remain pending",
                     trade_ids=[row["trade_id"] for row in pending],
                 )
+            config = conn.execute(
+                "SELECT squad_limit FROM season_squad_configuration WHERE season_id=?"
+                + _for_update_suffix(self.database),
+                (season_id,),
+            ).fetchone()
+            if not config:
+                raise MidseasonDraftStateError("season squad limit must be configured before locking delistings")
+            squad_limit = config["squad_limit"]
+            order_rows = conn.execute(
+                "SELECT position, season_entry_id FROM midseason_draft_order "
+                "WHERE midseason_draft_id=? ORDER BY position",
+                (draft["midseason_draft_id"],),
+            ).fetchall()
+            ordered_entry_ids = [row["season_entry_id"] for row in order_rows]
             active = conn.execute(
                 "SELECT * FROM midseason_delisting WHERE midseason_draft_id=? AND withdrawn_at IS NULL"
                 + _for_update_suffix(self.database),
@@ -935,6 +1008,39 @@ class MidseasonDraftRepository:
                 conn.execute(
                     "UPDATE midseason_delisting SET locked_at=? WHERE delisting_id=?", (now, row["delisting_id"])
                 )
+            allocations, _unapplied_leg_ids, vacancies = self._plan_selection_allocations(
+                conn, draft["midseason_draft_id"], ordered_entry_ids, squad_limit
+            )
+            allocated_counts: dict[str, int] = {}
+            for allocation in allocations:
+                allocated_counts[allocation["current"]] = allocated_counts.get(allocation["current"], 0) + 1
+            # An entry receiving more selections than its own vacancies
+            # would strand the draft (its extra pick can never be legally
+            # executed). Its mirror -- an entry left with *fewer*
+            # selections than its vacancies, because one of its own picks
+            # was traded away without anything replacing it -- is the same
+            # imbalance from the other side: it would leave that entry's
+            # roster permanently short, silently, with no further
+            # opportunity to fill it. Every entry with any vacancy or any
+            # allocation must reconcile exactly.
+            mismatched = {
+                entry_id: {"allocated": allocated_counts.get(entry_id, 0), "vacancies": vacancies.get(entry_id, 0)}
+                for entry_id in ordered_entry_ids
+                if allocated_counts.get(entry_id, 0) != vacancies.get(entry_id, 0)
+            }
+            if mismatched:
+                raise MidseasonPickReconciliationError(
+                    "one or more approved round-based pick trades leave an entry's final mid-season selection "
+                    "count out of step with its own roster vacancies -- nothing has been changed by this call (the "
+                    "delisting window is still open): rebalance with a compensating trade before retrying the "
+                    "lock: "
+                    + ", ".join(
+                        f"{entry_id} would receive {info['allocated']} selection(s) against "
+                        f"{info['vacancies']} vacanc{'y' if info['vacancies'] == 1 else 'ies'}"
+                        for entry_id, info in mismatched.items()
+                    ),
+                    mismatched=mismatched,
+                )
             conn.execute(
                 "UPDATE midseason_draft SET state='delistings_locked', delistings_locked_at=?, updated_at=?, "
                 "version=version+1 WHERE midseason_draft_id=?",
@@ -953,6 +1059,73 @@ class MidseasonDraftRepository:
             )
         return self.get_draft(season_id)
 
+    # -- shared by lock_delistings' reconciliation check and
+    #    generate_selection_table's materialisation --------------------
+
+    def _plan_selection_allocations(self, conn, midseason_draft_id, ordered_entry_ids, squad_limit):
+        """Computes each entry's vacancy count from its live squad size,
+        allocates picks in team order (skipping any entry once satisfied),
+        then resolves every approved round-based pick-trade leg against each
+        allocation's *original* vacancy-owner -- not a shared
+        (round, current_owner) lookup mutated leg-by-leg: overwriting that
+        lookup as legs are applied silently drops one side of a same-round
+        two-way swap (leg 1's write clobbers the very key leg 2 needs to
+        find leg 2's own original allocation). Walking the redirect chain
+        from each allocation's original owner instead handles a swap (a
+        two-node cycle -- stop once a revisit is detected, leaving the
+        chain's last resolved owner) and a longer trade chain (A's pick
+        traded to B, then that same pick traded on by B to C) identically
+        and correctly. Returns (allocations, unapplied_leg_ids, vacancies)."""
+        vacancies = {}
+        for entry_id in ordered_entry_ids:
+            count = conn.execute(
+                "SELECT COUNT(*) AS n FROM player_ownership_period WHERE season_entry_id=? AND released_at IS NULL",
+                (entry_id,),
+            ).fetchone()["n"]
+            vacancies[entry_id] = max(squad_limit - count, 0)
+        approved_pick_legs = conn.execute(
+            "SELECT l.* FROM midseason_trade_leg l JOIN midseason_trade t ON t.trade_id=l.trade_id "
+            "WHERE t.midseason_draft_id=? AND t.status='approved' AND l.leg_type='pick' "
+            "ORDER BY t.decided_at, l.leg_id",
+            (midseason_draft_id,),
+        ).fetchall()
+        allocations = [
+            {
+                "overall": overall,
+                "round": round_number,
+                "position": position,
+                "original": original,
+                "current": current,
+            }
+            for overall, round_number, position, original, current in vacancy_allocations(ordered_entry_ids, vacancies)
+        ]
+        redirect = {
+            (leg["draft_round"], leg["from_season_entry_id"]): leg["to_season_entry_id"] for leg in approved_pick_legs
+        }
+        visited = set()
+
+        def _resolve(round_number, owner):
+            seen = {owner}
+            current = owner
+            visited.add((round_number, current))
+            while (round_number, current) in redirect:
+                following = redirect[(round_number, current)]
+                if following in seen:
+                    break
+                seen.add(following)
+                current = following
+                visited.add((round_number, current))
+            return current
+
+        for allocation in allocations:
+            allocation["current"] = _resolve(allocation["round"], allocation["current"])
+        unapplied_leg_ids = [
+            leg["leg_id"]
+            for leg in approved_pick_legs
+            if (leg["draft_round"], leg["from_season_entry_id"]) not in visited
+        ]
+        return allocations, unapplied_leg_ids, vacancies
+
     # -- 12/13/14. Generate the final numbered selection table -----------
 
     def generate_selection_table(self, season_id, *, actor=ActorContext.anonymous_operator("scorer"), reason=None):
@@ -962,7 +1135,10 @@ class MidseasonDraftRepository:
         (skipping any entry once satisfied), applies approved round-based
         pick-trade legs to that allocation, and materialises it as the
         mid-season `season_draft`/`draft_pick` rows -- from this point,
-        selections are made through `app.draft.DraftRepository`."""
+        selections are made through `app.draft.DraftRepository`. By this
+        point `lock_delistings` has already verified every entry's final
+        allocation reconciles with its vacancies, so this call cannot itself
+        strand the draft."""
         with transaction(self.database) as conn:
             draft = self._locked_draft(conn, season_id)
             if draft["state"] != "delistings_locked":
@@ -981,70 +1157,11 @@ class MidseasonDraftRepository:
                 (draft["midseason_draft_id"],),
             ).fetchall()
             ordered_entry_ids = [row["season_entry_id"] for row in order_rows]
-            vacancies = {}
-            for entry_id in ordered_entry_ids:
-                count = conn.execute(
-                    "SELECT COUNT(*) AS n FROM player_ownership_period WHERE season_entry_id=? AND released_at IS NULL",
-                    (entry_id,),
-                ).fetchone()["n"]
-                vacancies[entry_id] = max(squad_limit - count, 0)
-            approved_pick_legs = conn.execute(
-                "SELECT l.* FROM midseason_trade_leg l JOIN midseason_trade t ON t.trade_id=l.trade_id "
-                "WHERE t.midseason_draft_id=? AND t.status='approved' AND l.leg_type='pick' "
-                "ORDER BY t.decided_at, l.leg_id",
-                (draft["midseason_draft_id"],),
-            ).fetchall()
-            allocations = [
-                {
-                    "overall": overall,
-                    "round": round_number,
-                    "position": position,
-                    "original": original,
-                    "current": current,
-                }
-                for overall, round_number, position, original, current in vacancy_allocations(
-                    ordered_entry_ids, vacancies
-                )
-            ]
+            allocations, unapplied_leg_ids, _vacancies = self._plan_selection_allocations(
+                conn, draft["midseason_draft_id"], ordered_entry_ids, squad_limit
+            )
             if not allocations:
                 raise MidseasonDraftStateError("no team requires a mid-season draft selection")
-            # Resolve every approved pick-trade leg against each
-            # allocation's *original* vacancy-owner, not a shared
-            # (round, current_owner) lookup mutated leg-by-leg: overwriting
-            # that lookup as legs are applied silently drops one side of a
-            # same-round two-way swap (leg 1's write clobbers the very key
-            # leg 2 needs to find leg 2's own original allocation). Walking
-            # the redirect chain from each allocation's original owner
-            # instead handles a swap (a two-node cycle -- stop once a
-            # revisit is detected, leaving the chain's last resolved owner)
-            # and a longer trade chain (A's pick traded to B, then that same
-            # pick traded on by B to C) identically and correctly.
-            redirect = {
-                (leg["draft_round"], leg["from_season_entry_id"]): leg["to_season_entry_id"]
-                for leg in approved_pick_legs
-            }
-            visited = set()
-
-            def _resolve(round_number, owner):
-                seen = {owner}
-                current = owner
-                visited.add((round_number, current))
-                while (round_number, current) in redirect:
-                    following = redirect[(round_number, current)]
-                    if following in seen:
-                        break
-                    seen.add(following)
-                    current = following
-                    visited.add((round_number, current))
-                return current
-
-            for allocation in allocations:
-                allocation["current"] = _resolve(allocation["round"], allocation["current"])
-            unapplied_leg_ids = [
-                leg["leg_id"]
-                for leg in approved_pick_legs
-                if (leg["draft_round"], leg["from_season_entry_id"]) not in visited
-            ]
             self.drafts.materialize_draft_in_transaction(
                 conn,
                 season_id,

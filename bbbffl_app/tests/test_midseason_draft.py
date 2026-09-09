@@ -10,11 +10,11 @@ from app.midseason_draft import (
     MidseasonDraftRepository,
     MidseasonDraftStateError,
     MidseasonPendingTradesError,
+    MidseasonPickReconciliationError,
     MidseasonRoundNotFinalError,
     MidseasonTradeValidationError,
     vacancy_allocations,
 )
-from app.player_pool import SquadCapacityError
 from app.season import SeasonRepository
 from tests.midseason_draft_helpers import build_season
 
@@ -468,6 +468,57 @@ def test_approving_a_player_trade_auto_withdraws_the_players_active_delisting():
     assert player in {p.season_player_id for p in m.ownership.current_squad(b.season_entry_id)}
 
 
+def test_decide_trade_tolerates_a_temporary_squad_capacity_overage_for_a_player_for_pick_trade():
+    """Codex review: a documented player-for-pick trade can legitimately
+    approve into a squad that is still showing full, because that entry's
+    own matching delisting has not been released yet -- release only
+    happens later, atomically, at `lock_delistings`. Without
+    `allow_capacity_overage` on the player-leg acquisition, `decide_trade`
+    would refuse the exact trade shape issue #164 requires, even though the
+    imbalance is only ever temporary and self-resolves at lock time."""
+    ctx = _delisting_open(trigger_round=10, squad_limit=4)
+    m, season, entries = ctx["midseason"], ctx["season"], ctx["entries"]
+    receiving, giving = entries[0], entries[1]
+    assert len(m.ownership.current_squad(receiving.season_entry_id)) == 4
+    outgoing_player = next(iter(m.ownership.current_squad(receiving.season_entry_id))).season_player_id
+    m.submit_delisting(season.season_id, receiving.season_entry_id, outgoing_player, actor=ACTOR)
+
+    incoming_player = next(iter(m.ownership.current_squad(giving.season_entry_id))).season_player_id
+    trade = m.propose_trade(
+        season.season_id,
+        [
+            {
+                "leg_type": "player",
+                "from_season_entry_id": giving.season_entry_id,
+                "to_season_entry_id": receiving.season_entry_id,
+                "season_player_id": incoming_player,
+            },
+            {
+                "leg_type": "pick",
+                "from_season_entry_id": receiving.season_entry_id,
+                "to_season_entry_id": giving.season_entry_id,
+                "draft_round": 1,
+            },
+        ],
+        actor=ACTOR,
+    )
+    # Would raise SquadCapacityError without allow_capacity_overage:
+    # receiving's delisted player has not been released yet, so its squad
+    # still shows all 4 slots full.
+    m.decide_trade(season.season_id, trade.trade_id, True, actor=ACTOR, reason="player-for-pick")
+
+    receiving_squad = {p.season_player_id for p in m.ownership.current_squad(receiving.season_entry_id)}
+    assert len(receiving_squad) == 5
+    assert incoming_player in receiving_squad
+
+    m.lock_delistings(season.season_id, actor=ACTOR)
+    # The pending delisting releases at lock time, restoring receiving to
+    # exactly its configured squad limit -- the temporary overage was only
+    # ever transient.
+    assert len(m.ownership.current_squad(receiving.season_entry_id)) == 4
+    m.generate_selection_table(season.season_id, actor=ACTOR)
+
+
 def test_decide_trade_is_blocked_once_post_draft_trading_is_closed():
     ctx = _delisting_open(trigger_round=10, squad_limit=4)
     m, season, entries = ctx["midseason"], ctx["season"], ctx["entries"]
@@ -654,7 +705,20 @@ def test_generate_selection_table_refuses_when_no_team_has_a_vacancy():
         m.generate_selection_table(season.season_id, actor=ACTOR)
 
 
-def test_approved_pick_trade_reassigns_the_generated_pick_and_squad_capacity_protects_an_unbalanced_one():
+def test_lock_delistings_refuses_a_pick_trade_that_cannot_reconcile_and_recovers_after_a_compensating_trade():
+    """Codex review: an approved round-based pick trade can hand an entry
+    more selections than it has roster vacancies for -- and, on the other
+    side of that same trade, leave the entry that gave the pick away with
+    fewer selections than its own vacancies (pick ownership is a
+    downstream, generation-time concept -- `propose_trade`/`decide_trade`
+    cannot see the eventual allocation, so neither side is individually
+    invalid at approval time). Left unchecked this would only surface
+    later as a pick nobody can legally execute (or a roster slot that can
+    never be filled), permanently stranding the draft. `lock_delistings`
+    must instead catch this before it ever commits, roll back cleanly (the
+    delisting window stays open, nothing already released is lost), and
+    leave the Scorer a real way out: a compensating trade, then retry the
+    lock."""
     ctx = _delisting_open(trigger_round=10, squad_limit=4)
     m, season, entries = ctx["midseason"], ctx["season"], ctx["entries"]
     worst, best = entries[9], entries[0]
@@ -663,11 +727,15 @@ def test_approved_pick_trade_reassigns_the_generated_pick_and_squad_capacity_pro
     m.submit_delisting(season.season_id, worst.season_entry_id, worst_squad[0].season_player_id, actor=ACTOR)
     m.submit_delisting(season.season_id, worst.season_entry_id, worst_squad[1].season_player_id, actor=ACTOR)
     m.submit_delisting(season.season_id, best.season_entry_id, best_squad[0].season_player_id, actor=ACTOR)
+    m.submit_delisting(season.season_id, best.season_entry_id, best_squad[1].season_player_id, actor=ACTOR)
+    # Both `worst` and `best` now have 2 vacancies each (own round-1 and
+    # round-2 picks).
 
-    # A pick-for-nothing trade: best gains an extra pick without shedding
-    # anything more -- valid to *propose and approve* (ownership of picks
-    # is a downstream, generation-time concept), but best only has one
-    # vacancy of its own, so it cannot actually complete both picks.
+    # A pick-for-nothing trade: best gains worst's round-1 pick without
+    # shedding anything -- valid to *propose and approve* (ownership of
+    # picks is a downstream, generation-time concept), but it leaves best
+    # with 3 selections against 2 vacancies, and worst with only 1 against
+    # its own 2.
     trade = m.propose_trade(
         season.season_id,
         [
@@ -682,28 +750,61 @@ def test_approved_pick_trade_reassigns_the_generated_pick_and_squad_capacity_pro
     )
     m.decide_trade(season.season_id, trade.trade_id, True, actor=ACTOR, reason="approved")
 
+    with pytest.raises(MidseasonPickReconciliationError) as excinfo:
+        m.lock_delistings(season.season_id, actor=ACTOR)
+    assert excinfo.value.mismatched == {
+        worst.season_entry_id: {"allocated": 1, "vacancies": 2},
+        best.season_entry_id: {"allocated": 3, "vacancies": 2},
+    }
+
+    # Nothing committed: the delisting window is still open, and no
+    # delisted player was released by the failed attempt.
+    draft = m.get_draft(season.season_id)
+    assert draft.state == "delisting_open"
+    assert all(delisting.locked_at is None for delisting in m.list_delistings(season.season_id))
+
+    # Recovery: `best` trades its own round-2 pick back to `worst` -- a
+    # different round from the original mistake's round-1 leg, so this
+    # resolves independently rather than chaining through the same
+    # (round, entry) redirect. That exactly restores both entries to their
+    # own vacancy count: `best` ends up with worst's round-1 pick plus its
+    # own round-1 pick (2, matching its 2 vacancies); `worst` ends up with
+    # its own round-2 pick plus best's round-2 pick (2, matching its own).
+    compensating = m.propose_trade(
+        season.season_id,
+        [
+            {
+                "leg_type": "pick",
+                "from_season_entry_id": best.season_entry_id,
+                "to_season_entry_id": worst.season_entry_id,
+                "draft_round": 2,
+            }
+        ],
+        actor=ACTOR,
+    )
+    m.decide_trade(season.season_id, compensating.trade_id, True, actor=ACTOR, reason="rebalance")
+
     m.lock_delistings(season.season_id, actor=ACTOR)
     m.generate_selection_table(season.season_id, actor=ACTOR)
     picks = m.picks(season.season_id)
-    round1_traded = [p for p in picks if p.draft_round == 1 and p.original_season_entry_id == worst.season_entry_id][0]
-    assert round1_traded.current_season_entry_id == best.season_entry_id
+    round1_from_worst = [
+        p for p in picks if p.draft_round == 1 and p.original_season_entry_id == worst.season_entry_id
+    ][0]
+    round2_from_best = [p for p in picks if p.draft_round == 2 and p.original_season_entry_id == best.season_entry_id][
+        0
+    ]
+    assert round1_from_worst.current_season_entry_id == best.season_entry_id
+    assert round2_from_best.current_season_entry_id == worst.season_entry_id
 
-    pool = m.available_player_pool(season.season_id)
-    # Round 1 now has both its slots owned by `best` (the traded-in pick at
-    # position 1, its own original pick at position 2) -- but `best` only
-    # ever had one real vacancy. Selections proceed in overall_number
-    # order: the first of the two succeeds (fills that one vacancy)...
-    first = m.next_pick(season.season_id)
-    assert first.current_season_entry_id == best.season_entry_id
-    m.execute_pick(season.season_id, best.season_entry_id, pool[0].season_player_id, actor=ACTOR)
+    while True:
+        nxt = m.next_pick(season.season_id)
+        if nxt is None:
+            break
+        pool = m.available_player_pool(season.season_id)
+        m.execute_pick(season.season_id, nxt.current_season_entry_id, pool[0].season_player_id, actor=ACTOR)
 
-    # ...but the second still-owned-by-`best` pick cannot be completed:
-    # squad-capacity validation refuses to leave `best`'s squad above the
-    # configured limit, protecting the very invariant issue #164 requires.
-    second = m.next_pick(season.season_id)
-    assert second.current_season_entry_id == best.season_entry_id
-    with pytest.raises(SquadCapacityError):
-        m.execute_pick(season.season_id, best.season_entry_id, pool[1].season_player_id, actor=ACTOR)
+    for entry in (worst, best):
+        assert len(m.ownership.current_squad(entry.season_entry_id)) == 4
 
 
 def test_pick_for_pick_swap_trade_keeps_every_team_at_its_own_vacancy_count():
@@ -792,6 +893,41 @@ def test_decide_trade_rejects_a_second_approval_of_an_already_traded_pick_entitl
     assert m.get_trade(trade_to_c.trade_id).status == "pending"
     # Rejecting the conflicting proposal instead is still fine.
     m.decide_trade(season.season_id, trade_to_c.trade_id, False, actor=ACTOR, reason="withdrawn by agreement")
+
+
+def test_propose_trade_rejects_a_duplicate_pick_entitlement_within_the_same_proposal():
+    """Codex review: the cross-trade duplicate-entitlement check in
+    `decide_trade` only ever looks at *other* already-approved trades --
+    it never catches a single proposal that sells the same
+    (round, from_entity) pick entitlement to two different legs of
+    itself. Left unchecked, the redirect that eventually applies would
+    silently depend on dict/iteration order rather than being rejected up
+    front. `propose_trade` must catch this before anything is written."""
+    ctx = _delisting_open(trigger_round=10)
+    m, season, entries = ctx["midseason"], ctx["season"], ctx["entries"]
+    a, b, c = entries[9], entries[8], entries[7]
+
+    with pytest.raises(MidseasonTradeValidationError) as excinfo:
+        m.propose_trade(
+            season.season_id,
+            [
+                {
+                    "leg_type": "pick",
+                    "from_season_entry_id": a.season_entry_id,
+                    "to_season_entry_id": b.season_entry_id,
+                    "draft_round": 1,
+                },
+                {
+                    "leg_type": "pick",
+                    "from_season_entry_id": a.season_entry_id,
+                    "to_season_entry_id": c.season_entry_id,
+                    "draft_round": 1,
+                },
+            ],
+            actor=ACTOR,
+        )
+    assert excinfo.value.issues and excinfo.value.issues[0]["leg"] == 1
+    assert m.list_trades(season.season_id) == []
 
 
 def test_reconcile_completion_is_publicly_retryable_and_idempotent():

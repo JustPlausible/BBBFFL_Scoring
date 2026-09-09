@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from app.audit import AuditEventRepository
+from app.db import transaction
 from app.identity import IdentityRepository
 from app.player_pool import (
     OwnershipRepository,
@@ -89,6 +90,34 @@ def test_squad_capacity_rejects_excess_player():
             entries[0].season_entry_id,
             effective_at="2027-01-02",
         )
+
+
+def test_acquire_in_transaction_allow_capacity_overage_bypasses_the_squad_limit():
+    """`allow_capacity_overage` exists for `app.midseason_draft.decide_trade`
+    approving a player-for-pick trade into a squad that is still full only
+    because its own matching delisting has not been released yet -- the
+    plan explicitly tolerates that temporary imbalance. Without the flag,
+    this acquisition is refused exactly like any other over-capacity one
+    (`test_squad_capacity_rejects_excess_player` above)."""
+    db, season, entries, pool, ownership = setup_domain(limit=1)
+    first = pool.refresh_player(season.season_id, 396, "First")
+    second = pool.refresh_player(season.season_id, 584, "Second")
+    ownership.acquire(first.season_player_id, entries[0].season_entry_id, effective_at="2027-01-01")
+    with transaction(db) as conn:
+        with pytest.raises(SquadCapacityError):
+            ownership.acquire_in_transaction(
+                conn, second.season_player_id, entries[0].season_entry_id, effective_at="2027-01-02"
+            )
+    with transaction(db) as conn:
+        ownership.acquire_in_transaction(
+            conn,
+            second.season_player_id,
+            entries[0].season_entry_id,
+            effective_at="2027-01-02",
+            allow_capacity_overage=True,
+        )
+    squad = {p.season_player_id for p in ownership.current_squad(entries[0].season_entry_id)}
+    assert squad == {first.season_player_id, second.season_player_id}
 
 
 def test_backdated_acquisition_cannot_overfill_squad_at_future_boundary():

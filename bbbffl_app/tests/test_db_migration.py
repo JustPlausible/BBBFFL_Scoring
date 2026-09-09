@@ -1125,6 +1125,90 @@ def test_opening_round_nomination_multiplicity_downgrade_succeeds_when_data_is_c
     engine.dispose()
 
 
+def test_0027_upgrade_survives_an_already_accepted_preseason_draft(tmp_path):
+    """Issue #164 (Codex review): `season_draft`'s batch-mode SQLite column
+    add drops and recreates the table underneath draft_order_position/
+    draft_pick, which hold foreign keys into it. Every other 2026-replay
+    database this migration is meant to carry forward already has an
+    accepted, finalized preseason draft -- this must not be a fresh-
+    database-only migration."""
+    from sqlalchemy import text
+
+    url = _url(tmp_path / "populated-0027-upgrade.db")
+    migrate(url, "0026_lineup_adjudication")
+
+    connection = connect(url)
+    season = SeasonRepository(connection).create_season(2026, "populated replay")
+    identities = IdentityRepository(connection)
+    entries = [
+        identities.create_entry(season.season_id, f"l{n}", identities.create_coach(f"C{n}").coach_id, f"T{n}")
+        for n in range(2)
+    ]
+    ownership = OwnershipRepository(connection)
+    ownership.configure_squad_limit(season.season_id, 1)
+    pool = PlayerPoolRepository(connection)
+    players = [pool.refresh_player(season.season_id, n + 1, f"P{n}") for n in range(2)]
+    for entry, player in zip(entries, players):
+        ownership.acquire(player.season_player_id, entry.season_entry_id)
+
+    # Raw inserts matching the pre-0027 season_draft/draft_pick shape (no
+    # draft_kind column yet) -- accept_order/execute_pick on this checkout
+    # already assume the post-migration shape, so a real accepted draft is
+    # seeded directly instead.
+    draft_id = "draft-0027-upgrade-test"
+    now = "2026-01-01T00:00:00+00:00"
+    with connection.engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO season_draft "
+                "(draft_id, season_id, target_squad_size, accepted_at, paused_at, paused_reason, "
+                "finalized_at, finalized_note) VALUES (:draft_id, :season_id, 1, :now, NULL, NULL, :now, NULL)"
+            ),
+            {"draft_id": draft_id, "season_id": season.season_id, "now": now},
+        )
+        for position, entry in enumerate(entries, 1):
+            conn.execute(
+                text("INSERT INTO draft_order_position VALUES (:draft_id, :season_id, :position, :entry_id)"),
+                {
+                    "draft_id": draft_id,
+                    "season_id": season.season_id,
+                    "position": position,
+                    "entry_id": entry.season_entry_id,
+                },
+            )
+        for overall, (entry, player) in enumerate(zip(entries, players), 1):
+            conn.execute(
+                text(
+                    "INSERT INTO draft_pick VALUES "
+                    "(:pick_id, :draft_id, :season_id, :overall, 1, :overall, :entry_id, :entry_id, "
+                    ":player_id, :now, NULL)"
+                ),
+                {
+                    "pick_id": f"pick-{overall}",
+                    "draft_id": draft_id,
+                    "season_id": season.season_id,
+                    "overall": overall,
+                    "entry_id": entry.season_entry_id,
+                    "player_id": player.season_player_id,
+                    "now": now,
+                },
+            )
+    connection.close()
+
+    migrate(url)
+
+    restored = connect(url)
+    row = restored.execute("SELECT draft_id, draft_kind FROM season_draft").fetchone()
+    assert row["draft_id"] == draft_id
+    assert row["draft_kind"] == "preseason"
+    assert restored.execute("SELECT COUNT(*) AS n FROM draft_pick").fetchone()["n"] == 2
+    assert restored.execute("SELECT COUNT(*) AS n FROM draft_order_position").fetchone()["n"] == 2
+    draft = DraftRepository(restored)
+    status = draft.status(season.season_id)
+    assert status.is_finalized
+    assert status.completed_picks == 2
+
+
 def test_revision_chain_has_single_head():
     cfg = Config("alembic.ini")
     assert ScriptDirectory.from_config(cfg).get_heads() == [HEAD]

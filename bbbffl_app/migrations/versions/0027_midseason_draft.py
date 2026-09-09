@@ -87,11 +87,23 @@ def upgrade():
         )
 
     # -- Generalise season_draft to carry more than one draft per season.
+    # On SQLite, batch mode recreates the table (copy, DROP the original,
+    # rename the copy into place); draft_order_position/draft_pick/
+    # season_preseason_window all hold foreign keys into season_draft.
+    # draft_id, so on any real database that already has an accepted
+    # preseason draft (exactly the populated 2026 replay database this
+    # migration exists to carry forward), the DROP step fails FK
+    # enforcement unless it is suspended for this statement -- see the
+    # matching comment in downgrade().
+    if bind.dialect.name == "sqlite":
+        op.execute("PRAGMA foreign_keys=OFF")
     with op.batch_alter_table("season_draft") as batch:
         batch.add_column(sa.Column("draft_kind", sa.Text(), nullable=False, server_default="preseason"))
         batch.drop_constraint("uq_draft_season", type_="unique")
         batch.create_unique_constraint("uq_draft_season_kind", ["season_id", "draft_kind"])
         batch.create_check_constraint("ck_draft_kind_valid", "draft_kind IN ('preseason', 'midseason')")
+    if bind.dialect.name == "sqlite":
+        op.execute("PRAGMA foreign_keys=ON")
 
     # -- Mid-season draft lifecycle.
     op.create_table(

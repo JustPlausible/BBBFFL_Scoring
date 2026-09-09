@@ -45,6 +45,7 @@ from app.midseason_draft import (
     MidseasonDraftRepository,
     MidseasonDraftStateError,
     MidseasonPendingTradesError,
+    MidseasonPickReconciliationError,
     MidseasonTradeValidationError,
 )
 from app.migrations import migrate
@@ -534,11 +535,12 @@ async def preseason_state_error_handler(request: Request, exc: PreseasonStateErr
 # app.preseason does (see its handlers above) -- these are the sole place
 # that translates each one to an HTTP status for
 # app/routes/midseason_draft.py (issue #164). More specific subclasses
-# (MidseasonPendingTradesError, MidseasonTradeValidationError) get their own
-# handlers so their structured `.trade_ids`/`.issues` reach the client;
-# every other MidseasonDraftStateError (including MidseasonRoundNotFinalError
-# and MidseasonDraftExistsError) falls through to the generic 409 handler
-# below via FastAPI's most-derived-registered-class dispatch.
+# (MidseasonPendingTradesError, MidseasonTradeValidationError,
+# MidseasonPickReconciliationError) get their own handlers so their
+# structured `.trade_ids`/`.issues`/`.mismatched` reach the client; every
+# other MidseasonDraftStateError (including MidseasonRoundNotFinalError and
+# MidseasonDraftExistsError) falls through to the generic 409 handler below
+# via FastAPI's most-derived-registered-class dispatch.
 @app.exception_handler(MidseasonPendingTradesError)
 async def midseason_pending_trades_error_handler(request: Request, exc: MidseasonPendingTradesError) -> JSONResponse:
     return JSONResponse(status_code=409, content={"detail": str(exc), "trade_ids": exc.trade_ids})
@@ -549,6 +551,13 @@ async def midseason_trade_validation_error_handler(
     request: Request, exc: MidseasonTradeValidationError
 ) -> JSONResponse:
     return JSONResponse(status_code=409, content={"detail": str(exc), "issues": exc.issues})
+
+
+@app.exception_handler(MidseasonPickReconciliationError)
+async def midseason_pick_reconciliation_error_handler(
+    request: Request, exc: MidseasonPickReconciliationError
+) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc), "mismatched": exc.mismatched})
 
 
 @app.exception_handler(MidseasonDraftStateError)

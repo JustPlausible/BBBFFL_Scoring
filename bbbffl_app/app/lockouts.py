@@ -902,6 +902,119 @@ class LockoutRepository:
             )
         return views
 
+    # -- Issue #176: persisted-only historical projection --------------------
+    #
+    # A round whose lockout evidence is already fully and irreversibly
+    # decided (in practice, a `final` round: lockout only ever gates
+    # *editing*, which ended when the round left `open`/`live`) never needs
+    # live AFL evidence to be redisplayed -- only to be *decided* in the
+    # first place. These two methods project exactly the same durable facts
+    # `lock_state`/`describe_triggers` themselves always prefer over live
+    # evidence (`weekly_lineup_lock`, `bbbffl_round_lockout_trigger_
+    # activation`), but never ask a `MatchFactsProvider` for anything and
+    # never materialize anything new -- so a historical round's mapped AFL
+    # round can safely sit outside whatever replay evidence package is
+    # currently active (e.g. an earlier phase's package at a replay
+    # boundary) without this read failing closed on evidence it does not
+    # actually need. Callers needing a *decision* (anything not already
+    # durably resolved) must keep using `lock_state`/`describe_triggers`.
+
+    def persisted_lock_state(
+        self,
+        lineup_id: str,
+        bbbffl_round_id: str,
+        season_entry_id: str,
+        positions: dict,
+    ) -> LineupLockView:
+        """`lock_state`'s persisted-only counterpart: every position that
+        already has a `weekly_lineup_lock` row (or resolves from the round's
+        persisted main-trigger activation alone, for a genuine vacancy) is
+        reported exactly as `lock_state` would; a named position with
+        neither is reported `INDETERMINATE` rather than resolved live --
+        this method never calls `resolve_match`."""
+        with transaction(self.database) as conn:
+            existing = self._existing_locks(conn, lineup_id)
+            coverage = self._trigger_coverage(conn, bbbffl_round_id)
+            view: dict[str, PositionLockState] = {}
+            for position, season_player_id in positions.items():
+                row = existing.get(position)
+                if row is not None and (season_player_id is None or row["season_player_id"] == season_player_id):
+                    view[position] = PositionLockState(
+                        position,
+                        row["season_player_id"],
+                        LockState.LOCKED,
+                        row["lock_reason"],
+                        row["afl_match_id"],
+                        row["effective_lock_at"],
+                        row["observed_status"],
+                        True,
+                    )
+                elif season_player_id is None:
+                    view[position] = (
+                        PositionLockState(
+                            position, None, LockState.LOCKED, "main_lockout_triggered", None, None, None, False
+                        )
+                        if coverage.main_activated
+                        else PositionLockState(position, None, LockState.EDITABLE, "empty", None, None, None, False)
+                    )
+                else:
+                    view[position] = PositionLockState(
+                        position,
+                        season_player_id,
+                        LockState.INDETERMINATE,
+                        "evidence_unavailable_for_historical_round",
+                        None,
+                        None,
+                        None,
+                        False,
+                    )
+        # Display-only metadata (when this projection was read) -- unlike
+        # every other `evaluation_at` in this module, nothing here is
+        # decided relative to it, so it never affects `view` above.
+        return LineupLockView(lineup_id, bbbffl_round_id, season_entry_id, datetime.now(timezone.utc).isoformat(), view)
+
+    def persisted_trigger_state(self, bbbffl_round_id: str) -> list[TriggerActivationView]:
+        """`describe_triggers`'s persisted-only counterpart: `activated`/
+        `activation_reason`/`effective_lock_at` come from the same durable
+        `bbbffl_round_lockout_trigger_activation` record either way; only
+        each configured match's *observed* status/start time -- always
+        display-only, never itself proof of activation -- is unavailable
+        without live evidence and reported `None`."""
+        triggers = LockoutTriggerRepository(self.database).list_triggers(bbbffl_round_id)
+        activations = {
+            row["trigger_id"]: row
+            for row in self.database.execute(
+                "SELECT a.trigger_id, a.afl_match_id, a.observed_status, a.effective_lock_at, a.activation_reason "
+                "FROM bbbffl_round_lockout_trigger_activation a "
+                "JOIN bbbffl_round_lockout_trigger t ON t.trigger_id=a.trigger_id "
+                "WHERE t.bbbffl_round_id=?",
+                (bbbffl_round_id,),
+            ).fetchall()
+        }
+        views = []
+        for trigger in triggers:
+            activation = activations.get(trigger.trigger_id)
+            configured_matches = tuple(
+                {"afl_match_id": match_id, "observed_status": None, "start_time_utc": None}
+                for match_id in trigger.afl_match_ids
+            )
+            views.append(
+                TriggerActivationView(
+                    trigger.trigger_id,
+                    trigger.trigger_key,
+                    trigger.trigger_type,
+                    trigger.sequence,
+                    trigger.afl_match_ids,
+                    activation is not None,
+                    activation["activation_reason"] if activation else None,
+                    activation["afl_match_id"] if activation else None,
+                    activation["effective_lock_at"] if activation else None,
+                    activation["observed_status"] if activation else None,
+                    configured_matches,
+                )
+            )
+        return views
+
     # -- Issue #146: adjudication support -----------------------------------
     #
     # A missed-initial-submission adjudication (`app.lineup_adjudication`)

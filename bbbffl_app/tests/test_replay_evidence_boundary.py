@@ -21,11 +21,17 @@ caught), and assert -- not merely that the page returns something, but --
 that the unwanted lookup for the historical AFL round never happens at all.
 """
 
+from datetime import datetime, timezone
+
 import pytest
 
 from app.admin_dashboard import build_admin_dashboard
+from app.afl_client import Match, Team
 from app.audit import ActorContext, AuditEventRepository
 from app.auth import RoleGrantRepository
+from app.lineups import WeeklyLineupRepository
+from app.lockouts import LockoutRepository, LockoutTriggerRepository
+from app.player_pool import OwnershipRepository, PlayerPoolRepository
 from app.replay import ReplayEvidenceError
 from app.round_mapping import RoundMappingRepository
 from app.round_review import RoundReviewRepository
@@ -208,3 +214,100 @@ def test_live_mode_first_half_style_final_round_still_renders_with_evidence_pres
     # No evidence lookup is performed for a `final` round either way now --
     # its presence in the package is simply irrelevant to this read.
     assert PRIOR_PHASE_AFL_ROUND not in client.requested_round_ids
+
+
+# -- Persisted lockout history must survive, not just "not crash" -----------
+
+_TRIGGER_AFL_MATCH_ID = 555001
+_TRIGGER_HOME = Team(9101, "Historical FC")
+_TRIGGER_AWAY = Team(9102, "Historical Opp")
+_TRIGGER_START = datetime(2026, 5, 1, 19, 0, tzinfo=timezone.utc)
+
+
+class _HistoricalMatchFacts:
+    """A fixed, one-time fact source used only to durably materialize
+    lockout evidence *while the round was still live* -- entirely separate
+    from `BoundaryReplayAflClient`, which stands in for the replay evidence
+    package actually active when the dashboard is built afterwards. This
+    mirrors how the real lockout plan was decided live, before the second-
+    half evidence-package boundary was ever reached."""
+
+    def __init__(self, matches):
+        self._matches = matches
+
+    def matches_for(self, bbbffl_round_id):
+        return self._matches
+
+
+def test_final_round_dashboard_shows_persisted_lockout_history_without_live_evidence():
+    """Codex review (PR #177): removing the live-evidence requirement for a
+    `final` round must not also blank out its already-decided lockout
+    history -- a trigger that durably activated, and a lineup position that
+    durably locked, while the round was live must still be shown, read
+    straight from persisted evidence, never from a live/replay lookup."""
+    g = build_governed_season(year=17608, close_preseason=True, open_round=True, afl_round=PRIOR_PHASE_AFL_ROUND)
+    round_id = g.logical_round.bbbffl_round_id
+    entry = g.entries[0]
+
+    LockoutTriggerRepository(g.database).create(round_id, "main", "main", 1, [_TRIGGER_AFL_MATCH_ID], reason="test")
+
+    # The preseason window is already closed (`close_preseason=True`), so
+    # ownership can no longer be changed directly -- reuse the player the
+    # draft already assigned to this entry and only refresh its afl-api
+    # facts (never ownership), exactly like a routine afl-api sync would.
+    pool = PlayerPoolRepository(g.database)
+    ownership = OwnershipRepository(g.database)
+    owned = ownership.current_squad(entry.season_entry_id)
+    assert owned, "the draft must have assigned this entry at least one player"
+    season_player_id = owned[0].season_player_id
+    canonical_player_id = g.database.execute(
+        "SELECT canonical_player_id FROM season_player_pool WHERE season_player_id=?", (season_player_id,)
+    ).fetchone()["canonical_player_id"]
+    player = pool.refresh_player(
+        g.season.season_id,
+        canonical_player_id,
+        "Historical Player",
+        afl_team_id=_TRIGGER_HOME.team_id,
+        afl_team_name=_TRIGGER_HOME.name,
+    )
+    assert player.season_player_id == season_player_id
+
+    lineups = WeeklyLineupRepository(g.database)
+    draft = lineups.save_draft(
+        g.season.season_id,
+        g.competition.competition_id,
+        round_id,
+        entry.season_entry_id,
+        {"F1": player.season_player_id},
+        expected_revision=0,
+    )
+    lineups.submit(draft.lineup_id, expected_draft_revision=draft.revision, expected_submission_version=0)
+
+    # Materialize durable lockout evidence exactly as the real live/replay
+    # flow would -- via `lock_state`, against a concluded match -- *before*
+    # the round is finalized and the active evidence package moves on.
+    concluded_match = Match(_TRIGGER_AFL_MATCH_ID, _TRIGGER_HOME, _TRIGGER_AWAY, "CONCLUDED", _TRIGGER_START.isoformat())
+    LockoutRepository(g.database).lock_state(
+        draft.lineup_id,
+        round_id,
+        entry.season_entry_id,
+        {"F1": player.season_player_id},
+        match_facts=_HistoricalMatchFacts([concluded_match]),
+    )
+
+    _finalize_the_open_round(g)
+
+    client = BoundaryReplayAflClient(available_round_ids={CURRENT_PHASE_AFL_ROUND})
+    view = _scorer_dashboard(g, client)
+
+    assert view["round"]["state"] == "final"
+    assert PRIOR_PHASE_AFL_ROUND not in client.requested_round_ids
+
+    trigger_rows = view["lockout"]["triggers"]
+    assert len(trigger_rows) == 1
+    assert trigger_rows[0]["trigger_key"] == "main"
+    assert trigger_rows[0]["activated"] is True
+
+    team_row = next(r for r in view["lineups"] if r["season_entry_id"] == entry.season_entry_id)
+    assert team_row["lock_summary"] is not None
+    assert team_row["lock_summary"]["locked_main"] + team_row["lock_summary"]["locked_selective"] >= 1

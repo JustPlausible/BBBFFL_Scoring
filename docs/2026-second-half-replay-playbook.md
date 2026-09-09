@@ -185,35 +185,117 @@ opening step brings the app up, once that evidence exists.
       replay/2026-second-half/backups/checkpoint-pre-round-10.json
    ```
 
-## E. AFL evidence acquisition for Rounds 10–20 (known prerequisite)
+## E. AFL evidence acquisition for Rounds 10–20
 
-`app.replay_acquisition.acquire_first_half_2026` (driven by `scripts/
-first_half_replay.py acquire`) is hard-scoped to AFL Opening Round plus
-ordinary rounds 1–9 — it validates that exact set and fails otherwise. There
-is currently no equivalent acquisition path for AFL rounds 10–20.
+`app.replay_acquisition.acquire_second_half_2026` (driven by `scripts.
+second_half_replay acquire`, issue #174) resolves the 2026 AFL season from
+AFL-api metadata — never a hard-coded database ID — and requires exactly
+AFL Rounds 10–20 inclusive (eleven rounds). It validates that exact set and
+fails closed on any round missing, duplicated, or ambiguous, on any
+match/player-stat identity acquired twice, and on incomplete final-stat
+coverage, before it writes anything. It shares its season-resolution,
+player-pool pagination, and per-round match/stat/roster acquisition
+boundaries with `acquire_first_half_2026` (`app/replay_acquisition.py`'s
+`_resolve_2026_season_and_players`/`_acquire_match_evidence` helpers) — the
+same acquisition/domain boundary the first half uses, not a parallel
+implementation. Do not accept a package validated against a round count
+other than eleven; that would silently admit a missing or extra round and
+fail later at preflight or replay instead of here.
 
-Before Round 10 evidence can be acquired under this playbook, that
-acquisition path needs a second-half counterpart (an `acquire_second_half_
-2026`-shaped function following the same schema/provenance/pagination
-conventions as `app/replay_acquisition.py`, exposed through a `scripts/
-second_half_replay.py acquire` subcommand mirroring `first_half_replay.py`'s
-`acquire`/`validate`/`checkpoint` triad). This is a small, contained,
-analogous addition, not a redesign — but it does not exist yet, so this
-playbook does not claim a command for it. Track this as an explicit
-prerequisite for issue #166 (or a dedicated follow-up issue) rather than
-inventing a command here or reusing `first_half_replay.py acquire` against
-rounds it will refuse.
+Unlike the first-half acquisition (`2026-first-half-replay-playbook.md`
+section C, run from a host virtualenv), every second-half acquisition/
+validation command below runs through Docker — this playbook's operator
+uses Docker throughout because host Python versions are not treated as
+authoritative. `compose.second-half-replay.yaml` mounts
+`replay/2026-second-half/evidence` and `.../state` read-only for the
+long-running `app` service (section D); the one-off commands below
+override those two mounts read-write for the duration of the command only,
+exactly like section D step 3 already does for the checkpoint state mount
+when initialising it.
 
-Once that acquisition path exists, section F's evidence step is the same
-`acquire` → `validate` → `checkpoint` sequence as
-`2026-first-half-replay-playbook.md` section C, pointed at
-`replay/2026-second-half/evidence/2026-second-half.json` and validated the
-same way (`PASS`, season 2026, the **eleven** included AFL round identities
-for rounds 10–20 inclusive, every match with stat coverage — do not accept
-a package validated against a count of ten; that silently permits one
-missing round to pass acquisition and fail later at preflight or replay).
-Record this in the playbook test log's Notes column as a genuine
-prerequisite, not silently worked around with fabricated evidence.
+`second_half_replay acquire` deliberately has **no** `--player-pool-output`
+flag (unlike `first_half_replay acquire`). The second-half working copy
+already carries the verified season-wide `2026-player-pool.json` acquired
+during the first half (section B); nothing in this playbook re-bootstraps a
+season player pool from a file for the second half, so acquiring Round
+10–20 evidence never touches, rebuilds, or redefines it. A genuine need to
+refresh season membership is a separate, explicitly justified action, never
+a side effect of this command.
+
+1. **Acquire.** Requires the configured consumer API and `AFL_API_KEY`,
+   exactly like the first-half acquisition. Do not prepare Bruno files —
+   the command follows every player-pool page and every round/match/stat
+   endpoint itself, exactly as `2026-first-half-replay-playbook.md` section
+   C describes for the first half:
+
+   ```bash
+   read -rsp 'AFL API key: ' AFL_API_KEY; echo
+   $SECOND run --rm \
+     -v "$PWD/bbbffl_app:/app" \
+     -v "$PWD/replay/2026-second-half/evidence:/replay/evidence" \
+     -e AFL_API_BASE_URL=https://<consumer-api-host> \
+     -e AFL_API_KEY="$AFL_API_KEY" \
+     app \
+     python -m scripts.second_half_replay acquire \
+     --output /replay/evidence/2026-second-half.json
+   unset AFL_API_KEY
+   ```
+
+2. **Validate.** The fresh second-half checkpoint from section D step 3
+   must already exist at this point (it is evidence-agnostic and does not
+   require the acquired package). The two `:ro` mounts below simply make
+   explicit the read-only access `compose.second-half-replay.yaml` already
+   declares for these paths — no override needed here, unlike acquire:
+
+   ```bash
+   $SECOND run --rm \
+     -v "$PWD/bbbffl_app:/app" \
+     -v "$PWD/replay/2026-second-half/evidence:/replay/evidence:ro" \
+     -v "$PWD/replay/2026-second-half/state:/replay/state:ro" \
+     app \
+     python -m scripts.second_half_replay validate \
+     --evidence /replay/evidence/2026-second-half.json \
+     --state /replay/state/checkpoint.json
+   ```
+
+   Expect validation `PASS`, season 2026, the **eleven** included AFL round
+   identities for rounds 10–20 inclusive, every match with stat coverage,
+   and explicit available/unavailable roster coverage. A missing optional
+   roster is diagnostic, not fabricated. Missing/incomplete stats,
+   malformed scheduled starts, an unsupported package version, a season
+   other than 2026, a round count other than eleven, or any duplicate/
+   conflicting match or round identity is fatal and reported by
+   `validate_replay_package` before anything reads as a pass.
+
+3. **Confirm coverage/manifest diagnostics.** The `validate` command's PASS
+   output already reports round/match/stats/roster coverage; to inspect the
+   full manifest (acquisition timestamp, source host — never credentials —
+   API/exporter versions, included round identities, `player_pool_count`/
+   `player_pool_page_count`), read the evidence file directly on the host —
+   it is a plain JSON file at the bind-mounted path, no container needed:
+
+   ```bash
+   jq '.manifest' replay/2026-second-half/evidence/2026-second-half.json
+   ```
+
+   Confirm `manifest.included_rounds` lists exactly round numbers 10
+   through 20 with no repeats, `manifest.match_count` equals
+   `manifest.player_stat_match_count`, and `manifest.package_version` is
+   `bbbffl.second-half/v1`.
+
+4. **Hermetic proof: disconnect AFL-api.** Now stop/disconnect `afl-api`
+   (or firewall the host). Leave it unavailable for every remaining step.
+   Second-half replay never falls back to it — once acquisition has
+   written `2026-second-half.json` and validation has passed, nothing later
+   in this playbook depends on AFL-api being reachable. `scripts.
+   second_half_replay validate`, and the application startup in section F,
+   only ever read the local evidence/checkpoint files.
+
+5. **Proceed to the pre-Round-10 startup/checkpoint validation.** Section F
+   step 1 brings up the `app` service now that the evidence package exists
+   and the fresh checkpoint from section D step 3 is in place, then section
+   F step 2 confirms Rounds 1–9 history survived the restore before Round
+   10 itself begins.
 
 ## F. Bring up the application and replay Round 10 (pre-mid-season-draft squads)
 

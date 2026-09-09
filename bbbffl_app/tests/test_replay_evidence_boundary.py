@@ -286,7 +286,9 @@ def test_final_round_dashboard_shows_persisted_lockout_history_without_live_evid
     # Materialize durable lockout evidence exactly as the real live/replay
     # flow would -- via `lock_state`, against a concluded match -- *before*
     # the round is finalized and the active evidence package moves on.
-    concluded_match = Match(_TRIGGER_AFL_MATCH_ID, _TRIGGER_HOME, _TRIGGER_AWAY, "CONCLUDED", _TRIGGER_START.isoformat())
+    concluded_match = Match(
+        _TRIGGER_AFL_MATCH_ID, _TRIGGER_HOME, _TRIGGER_AWAY, "CONCLUDED", _TRIGGER_START.isoformat()
+    )
     LockoutRepository(g.database).lock_state(
         draft.lineup_id,
         round_id,

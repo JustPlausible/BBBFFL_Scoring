@@ -366,6 +366,37 @@ def test_confirm_ladder_rejects_a_competition_from_a_different_season():
         m.confirm_ladder(season.season_id, other["competition"].competition_id, actor=ACTOR)
 
 
+def test_confirm_ladder_refuses_if_the_trigger_round_changes_between_its_two_transactions(monkeypatch):
+    """Codex review: `confirm_ladder` reads the season's trigger round in
+    one transaction, computes the ladder snapshot for it outside any lock
+    (a deliberate, documented pattern -- the live ladder is never locked),
+    then freezes that snapshot into a new `midseason_draft` row in a
+    second transaction. In the window between those two transactions,
+    `set_midseason_draft_trigger_round` can still change the trigger --
+    its own guard only refuses once a `midseason_draft` row exists, and
+    that row isn't inserted until the second transaction. Must refuse and
+    commit nothing rather than freezing a ladder computed for a
+    since-changed trigger round, permanently (the setter is frozen once
+    any draft exists) leaving the season's configuration inconsistent with
+    its own immutable snapshot."""
+    ctx = _setup(trigger_round=10)
+    m, season, database = ctx["midseason"], ctx["season"], ctx["database"]
+    seasons = SeasonRepository(database)
+    original_snapshot = LadderRepository.snapshot
+
+    def racing_snapshot(self, competition_id, through_round):
+        seasons.set_midseason_draft_trigger_round(season.season_id, 9, reason="racing change")
+        return original_snapshot(self, competition_id, through_round)
+
+    monkeypatch.setattr(LadderRepository, "snapshot", racing_snapshot)
+
+    with pytest.raises(MidseasonDraftStateError):
+        m.confirm_ladder(season.season_id, ctx["competition"].competition_id, actor=ACTOR)
+
+    assert m.get_draft(season.season_id) is None
+    assert seasons.get_season(season.season_id).midseason_draft_trigger_round == 9
+
+
 def test_decide_trade_rejects_a_stale_leg_whose_ownership_moved_since_proposal():
     """Codex review: two approved-in-sequence trades must not let the
     second one release a player from whoever the first one already moved

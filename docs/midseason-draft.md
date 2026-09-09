@@ -60,6 +60,18 @@ through the existing audited match/result/player-stat pathways, and the
 season, or one deliberately re-run) would then confirm a different snapshot,
 but an already-confirmed snapshot is never silently rewritten.
 
+`confirm_ladder` itself spans two transactions -- reading the season's
+configured trigger round in the first, computing the ladder snapshot for it
+outside any lock (deliberately: the live ladder is never locked) in
+between, then freezing that snapshot into a new `midseason_draft` row in
+the second. `set_midseason_draft_trigger_round` refuses only once a
+`midseason_draft` row exists, so it can still change the trigger in the
+window between those two transactions. The second transaction re-locks and
+re-reads the season's trigger round and refuses (committing nothing) if it
+no longer matches what the snapshot was computed against, rather than
+freezing a ladder for a since-changed trigger round -- which the setter
+being frozen once *any* draft exists would otherwise make permanent.
+
 ## Pending/approved trades and ownership
 
 `propose_trade` validates every leg before writing anything and never

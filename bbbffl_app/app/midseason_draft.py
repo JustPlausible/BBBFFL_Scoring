@@ -376,6 +376,33 @@ class MidseasonDraftRepository:
                 "SELECT 1 FROM midseason_draft WHERE season_id=?" + _for_update_suffix(self.database), (season_id,)
             ).fetchone():
                 raise MidseasonDraftExistsError("a mid-season draft already exists for this season")
+            # Re-lock and re-read the season's trigger round: between the
+            # first transaction releasing its lock and this one starting,
+            # `set_midseason_draft_trigger_round` could have changed it --
+            # its own guard only refuses once a `midseason_draft` row
+            # exists, and that row is not inserted until this transaction.
+            # The ladder snapshot above was already computed against the
+            # *old* trigger, so silently freezing it under a since-changed
+            # trigger would leave the season's configuration permanently
+            # inconsistent with its own immutable snapshot (worse, once
+            # this insert lands the setter refuses to ever change it
+            # again). Refuse and let the caller retry `confirm_ladder` from
+            # scratch instead -- nothing has been written yet.
+            current_season = conn.execute(
+                "SELECT midseason_draft_trigger_round FROM bbbffl_season WHERE season_id=?"
+                + _for_update_suffix(self.database),
+                (season_id,),
+            ).fetchone()
+            current_trigger = (
+                current_season["midseason_draft_trigger_round"]
+                if current_season and "midseason_draft_trigger_round" in current_season.keys()
+                else None
+            )
+            if current_trigger != trigger:
+                raise MidseasonDraftStateError(
+                    f"the season's configured trigger round changed from {trigger} to {current_trigger} while "
+                    "confirming the ladder -- retry confirm_ladder against the current configuration"
+                )
             midseason_draft_id, now = _id(), _now()
             conn.execute(
                 "INSERT INTO midseason_draft VALUES "

@@ -557,7 +557,10 @@ async def midseason_trade_validation_error_handler(
 async def midseason_pick_reconciliation_error_handler(
     request: Request, exc: MidseasonPickReconciliationError
 ) -> JSONResponse:
-    return JSONResponse(status_code=409, content={"detail": str(exc), "mismatched": exc.mismatched})
+    return JSONResponse(
+        status_code=409,
+        content={"detail": str(exc), "mismatched": exc.mismatched, "unapplied_leg_ids": exc.unapplied_leg_ids},
+    )
 
 
 @app.exception_handler(MidseasonDraftStateError)

@@ -468,14 +468,17 @@ def test_approving_a_player_trade_auto_withdraws_the_players_active_delisting():
     assert player in {p.season_player_id for p in m.ownership.current_squad(b.season_entry_id)}
 
 
-def test_decide_trade_tolerates_a_temporary_squad_capacity_overage_for_a_player_for_pick_trade():
+def test_decide_trade_tolerates_a_temporary_squad_capacity_overage_covered_by_an_active_delisting():
     """Codex review: a documented player-for-pick trade can legitimately
     approve into a squad that is still showing full, because that entry's
     own matching delisting has not been released yet -- release only
     happens later, atomically, at `lock_delistings`. Without
     `allow_capacity_overage` on the player-leg acquisition, `decide_trade`
     would refuse the exact trade shape issue #164 requires, even though the
-    imbalance is only ever temporary and self-resolves at lock time."""
+    imbalance is only ever temporary and self-resolves at lock time. (The
+    pick side of a real player-for-pick trade is exercised separately in
+    the reconciliation tests below -- kept out of this one so it stays
+    focused purely on the capacity-overage tolerance.)"""
     ctx = _delisting_open(trigger_round=10, squad_limit=4)
     m, season, entries = ctx["midseason"], ctx["season"], ctx["entries"]
     receiving, giving = entries[0], entries[1]
@@ -492,12 +495,6 @@ def test_decide_trade_tolerates_a_temporary_squad_capacity_overage_for_a_player_
                 "from_season_entry_id": giving.season_entry_id,
                 "to_season_entry_id": receiving.season_entry_id,
                 "season_player_id": incoming_player,
-            },
-            {
-                "leg_type": "pick",
-                "from_season_entry_id": receiving.season_entry_id,
-                "to_season_entry_id": giving.season_entry_id,
-                "draft_round": 1,
             },
         ],
         actor=ACTOR,
@@ -517,6 +514,78 @@ def test_decide_trade_tolerates_a_temporary_squad_capacity_overage_for_a_player_
     # ever transient.
     assert len(m.ownership.current_squad(receiving.season_entry_id)) == 4
     m.generate_selection_table(season.season_id, actor=ACTOR)
+
+
+def test_decide_trade_refuses_an_uncovered_capacity_overage():
+    """Codex review: the capacity-overage bypass must not apply to an
+    overage nothing will ever resolve. Without an active delisting to cover
+    it, approving a player-for-nothing acquisition into a full squad would
+    leave that entry permanently above its configured limit -- refuse the
+    decision outright instead, with the ordinary squad-capacity ceiling
+    still in force."""
+    ctx = _delisting_open(trigger_round=10, squad_limit=4)
+    m, season, entries = ctx["midseason"], ctx["season"], ctx["entries"]
+    receiving, giving = entries[0], entries[1]
+    assert len(m.ownership.current_squad(receiving.season_entry_id)) == 4
+    # No delisting submitted for `receiving` -- nothing will ever bring its
+    # squad back down to the limit if this acquisition is allowed through.
+    incoming_player = next(iter(m.ownership.current_squad(giving.season_entry_id))).season_player_id
+    trade = m.propose_trade(
+        season.season_id,
+        [
+            {
+                "leg_type": "player",
+                "from_season_entry_id": giving.season_entry_id,
+                "to_season_entry_id": receiving.season_entry_id,
+                "season_player_id": incoming_player,
+            },
+        ],
+        actor=ACTOR,
+    )
+    with pytest.raises(MidseasonDraftStateError):
+        m.decide_trade(season.season_id, trade.trade_id, True, actor=ACTOR, reason="uncovered overage")
+    assert len(m.ownership.current_squad(receiving.season_entry_id)) == 4
+    assert m.get_trade(trade.trade_id).status == "pending"
+
+
+def test_decide_trade_refuses_a_capacity_overage_once_the_draft_is_complete():
+    """Codex review: even with a covering delisting on paper, the
+    capacity-overage bypass must not apply once the draft has reached
+    `draft_complete` -- there is no later `lock_delistings` call in
+    post-draft trading to ever release anything and resolve the overage."""
+    ctx = _delisting_open(trigger_round=10, squad_limit=4)
+    m, season, entries = ctx["midseason"], ctx["season"], ctx["entries"]
+    worst = entries[9]
+    squad = m.ownership.current_squad(worst.season_entry_id)
+    m.submit_delisting(season.season_id, worst.season_entry_id, squad[0].season_player_id, actor=ACTOR)
+    m.lock_delistings(season.season_id, actor=ACTOR)
+    m.generate_selection_table(season.season_id, actor=ACTOR)
+    pool = list(m.available_player_pool(season.season_id))
+    while True:
+        nxt = m.next_pick(season.season_id)
+        if nxt is None:
+            break
+        m.execute_pick(season.season_id, nxt.current_season_entry_id, pool.pop(0).season_player_id, actor=ACTOR)
+    assert m.get_draft(season.season_id).state == "draft_complete"
+
+    receiving, giving = entries[0], entries[1]
+    assert len(m.ownership.current_squad(receiving.season_entry_id)) == 4
+    incoming_player = next(iter(m.ownership.current_squad(giving.season_entry_id))).season_player_id
+    trade = m.propose_trade(
+        season.season_id,
+        [
+            {
+                "leg_type": "player",
+                "from_season_entry_id": giving.season_entry_id,
+                "to_season_entry_id": receiving.season_entry_id,
+                "season_player_id": incoming_player,
+            },
+        ],
+        actor=ACTOR,
+    )
+    with pytest.raises(MidseasonDraftStateError):
+        m.decide_trade(season.season_id, trade.trade_id, True, actor=ACTOR, reason="too late for overage tolerance")
+    assert len(m.ownership.current_squad(receiving.season_entry_id)) == 4
 
 
 def test_decide_trade_is_blocked_once_post_draft_trading_is_closed():
@@ -805,6 +874,94 @@ def test_lock_delistings_refuses_a_pick_trade_that_cannot_reconcile_and_recovers
 
     for entry in (worst, best):
         assert len(m.ownership.current_squad(entry.season_entry_id)) == 4
+
+
+def test_lock_delistings_refuses_an_approved_pick_leg_with_no_vacancy_to_apply_to():
+    """Codex review: an approved round-based pick leg can name a sender
+    that ends up with no vacancy in that round at all. Generation would
+    then silently drop the pick side of that trade entirely (only
+    recording it in `unapplied_pick_trade_leg_ids`), rather than ever
+    delivering what was approved. `lock_delistings` must catch this and
+    refuse to lock instead."""
+    ctx = _delisting_open(trigger_round=10, squad_limit=4)
+    m, season, entries = ctx["midseason"], ctx["season"], ctx["entries"]
+    worst, best = entries[9], entries[0]
+    # `worst` never delists anyone, so it has zero vacancy and therefore no
+    # original round-1 allocation at all to redirect.
+    assert len(m.ownership.current_squad(worst.season_entry_id)) == 4
+
+    trade = m.propose_trade(
+        season.season_id,
+        [
+            {
+                "leg_type": "pick",
+                "from_season_entry_id": worst.season_entry_id,
+                "to_season_entry_id": best.season_entry_id,
+                "draft_round": 1,
+            }
+        ],
+        actor=ACTOR,
+    )
+    m.decide_trade(season.season_id, trade.trade_id, True, actor=ACTOR, reason="approved")
+
+    with pytest.raises(MidseasonPickReconciliationError) as excinfo:
+        m.lock_delistings(season.season_id, actor=ACTOR)
+    legs = m.trade_legs(trade.trade_id)
+    assert excinfo.value.unapplied_leg_ids == [legs[0].leg_id]
+
+    draft = m.get_draft(season.season_id)
+    assert draft.state == "delisting_open"
+
+
+def test_same_round_three_way_pick_rotation_resolves_each_leg_to_its_own_named_recipient():
+    """Codex review: resolving a leg by walking onward from its
+    *destination* conflates "B forwards the specific pick it just received
+    from A" with "B separately trades away its own unrelated pick" --
+    indistinguishable in this data model, since a leg only ever names its
+    sender's own original entitlement. A same-round three-way rotation (A's
+    pick to B, B's own pick to C, C's own pick to A) must resolve each leg
+    directly against its own named sender: A's pick lands at B (not two
+    hops away at C), B's at C, C's at A."""
+    ctx = _delisting_open(trigger_round=10, squad_limit=4)
+    m, season, entries = ctx["midseason"], ctx["season"], ctx["entries"]
+    a, b, c = entries[9], entries[8], entries[7]
+    for entry in (a, b, c):
+        squad = m.ownership.current_squad(entry.season_entry_id)
+        m.submit_delisting(season.season_id, entry.season_entry_id, squad[0].season_player_id, actor=ACTOR)
+
+    trade = m.propose_trade(
+        season.season_id,
+        [
+            {
+                "leg_type": "pick",
+                "from_season_entry_id": a.season_entry_id,
+                "to_season_entry_id": b.season_entry_id,
+                "draft_round": 1,
+            },
+            {
+                "leg_type": "pick",
+                "from_season_entry_id": b.season_entry_id,
+                "to_season_entry_id": c.season_entry_id,
+                "draft_round": 1,
+            },
+            {
+                "leg_type": "pick",
+                "from_season_entry_id": c.season_entry_id,
+                "to_season_entry_id": a.season_entry_id,
+                "draft_round": 1,
+            },
+        ],
+        actor=ACTOR,
+    )
+    m.decide_trade(season.season_id, trade.trade_id, True, actor=ACTOR, reason="three-way rotation")
+    m.lock_delistings(season.season_id, actor=ACTOR)
+    m.generate_selection_table(season.season_id, actor=ACTOR)
+
+    picks = m.picks(season.season_id)
+    round1 = {p.original_season_entry_id: p.current_season_entry_id for p in picks if p.draft_round == 1}
+    assert round1[a.season_entry_id] == b.season_entry_id
+    assert round1[b.season_entry_id] == c.season_entry_id
+    assert round1[c.season_entry_id] == a.season_entry_id
 
 
 def test_pick_for_pick_swap_trade_keeps_every_team_at_its_own_vacancy_count():

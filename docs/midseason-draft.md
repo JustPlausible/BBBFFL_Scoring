@@ -79,11 +79,26 @@ entitlements become concrete numbered picks" exactly at that boundary.
 
 A pick trade can hand a team more picks than its own vacancy count without a
 matching player/pick outflow (the plan explicitly allows a temporary
-imbalance). The system does not need to forbid this at proposal/approval
-time: `OwnershipRepository.validate_squad_capacity` -- the same guard every
-draft pick already goes through -- refuses to let a team complete a
-selection that would exceed the configured squad limit, so an unbalanced
-trade simply leaves its extra pick unusable rather than corrupting a squad.
+imbalance) -- and, similarly, `decide_trade`'s player-leg acquisition
+tolerates a temporary squad-capacity overage (`allow_capacity_overage`) when
+the receiving entry holds enough still-active delistings under this same
+draft to cover it once they release. Neither of these is left to be
+discovered only once a pick can never legally execute: `lock_delistings`
+re-plans the eventual selection allocation before ever committing (shared
+with `generate_selection_table` via `_plan_selection_allocations`) and
+refuses to lock -- rolling back cleanly, including any delisted-player
+releases already applied -- if any entry's final selection count doesn't
+exactly match its own vacancies, or if any approved pick leg has no
+vacancy to apply to at all (`MidseasonPickReconciliationError`, carrying
+`.mismatched` and `.unapplied_leg_ids`). The capacity-overage bypass is
+itself bounded the same way: outside `delisting_open`, or without a
+covering active delisting, `decide_trade` refuses the acquisition outright
+instead of creating an overage nothing will ever resolve. Redirects are
+resolved as a single direct hop from each allocation's own original
+vacancy-owner -- never chained through a leg's destination -- since a leg
+only ever names its sender's own original entitlement, not a specifically
+re-traded one; this also makes same-round swaps and multi-way rotations
+resolve correctly without special-casing.
 
 ## Delisting lock and draft-generation boundary
 

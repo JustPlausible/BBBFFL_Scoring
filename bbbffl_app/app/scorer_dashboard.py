@@ -270,7 +270,14 @@ def _build_team_readiness(
         submission = lineups_repo.get_effective_submission(draft.lineup_id) if draft is not None else None
         state = _team_submission_state(draft, submission)
         lock_summary = None
-        if draft is not None and lifecycle_state not in ("not_created", "upcoming"):
+        # A `final` round's lockout evidence is done and immutable -- its
+        # published result already reflects whatever locked/unlocked while
+        # it was live, and nothing here ever re-derives or changes that
+        # after the fact (issue #176: the round's mapped AFL round may by
+        # now sit outside the currently active replay evidence package
+        # entirely, e.g. a prior evidence-package boundary, so this must
+        # never depend on fetching it again just to redisplay history).
+        if draft is not None and lifecycle_state not in ("not_created", "upcoming", "final"):
             effective_positions = submission.positions if submission is not None else draft.positions
             try:
                 view = lockouts_repo.lock_state(
@@ -1025,7 +1032,18 @@ def _build_round_dashboard(
     # read it unconditionally so a provider outage below is never confused
     # with "nothing was ever configured" (Codex review, PR #159).
     trigger_plan_configured = False
-    if lifecycle_state != "not_created":
+    # A `final` round is already published, read-only governance/operational
+    # history -- its lockout/lineup evidence was durably materialized while
+    # it was live and never changes afterwards (a correction is a separate,
+    # explicitly-invoked mutation elsewhere, never something a dashboard
+    # read triggers). It therefore needs no live AFL match/lockout evidence
+    # to render, exactly like a round that has not even been created yet
+    # (issue #176: at a replay evidence-package boundary, a finalized
+    # historical round's mapped AFL round can legitimately sit outside the
+    # currently active package -- requiring it here would fail closed for
+    # evidence this read never actually needs).
+    needs_live_evidence = lifecycle_state not in ("not_created", "final")
+    if needs_live_evidence:
         trigger_plan_configured = bool(LockoutTriggerRepository(database).list_triggers(round_id))
         with scope as evidence:
             try:

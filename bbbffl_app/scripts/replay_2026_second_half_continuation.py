@@ -99,7 +99,13 @@ def main() -> int:
         )
         return 1
 
-    migrate(args.database_url)
+    # `status` is documented and parsed as a read-only probe -- it must never
+    # upgrade the schema of a database it is only meant to inspect. Only
+    # `continue` (which mutates the database on purpose) runs the migrator
+    # first, exactly like scripts/replay_2026_midseason_draft.py does before
+    # its own mutating commands.
+    if args.command == "continue":
+        migrate(args.database_url)
     database = connect(args.database_url)
     try:
         return COMMANDS[args.command](database, args)

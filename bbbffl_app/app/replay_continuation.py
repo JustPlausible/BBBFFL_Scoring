@@ -382,108 +382,150 @@ def continue_second_half_regular_season(
     returns success without creating any duplicate rows.
     """
     reason = reason or DEFAULT_REASON
-    with transaction(database) as conn:
-        baseline = _gather_facts(conn.execute, database, locked=True)
+    # Set only once the frozen-fixture triggers have actually been dropped in
+    # the transaction below -- see the except block at the bottom of this
+    # function for why a *dialect name* (not just a bool) is recorded here,
+    # and why recovery must run in a brand-new transaction/connection rather
+    # than reusing the one below.
+    triggers_dropped_for: str | None = None
+    try:
+        with transaction(database) as conn:
+            baseline = _gather_facts(conn.execute, database, locked=True)
 
-        if baseline.round_count == TARGET_ROUND_COUNT:
+            if baseline.round_count == TARGET_ROUND_COUNT:
+                return {
+                    "already_continued": True,
+                    "mutated": False,
+                    "season_id": baseline.season_id,
+                    "fixture_draw_id": baseline.draw_id,
+                    "regular_season_round_count": TARGET_ROUND_COUNT,
+                    "fixture_draw_version": baseline.draw_version,
+                    "preserved_rounds": [1, SOURCE_ROUND_COUNT],
+                    "appended_rounds": [SOURCE_ROUND_COUNT + 1, TARGET_ROUND_COUNT],
+                }
+
+            dialect = database.engine.dialect.name
+            now = _now()
+            correlation_id = new_correlation_id()
+
+            _drop_frozen_fixture_triggers(conn, dialect)
+            # From this point on, if anything below raises, the except block
+            # must attempt SQLite recovery -- deliberately never reset once
+            # set, even after a later in-transaction recreate succeeds (see
+            # that block for why an in-transaction recreate is not itself
+            # enough to be safe from a *later* failure in this same
+            # transaction, on SQLite).
+            triggers_dropped_for = dialect
+
+            conn.execute(
+                "UPDATE bbbffl_season SET regular_season_round_count=?, updated_at=? WHERE season_id=?",
+                (TARGET_ROUND_COUNT, now, baseline.season_id),
+            )
+            new_draw_version = baseline.draw_version + 1
+            conn.execute(
+                "UPDATE season_fixture_draw SET version=?, updated_at=? WHERE fixture_draw_id=?",
+                (new_draw_version, now, baseline.draw_id),
+            )
+
+            rotation = fixture_number_rotation(TARGET_ROUND_COUNT)
+            entries = baseline.entries_by_fixture_number
+            for round_number in APPENDED_ROUND_NUMBERS:
+                for order, (home, away) in enumerate(rotation[round_number - 1], 1):
+                    conn.execute(
+                        "INSERT INTO season_fixture_matchup VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            _matchup_id(baseline.draw_id, round_number, order),
+                            baseline.draw_id,
+                            baseline.season_id,
+                            round_number,
+                            order,
+                            entries[home - 1],
+                            entries[away - 1],
+                        ),
+                    )
+
+            created_round_keys = []
+            for number in APPENDED_ROUND_NUMBERS:
+                round_id = str(uuid4())
+                round_key, label = f"round-{number}", f"Round {number}"
+                conn.execute(
+                    "INSERT INTO bbbffl_round VALUES (?, ?, ?, ?, ?, ?)",
+                    (round_id, baseline.competition_id, round_key, label, number, now),
+                )
+                created_round_keys.append(round_key)
+
+            _recreate_frozen_fixture_triggers(conn, dialect)
+
+            append_event(
+                conn,
+                actor=actor,
+                action=SEASON_CONTINUED_ACTION,
+                entity_type="season",
+                entity_id=baseline.season_id,
+                entity_version=str(TARGET_ROUND_COUNT),
+                correlation_id=correlation_id,
+                reason=reason,
+                before_state={"regular_season_round_count": SOURCE_ROUND_COUNT},
+                after_state={"regular_season_round_count": TARGET_ROUND_COUNT},
+                payload={
+                    "fixture_draw_id": baseline.draw_id,
+                    "fixture_draw_version": new_draw_version,
+                    "preserved_rounds": [1, SOURCE_ROUND_COUNT],
+                    "appended_rounds": [SOURCE_ROUND_COUNT + 1, TARGET_ROUND_COUNT],
+                    "logical_rounds_created": created_round_keys,
+                    "rotation_version": ROTATION_VERSION,
+                },
+            )
+            append_event(
+                conn,
+                actor=actor,
+                action=FIXTURE_DRAW_CONTINUED_ACTION,
+                entity_type="fixture_draw",
+                entity_id=baseline.draw_id,
+                entity_version=str(new_draw_version),
+                correlation_id=correlation_id,
+                reason=reason,
+                before_state={"version": baseline.draw_version, "rounds": SOURCE_ROUND_COUNT},
+                after_state={"version": new_draw_version, "rounds": TARGET_ROUND_COUNT},
+                payload={
+                    "rotation_version": ROTATION_VERSION,
+                    "appended_round_numbers": list(APPENDED_ROUND_NUMBERS),
+                },
+            )
+
             return {
-                "already_continued": True,
-                "mutated": False,
+                "already_continued": False,
+                "mutated": True,
                 "season_id": baseline.season_id,
                 "fixture_draw_id": baseline.draw_id,
                 "regular_season_round_count": TARGET_ROUND_COUNT,
-                "fixture_draw_version": baseline.draw_version,
-                "preserved_rounds": [1, SOURCE_ROUND_COUNT],
-                "appended_rounds": [SOURCE_ROUND_COUNT + 1, TARGET_ROUND_COUNT],
-            }
-
-        dialect = database.engine.dialect.name
-        now = _now()
-        correlation_id = new_correlation_id()
-
-        _drop_frozen_fixture_triggers(conn, dialect)
-
-        conn.execute(
-            "UPDATE bbbffl_season SET regular_season_round_count=?, updated_at=? WHERE season_id=?",
-            (TARGET_ROUND_COUNT, now, baseline.season_id),
-        )
-        new_draw_version = baseline.draw_version + 1
-        conn.execute(
-            "UPDATE season_fixture_draw SET version=?, updated_at=? WHERE fixture_draw_id=?",
-            (new_draw_version, now, baseline.draw_id),
-        )
-
-        rotation = fixture_number_rotation(TARGET_ROUND_COUNT)
-        entries = baseline.entries_by_fixture_number
-        for round_number in APPENDED_ROUND_NUMBERS:
-            for order, (home, away) in enumerate(rotation[round_number - 1], 1):
-                conn.execute(
-                    "INSERT INTO season_fixture_matchup VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        _matchup_id(baseline.draw_id, round_number, order),
-                        baseline.draw_id,
-                        baseline.season_id,
-                        round_number,
-                        order,
-                        entries[home - 1],
-                        entries[away - 1],
-                    ),
-                )
-
-        created_round_keys = []
-        for number in APPENDED_ROUND_NUMBERS:
-            round_id = str(uuid4())
-            round_key, label = f"round-{number}", f"Round {number}"
-            conn.execute(
-                "INSERT INTO bbbffl_round VALUES (?, ?, ?, ?, ?, ?)",
-                (round_id, baseline.competition_id, round_key, label, number, now),
-            )
-            created_round_keys.append(round_key)
-
-        _recreate_frozen_fixture_triggers(conn, dialect)
-
-        append_event(
-            conn,
-            actor=actor,
-            action=SEASON_CONTINUED_ACTION,
-            entity_type="season",
-            entity_id=baseline.season_id,
-            entity_version=str(TARGET_ROUND_COUNT),
-            correlation_id=correlation_id,
-            reason=reason,
-            before_state={"regular_season_round_count": SOURCE_ROUND_COUNT},
-            after_state={"regular_season_round_count": TARGET_ROUND_COUNT},
-            payload={
-                "fixture_draw_id": baseline.draw_id,
                 "fixture_draw_version": new_draw_version,
                 "preserved_rounds": [1, SOURCE_ROUND_COUNT],
                 "appended_rounds": [SOURCE_ROUND_COUNT + 1, TARGET_ROUND_COUNT],
                 "logical_rounds_created": created_round_keys,
-                "rotation_version": ROTATION_VERSION,
-            },
-        )
-        append_event(
-            conn,
-            actor=actor,
-            action=FIXTURE_DRAW_CONTINUED_ACTION,
-            entity_type="fixture_draw",
-            entity_id=baseline.draw_id,
-            entity_version=str(new_draw_version),
-            correlation_id=correlation_id,
-            reason=reason,
-            before_state={"version": baseline.draw_version, "rounds": SOURCE_ROUND_COUNT},
-            after_state={"version": new_draw_version, "rounds": TARGET_ROUND_COUNT},
-            payload={"rotation_version": ROTATION_VERSION, "appended_round_numbers": list(APPENDED_ROUND_NUMBERS)},
-        )
-
-    return {
-        "already_continued": False,
-        "mutated": True,
-        "season_id": baseline.season_id,
-        "fixture_draw_id": baseline.draw_id,
-        "regular_season_round_count": TARGET_ROUND_COUNT,
-        "fixture_draw_version": new_draw_version,
-        "preserved_rounds": [1, SOURCE_ROUND_COUNT],
-        "appended_rounds": [SOURCE_ROUND_COUNT + 1, TARGET_ROUND_COUNT],
-        "logical_rounds_created": created_round_keys,
-    }
+            }
+    except Exception:
+        if triggers_dropped_for == "sqlite":
+            # SQLite's pysqlite driver only wraps DDL in the surrounding
+            # transaction once that transaction has already been opened by a
+            # prior DML statement (a documented DBAPI limitation -- see
+            # https://docs.sqlalchemy.org/en/20/dialects/sqlite.html
+            # #serializable-isolation-savepoints-transactional-ddl). The very
+            # first `DROP TRIGGER` above is therefore *not* wrapped (nothing
+            # was open yet) and always commits immediately, regardless of
+            # whether the rest of this operation later succeeds or fails --
+            # and even a later in-transaction `_recreate_frozen_fixture_
+            # triggers` call is *not* itself safe from a *subsequent*
+            # failure in the same transaction (e.g. append_event rejecting
+            # an invalid actor), because by then a DML-opened transaction
+            # *is* active and would roll the recreate back with everything
+            # else. Recovery must therefore run in a brand-new, independent
+            # transaction/connection -- reusing the doomed one above would
+            # itself be rolled back the same way. PostgreSQL's fully
+            # transactional DDL means the original DROP already rolled back
+            # there with everything else; this recovery path is never
+            # reached for that dialect.
+            with transaction(database) as recovery_conn:
+                _drop_frozen_fixture_triggers(recovery_conn, "sqlite")
+                _recreate_frozen_fixture_triggers(recovery_conn, "sqlite")
+        raise

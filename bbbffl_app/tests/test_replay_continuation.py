@@ -195,6 +195,54 @@ def test_ordinary_frozen_fixture_editing_remains_prohibited_after_continuation(b
             )
 
 
+def test_sqlite_failure_between_trigger_drop_and_recreate_still_restores_immutability(baseline, monkeypatch):
+    """SQLite's pysqlite driver auto-commits DDL outside the surrounding
+    transaction, so the DROP TRIGGER statements this module issues take
+    effect immediately regardless of whether the rest of the operation
+    later fails and rolls back. Inject a failure squarely inside that
+    window (after the triggers are dropped, before they are recreated) and
+    prove the except-handler recovery path still leaves ordinary
+    frozen-fixture immutability enforced -- the exact guarantee that would
+    otherwise silently be lost."""
+    database, season = baseline["database"], baseline["season"]
+    fixtures = FixtureRepository(database)
+
+    def _boom():
+        raise RuntimeError("injected failure between DROP and CREATE TRIGGER")
+
+    monkeypatch.setattr("app.replay_continuation.uuid4", _boom)
+
+    with pytest.raises(RuntimeError, match="injected failure"):
+        continue_second_half_regular_season(database)
+
+    # The DML side rolled back normally: no partial continuation persisted.
+    assert SeasonRepository(database).get_season(season.season_id).regular_season_round_count == SOURCE_ROUND_COUNT
+    assert len(fixtures.list_matchups(season.season_id)) == SOURCE_ROUND_COUNT * 5
+
+    # The critical assertion: ordinary frozen-fixture immutability must
+    # still hold even though the triggers were dropped mid-operation.
+    with pytest.raises(ValueError, match="immutable"):
+        fixtures.save_draft(season.season_id, baseline["ordered_entries"])
+    with pytest.raises(IntegrityError, match="immutable"):
+        with transaction(database) as conn:
+            conn.execute(
+                "DELETE FROM season_fixture_matchup WHERE fixture_draw_id=? AND bbbffl_round_number=1",
+                (fixtures.get_draw(season.season_id).fixture_draw_id,),
+            )
+    with pytest.raises(IntegrityError, match="frozen fixture draw fixes season length"):
+        with transaction(database) as conn:
+            conn.execute(
+                "UPDATE bbbffl_season SET regular_season_round_count=25 WHERE season_id=?",
+                (season.season_id,),
+            )
+
+    # And the operation is still safely retryable afterwards.
+    monkeypatch.undo()
+    report = continue_second_half_regular_season(database)
+    assert report["mutated"] is True
+    assert report["regular_season_round_count"] == TARGET_ROUND_COUNT
+
+
 def test_round_1_to_9_lifecycle_submission_result_and_audit_history_unchanged(baseline):
     database = baseline["database"]
     lifecycle = baseline["lifecycle"]

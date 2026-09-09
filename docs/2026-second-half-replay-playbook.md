@@ -185,13 +185,13 @@ opening step brings the app up, once that evidence exists.
       replay/2026-second-half/backups/checkpoint-pre-round-10.json
    ```
 
-## E. AFL evidence acquisition for Rounds 10–20
+## E. AFL evidence acquisition for Rounds 10–24
 
 `app.replay_acquisition.acquire_second_half_2026` (driven by `scripts.
 second_half_replay acquire`, issue #174) resolves the 2026 AFL season from
 AFL-api metadata — never a hard-coded database ID — and requires exactly
-AFL Rounds 10–20 inclusive (eleven rounds). It validates that exact set and
-fails closed on any round missing, duplicated, or ambiguous, on any
+AFL Rounds 10–24 inclusive (fifteen rounds). It validates that exact set
+and fails closed on any round missing, duplicated, or ambiguous, on any
 match/player-stat identity acquired twice, and on incomplete final-stat
 coverage, before it writes anything. It shares its season-resolution,
 player-pool pagination, and per-round match/stat/roster acquisition
@@ -199,8 +199,30 @@ boundaries with `acquire_first_half_2026` (`app/replay_acquisition.py`'s
 `_resolve_2026_season_and_players`/`_acquire_match_evidence` helpers) — the
 same acquisition/domain boundary the first half uses, not a parallel
 implementation. Do not accept a package validated against a round count
-other than eleven; that would silently admit a missing or extra round and
+other than fifteen; that would silently admit a missing or extra round and
 fail later at preflight or replay instead of here.
+
+**Why R10–24 and not just R10–20.** The second-half *ordinary* competition
+replay this playbook drives (sections F–K, and issue #168) only ever
+consumes AFL Rounds 10–20 — BBBFFL's twenty-round home-and-away season maps
+one BBBFFL round to one AFL round across the whole season, and Round 20 is
+the last of those. AFL Rounds 21–24, though, are genuine historical 2026
+finals-series facts this replay will need again once BBBFFL finals/
+SuperScore testing begins (not yet built — see section L's "Handoff to
+finals seeding/finals/SuperScore" and the roadmap). Rather than run a
+second acquisition workflow against AFL-api later for just those four
+rounds, they are acquired now, into this same hermetic offline package, as
+known historical facts — the acquisition/validation machinery is identical
+either way, and AFL-api access is already open for this step regardless.
+This is evidence acquisition only: it does not expand #166's or #168's own
+execution scope, and rounds 21–24 remain unused/inert evidence until a
+later finals/SuperScore replay actually consumes them. The package
+filename/path (`2026-second-half.json` at
+`/replay/evidence/2026-second-half.json`) and its manifest identity
+(`afl-2026-second-half`, `bbbffl.second-half/v1`) are unchanged by this
+wider range — there is no technical reason to rename it, and conceptually
+it remains the one post-Round-9 evidence package for everything after the
+verified first-half boundary, ordinary replay and finals/SuperScore alike.
 
 Unlike the first-half acquisition (`2026-first-half-replay-playbook.md`
 section C, run from a host virtualenv), every second-half acquisition/
@@ -218,7 +240,7 @@ flag (unlike `first_half_replay acquire`). The second-half working copy
 already carries the verified season-wide `2026-player-pool.json` acquired
 during the first half (section B); nothing in this playbook re-bootstraps a
 season player pool from a file for the second half, so acquiring Round
-10–20 evidence never touches, rebuilds, or redefines it. A genuine need to
+10–24 evidence never touches, rebuilds, or redefines it. A genuine need to
 refresh season membership is a separate, explicitly justified action, never
 a side effect of this command.
 
@@ -258,14 +280,16 @@ a side effect of this command.
      --state /replay/state/checkpoint.json
    ```
 
-   Expect validation `PASS`, season 2026, the **eleven** included AFL round
-   identities for rounds 10–20 inclusive, every match with stat coverage,
+   Expect validation `PASS`, season 2026, the **fifteen** included AFL round
+   identities for rounds 10–24 inclusive, every match with stat coverage,
    and explicit available/unavailable roster coverage. A missing optional
    roster is diagnostic, not fabricated. Missing/incomplete stats,
    malformed scheduled starts, an unsupported package version, a season
-   other than 2026, a round count other than eleven, or any duplicate/
+   other than 2026, a round count other than fifteen, or any duplicate/
    conflicting match or round identity is fatal and reported by
-   `validate_replay_package` before anything reads as a pass.
+   `validate_replay_package` before anything reads as a pass — anywhere in
+   the R10–24 range, not only within the R10–20 rounds the ordinary
+   second-half replay itself consumes.
 
 3. **Confirm coverage/manifest diagnostics.** The `validate` command's PASS
    output already reports round/match/stats/roster coverage; to inspect the
@@ -279,7 +303,7 @@ a side effect of this command.
    ```
 
    Confirm `manifest.included_rounds` lists exactly round numbers 10
-   through 20 with no repeats, `manifest.match_count` equals
+   through 24 with no repeats, `manifest.match_count` equals
    `manifest.player_stat_match_count`, and `manifest.package_version` is
    `bbbffl.second-half/v1`.
 
@@ -394,29 +418,28 @@ D's migration commands mount the checkout too. Run this from the repository
 root (so `$PWD/bbbffl_app` resolves correctly), or invoke the script
 directly against the Postgres connection string from the host instead.
 
-**Known prerequisite: new-to-the-pool AFL players are not automatically
-draftable.** `msd pick`/`msd trade` operate on an existing
+**Note: the persisted pool does not need reconciliation for 2026 draft
+eligibility.** `msd pick`/`msd trade` operate on an existing
 `season_player_id` in the working database's `season_player_pool` table,
 which the working copy inherited from the first-half bootstrap and this
 playbook's acquisition (section E) never rebuilds or extends (see section
-E's player-pool-handling note). If the second-half evidence's acquired
-`players` list (issue #174) contains a genuine 2026 AFL season member who
-has no corresponding `season_player_pool` row — most plausibly a player
-signed/listed after the first-half capture — no supported command in this
-playbook yet reconciles that gap before a historical mid-season-draft
-selection of them. `app.player_pool.PlayerPoolRepository.refresh_player`
-is the existing upsert `replay_bootstrap.py` itself uses for exactly this
-purpose at first-half bootstrap time and would be the natural mechanism to
-reuse, but no operator-facing command currently exposes it for a bulk
-reconciliation against an acquired evidence file outside that bootstrap
-flow. Confirm, before running `msd pick` for any given historical
-selection, that the selected player already has a `season_player_pool` row
-for this season; if not, this is a genuine blocking prerequisite for that
-pick — track it against issue #166/#168 (or a dedicated follow-up issue)
-rather than inventing a reconciliation step here or silently rebuilding/
-redefining the established `2026-player-pool.json`/`season_player_pool`
-source of truth. This playbook implementing the mid-season draft itself is
-explicitly out of scope for issue #174.
+E's player-pool-handling note). The second-half evidence's acquired
+`players` list (issue #174) can contain a genuine 2026 AFL season member
+who has no corresponding `season_player_pool` row — most plausibly a
+player added to an AFL list through the AFL mid-season draft itself. That
+is not a blocker here, by BBBFFL competition rules/timing: the AFL
+mid-season draft normally occurs between AFL Rounds 11 and 12, after the
+BBBFFL mid-season draft (section H below, triggered after BBBFFL Round 10)
+has already been conducted, so a player added to an AFL list through it is
+never eligible for that year's BBBFFL mid-season draft in the first place.
+The preserved `2026-player-pool.json`/`season_player_pool` therefore
+remains authoritative for 2026 draft eligibility as-is; the wider acquired
+evidence (including any such later AFL players, and AFL Rounds 21–24 more
+generally per section E) still legitimately carries their match/player-stat
+history for other purposes, just not draft eligibility. For a future live
+season (e.g. 2027), the live player-pool refresh path is the correct
+mechanism for any AFL list change before that season's own mid-season
+draft — never by retroactively mutating a replay package like this one.
 
 1. **Configure/verify the trigger round.** `set-trigger-round` records the
    BBBFFL round after which the draft occurs; it has no default, so a

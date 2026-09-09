@@ -1,12 +1,16 @@
-"""Acquire, validate, and stage the supported 2026 second-half (AFL R10-20)
+"""Acquire, validate, and stage the supported 2026 second-half (AFL R10-24)
 replay evidence package.
 
 This mirrors `scripts/first_half_replay.py`'s acquire/validate/checkpoint
 triad and reuses its acquisition/domain boundaries end to end
 (`app.replay_acquisition`, `app.replay.ReplayAflDataSource`) -- only the
-round selection (AFL R10-20 inclusive, no Opening Round) and package
-identity differ. See `docs/2026-second-half-replay-playbook.md` section E
-for the exact Docker-based operator commands.
+round selection (AFL R10-24 inclusive, no Opening Round) and package
+identity differ. Rounds 21-24 (beyond the ordinary second-half replay's own
+Rounds 10-20) are acquired now for the later finals/SuperScore replay to
+consume, rather than requiring a second acquisition workflow -- this is
+evidence acquisition only and does not expand any later replay's execution
+scope. See `docs/2026-second-half-replay-playbook.md` section E for the
+exact Docker-based operator commands.
 
 Deliberately does not offer a `--player-pool-output` flag. The Phase 2
 working installation already carries the verified season-wide

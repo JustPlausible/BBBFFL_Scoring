@@ -65,7 +65,7 @@ repository (see the [README](README.md)'s evidence policy).
 | Acquired package identity (`manifest.id` / `package_version`) | |
 | Acquisition timestamp (`manifest.acquired_at`) | |
 | Source API host (`manifest.source_api`, never credentials) | |
-| Included AFL round identities (10–20 inclusive, eleven rounds) | |
+| Included AFL round identities (10–24 inclusive, fifteen rounds -- R10–20 for the ordinary second-half replay, R21–24 acquired now for the later finals/SuperScore replay) | |
 | Match/stat/roster coverage (`validate` PASS output) | |
 | `scripts.second_half_replay validate` result | |
 | AFL-api disconnected after acquisition | |

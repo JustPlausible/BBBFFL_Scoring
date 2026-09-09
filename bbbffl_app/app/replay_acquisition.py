@@ -1,7 +1,7 @@
 """Supported exporter for hermetic 2026 AFL replay evidence (first- and
 second-half).
 
-The first-half (Opening Round + AFL R1-9) and second-half (AFL R10-20)
+The first-half (Opening Round + AFL R1-9) and second-half (AFL R10-24)
 acquisition entry points below share the same season-resolution,
 player-pool pagination, and per-round match/stat/roster acquisition
 boundaries -- only round selection/validation and package manifest identity
@@ -349,19 +349,28 @@ def acquire_first_half_2026(api: ConsumerApi, *, source_base_url: str, acquired_
     }
 
 
-SECOND_HALF_ROUND_NUMBERS = tuple(range(10, 21))
+SECOND_HALF_ROUND_NUMBERS = tuple(range(10, 25))
 
 
 def acquire_second_half_2026(api: ConsumerApi, *, source_base_url: str, acquired_at: datetime | None = None) -> dict:
-    """Acquire AFL rounds 10--20 inclusive (11 rounds); fail before returning
-    partial evidence.
+    """Acquire AFL rounds 10--24 inclusive (15 rounds) -- every remaining
+    2026 home-and-away round after the verified Round 9 boundary, through
+    the end of the ordinary season; fail before returning partial evidence.
+
+    Rounds 21-24 are acquired now alongside the second-half ordinary
+    replay's own Rounds 10-20 even though BBBFFL's second-half ordinary
+    replay (#168) does not itself consume them: the later finals/SuperScore
+    replay will need the same AFL match/player-stat historical facts, and
+    acquiring them once into this hermetic offline package avoids a second
+    acquisition workflow later. This is evidence acquisition only and does
+    not expand #166's or #168's own execution scope.
 
     Reuses the same season-resolution, player-pool pagination, and
     match/stat/roster acquisition boundaries as `acquire_first_half_2026`
     (see `_resolve_2026_season_and_players` / `_acquire_match_evidence`) --
     only round selection/validation and package manifest identity differ.
     There is no Opening Round concept in the second half: every selected
-    round must carry an ordinary `round_number` in 10-20, and the set must
+    round must carry an ordinary `round_number` in 10-24, and the set must
     be exactly that range, no more and no fewer, with no duplicate/ambiguous
     round identity."""
     acquired_at = acquired_at or datetime.now(timezone.utc)
@@ -378,17 +387,17 @@ def acquire_second_half_2026(api: ConsumerApi, *, source_base_url: str, acquired
     round_ids = [r.get("round_id") for r in rounds]
     if len(round_ids) != len(set(round_ids)):
         raise ReplayEvidenceError(
-            f"AFL season {season_id} has duplicate round_id entries among selected AFL rounds 10-20: {round_ids}"
+            f"AFL season {season_id} has duplicate round_id entries among selected AFL rounds 10-24: {round_ids}"
         )
     numbers = [r.get("round_number") for r in rounds]
     if len(numbers) != len(set(numbers)):
         raise ReplayEvidenceError(
-            f"AFL season {season_id} has duplicate/ambiguous round_number entries among AFL rounds 10-20: "
+            f"AFL season {season_id} has duplicate/ambiguous round_number entries among AFL rounds 10-24: "
             f"{sorted(numbers)}"
         )
     if set(numbers) != expected:
         raise ReplayEvidenceError(
-            f"AFL season {season_id} requires exactly AFL rounds 10-20 inclusive (11 rounds); "
+            f"AFL season {season_id} requires exactly AFL rounds 10-24 inclusive (15 rounds); "
             f"found {sorted(set(numbers))}"
         )
     rounds.sort(key=lambda r: (r.get("round_number", 999), r.get("round_id", 0)))
@@ -509,8 +518,8 @@ def validate_replay_package(
     # deep inside replay's own `get_round` lookup), and every round the
     # resolved season's evidence actually carries must itself be declared
     # (a physically-present-but-undeclared extra round -- e.g. an AFL Round
-    # 21 record smuggled into "rounds" while the manifest still claims
-    # exactly 10-20 -- fails here instead of silently remaining reachable
+    # 25 record smuggled into "rounds" while the manifest still claims
+    # exactly 10-24 -- fails here instead of silently remaining reachable
     # through the returned, supposedly fully-validated source).
     declared_round_ids = {row["round_id"] for row in included}
     actual_rounds = {round_.round_id: round_.round_number for round_ in source.get_rounds(resolved_season.season_id)}

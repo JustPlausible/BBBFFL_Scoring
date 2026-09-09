@@ -1,10 +1,14 @@
-"""Deterministic tests for the second-half (AFL R10-20) replay evidence
-acquisition/validation path added for issue #174.
+"""Deterministic tests for the second-half (AFL R10-24) replay evidence
+acquisition/validation path added for issue #174, extended from R10-20 to
+R10-24 to also acquire the historical AFL evidence a later finals/
+SuperScore replay will need (the second-half *ordinary* replay, #168,
+still only consumes rounds 10-20 itself -- see `acquire_second_half_2026`'s
+docstring).
 
 Mirrors the structure of `tests/test_replay_acquisition.py` (the first-half
 suite, which this module leaves entirely unchanged) but drives
 `acquire_second_half_2026` / `scripts.second_half_replay` /
-`validate_replay_package` instead. Round IDs here (1353-1363) deliberately
+`validate_replay_package` instead. Round IDs here (1353-1367) deliberately
 continue on from the first-half fixture's Opening Round/R1-9 IDs (100-109
 in the first-half tests; the real 2026 season's first-half AFL round IDs
 are 1343-1352 per `docs/evidence/2026-first-half-replay/phase-one-closeout.md`)
@@ -34,12 +38,12 @@ from app.replay_acquisition import (
 )
 from scripts import second_half_replay
 
-SECOND_HALF_ROUND_ID = {n: 1343 + n for n in range(10, 21)}  # 1353..1363, contiguous with the real 1343-1352 first half
+SECOND_HALF_ROUND_ID = {n: 1343 + n for n in range(10, 25)}  # 1353..1367, contiguous with the real 1343-1352 first half
 
 
 class Api:
     """Fake consumer API modelling the real AFL-api v1 contract, scoped to
-    AFL rounds 10-20 for the second half."""
+    AFL rounds 10-24 for the second half."""
 
     def __init__(
         self,
@@ -100,7 +104,7 @@ class Api:
                     "abbreviation": f"R{n}",
                     "byes": [],
                 }
-                for n in range(10, 21)
+                for n in range(10, 25)
             ]
             rounds.extend(self.extra_rounds)
             if self.round_order:
@@ -186,20 +190,20 @@ def test_acquisition_resolves_2026_season_by_metadata_not_hard_coded_id():
     assert any("/seasons/712/" in c for c in api.calls)
 
 
-def test_acquisition_selects_exactly_afl_rounds_10_to_20():
+def test_acquisition_selects_exactly_afl_rounds_10_to_24():
     payload = acquire_second_half_2026(Api(no_roster=True), source_base_url="http://api")
     numbers = [r["round_number"] for r in payload["rounds"]]
-    assert numbers == list(range(10, 21))
-    assert len(numbers) == 11
-    assert set(SECOND_HALF_ROUND_NUMBERS) == set(range(10, 21))
+    assert numbers == list(range(10, 25))
+    assert len(numbers) == 15
+    assert set(SECOND_HALF_ROUND_NUMBERS) == set(range(10, 25))
 
 
 def test_acquisition_output_round_and_match_ordering_is_deterministic_regardless_of_api_order():
-    shuffled_order = [SECOND_HALF_ROUND_ID[n] for n in (15, 10, 20, 12, 11, 19, 13, 18, 14, 17, 16)]
+    shuffled_order = [SECOND_HALF_ROUND_ID[n] for n in (15, 10, 24, 20, 12, 11, 23, 19, 13, 22, 18, 14, 21, 17, 16)]
     payload_a = acquire_second_half_2026(Api(no_roster=True, round_order=shuffled_order), source_base_url="http://api")
     payload_b = acquire_second_half_2026(Api(no_roster=True), source_base_url="http://api")
     assert [r["round_id"] for r in payload_a["rounds"]] == [r["round_id"] for r in payload_b["rounds"]]
-    assert [r["round_number"] for r in payload_a["rounds"]] == list(range(10, 21))
+    assert [r["round_number"] for r in payload_a["rounds"]] == list(range(10, 25))
     assert [m["match_id"] for m in payload_a["matches"]] == [m["match_id"] for m in payload_b["matches"]]
 
 
@@ -212,14 +216,31 @@ def test_acquisition_missing_round_fails_closed():
                 return payload
             return super().get(path)
 
-    with pytest.raises(ReplayEvidenceError, match="requires exactly AFL rounds 10-20"):
+    with pytest.raises(ReplayEvidenceError, match="requires exactly AFL rounds 10-24"):
         acquire_second_half_2026(MissingRoundApi(no_roster=True), source_base_url="http://api")
 
 
-def test_acquisition_extra_round_outside_10_20_is_not_selected():
-    extra = {"round_id": 9999, "round_number": 21, "name": "Round 21", "abbreviation": "R21", "byes": []}
+def test_acquisition_missing_round_in_21_to_24_extension_fails_closed():
+    """Missing/incomplete evidence must fail acquisition regardless of
+    where in R10-24 it occurs -- not only within the pre-existing R10-20
+    range."""
+
+    class MissingLateRoundApi(Api):
+        def get(self, path):
+            if path == "/api/v1/seasons/712/rounds":
+                payload = super().get(path)
+                payload["rounds"] = [r for r in payload["rounds"] if r["round_number"] != 22]
+                return payload
+            return super().get(path)
+
+    with pytest.raises(ReplayEvidenceError, match="requires exactly AFL rounds 10-24"):
+        acquire_second_half_2026(MissingLateRoundApi(no_roster=True), source_base_url="http://api")
+
+
+def test_acquisition_extra_round_outside_10_24_is_not_selected():
+    extra = {"round_id": 9999, "round_number": 25, "name": "Round 25", "abbreviation": "R25", "byes": []}
     payload = acquire_second_half_2026(Api(no_roster=True, extra_rounds=[extra]), source_base_url="http://api")
-    assert [r["round_number"] for r in payload["rounds"]] == list(range(10, 21))
+    assert [r["round_number"] for r in payload["rounds"]] == list(range(10, 25))
     assert 9999 not in [r["round_id"] for r in payload["rounds"]]
 
 
@@ -235,18 +256,45 @@ def test_exact_duplicate_round_id_entry_fails_closed():
         acquire_second_half_2026(Api(no_roster=True, extra_rounds=[duplicate]), source_base_url="http://api")
 
 
+def test_duplicate_round_number_within_21_to_24_extension_fails_closed():
+    duplicate = {"round_id": 5002, "round_number": 22, "name": "Round 22 (dup)", "abbreviation": "R22b", "byes": []}
+    with pytest.raises(ReplayEvidenceError, match="duplicate/ambiguous round_number"):
+        acquire_second_half_2026(Api(no_roster=True, extra_rounds=[duplicate]), source_base_url="http://api")
+
+
 # --- Match/stat completeness --------------------------------------------------
 
 
-def test_all_matches_across_eleven_rounds_are_acquired():
+def test_all_matches_across_fifteen_rounds_are_acquired():
     payload = acquire_second_half_2026(Api(no_roster=True), source_base_url="http://api")
-    assert len(payload["matches"]) == 11
-    assert len(payload["player_stats"]) == 11
+    assert len(payload["matches"]) == 15
+    assert len(payload["player_stats"]) == 15
     assert {m["round_id"] for m in payload["matches"]} == set(SECOND_HALF_ROUND_ID.values())
+
+
+def test_acquisition_includes_rounds_21_to_24_with_full_match_stat_coverage():
+    """Rounds 21-24 are acquired now even though the second-half *ordinary*
+    replay (#168) only consumes rounds 10-20 itself -- the later finals/
+    SuperScore replay needs this same historical AFL evidence. Proves it is
+    actually present with full match/stat coverage, not merely declared."""
+    payload = acquire_second_half_2026(Api(no_roster=True), source_base_url="http://api")
+    late_rounds = {r["round_number"]: r for r in payload["rounds"] if r["round_number"] >= 21}
+    assert set(late_rounds) == {21, 22, 23, 24}
+    late_round_ids = {r["round_id"] for r in late_rounds.values()}
+    late_matches = [m for m in payload["matches"] if m["round_id"] in late_round_ids]
+    assert len(late_matches) == 4
+    assert all(str(m["match_id"]) in payload["player_stats"] for m in late_matches)
+    assert all(payload["player_stats"][str(m["match_id"])] for m in late_matches)
 
 
 def test_missing_required_stats_fails_with_match_identity():
     missing_match_id = SECOND_HALF_ROUND_ID[13] * 10
+    with pytest.raises(ReplayEvidenceError, match=f"AFL match {missing_match_id}"):
+        acquire_second_half_2026(Api(empty_stats=missing_match_id), source_base_url="http://api")
+
+
+def test_missing_required_stats_fails_for_a_match_in_the_21_to_24_extension():
+    missing_match_id = SECOND_HALF_ROUND_ID[23] * 10
     with pytest.raises(ReplayEvidenceError, match=f"AFL match {missing_match_id}"):
         acquire_second_half_2026(Api(empty_stats=missing_match_id), source_base_url="http://api")
 
@@ -259,8 +307,8 @@ def test_non_final_stats_response_fails_closed(finality):
 
 def test_final_stats_response_is_accepted_for_every_match():
     payload = acquire_second_half_2026(Api(finality="final"), source_base_url="http://api")
-    assert len(payload["player_stats"]) == 11
-    assert payload["manifest"]["player_stat_match_count"] == 11
+    assert len(payload["player_stats"]) == 15
+    assert payload["manifest"]["player_stat_match_count"] == 15
 
 
 def test_duplicate_match_across_rounds_fails_closed():
@@ -310,13 +358,13 @@ def test_scheduled_starts_are_preserved_and_drive_lockout(tmp_path):
 def test_roster_evidence_follows_optional_available_semantics():
     payload = acquire_second_half_2026(Api(no_roster=True), source_base_url="http://api")
     assert payload["manifest"]["roster_coverage"]["available"] == 0
-    assert len(payload["manifest"]["roster_coverage"]["unavailable"]) == 11
+    assert len(payload["manifest"]["roster_coverage"]["unavailable"]) == 15
     assert all(v is None for v in payload["rosters"].values())
 
 
 def test_roster_evidence_is_captured_when_available():
     payload = acquire_second_half_2026(Api(no_roster=False), source_base_url="http://api")
-    assert payload["manifest"]["roster_coverage"]["available"] == 11
+    assert payload["manifest"]["roster_coverage"]["available"] == 15
     assert payload["manifest"]["roster_coverage"]["unavailable"] == []
     assert all(v is not None for v in payload["rosters"].values())
 
@@ -335,8 +383,8 @@ def test_manifest_identity_and_no_fabricated_evidence(tmp_path):
     assert payload["manifest"]["afl_season"] == 2026
     assert payload["manifest"]["source_api"] == "https://example.test:8443"
     assert "secret" not in json.dumps(payload)
-    assert payload["manifest"]["match_count"] == 11
-    assert [r["round_number"] for r in payload["manifest"]["included_rounds"]] == list(range(10, 21))
+    assert payload["manifest"]["match_count"] == 15
+    assert [r["round_number"] for r in payload["manifest"]["included_rounds"]] == list(range(10, 25))
     assert payload["manifest"]["lifecycle_semantics"] == "scheduled-start-plus-final-results-checkpoint"
 
 
@@ -370,7 +418,7 @@ def test_validate_replay_package_passes_for_a_complete_package(tmp_path):
         expected_afl_season=2026,
         expected_round_numbers=SECOND_HALF_ROUND_NUMBERS,
     )
-    assert source.manifest["match_count"] == 11
+    assert source.manifest["match_count"] == 15
 
 
 def test_validate_replay_package_loads_with_no_live_api_object_at_all(tmp_path):
@@ -446,7 +494,7 @@ def test_validate_replay_package_rejects_undeclared_extra_round_in_evidence(tmp_
     season_id = payload["seasons"][0]["season_id"]
     extra_round = dict(payload["rounds"][0])
     extra_round["round_id"] = 999999
-    extra_round["round_number"] = 21
+    extra_round["round_number"] = 25
     extra_round["season_id"] = season_id
     payload["rounds"].append(extra_round)
     evidence = tmp_path / "evidence.json"
@@ -472,7 +520,28 @@ def test_validate_replay_package_rejects_missing_round(tmp_path):
     write_package(payload, evidence)
     state = tmp_path / "checkpoint.json"
     apply_checkpoint(state, effective_at="2026-06-01T00:00:00Z", stage="scheduled", round_id=None)
-    with pytest.raises(ReplayEvidenceError, match="must include exactly 11 unique AFL rounds"):
+    with pytest.raises(ReplayEvidenceError, match="must include exactly 15 unique AFL rounds"):
+        validate_replay_package(
+            evidence,
+            state,
+            expected_package_version="bbbffl.second-half/v1",
+            expected_afl_season=2026,
+            expected_round_numbers=SECOND_HALF_ROUND_NUMBERS,
+        )
+
+
+def test_validate_replay_package_rejects_missing_round_in_21_to_24_extension(tmp_path):
+    """Missing/incomplete evidence must fail validation regardless of where
+    in R10-24 it occurs -- not only within the pre-existing R10-20 range."""
+    payload = acquire_second_half_2026(Api(no_roster=True), source_base_url="http://api")
+    payload["manifest"]["included_rounds"] = [
+        r for r in payload["manifest"]["included_rounds"] if r["round_number"] != 23
+    ]
+    evidence = tmp_path / "evidence.json"
+    write_package(payload, evidence)
+    state = tmp_path / "checkpoint.json"
+    apply_checkpoint(state, effective_at="2026-06-01T00:00:00Z", stage="scheduled", round_id=None)
+    with pytest.raises(ReplayEvidenceError, match="must include exactly 15 unique AFL rounds"):
         validate_replay_package(
             evidence,
             state,
@@ -508,7 +577,7 @@ def test_validate_replay_package_rejects_manifest_round_number_mismatch(tmp_path
     own `get_round` lookup."""
     payload = acquire_second_half_2026(Api(no_roster=True), source_base_url="http://api")
     # Swap two entries' declared round_number (not round_id): the *set* of
-    # declared round numbers is still exactly {10..20} (so the earlier
+    # declared round numbers is still exactly {10..24} (so the earlier
     # "must match required set" check still passes), but each entry's
     # (round_id, round_number) pairing no longer matches the round record
     # the evidence's own "rounds" section actually declares for that
@@ -663,9 +732,9 @@ def test_checkpoint_command_finalises_second_half_round_and_refuses_rewind(tmp_p
 
 def test_first_half_acquisition_still_rejects_second_half_shaped_rounds():
     """`acquire_first_half_2026` must still refuse a season whose rounds
-    collection only contains AFL R10-20 -- the two acquisition entry points
+    collection only contains AFL R10-24 -- the two acquisition entry points
     stay independently scoped even though they share helpers."""
-    api = Api(no_roster=True)  # rounds 10-20 only, no Opening Round / R1-9
+    api = Api(no_roster=True)  # rounds 10-24 only, no Opening Round / R1-9
     with pytest.raises(ReplayEvidenceError, match="requires one Opening Round and rounds 1-9"):
         acquire_first_half_2026(api, source_base_url="http://api")
 
@@ -685,7 +754,7 @@ def test_second_half_acquisition_still_rejects_first_half_shaped_rounds():
                 }
             return super().get(path)
 
-    with pytest.raises(ReplayEvidenceError, match="requires exactly AFL rounds 10-20"):
+    with pytest.raises(ReplayEvidenceError, match="requires exactly AFL rounds 10-24"):
         acquire_second_half_2026(FirstHalfShapedApi(no_roster=True), source_base_url="http://api")
 
 
@@ -717,7 +786,7 @@ def test_cli_successful_acquisition_writes_package_and_prints_pass(tmp_path, mon
     assert second_half_replay.main() == 0
     captured = capsys.readouterr()
     assert "acquisition PASS" in captured.out
-    assert "rounds: 11" in captured.out
+    assert "rounds: 15" in captured.out
     payload = json.loads(output.read_text())
     assert payload["manifest"]["package_version"] == "bbbffl.second-half/v1"
 
@@ -756,7 +825,7 @@ def test_cli_validate_reports_pass_for_a_complete_package(tmp_path, monkeypatch,
     assert second_half_replay.main() == 0
     captured = capsys.readouterr()
     assert "validation PASS" in captured.out
-    assert "rounds: 11" in captured.out
+    assert "rounds: 15" in captured.out
 
 
 def test_cli_validate_fails_closed_on_corrupt_package(tmp_path, monkeypatch, capsys):

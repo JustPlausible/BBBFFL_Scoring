@@ -189,6 +189,7 @@ CAPABILITIES: dict[Role, frozenset[str]] = {
             "roundsetup.manage",
             "player_pool.read",
             "preseason.manage",
+            "midseason_draft.manage",
         }
     ),
     Role.SECRETARY: frozenset(
@@ -200,6 +201,7 @@ CAPABILITIES: dict[Role, frozenset[str]] = {
             "player_pool.read",
             "player_pool.manage",
             "preseason.manage",
+            "midseason_draft.manage",
         }
     ),
     Role.REPLAY_OPERATOR: frozenset(
@@ -213,6 +215,7 @@ CAPABILITIES: dict[Role, frozenset[str]] = {
             "lineup.correct_locked",
             "lineup.adjudicate_missed_submission",
             "opening_round.nominate",
+            "midseason_draft.manage",
         }
     ),
     Role.ADMIN: frozenset({_WILDCARD_CAPABILITY}),

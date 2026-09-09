@@ -39,6 +39,10 @@ class Season:
     updated_at: str
     version: int
     regular_season_round_count: int
+    # Issue #164: the BBBFFL round after which a mid-season draft occurs.
+    # `None` means the season has not configured one (most seasons, and
+    # every season predating this column).
+    midseason_draft_trigger_round: int | None = None
 
 
 @dataclass(frozen=True)
@@ -92,10 +96,16 @@ class SeasonRepository:
             column["name"] for column in inspect(self.database.engine).get_columns("bbbffl_season")
         }
 
+    def _has_midseason_trigger_round(self) -> bool:
+        return "midseason_draft_trigger_round" in {
+            column["name"] for column in inspect(self.database.engine).get_columns("bbbffl_season")
+        }
+
     @staticmethod
     def _season_from_row(row: Mapping[str, Any]) -> Season:
         values = dict(row)
         values.setdefault("regular_season_round_count", 20)
+        values.setdefault("midseason_draft_trigger_round", None)
         return Season(**values)
 
     def create_season(
@@ -105,11 +115,14 @@ class SeasonRepository:
         *,
         lifecycle_state: str = "setup",
         regular_season_round_count: int = 20,
+        midseason_draft_trigger_round: int | None = None,
     ) -> Season:
         if lifecycle_state not in LEGAL_TRANSITIONS:
             raise ValueError("invalid season lifecycle state")
         if regular_season_round_count < 1:
             raise ValueError("regular season round count must be positive")
+        if midseason_draft_trigger_round is not None and midseason_draft_trigger_round < 1:
+            raise ValueError("mid-season draft trigger round must be positive")
         now = _now()
         item = Season(
             _id(),
@@ -120,21 +133,94 @@ class SeasonRepository:
             now,
             1,
             regular_season_round_count,
+            midseason_draft_trigger_round,
         )
         with transaction(self.database) as connection:
-            if self._has_round_count():
+            has_round_count = self._has_round_count()
+            has_trigger_round = self._has_midseason_trigger_round()
+            if has_round_count and has_trigger_round:
+                connection.execute(
+                    "INSERT INTO bbbffl_season "
+                    "(season_id, year, label, lifecycle_state, created_at, updated_at, version, "
+                    "regular_season_round_count, midseason_draft_trigger_round) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    tuple(item.__dict__.values()),
+                )
+            elif has_round_count:
+                # Migration/CI compatibility while deliberately exercising a
+                # pre-0027 schema.
                 connection.execute(
                     "INSERT INTO bbbffl_season VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    tuple(item.__dict__.values()),
+                    tuple(item.__dict__.values())[:-1],
                 )
             else:
                 # Migration/CI compatibility while deliberately exercising a
                 # pre-0009 schema; its implicit historical value is 20.
                 connection.execute(
                     "INSERT INTO bbbffl_season VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    tuple(item.__dict__.values())[:-1],
+                    tuple(item.__dict__.values())[:-2],
                 )
         return item
+
+    def set_midseason_draft_trigger_round(
+        self,
+        season_id: str,
+        trigger_round: int,
+        *,
+        actor: ActorContext = ActorContext.anonymous_operator("admin"),
+        reason: str | None = None,
+    ) -> Season:
+        """Record (or change) the BBBFFL round after which the mid-season
+        draft occurs -- issue #164's "the season setup must explicitly
+        identify the BBBFFL round". Separate from `create_season` so an
+        already-established season (e.g. the 2026 replay, bootstrapped long
+        before this column existed) can still configure it. Refused once a
+        mid-season draft already exists for the season: the trigger round
+        that draft was confirmed against must remain traceable, exactly like
+        `regular_season_round_count`'s frozen-once-the-fixture-draw-exists
+        rule (migration 0009)."""
+        if trigger_round < 1:
+            raise ValueError("mid-season draft trigger round must be positive")
+        with transaction(self.database) as connection:
+            row = connection.execute(
+                "SELECT * FROM bbbffl_season WHERE season_id=?" + _for_update_suffix(self.database), (season_id,)
+            ).fetchone()
+            if not row:
+                raise KeyError(season_id)
+            if connection.execute("SELECT 1 FROM midseason_draft WHERE season_id=?", (season_id,)).fetchone():
+                raise ValueError("mid-season draft trigger round cannot change once a mid-season draft exists")
+            before = row["midseason_draft_trigger_round"] if "midseason_draft_trigger_round" in row.keys() else None
+            updated_at = _now()
+            connection.execute(
+                "UPDATE bbbffl_season SET midseason_draft_trigger_round=?, updated_at=? WHERE season_id=?",
+                (trigger_round, updated_at, season_id),
+            )
+            append_event(
+                connection,
+                actor=actor,
+                action="season.midseason_draft_trigger_round.set",
+                entity_type="season",
+                entity_id=season_id,
+                reason=reason,
+                before_state={"midseason_draft_trigger_round": before},
+                after_state={"midseason_draft_trigger_round": trigger_round},
+            )
+            # Construct the result from the locked row and exact values
+            # written above, matching `transition_lifecycle`'s convention --
+            # an unlocked post-commit read could observe a later change.
+            result = Season(
+                season_id=season_id,
+                year=row["year"],
+                label=row["label"],
+                lifecycle_state=row["lifecycle_state"],
+                created_at=row["created_at"],
+                updated_at=updated_at,
+                version=row["version"],
+                regular_season_round_count=(
+                    row["regular_season_round_count"] if "regular_season_round_count" in row.keys() else 20
+                ),
+                midseason_draft_trigger_round=trigger_round,
+            )
+        return result
 
     def get_season(self, season_id: str) -> Season | None:
         row = self.database.execute("SELECT * FROM bbbffl_season WHERE season_id = ?", (season_id,)).fetchone()
@@ -204,6 +290,9 @@ class SeasonRepository:
                 version=version,
                 regular_season_round_count=(
                     row["regular_season_round_count"] if "regular_season_round_count" in row.keys() else 20
+                ),
+                midseason_draft_trigger_round=(
+                    row["midseason_draft_trigger_round"] if "midseason_draft_trigger_round" in row.keys() else None
                 ),
             )
         return result

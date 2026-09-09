@@ -71,6 +71,17 @@ SEASON_MODEL = {
     "app.lineups",
     "app.calculations",
     "app.ladder",
+    # Mid-season draft workflow (issue #164): a sibling of app.preseason/
+    # app.draft/app.ladder -- it reuses all three (the draft-order snapshot
+    # comes from app.ladder without ever mutating it; selections are
+    # materialised and played out through app.draft.DraftRepository under
+    # draft_kind="midseason"; ownership changes go through app.player_pool)
+    # rather than duplicating any of their business rules. Like every other
+    # SEASON_MODEL module, it is not imported directly by its route file
+    # (app.routes.midseason_draft) -- reached only via the already-
+    # constructed instance on request.app.state (see this file's
+    # ROUND_REVIEW comment).
+    "app.midseason_draft",
 }
 
 # Lockouts sits one layer above the season model (it depends on
@@ -256,6 +267,7 @@ ROUTES = {
     "app.routes.lineup_adjudication",
     "app.routes.scorer_dashboard",
     "app.routes.admin_dashboard",
+    "app.routes.midseason_draft",
 }
 
 COMPOSITION_ROOT = {"app.main"}

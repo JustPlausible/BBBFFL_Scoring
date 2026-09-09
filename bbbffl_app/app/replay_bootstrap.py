@@ -693,7 +693,7 @@ def bootstrap_first_half(database, config: ReplayConfig) -> dict:
         else:
             season_id = _id()
             conn.execute(
-                "INSERT INTO bbbffl_season VALUES (?, ?, ?, 'setup', ?, ?, 1, ?)",
+                "INSERT INTO bbbffl_season VALUES (?, ?, ?, 'setup', ?, ?, 1, ?, NULL)",
                 (season_id, config.year, config.season_label, now, now, len(FIRST_HALF_ROUNDS)),
             )
 
@@ -882,7 +882,9 @@ def bootstrap_first_half(database, config: ReplayConfig) -> dict:
         else:
             draft_id = _id()
             conn.execute(
-                "INSERT INTO season_draft VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL)",
+                "INSERT INTO season_draft "
+                "(draft_id, season_id, target_squad_size, accepted_at, paused_at, paused_reason, "
+                "finalized_at, finalized_note, draft_kind) VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, 'preseason')",
                 (draft_id, season_id, config.squad_limit, now),
             )
             for position, entry_id in enumerate(ordered_ids, 1):

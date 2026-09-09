@@ -483,11 +483,33 @@ def validate_replay_package(
             f"replay package rounds {sorted(set(included_numbers))} do not match the required set "
             f"{sorted(expected_numbers)}"
         )
+    # manifest.included_rounds is a summary the acquirer wrote alongside the
+    # authoritative `rounds` evidence, not itself authoritative -- cross-check
+    # every declared (round_id, round_number) pair against the round record
+    # ReplayAflDataSource actually loaded, so a corrupted/mislabelled summary
+    # (e.g. round_id resolving to a round the evidence itself declares as
+    # round_number 21) fails here rather than only surfacing later, deep
+    # inside replay, as `get_round(season_id, 20)` unable to find it.
+    actual_round_numbers: dict[int, int] = {}
+    for season in source.get_seasons():
+        for round_ in source.get_rounds(season.season_id):
+            actual_round_numbers[round_.round_id] = round_.round_number
     all_matches = []
     for round_row in included:
         round_id = round_row.get("round_id")
         if round_id is None:
             raise ReplayEvidenceError("manifest.included_rounds entry is missing round_id")
+        actual_number = actual_round_numbers.get(round_id)
+        if actual_number is None:
+            raise ReplayEvidenceError(
+                f"manifest.included_rounds references round_id {round_id} not present in the evidence's rounds"
+            )
+        if actual_number != round_row.get("round_number"):
+            raise ReplayEvidenceError(
+                f"manifest.included_rounds declares round_id {round_id} as round_number "
+                f"{round_row.get('round_number')!r}, but the evidence round record itself declares "
+                f"round_number {actual_number!r}"
+            )
         all_matches.extend(source.get_matches(round_id))
     match_ids = [match.match_id for match in all_matches]
     if len(match_ids) != len(set(match_ids)):

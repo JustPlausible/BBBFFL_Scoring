@@ -451,6 +451,56 @@ def test_validate_replay_package_rejects_mismatched_match_count(tmp_path):
         )
 
 
+def test_validate_replay_package_rejects_manifest_round_number_mismatch(tmp_path):
+    """The manifest's `included_rounds` summary is written by the acquirer
+    alongside the authoritative `rounds` evidence, but is not itself
+    authoritative -- a corrupted/mislabelled summary entry (a round_id whose
+    evidence round record actually declares a different round_number) must
+    fail validation rather than only surfacing later, deep inside replay's
+    own `get_round` lookup."""
+    payload = acquire_second_half_2026(Api(no_roster=True), source_base_url="http://api")
+    # Swap two entries' declared round_number (not round_id): the *set* of
+    # declared round numbers is still exactly {10..20} (so the earlier
+    # "must match required set" check still passes), but each entry's
+    # (round_id, round_number) pairing no longer matches the round record
+    # the evidence's own "rounds" section actually declares for that
+    # round_id -- exactly the corruption the earlier, coarser set-only
+    # check could not detect.
+    round_15 = next(r for r in payload["manifest"]["included_rounds"] if r["round_number"] == 15)
+    round_16 = next(r for r in payload["manifest"]["included_rounds"] if r["round_number"] == 16)
+    round_15["round_number"], round_16["round_number"] = round_16["round_number"], round_15["round_number"]
+    evidence = tmp_path / "evidence.json"
+    write_package(payload, evidence)
+    state = tmp_path / "checkpoint.json"
+    apply_checkpoint(state, effective_at="2026-06-01T00:00:00Z", stage="scheduled", round_id=None)
+    with pytest.raises(ReplayEvidenceError, match="evidence round record itself declares round_number 15"):
+        validate_replay_package(
+            evidence,
+            state,
+            expected_package_version="bbbffl.second-half/v1",
+            expected_afl_season=2026,
+            expected_round_numbers=SECOND_HALF_ROUND_NUMBERS,
+        )
+
+
+def test_validate_replay_package_rejects_manifest_round_id_absent_from_evidence(tmp_path):
+    payload = acquire_second_half_2026(Api(no_roster=True), source_base_url="http://api")
+    round_15 = next(r for r in payload["manifest"]["included_rounds"] if r["round_number"] == 15)
+    round_15["round_id"] = 999999  # no such round in payload["rounds"]
+    evidence = tmp_path / "evidence.json"
+    write_package(payload, evidence)
+    state = tmp_path / "checkpoint.json"
+    apply_checkpoint(state, effective_at="2026-06-01T00:00:00Z", stage="scheduled", round_id=None)
+    with pytest.raises(ReplayEvidenceError, match="not present in the evidence's rounds"):
+        validate_replay_package(
+            evidence,
+            state,
+            expected_package_version="bbbffl.second-half/v1",
+            expected_afl_season=2026,
+            expected_round_numbers=SECOND_HALF_ROUND_NUMBERS,
+        )
+
+
 def test_validate_replay_package_rejects_incomplete_stats_coverage(tmp_path):
     payload = acquire_second_half_2026(Api(no_roster=True), source_base_url="http://api")
     payload["manifest"]["player_stat_match_count"] = 10

@@ -394,6 +394,30 @@ D's migration commands mount the checkout too. Run this from the repository
 root (so `$PWD/bbbffl_app` resolves correctly), or invoke the script
 directly against the Postgres connection string from the host instead.
 
+**Known prerequisite: new-to-the-pool AFL players are not automatically
+draftable.** `msd pick`/`msd trade` operate on an existing
+`season_player_id` in the working database's `season_player_pool` table,
+which the working copy inherited from the first-half bootstrap and this
+playbook's acquisition (section E) never rebuilds or extends (see section
+E's player-pool-handling note). If the second-half evidence's acquired
+`players` list (issue #174) contains a genuine 2026 AFL season member who
+has no corresponding `season_player_pool` row — most plausibly a player
+signed/listed after the first-half capture — no supported command in this
+playbook yet reconciles that gap before a historical mid-season-draft
+selection of them. `app.player_pool.PlayerPoolRepository.refresh_player`
+is the existing upsert `replay_bootstrap.py` itself uses for exactly this
+purpose at first-half bootstrap time and would be the natural mechanism to
+reuse, but no operator-facing command currently exposes it for a bulk
+reconciliation against an acquired evidence file outside that bootstrap
+flow. Confirm, before running `msd pick` for any given historical
+selection, that the selected player already has a `season_player_pool` row
+for this season; if not, this is a genuine blocking prerequisite for that
+pick — track it against issue #166/#168 (or a dedicated follow-up issue)
+rather than inventing a reconciliation step here or silently rebuilding/
+redefining the established `2026-player-pool.json`/`season_player_pool`
+source of truth. This playbook implementing the mid-season draft itself is
+explicitly out of scope for issue #174.
+
 1. **Configure/verify the trigger round.** `set-trigger-round` records the
    BBBFFL round after which the draft occurs; it has no default, so a
    season bootstrapped before this column existed (the 2026 replay) always

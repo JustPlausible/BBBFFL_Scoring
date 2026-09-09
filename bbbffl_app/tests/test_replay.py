@@ -43,6 +43,45 @@ def test_missing_malformed_and_incomplete_evidence_fail_closed(tmp_path):
         ReplayAflDataSource(unclassified)
 
 
+def test_duplicate_identities_in_raw_evidence_fail_closed(tmp_path):
+    """A second raw record sharing an identity with an existing one must be
+    rejected before the section is collapsed into an identity-keyed dict --
+    otherwise it would silently overwrite the first record with no trace
+    (issue #174 Codex review: `ReplayAflDataSource._load` previously let two
+    `matches` rows share one `match_id`, invisible once loaded)."""
+    base = json.loads(FIXTURE.read_text())
+
+    def write(payload):
+        path = tmp_path / "dup.json"
+        path.write_text(json.dumps(payload))
+        return path
+
+    payload = json.loads(json.dumps(base))
+    payload["players"].append(dict(payload["players"][0]))
+    with pytest.raises(ReplayEvidenceError, match="duplicate player identity"):
+        ReplayAflDataSource(write(payload))
+
+    payload = json.loads(json.dumps(base))
+    payload["matches"].append(dict(payload["matches"][0]))
+    with pytest.raises(ReplayEvidenceError, match="duplicate match identity"):
+        ReplayAflDataSource(write(payload))
+
+    payload = json.loads(json.dumps(base))
+    payload["rounds"].append(dict(payload["rounds"][0]))
+    with pytest.raises(ReplayEvidenceError, match="duplicate round identity"):
+        ReplayAflDataSource(write(payload))
+
+    payload = json.loads(json.dumps(base))
+    payload["seasons"].append(dict(payload["seasons"][0]))
+    with pytest.raises(ReplayEvidenceError, match="duplicate season identity"):
+        ReplayAflDataSource(write(payload))
+
+    payload = json.loads(json.dumps(base))
+    payload["player_stats"]["2601"].append(dict(payload["player_stats"]["2601"][0]))
+    with pytest.raises(ReplayEvidenceError, match="duplicate player_stat identity"):
+        ReplayAflDataSource(write(payload))
+
+
 def test_match_lifecycle_is_selected_by_replay_clock_from_same_evidence():
     before = ReplayAflDataSource(FIXTURE, clock=ReplayClock.from_iso("2026-03-19T08:29:00Z"))
     during = ReplayAflDataSource(FIXTURE, clock=ReplayClock.from_iso("2026-03-19T08:31:00Z"))

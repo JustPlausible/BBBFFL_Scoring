@@ -213,9 +213,12 @@ SEASON_CENTRE = {"app.season_centre"}
 # Operator/application orchestration for the Draft Board and the explicit
 # replay bootstrap. Routes may import the repository-agnostic board read
 # service; replay bootstrap itself composes season/auth repositories but is
-# never an HTTP or lower-domain dependency.
+# never an HTTP or lower-domain dependency. `app.replay_continuation` (issue
+# #178) is the same shape: a narrow, audited replay/migration-style
+# continuation operation over the season/fixture model, composed only by
+# `scripts.replay_2026_second_half_continuation`, never by a route.
 DRAFT_BOARD = {"app.draft_board"}
-REPLAY_BOOTSTRAP = {"app.replay_bootstrap"}
+REPLAY_BOOTSTRAP = {"app.replay_bootstrap", "app.replay_continuation"}
 
 # Round-opening preflight (#105): an application read model over the
 # persisted mapping/lifecycle, lockout and Opening Round boundaries.  Like

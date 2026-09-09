@@ -30,6 +30,19 @@ repository (see the [README](README.md)'s evidence policy).
 | Environment/configuration assumptions used | |
 | Rounds 1–9 / squads / ladder / audit history confirmed intact | |
 
+## 9-to-20-round continuation (section D step 5, issue #178)
+
+| Field | Value |
+|---|---|
+| Season id | |
+| Fixture draw id | |
+| Fixture draw version before / after | |
+| `regular_season_round_count` before / after | `9` / `20` |
+| `replay.season.continued` audit event id | |
+| `fixture.draw.continued` audit event id | |
+| Already-continued (idempotent no-op) vs. fresh continuation | |
+| Rounds 1–20 confirmed via Season Centre / Round Centre / Round Preflight, Round 10 still unopened | |
+
 ## Round 10 pre-draft checkpoint (section G)
 
 | Field | Value |

@@ -100,6 +100,24 @@ only ever names its sender's own original entitlement, not a specifically
 re-traded one; this also makes same-round swaps and multi-way rotations
 resolve correctly without special-casing.
 
+`decide_trade` only ever accepts a *pending* trade, so an already-*approved*
+one has no way back through it. `reverse_trade_approval` is the exceptional
+Scorer correction for exactly that: while the delisting window is still
+open, it undoes a player leg (release from the current holder, reacquire
+back to the original owner) and simply drops a pick leg's `approved` status
+so `_plan_selection_allocations` stops considering it -- the real recovery
+path for a pick leg `lock_delistings` finds undeliverable (e.g. a round
+number no entry's vacancy could ever reach).
+
+If literally no entry has any vacancy at all -- nobody delisted anyone this
+cycle, or every delisting was withdrawn before lock -- `generate_selection_
+table` recognises that as a trivial completion (straight to `draft_complete`,
+no engine draft ever created) rather than raising: `app.draft.
+DraftRepository` refuses to materialise a zero-pick draft outright, and
+`delistings_locked` has no route back to `delisting_open` to retry from.
+Every downstream read (`status`, `picks`, `next_pick`,
+`reconcile_completion`) is already null-safe for "no engine draft exists".
+
 ## Delisting lock and draft-generation boundary
 
 `lock_delistings` and `generate_selection_table` are deliberately two

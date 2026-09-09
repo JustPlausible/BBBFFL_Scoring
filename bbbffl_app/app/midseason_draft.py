@@ -163,8 +163,11 @@ class MidseasonPickReconciliationError(MidseasonDraftStateError):
 
     Raising here rolls back the whole lock (including any delisted-player
     releases already applied in this same transaction) and leaves the
-    delisting window open, so the Scorer can reject/withdraw or rebalance
-    the offending trade(s) before retrying the lock."""
+    delisting window open, so the Scorer can rebalance with a compensating
+    trade, or -- since a pending proposal can be rejected but an *approved*
+    trade cannot, `decide_trade` only ever accepting a pending one --
+    reverse the offending trade's approval outright with
+    `reverse_trade_approval`, before retrying the lock."""
 
     def __init__(self, message, mismatched, unapplied_leg_ids=()):
         super().__init__(message)
@@ -963,6 +966,100 @@ class MidseasonDraftRepository:
             )
         return self.get_trade(trade_id)
 
+    def reverse_trade_approval(self, season_id, trade_id, *, actor, reason):
+        """Exceptional Scorer/Admin correction: undoes an already-*approved*
+        trade while the delisting window is still open. Exists specifically
+        for a round-based pick leg approved in good faith that later turns
+        out to be undeliverable -- `lock_delistings`'
+        `MidseasonPickReconciliationError.unapplied_leg_ids` names it -- and
+        for which there is otherwise no way back: `decide_trade` only ever
+        accepts a *pending* trade, and once approved a trade has no path to
+        `pending` again.
+
+        Reverses every player leg exactly as if the trade had never been
+        approved (release from its current holder, reacquire back to the
+        original owner -- refusing if that player has since moved on again,
+        for the same staleness reason `decide_trade` itself refuses a stale
+        leg), and simply drops every pick leg's `approved` status by moving
+        the whole trade to `rejected`, so `_plan_selection_allocations` (and
+        therefore `lock_delistings`) stops considering it at all. Requires
+        an explicit reason, like every other exceptional correction in this
+        module.
+
+        Only legal while `delisting_open`: once delistings are locked, no
+        pick leg is ever applied by anything but `generate_selection_table`
+        (there is nothing left to unstick), and an approved trade in
+        `draft_complete` is real post-draft trading this correction path
+        does not cover."""
+        if not reason or not reason.strip():
+            raise ValueError("reversing an approved trade requires an explicit reason")
+        with transaction(self.database) as conn:
+            draft = self._locked_draft(conn, season_id)
+            if draft["state"] != "delisting_open":
+                raise MidseasonDraftStateError(
+                    "an approved trade can only be reversed while the delisting window is open"
+                )
+            trade = conn.execute(
+                "SELECT * FROM midseason_trade WHERE trade_id=?" + _for_update_suffix(self.database), (trade_id,)
+            ).fetchone()
+            if not trade or trade["midseason_draft_id"] != draft["midseason_draft_id"]:
+                raise KeyError(trade_id)
+            if trade["status"] != "approved":
+                raise MidseasonDraftStateError(
+                    f"only an approved trade can be reversed (this one is {trade['status']})"
+                )
+            legs = conn.execute("SELECT * FROM midseason_trade_leg WHERE trade_id=?", (trade_id,)).fetchall()
+            now = _now()
+            correlation = new_correlation_id()
+            for leg in legs:
+                if leg["leg_type"] != "player":
+                    continue
+                current = conn.execute(
+                    "SELECT season_entry_id FROM player_ownership_period "
+                    "WHERE season_player_id=? AND released_at IS NULL" + _for_update_suffix(self.database),
+                    (leg["season_player_id"],),
+                ).fetchone()
+                if not current or current["season_entry_id"] != leg["to_season_entry_id"]:
+                    raise MidseasonDraftStateError(
+                        f"player {leg['season_player_id']} is no longer owned by {leg['to_season_entry_id']} -- "
+                        "this trade's effect has already moved on and cannot be cleanly reversed"
+                    )
+                self.ownership.release_in_transaction(
+                    conn,
+                    leg["season_player_id"],
+                    effective_at=now,
+                    actor=actor,
+                    reason=reason,
+                    correlation_id=correlation,
+                    allow_closed_window=True,
+                )
+                self.ownership.acquire_in_transaction(
+                    conn,
+                    leg["season_player_id"],
+                    leg["from_season_entry_id"],
+                    effective_at=now,
+                    actor=actor,
+                    reason=reason,
+                    correlation_id=correlation,
+                    allow_closed_window=True,
+                )
+            conn.execute(
+                "UPDATE midseason_trade SET status='rejected', decided_at=?, decision_reason=? WHERE trade_id=?",
+                (now, reason, trade_id),
+            )
+            append_event(
+                conn,
+                actor=actor,
+                action="midseason.trade.reversed",
+                entity_type="midseason.trade",
+                entity_id=trade_id,
+                correlation_id=correlation,
+                reason=reason,
+                before_state={"status": "approved"},
+                after_state={"status": "rejected"},
+            )
+        return self.get_trade(trade_id)
+
     def get_trade(self, trade_id):
         row = self.database.execute("SELECT * FROM midseason_trade WHERE trade_id=?", (trade_id,)).fetchone()
         return MidseasonTrade(**dict(row)) if row else None
@@ -1009,12 +1106,15 @@ class MidseasonDraftRepository:
         with no vacancy in that round can never be delivered. Either defect
         raising here rolls back this entire call -- including the
         delisted-player releases just applied -- so nothing is lost: the
-        Scorer can reject/withdraw or rebalance the offending trade(s) --
-        typically by trading the excess pick(s) on to an entry with spare
-        vacancy while the delisting window is still open -- and retry the
-        lock, rather than the draft only discovering the problem later when
-        a pick can never be legally executed or a trade's promised pick
-        silently never arrives."""
+        Scorer can rebalance the offending trade(s) -- typically by trading
+        the excess pick(s) on to an entry with spare vacancy while the
+        delisting window is still open -- or reverse an already-approved
+        trade's effect outright with `reverse_trade_approval` (a pending
+        proposal can simply be rejected via `decide_trade`, but an approved
+        one cannot go back to pending) -- and retry the lock, rather than
+        the draft only discovering the problem later when a pick can never
+        be legally executed or a trade's promised pick silently never
+        arrives."""
         with transaction(self.database) as conn:
             draft = self._locked_draft(conn, season_id)
             if draft["state"] != "delisting_open":
@@ -1111,8 +1211,9 @@ class MidseasonDraftRepository:
                         + ", ".join(str(leg_id) for leg_id in unapplied_leg_ids)
                     )
                 raise MidseasonPickReconciliationError(
-                    "nothing has been changed by this call (the delisting window is still open): reject/withdraw "
-                    "or rebalance the offending trade(s) before retrying the lock -- " + "; ".join(messages),
+                    "nothing has been changed by this call (the delisting window is still open): rebalance with a "
+                    "compensating trade, or reverse an approved trade outright with reverse_trade_approval, before "
+                    "retrying the lock -- " + "; ".join(messages),
                     mismatched=mismatched,
                     unapplied_leg_ids=unapplied_leg_ids,
                 )
@@ -1208,7 +1309,19 @@ class MidseasonDraftRepository:
         selections are made through `app.draft.DraftRepository`. By this
         point `lock_delistings` has already verified every entry's final
         allocation reconciles with its vacancies, so this call cannot itself
-        strand the draft."""
+        strand the draft.
+
+        If literally no entry has any vacancy at all (nobody delisted
+        anyone this cycle, or every delisting was withdrawn before lock),
+        there is nothing to draft -- `app.draft.DraftRepository` itself
+        refuses to materialise a zero-pick draft, and `delistings_locked`
+        has no route back to `delisting_open` to retry from. Rather than
+        stranding the season there, this call recognises that outcome as a
+        trivial completion: it transitions straight to `draft_complete`
+        without ever creating an underlying engine draft. Every downstream
+        read (`status`, `picks`, `next_pick`, `reconcile_completion`) is
+        already null-safe for "no engine draft exists for this season/kind"
+        for exactly this reason."""
         with transaction(self.database) as conn:
             draft = self._locked_draft(conn, season_id)
             if draft["state"] != "delistings_locked":
@@ -1230,40 +1343,61 @@ class MidseasonDraftRepository:
             allocations, unapplied_leg_ids, _vacancies = self._plan_selection_allocations(
                 conn, draft["midseason_draft_id"], ordered_entry_ids, squad_limit
             )
-            if not allocations:
-                raise MidseasonDraftStateError("no team requires a mid-season draft selection")
-            self.drafts.materialize_draft_in_transaction(
-                conn,
-                season_id,
-                MIDSEASON_DRAFT_KIND,
-                ordered_entry_ids,
-                (
-                    (a["overall"], a["round"], a["position"], a["original"], a["current"])
-                    for a in sorted(allocations, key=lambda a: a["overall"])
-                ),
-                squad_limit,
-                actor=actor,
-                reason=reason,
-            )
             now = _now()
-            conn.execute(
-                "UPDATE midseason_draft SET state='draft_open', updated_at=?, version=version+1 WHERE midseason_draft_id=?",
-                (now, draft["midseason_draft_id"]),
-            )
-            append_event(
-                conn,
-                actor=actor,
-                action="midseason.selections.generated",
-                entity_type="midseason.draft",
-                entity_id=draft["midseason_draft_id"],
-                reason=reason,
-                before_state={"state": "delistings_locked"},
-                after_state={
-                    "state": "draft_open",
-                    "pick_count": len(allocations),
-                    "unapplied_pick_trade_leg_ids": unapplied_leg_ids,
-                },
-            )
+            if not allocations:
+                # Nothing at all to draft: transition straight through to
+                # draft_complete rather than materialising a zero-pick
+                # engine draft (app.draft.DraftRepository refuses one
+                # outright), which would otherwise strand the season in
+                # delistings_locked with no route back to delisting_open.
+                conn.execute(
+                    "UPDATE midseason_draft SET state='draft_complete', draft_completed_at=?, updated_at=?, "
+                    "version=version+1 WHERE midseason_draft_id=?",
+                    (now, now, draft["midseason_draft_id"]),
+                )
+                append_event(
+                    conn,
+                    actor=actor,
+                    action="midseason.selections.generated",
+                    entity_type="midseason.draft",
+                    entity_id=draft["midseason_draft_id"],
+                    reason=reason or "no entry has any roster vacancy -- nothing to draft",
+                    before_state={"state": "delistings_locked"},
+                    after_state={"state": "draft_complete", "pick_count": 0},
+                )
+            else:
+                self.drafts.materialize_draft_in_transaction(
+                    conn,
+                    season_id,
+                    MIDSEASON_DRAFT_KIND,
+                    ordered_entry_ids,
+                    (
+                        (a["overall"], a["round"], a["position"], a["original"], a["current"])
+                        for a in sorted(allocations, key=lambda a: a["overall"])
+                    ),
+                    squad_limit,
+                    actor=actor,
+                    reason=reason,
+                )
+                conn.execute(
+                    "UPDATE midseason_draft SET state='draft_open', updated_at=?, version=version+1 "
+                    "WHERE midseason_draft_id=?",
+                    (now, draft["midseason_draft_id"]),
+                )
+                append_event(
+                    conn,
+                    actor=actor,
+                    action="midseason.selections.generated",
+                    entity_type="midseason.draft",
+                    entity_id=draft["midseason_draft_id"],
+                    reason=reason,
+                    before_state={"state": "delistings_locked"},
+                    after_state={
+                        "state": "draft_open",
+                        "pick_count": len(allocations),
+                        "unapplied_pick_trade_leg_ids": unapplied_leg_ids,
+                    },
+                )
         return self.get_draft(season_id)
 
     # -- 15. Selections, completion ---------------------------------------

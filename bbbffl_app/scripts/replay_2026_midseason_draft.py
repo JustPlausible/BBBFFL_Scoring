@@ -24,20 +24,23 @@ established.
 Usage
 -----
 
+`--database-url` is a top-level option -- like `git --git-dir=... status`,
+it must come *before* the subcommand name, not after it.
+
     cd bbbffl_app
-    python -m scripts.replay_2026_midseason_draft set-trigger-round \\
+    python -m scripts.replay_2026_midseason_draft \\
         --database-url sqlite:///$(pwd)/data/2026-first-half.db \\
-        --season-id <season_id> --trigger-round 10
-    python -m scripts.replay_2026_midseason_draft confirm-ladder \\
+        set-trigger-round --season-id <season_id> --trigger-round 10
+    python -m scripts.replay_2026_midseason_draft \\
         --database-url sqlite:///$(pwd)/data/2026-first-half.db \\
-        --season-id <season_id> --competition-id <competition_id>
-    python -m scripts.replay_2026_midseason_draft open-delisting-window ...
-    python -m scripts.replay_2026_midseason_draft delist --season-entry-id ... --season-player-id ...
-    python -m scripts.replay_2026_midseason_draft lock-delistings ...
-    python -m scripts.replay_2026_midseason_draft generate-selections ...
-    python -m scripts.replay_2026_midseason_draft pick --season-entry-id ... --season-player-id ...
-    python -m scripts.replay_2026_midseason_draft auto-complete ...
-    python -m scripts.replay_2026_midseason_draft close-post-draft-trading ...
+        confirm-ladder --season-id <season_id> --competition-id <competition_id>
+    python -m scripts.replay_2026_midseason_draft --database-url ... open-delisting-window ...
+    python -m scripts.replay_2026_midseason_draft --database-url ... delist --season-entry-id ... --season-player-id ...
+    python -m scripts.replay_2026_midseason_draft --database-url ... lock-delistings ...
+    python -m scripts.replay_2026_midseason_draft --database-url ... generate-selections ...
+    python -m scripts.replay_2026_midseason_draft --database-url ... pick --season-entry-id ... --season-player-id ...
+    python -m scripts.replay_2026_midseason_draft --database-url ... auto-complete ...
+    python -m scripts.replay_2026_midseason_draft --database-url ... close-post-draft-trading ...
 """
 
 from __future__ import annotations
@@ -122,6 +125,12 @@ def cmd_trade(midseason: MidseasonDraftRepository, args: argparse.Namespace) -> 
 def cmd_decide_trade(midseason: MidseasonDraftRepository, args: argparse.Namespace) -> int:
     trade = midseason.decide_trade(args.season_id, args.trade_id, args.approve, actor=ACTOR, reason=args.reason)
     print(f"Trade {trade.trade_id} is now {trade.status}.")
+    return 0
+
+
+def cmd_reverse_trade_approval(midseason: MidseasonDraftRepository, args: argparse.Namespace) -> int:
+    trade = midseason.reverse_trade_approval(args.season_id, args.trade_id, actor=ACTOR, reason=args.reason)
+    print(f"Trade {trade.trade_id} approval reversed; it is now {trade.status}.")
     return 0
 
 
@@ -223,6 +232,7 @@ COMMANDS = {
     "withdraw-delisting": cmd_withdraw_delisting,
     "trade": cmd_trade,
     "decide-trade": cmd_decide_trade,
+    "reverse-trade": cmd_reverse_trade_approval,
     "lock-delistings": cmd_lock_delistings,
     "generate-selections": cmd_generate_selections,
     "pick": cmd_pick,
@@ -283,6 +293,10 @@ def build_parser() -> argparse.ArgumentParser:
     decision.add_argument("--approve", dest="approve", action="store_true")
     decision.add_argument("--reject", dest="approve", action="store_false")
     p.add_argument("--reason")
+
+    p = base("reverse-trade")
+    p.add_argument("--trade-id", required=True)
+    p.add_argument("--reason", required=True)
 
     p = base("lock-delistings")
     p.add_argument("--reason")

@@ -766,14 +766,6 @@ def test_generate_selection_table_produces_correct_vacancy_based_numbered_picks(
     assert status.total_picks == 3 and status.completed_picks == 0 and status.target_squad_size == 3
 
 
-def test_generate_selection_table_refuses_when_no_team_has_a_vacancy():
-    ctx = _delisting_open(trigger_round=10)
-    m, season = ctx["midseason"], ctx["season"]
-    m.lock_delistings(season.season_id, actor=ACTOR)
-    with pytest.raises(MidseasonDraftStateError):
-        m.generate_selection_table(season.season_id, actor=ACTOR)
-
-
 def test_lock_delistings_refuses_a_pick_trade_that_cannot_reconcile_and_recovers_after_a_compensating_trade():
     """Codex review: an approved round-based pick trade can hand an entry
     more selections than it has roster vacancies for -- and, on the other
@@ -911,6 +903,115 @@ def test_lock_delistings_refuses_an_approved_pick_leg_with_no_vacancy_to_apply_t
 
     draft = m.get_draft(season.season_id)
     assert draft.state == "delisting_open"
+
+    # Recovery: `decide_trade` only ever accepts a *pending* trade, so an
+    # already-approved one has no way back through it -- the Scorer instead
+    # reverses the approval outright, an exceptional correction that is
+    # safe here since the trade never touched any live ownership (a pure
+    # pick leg only ever matters at generation time).
+    reversed_trade = m.reverse_trade_approval(
+        season.season_id, trade.trade_id, actor=ACTOR, reason="pick could never be delivered"
+    )
+    assert reversed_trade.status == "rejected"
+    m.lock_delistings(season.season_id, actor=ACTOR)
+    m.generate_selection_table(season.season_id, actor=ACTOR)
+
+
+def test_reverse_trade_approval_undoes_a_player_leg_and_rejects_a_pending_or_stale_trade():
+    """Codex review: `reverse_trade_approval` is the only way back for an
+    already-*approved* trade (`decide_trade` accepts only `pending` ones).
+    For a player leg, reversing must actually undo the ownership change --
+    release from the new holder, reacquire back to the original owner --
+    not just flip a status flag."""
+    ctx = _delisting_open(trigger_round=10, squad_limit=4)
+    m, season, entries = ctx["midseason"], ctx["season"], ctx["entries"]
+    a, b = entries[0], entries[1]
+    player = next(iter(m.ownership.current_squad(a.season_entry_id))).season_player_id
+    # `b` needs a covering delisting for the capacity-overage bypass to let
+    # this one-way acquisition through at all -- unrelated to what's under
+    # test here (the reversal itself).
+    b_delisted_player = next(iter(m.ownership.current_squad(b.season_entry_id))).season_player_id
+    m.submit_delisting(season.season_id, b.season_entry_id, b_delisted_player, actor=ACTOR)
+
+    trade = m.propose_trade(
+        season.season_id,
+        [
+            {
+                "leg_type": "player",
+                "from_season_entry_id": a.season_entry_id,
+                "to_season_entry_id": b.season_entry_id,
+                "season_player_id": player,
+            }
+        ],
+        actor=ACTOR,
+    )
+
+    # Only an approved trade can be reversed.
+    with pytest.raises(MidseasonDraftStateError):
+        m.reverse_trade_approval(season.season_id, trade.trade_id, actor=ACTOR, reason="too early")
+
+    m.decide_trade(season.season_id, trade.trade_id, True, actor=ACTOR, reason="approved")
+    assert player in {p.season_player_id for p in m.ownership.current_squad(b.season_entry_id)}
+
+    with pytest.raises(ValueError):
+        m.reverse_trade_approval(season.season_id, trade.trade_id, actor=ACTOR, reason="   ")
+
+    reversed_trade = m.reverse_trade_approval(
+        season.season_id, trade.trade_id, actor=ACTOR, reason="undoing a mistaken approval"
+    )
+    assert reversed_trade.status == "rejected"
+    assert player in {p.season_player_id for p in m.ownership.current_squad(a.season_entry_id)}
+    assert player not in {p.season_player_id for p in m.ownership.current_squad(b.season_entry_id)}
+
+    # A trade that is not currently approved cannot be reversed again.
+    with pytest.raises(MidseasonDraftStateError):
+        m.reverse_trade_approval(season.season_id, trade.trade_id, actor=ACTOR, reason="already reversed")
+
+
+def test_reverse_trade_approval_refused_once_delistings_are_locked():
+    ctx = _delisting_open(trigger_round=10, squad_limit=4)
+    m, season, entries = ctx["midseason"], ctx["season"], ctx["entries"]
+    a, b = entries[0], entries[1]
+    player = next(iter(m.ownership.current_squad(a.season_entry_id))).season_player_id
+    b_delisted_player = next(iter(m.ownership.current_squad(b.season_entry_id))).season_player_id
+    m.submit_delisting(season.season_id, b.season_entry_id, b_delisted_player, actor=ACTOR)
+    trade = m.propose_trade(
+        season.season_id,
+        [
+            {
+                "leg_type": "player",
+                "from_season_entry_id": a.season_entry_id,
+                "to_season_entry_id": b.season_entry_id,
+                "season_player_id": player,
+            }
+        ],
+        actor=ACTOR,
+    )
+    m.decide_trade(season.season_id, trade.trade_id, True, actor=ACTOR, reason="approved")
+    m.lock_delistings(season.season_id, actor=ACTOR)
+    with pytest.raises(MidseasonDraftStateError):
+        m.reverse_trade_approval(season.season_id, trade.trade_id, actor=ACTOR, reason="too late")
+
+
+def test_lock_delistings_and_generate_selection_table_complete_trivially_when_nobody_delists():
+    """Codex review: if literally no entry has any vacancy (nobody delisted
+    anyone this cycle), `vacancy_allocations` yields nothing --
+    `app.draft.DraftRepository` itself refuses to materialise a zero-pick
+    draft, and `delistings_locked` has no route back to `delisting_open` to
+    retry from. This must resolve as a trivial completion, not a stranded
+    season."""
+    ctx = _delisting_open(trigger_round=10, squad_limit=4)
+    m, season = ctx["midseason"], ctx["season"]
+    m.lock_delistings(season.season_id, actor=ACTOR)
+    draft = m.generate_selection_table(season.season_id, actor=ACTOR)
+    assert draft.state == "draft_complete"
+    assert m.status(season.season_id) is None
+    assert m.picks(season.season_id) == []
+    assert m.next_pick(season.season_id) is None
+    # Safe to call even though there is no underlying engine draft at all.
+    m.reconcile_completion(season.season_id, actor=ACTOR)
+    m.close_post_draft_trading(season.season_id, actor=ACTOR)
+    assert m.get_draft(season.season_id).state == "complete"
 
 
 def test_same_round_three_way_pick_rotation_resolves_each_leg_to_its_own_named_recipient():

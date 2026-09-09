@@ -93,6 +93,11 @@ class DecideTradeRequest(BaseModel):
     scorer_name: str | None = None
 
 
+class ReverseTradeApprovalRequest(BaseModel):
+    reason: str
+    scorer_name: str | None = None
+
+
 class LockDelistingsRequest(BaseModel):
     reason: str | None = None
     scorer_name: str | None = None
@@ -263,6 +268,25 @@ def decide_trade(
     _authorise(request, principal, season_id)
     trade = request.app.state.midseason_draft.decide_trade(
         season_id, trade_id, payload.approve, actor=_actor(principal, payload.scorer_name), reason=payload.reason
+    )
+    return {"trade": dataclasses.asdict(trade)}
+
+
+@router.post("/{season_id}/trade/{trade_id}/reverse")
+def reverse_trade_approval(
+    season_id: str,
+    trade_id: str,
+    payload: ReverseTradeApprovalRequest,
+    request: Request,
+    principal: Principal = Depends(manage),
+):
+    """Exceptional correction: undo an already-*approved* trade while the
+    delisting window is still open (e.g. one whose approved pick leg turns
+    out to be undeliverable) -- `decide_trade` only accepts a pending
+    trade, so an approval has no other way back."""
+    _authorise(request, principal, season_id)
+    trade = request.app.state.midseason_draft.reverse_trade_approval(
+        season_id, trade_id, actor=_actor(principal, payload.scorer_name), reason=payload.reason
     )
     return {"trade": dataclasses.asdict(trade)}
 

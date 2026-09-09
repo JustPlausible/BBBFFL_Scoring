@@ -270,7 +270,20 @@ def _build_team_readiness(
         submission = lineups_repo.get_effective_submission(draft.lineup_id) if draft is not None else None
         state = _team_submission_state(draft, submission)
         lock_summary = None
-        if draft is not None and lifecycle_state not in ("not_created", "upcoming"):
+        if draft is not None and lifecycle_state == "final":
+            # A `final` round's lockout evidence is done and immutable --
+            # its published result already reflects whatever locked/
+            # unlocked while it was live, and nothing here ever re-derives
+            # or changes that after the fact. Project it from what is
+            # already durably persisted rather than `lock_state` (issue
+            # #176: the round's mapped AFL round may by now sit outside the
+            # currently active replay evidence package entirely, e.g. a
+            # prior evidence-package boundary, and this historical summary
+            # never actually needs to fetch it again to redisplay history).
+            effective_positions = submission.positions if submission is not None else draft.positions
+            view = lockouts_repo.persisted_lock_state(draft.lineup_id, round_id, entry_id, effective_positions)
+            lock_summary = _position_lock_summary(view.positions)
+        elif draft is not None and lifecycle_state not in ("not_created", "upcoming"):
             effective_positions = submission.positions if submission is not None else draft.positions
             try:
                 view = lockouts_repo.lock_state(
@@ -1025,7 +1038,40 @@ def _build_round_dashboard(
     # read it unconditionally so a provider outage below is never confused
     # with "nothing was ever configured" (Codex review, PR #159).
     trigger_plan_configured = False
-    if lifecycle_state != "not_created":
+    # A `final` round is already published, read-only governance/operational
+    # history -- its lockout/lineup evidence was durably materialized while
+    # it was live and never changes afterwards (a correction is a separate,
+    # explicitly-invoked mutation elsewhere, never something a dashboard
+    # read triggers). It therefore needs no live AFL match/lockout evidence
+    # to render (issue #176: at a replay evidence-package boundary, a
+    # finalized historical round's mapped AFL round can legitimately sit
+    # outside the currently active package -- requiring it here would fail
+    # closed for evidence this read never actually needs), but its
+    # persisted trigger/lock facts are still shown, via `LockoutRepository`'s
+    # persisted-only projection, exactly like a round still being played.
+    if lifecycle_state == "final":
+        # Never asserted as confirmed fresh (Codex review, PR #177): no live
+        # evidence was fetched to confirm anything here, and `evidence_fresh
+        # =True` would misrepresent a check that was deliberately skipped as
+        # one that was performed and passed. `build_round_review` treats
+        # `None` distinctly from both `True` and `False` for exactly this.
+        evidence_fresh = None
+        trigger_plan_configured = bool(LockoutTriggerRepository(database).list_triggers(round_id))
+        trigger_rows = _build_trigger_rows(lockouts_repo.persisted_trigger_state(round_id), {})
+        any_trigger_activated = any(row["activated"] for row in trigger_rows)
+        team_rows = _build_team_readiness(
+            lineups_repo,
+            lockouts_repo,
+            identities,
+            match_facts,
+            season_id=season.season_id,
+            competition_id=competition_id,
+            round_id=round_id,
+            entry_ids=entry_ids,
+            lifecycle_state=lifecycle_state,
+            any_trigger_activated=any_trigger_activated,
+        )
+    elif lifecycle_state != "not_created":
         trigger_plan_configured = bool(LockoutTriggerRepository(database).list_triggers(round_id))
         with scope as evidence:
             try:

@@ -1558,3 +1558,130 @@ def test_round_lockout_plan_activates_from_curated_afl_evidence_fixtures():
         assert after_main_start.positions["M1"].reason == "main_lockout_triggered"
     finally:
         client.close()
+
+
+# ---------------------------------------------------------------------------
+# Issue #176: persisted-only historical projection -- never asks a
+# MatchFactsProvider for anything, so a round outside the currently active
+# replay evidence package can still have its already-decided lockout
+# history redisplayed safely.
+# ---------------------------------------------------------------------------
+
+
+def test_persisted_lock_state_projects_durable_evidence_without_match_facts():
+    db, _, round_, entries, scope, pool, ownership = context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_selective(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], key="early-1", sequence=1)
+    configure_main(triggers, round_.bbbffl_round_id, [LATE_MATCH_ID], sequence=2)
+    early = acquire(pool, ownership, scope, entry, 900001, EARLY_HOME)
+    lineups = WeeklyLineupRepository(db)
+    draft, submitted = establish(lineups, round_, entry, scope, {"F1": early.season_player_id, "M1": None})
+    lock_repo = LockoutRepository(db)
+
+    # Materialize durable evidence exactly as the live/replay flow would --
+    # both matches concluded, so the selective trigger locks F1 by its own
+    # persisted `weekly_lineup_lock` row and the main trigger's activation
+    # (a pure persisted fact) locks the deliberately vacant M1.
+    match_facts = FakeMatchFacts([early_match(status="CONCLUDED"), late_match(status="CONCLUDED")])
+    lock_repo.lock_state(
+        draft.lineup_id,
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        submitted.positions,
+        match_facts=match_facts,
+        evaluation_at=LATE_START + timedelta(hours=1),
+    )
+
+    projected = lock_repo.persisted_lock_state(
+        draft.lineup_id, round_.bbbffl_round_id, entry.season_entry_id, submitted.positions
+    )
+
+    assert projected.positions["F1"].state == LockState.LOCKED
+    assert projected.positions["F1"].reason == "selective_trigger_activated"
+    assert projected.positions["M1"].state == LockState.LOCKED
+    assert projected.positions["M1"].reason == "main_lockout_triggered"
+
+
+def test_persisted_lock_state_honors_main_activation_for_a_never_materialized_named_position():
+    """Codex review (PR #177): a persisted main-trigger activation
+    conclusively locks *every remaining position* once it has fired --
+    including a named occupant whose own `weekly_lineup_lock` row was never
+    separately materialized. Lock rows are written lazily, per lineup
+    (`_materialize_lineup`), and nothing guarantees every lineup was
+    re-observed again after main lockout actually activated -- so this must
+    never be reported `INDETERMINATE` merely because that lazy write never
+    happened for this one lineup."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_main(triggers, round_.bbbffl_round_id, [LATE_MATCH_ID], sequence=1)
+    named = acquire(pool, ownership, scope, entry, 900003, EARLY_HOME)
+    lineups = WeeklyLineupRepository(db)
+    draft, submitted = establish(lineups, round_, entry, scope, {"F1": named.season_player_id})
+    lock_repo = LockoutRepository(db)
+
+    # Durably activate the main trigger -- but deliberately never call
+    # `lock_state`/`materialize_lineup` for this lineup, so no
+    # `weekly_lineup_lock` row is ever written for F1.
+    lock_repo.materialize_round_triggers(
+        round_.bbbffl_round_id,
+        match_facts=FakeMatchFacts([late_match(status="CONCLUDED")]),
+        evaluation_at=LATE_START + timedelta(hours=1),
+    )
+
+    projected = lock_repo.persisted_lock_state(
+        draft.lineup_id, round_.bbbffl_round_id, entry.season_entry_id, submitted.positions
+    )
+
+    assert projected.positions["F1"].state == LockState.LOCKED
+    assert projected.positions["F1"].reason == "main_lockout_triggered"
+    assert projected.positions["F1"].irreversible is False
+
+
+def test_persisted_lock_state_reports_indeterminate_for_a_never_materialized_position():
+    """A named position that never durably locked (its match was never
+    supplied to any prior `lock_state`/materialization call) must be
+    reported `INDETERMINATE`, never guessed live -- this method has no live
+    evidence to guess from in the first place."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    entry = entries[0]
+    never_locked = acquire(pool, ownership, scope, entry, 900002, LATE_HOME)
+    lineups = WeeklyLineupRepository(db)
+    draft, submitted = establish(lineups, round_, entry, scope, {"F1": never_locked.season_player_id})
+
+    projected = LockoutRepository(db).persisted_lock_state(
+        draft.lineup_id, round_.bbbffl_round_id, entry.season_entry_id, submitted.positions
+    )
+
+    assert projected.positions["F1"].state == LockState.INDETERMINATE
+    assert projected.positions["F1"].reason == "evidence_unavailable_for_historical_round"
+
+
+def test_persisted_trigger_state_projects_activation_without_match_facts():
+    db, _, round_, entries, scope, pool, ownership = context()
+    triggers = LockoutTriggerRepository(db)
+    # The selective trigger is scoped to the *later*-scheduled match, so it
+    # stays un-activated at an evaluation instant that has already locked
+    # the main trigger's own (earlier, concluded) match.
+    configure_main(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], sequence=1)
+    configure_selective(triggers, round_.bbbffl_round_id, [STAGE_B_MATCH_ID], key="stage-b", sequence=2)
+    lock_repo = LockoutRepository(db)
+
+    lock_repo.materialize_round_triggers(
+        round_.bbbffl_round_id,
+        match_facts=FakeMatchFacts([early_match(status="CONCLUDED"), stage_b_match(status="UPCOMING")]),
+        evaluation_at=EARLY_START + timedelta(hours=1),
+    )
+
+    views = {view.trigger_key: view for view in lock_repo.persisted_trigger_state(round_.bbbffl_round_id)}
+
+    assert views["stage-b"].activated is False
+    assert views["main"].activated is True
+    assert views["main"].activation_reason == "match_status_completed"
+    # No live evidence was ever asked for by this projection, so per-match
+    # observed status/start time is unavailable -- never fabricated.
+    for view in views.values():
+        for configured_match in view.configured_matches:
+            assert configured_match["observed_status"] is None
+            assert configured_match["start_time_utc"] is None

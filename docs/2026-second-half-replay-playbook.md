@@ -401,15 +401,27 @@ directly against the Postgres connection string from the host instead.
    `DraftRepository.correct_pick` with the default `draft_kind="preseason"`,
    and once a mid-season draft exists this season carries both a preseason
    and a mid-season draft, so it would look for the pick under the wrong
-   `draft_kind` and fail. Use the mid-season-specific correction instead —
-   `msd correct-selection --draft-pick-id <pick_id> --reason "..."` (only
-   while the draft is still open; after `draft_complete`, run `msd
-   reopen-draft --reason "..."` first):
+   `draft_kind` and fail. Use the mid-season-specific correction instead,
+   reopening first if the draft has already reached `draft_complete` — its
+   final selection auto-finalises the underlying engine draft, and
+   `correct_pick` refuses outright once `finalized_at` is set, so
+   `reopen-draft` must run *before* `correct-selection`, not after:
 
    ```bash
-   msd correct-selection --season-id <season_id> --draft-pick-id <pick_id> --reason "..."
    msd reopen-draft --season-id <season_id> --reason "..."   # only if already draft_complete
+   msd correct-selection --season-id <season_id> --draft-pick-id <pick_id> --reason "..."
    ```
+
+   `correct_pick` is deliberately narrow: it only ever corrects the single
+   most-recently-completed active pick in the draft, precisely so a
+   correction never has to reconcile sequencing against picks completed
+   after it. If the wrong pick is discovered only after later picks have
+   already been made, either unwind those later picks first — repeat
+   `correct-selection` back to (and including) the wrong one, in reverse
+   pick order, then re-`pick` each slot correctly forward again — or, if
+   that is too disruptive to reconstruct cleanly, restore the working
+   database from the Round 10/pre-draft checkpoint (section G) and redo
+   section H from `set-trigger-round`/`confirm-ladder` onward.
 8. **Apply any audited exceptional Scorer correction** here — an
    `override-order` reason, a `reverse-trade`, or a draft-pick correction —
    and record each one in `docs/evidence/2026-second-half-replay/

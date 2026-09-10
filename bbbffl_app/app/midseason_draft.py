@@ -949,9 +949,23 @@ class MidseasonDraftRepository:
                     squad_limit = config["squad_limit"]
                 for leg in player_legs:
                     to_entry = leg["to_season_entry_id"]
+                    # PostgreSQL rejects `SELECT COUNT(*) ... FOR UPDATE` (FOR
+                    # UPDATE is not allowed against an aggregate). Lock the
+                    # receiving entry's own row first -- the same parent-row
+                    # lock `OwnershipRepository.acquire_in_transaction` always
+                    # takes before it validates squad capacity -- so a
+                    # concurrent acquisition into this entry (mid-season
+                    # draft pick, another trade, a direct correction) is
+                    # blocked until this decision commits, then count the
+                    # now-stable ownership rows without a lock.
+                    conn.execute(
+                        "SELECT season_entry_id FROM season_entry WHERE season_entry_id=?"
+                        + _for_update_suffix(self.database),
+                        (to_entry,),
+                    ).fetchone()
                     live_count = conn.execute(
                         "SELECT COUNT(*) AS n FROM player_ownership_period "
-                        "WHERE season_entry_id=? AND released_at IS NULL" + _for_update_suffix(self.database),
+                        "WHERE season_entry_id=? AND released_at IS NULL",
                         (to_entry,),
                     ).fetchone()["n"]
                     allow_overage = False
@@ -962,9 +976,16 @@ class MidseasonDraftRepository:
                                 f"{squad_limit}, and there is no later delisting lock outside the delisting "
                                 "window to ever resolve it -- reject this trade instead"
                             )
+                        # Not separately locked: the whole draft row is
+                        # already held FOR UPDATE by `_locked_draft` above,
+                        # and every delisting mutation (`submit_delisting`,
+                        # `withdraw_delisting`) takes that same lock before
+                        # touching `midseason_delisting`, so this count is
+                        # already race-free without an (invalid) aggregate
+                        # FOR UPDATE of its own.
                         active_delistings = conn.execute(
                             "SELECT COUNT(*) AS n FROM midseason_delisting WHERE midseason_draft_id=? "
-                            "AND season_entry_id=? AND withdrawn_at IS NULL" + _for_update_suffix(self.database),
+                            "AND season_entry_id=? AND withdrawn_at IS NULL",
                             (draft["midseason_draft_id"], to_entry),
                         ).fetchone()["n"]
                         if live_count + 1 - active_delistings > squad_limit:

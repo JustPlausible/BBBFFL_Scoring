@@ -115,11 +115,30 @@ class _CachedMatchFacts:
     def __init__(self, inner):
         self._inner = inner
         self._cache: dict[str, list] = {}
+        self._byes_cache: dict[str, frozenset | None] = {}
+        self._byes_cache_hit: set[str] = set()
 
     def matches_for(self, bbbffl_round_id: str) -> list:
         if bbbffl_round_id not in self._cache:
             self._cache[bbbffl_round_id] = self._inner.matches_for(bbbffl_round_id)
         return self._cache[bbbffl_round_id]
+
+    def byes_for(self, bbbffl_round_id: str):
+        """Forwards to `self._inner.byes_for` (issue #185), cached exactly
+        like `matches_for` above -- without this, `app.lockouts.resolve_byes`
+        sees no `byes_for` on this wrapper at all (it is duck-typed via
+        `getattr`) and treats every bye on this dashboard as permanently
+        unconfirmed, silently diverging from the Coach/delegated pages'
+        correct `INVALID_SELECTION` classification for the exact same round
+        (Codex review). `None` is cached too (a distinct "already resolved,
+        genuinely unconfirmed" outcome), never re-fetched as though absent."""
+        inner_byes_for = getattr(self._inner, "byes_for", None)
+        if inner_byes_for is None:
+            return None
+        if bbbffl_round_id not in self._byes_cache_hit:
+            self._byes_cache[bbbffl_round_id] = inner_byes_for(bbbffl_round_id)
+            self._byes_cache_hit.add(bbbffl_round_id)
+        return self._byes_cache[bbbffl_round_id]
 
     def evaluation_at(self):
         inner_evaluation_at = getattr(self._inner, "evaluation_at", None)

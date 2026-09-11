@@ -17,8 +17,8 @@ from app.authorization import Principal, require_capability, require_entry_conte
 from app.carry_forward import CarryForwardService
 from app.coach_lineup import (
     COACH_LINEUP_POSITIONS,
+    DRAFT_DEFERRING_LOCK_STATES,
     CoachLineupService,
-    LockState,
     MatchResolutionError,
     describe_ordinary_position,
     resolve_position_locks,
@@ -194,11 +194,15 @@ def _lineup_view(request: Request, principal: Principal, scope: dict) -> dict:
     lock_state = []
     for position in COACH_LINEUP_POSITIONS:
         authoritative_lock = locks[position]
-        # Still open under the authoritative state -> present (and let the
-        # operator continue editing) their own current draft pick, live-
-        # evaluated; already locked/indeterminate there -> the draft's
-        # value is presentational-only divergence, never the primary value.
-        display_lock = draft_locks[position] if authoritative_lock.state == LockState.EDITABLE else authoritative_lock
+        # Still open under the authoritative state (editable, or an invalid
+        # selection no trigger actually covers -- issue #185, Codex review
+        # on PR #186) -> present (and let the operator continue editing)
+        # their own current draft pick, live-evaluated; already locked/
+        # indeterminate there -> the draft's value is presentational-only
+        # divergence, never the primary value.
+        display_lock = (
+            draft_locks[position] if authoritative_lock.state in DRAFT_DEFERRING_LOCK_STATES else authoritative_lock
+        )
         draft_value = draft.positions[position]
         draft_player = (
             service.pool.get_by_id(draft_value)

@@ -186,6 +186,52 @@ def test_coach_view_reports_a_bye_player_as_editable_with_a_replacement_offered(
     assert rendered.selected_players["F1"].season_player_id == bye_player.season_player_id
 
 
+def test_coach_view_reflects_a_draft_replacement_saved_over_a_submitted_bye_player():
+    """Codex review (PR #186): once the coach saves a replacement to their
+    private draft for a position the effective submission holds a bye
+    player in, `view()` must render the replacement, not keep echoing the
+    old submitted bye player -- the same "still-open position defers to the
+    live draft" rule `EDITABLE` already got, now extended to
+    `INVALID_SELECTION` positions too. Before this fix, the overlay only
+    fired for `EDITABLE`, so a saved replacement for a bye position never
+    actually rendered, and a subsequent Submit would resend the stale bye
+    player and be rejected again."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    entry = entries[0]
+    coach_row = db.execute(
+        "SELECT coach_id FROM season_entry_coach_history WHERE season_entry_id=? AND ended_at IS NULL",
+        (entry.season_entry_id,),
+    ).fetchone()
+    triggers = LockoutTriggerRepository(db)
+    configure_selective(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], key="early-1", sequence=1)
+    configure_main(triggers, round_.bbbffl_round_id, [LATE_MATCH_ID], sequence=2)
+    bye_player = acquire(pool, ownership, scope, entry, 1, BYE_TEAM, name="Bye Club Player")
+    replacement = acquire(pool, ownership, scope, entry, 2, UNCOVERED_HOME, name="Valid Replacement")
+    lineups = WeeklyLineupRepository(db)
+    draft, submitted = establish(lineups, round_, entry, scope, {"F1": bye_player.season_player_id})
+
+    service = CoachLineupService(
+        db,
+        afl_client=SimpleNamespace(
+            get_matches=lambda afl_round_id: ALL_MATCHES,
+            get_rounds=lambda afl_season_id: [SimpleNamespace(round_id=2027, round_number=1, byes=(BYE_TEAM,))],
+        ),
+    )
+    entry_context = service.resolve(coach_row["coach_id"], scope["season_id"], round_.bbbffl_round_id)
+    service.save(
+        scope["season_id"],
+        round_.bbbffl_round_id,
+        entry_context,
+        {**submitted.positions, "F1": replacement.season_player_id},
+        draft.revision,
+    )
+
+    rendered = service.view(coach_row["coach_id"], scope["season_id"], round_.bbbffl_round_id)
+    assert rendered.locks["F1"].state == LockState.EDITABLE
+    assert rendered.locks["F1"].season_player_id == replacement.season_player_id
+    assert rendered.selected_players["F1"].season_player_id == replacement.season_player_id
+
+
 def test_describe_ordinary_position_renders_invalid_selection_as_an_editable_control():
     """Direct unit coverage of the shared presentation boundary both the
     Coach and delegated Replay Operator surfaces call (issue #138/#185):

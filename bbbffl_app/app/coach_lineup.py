@@ -32,6 +32,19 @@ EXPECTED_COACH_LINEUP_ERRORS = (
     ValueError,
 )
 
+# issue #185 (Codex review, PR #186): a position whose *authoritative*
+# (effective-submission) state is `EDITABLE` **or** `INVALID_SELECTION` is
+# still open to being changed -- an invalid (bye) selection is never itself
+# a lockout, so both states must defer to the coach's/Scorer's current
+# *live* draft pick the same way `EDITABLE` alone used to. Both
+# `CoachLineupService.view()` and `app.routes.delegated_operations.
+# _lineup_view` overlay the live draft evaluation only for a position whose
+# authoritative lock is in this set; without `INVALID_SELECTION` included,
+# a replacement saved to the draft for a bye position would never actually
+# render (the old submitted bye player would keep showing, and a
+# subsequent Submit would resend it, rejected again).
+DRAFT_DEFERRING_LOCK_STATES = (LockState.EDITABLE, LockState.INVALID_SELECTION)
+
 # The eight starting-lineup positions, excluding Interchange -- issue #98's
 # vacancy-confirmation UX safeguard only prompts about these. Interchange
 # itself being unnamed is ordinary/common and not the "did the coach forget
@@ -419,7 +432,7 @@ class CoachLineupService:
                 **{
                     position: draft_locks[position]
                     for position, lock in locks.items()
-                    if lock.state == LockState.EDITABLE and position in draft_locks
+                    if lock.state in DRAFT_DEFERRING_LOCK_STATES and position in draft_locks
                 },
             }
         # Built from `locks`, not `draft.positions`, for the same reason:

@@ -976,6 +976,59 @@ def test_delegated_bye_player_position_is_editable_with_a_human_readable_explana
     assert f1["afl_club_id"] == BYE_TEAM.team_id
 
 
+def test_delegated_view_reflects_a_proxy_draft_replacement_saved_over_a_submitted_bye_player():
+    """Codex review (PR #186): once the operator saves a replacement to the
+    proxy draft for a position the effective submission holds a bye player
+    in, `_lineup_view` must render the replacement, not keep echoing the
+    old submitted bye player -- otherwise a subsequent Submit would resend
+    the stale bye player from `positions()`'s `row.season_player_id` and be
+    rejected again, even though the operator had already picked a valid
+    replacement and saved it."""
+    db, _, round_, entries, scope_row, pool, ownership = lockout_context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_selective(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], key="early-1", sequence=1)
+    configure_main(triggers, round_.bbbffl_round_id, [LATE_MATCH_ID], sequence=2)
+    bye_player = acquire(pool, ownership, scope_row, entry, 1, BYE_TEAM, name="Bye Club Player")
+    replacement = acquire(pool, ownership, scope_row, entry, 2, UNCOVERED_HOME, name="Valid Replacement")
+    client = afl_client_with_bye(ALL_MATCHES, BYE_TEAM)
+    proxy = LineupProxyService(db, client)
+
+    draft = proxy.create_or_amend(
+        scope_row["season_id"],
+        scope_row["competition_id"],
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        {"F1": bye_player.season_player_id},
+        expected_revision=0,
+        actor=OPERATOR,
+    )
+    submitted = proxy.submit(
+        draft.lineup_id,
+        expected_draft_revision=draft.revision,
+        expected_submission_version=0,
+        actor=OPERATOR,
+        reason="issue #185: historical pre-existing bye selection",
+        lock_guard=None,
+    )
+    proxy.create_or_amend(
+        scope_row["season_id"],
+        scope_row["competition_id"],
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        {**submitted.positions, "F1": replacement.season_player_id},
+        expected_revision=draft.revision,
+        actor=OPERATOR,
+    )
+
+    request = _request(db, client)
+    view = delegated_operations._lineup_view(request, _principal(entry), _scope(db, round_, scope_row, entry))
+    f1 = _lock_by_position(view)["F1"]
+    assert f1["state"] == "editable"
+    assert f1["season_player_id"] == replacement.season_player_id
+    assert f1["draft_diverges"] is False
+
+
 def test_delegated_submission_rejected_while_bye_player_selected_then_succeeds_after_replacement():
     """The delegated-Scorer flow (`LineupProxyService`, `source_type=
     'scorer_proxy'`) must behave exactly like the coach flow: fail closed

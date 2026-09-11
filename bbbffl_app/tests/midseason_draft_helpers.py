@@ -52,12 +52,18 @@ def build_season(
     regular_season_round_count=None,
     squad_limit=4,
     score_fn=dominant_scores,
+    team_names=None,
 ):
     """Ten (by default) season entries, `trigger_round` rounds finalised
     through `app.competition_lifecycle`, and every entry given `squad_limit`
     owned players directly on `player_ownership_period` -- exactly what
     `app.midseason_draft` needs (a computable ladder, and squads to
-    delist/trade/replace) without a full preseason draft's machinery."""
+    delist/trade/replace) without a full preseason draft's machinery.
+
+    `team_names`, if given, assigns entries[0..entry_count-1] those exact
+    display names in order instead of the default `"Team {number}"` --
+    reused by `tests/finals_seeding_helpers.py` to build a season with
+    specific, real 2026 team names."""
     database = database or migrated_connection()
     regular_season_round_count = regular_season_round_count or max(trigger_round, 10)
 
@@ -72,9 +78,8 @@ def build_season(
     entries = []
     for number in range(entry_count):
         coach = identities.create_coach(f"Coach {year}-{number}")
-        entries.append(
-            identities.create_entry(season.season_id, f"licence-{year}-{number}", coach.coach_id, f"Team {number}")
-        )
+        name = team_names[number] if team_names is not None else f"Team {number}"
+        entries.append(identities.create_entry(season.season_id, f"licence-{year}-{number}", coach.coach_id, name))
 
     fixtures = FixtureRepository(database)
     fixtures.save_draft(season.season_id, [entry.season_entry_id for entry in entries])

@@ -739,6 +739,37 @@ operational playbook, matching
   `2026-finals-replay` evidence directory, following the same convention)
   rather than inventing an unrelated format.
 
+**Bridge Round 20 into the historical finals order (issue #187).** Before
+that finals/SuperScore implementation runs, take the one narrow,
+replay-only step this playbook does cover: an explicit, audited
+finals-seeding snapshot recording the historical 2026 finals order, which
+differs from the mathematical Round 20 ladder above for three teams because
+of two known historical Scorer-error match outcomes (Round 12 Evil
+Absolutes v Running Hots, Round 13 Motherruckers v Evil Absolutes). See
+[`docs/evidence/2026-second-half-replay/finals-seeding-2026.md`](evidence/2026-second-half-replay/finals-seeding-2026.md)
+for the full rationale. The mathematical ladder from section K is never
+rewritten by this step -- both records are retained side by side.
+
+```bash
+$SECOND run --rm -v "$PWD/bbbffl_app:/app" app \
+  python -m scripts.finals_seeding_2026 \
+  --database-url postgresql+psycopg://bbbffl:second-half-only@database/bbbffl_2026_second_half \
+  preview --season-id <season_id> --competition-id <competition_id>
+
+$SECOND run --rm -v "$PWD/bbbffl_app:/app" app \
+  python -m scripts.finals_seeding_2026 \
+  --database-url postgresql+psycopg://bbbffl:second-half-only@database/bbbffl_2026_second_half \
+  apply --season-id <season_id> --competition-id <competition_id> \
+  --reason "2026 second-half replay: historical finals-seeding snapshot per issue #187"
+```
+
+`preview` never mutates; `apply` refuses (no mutation) unless the season is
+the 2026 replay year with Round 20 fully final, requires an explicit
+reason, is idempotent against an unchanged resolution, and prints the
+resulting seed positions and the audit event id. Record both in
+`provenance-manifest.md`'s "Finals-seeding snapshot" section before
+proceeding into the finals/SuperScore implementation itself.
+
 ## M. Provenance and evidence — minimum record
 
 At minimum, record the following at each checkpoint named in sections C, D,

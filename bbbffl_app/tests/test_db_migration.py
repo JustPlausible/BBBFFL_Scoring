@@ -95,6 +95,10 @@ EXPECTED_TABLES = {
     "midseason_delisting",
     "midseason_trade",
     "midseason_trade_leg",
+    "finals_seeding_snapshot",
+    "finals_seeding_snapshot_mathematical_row",
+    "finals_seeding_snapshot_reference",
+    "finals_seeding_snapshot_seed_row",
 }
 
 
@@ -1207,6 +1211,35 @@ def test_0027_upgrade_survives_an_already_accepted_preseason_draft(tmp_path):
     status = draft.status(season.season_id)
     assert status.is_finalized
     assert status.completed_picks == 2
+
+
+def test_finals_seeding_downgrade_refuses_loss_of_snapshot_history(tmp_path):
+    """0028 (issue #187): the finals-seeding snapshot is a historical fact
+    table exactly like 0027's midseason ladder snapshot -- downgrading past
+    it must refuse once a snapshot has been recorded."""
+    from app.finals_seeding import FinalsSeedingRepository
+    from tests.finals_seeding_helpers import build_2026_replay_season
+
+    url = _url(tmp_path / "finals-seeding-irreversible.db")
+    migrate(url)
+    ctx = build_2026_replay_season(database=connect(url))
+    FinalsSeedingRepository(ctx["database"]).apply(
+        ctx["season"].season_id, ctx["competition"].competition_id, reason="issue #187 migration regression test"
+    )
+    ctx["database"].close()
+
+    with pytest.raises(RuntimeError, match="history would be lost"):
+        downgrade(url, "0027_midseason_draft")
+
+
+def test_finals_seeding_downgrade_succeeds_when_no_snapshot_exists(tmp_path):
+    url = _url(tmp_path / "finals-seeding-reversible.db")
+    migrate(url)
+    downgrade(url, "0027_midseason_draft")
+    engine = create_engine(url)
+    tables = set(inspect(engine).get_table_names())
+    assert "finals_seeding_snapshot" not in tables
+    migrate(url)
 
 
 def test_revision_chain_has_single_head():

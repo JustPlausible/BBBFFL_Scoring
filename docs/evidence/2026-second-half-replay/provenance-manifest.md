@@ -71,6 +71,24 @@ repository (see the [README](README.md)'s evidence policy).
 | Home-and-away ladder verified | |
 | Known unresolved historical uncertainty | |
 
+## Finals-seeding snapshot (issue #187)
+
+Record this once `scripts/finals_seeding_2026.py apply` has run against the
+Round 20 checkpoint above -- see
+[`finals-seeding-2026.md`](finals-seeding-2026.md) for the full mathematical-
+ladder-vs-historical-seed rationale this snapshot records.
+
+| Field | Value |
+|---|---|
+| Season id | |
+| Competition id (ordinary) | |
+| Snapshot id | |
+| `finals_seeding.snapshot.created` audit event id | |
+| Actor / reason recorded | |
+| Mathematical Round 20 order confirmed unchanged before and after | |
+| Historical seed order confirmed (Running Hots ... The Plague) | |
+| Already-existed (idempotent confirmation) vs. freshly created | |
+
 ## AFL evidence acquisition (section E)
 
 | Field | Value |

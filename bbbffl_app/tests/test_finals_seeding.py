@@ -15,6 +15,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from app.audit import ActorContext, AuditEventRepository
 from app.db import connect
@@ -390,3 +391,19 @@ def test_apply_accepts_no_caller_supplied_seed_order_parameter():
     params = set(inspect.signature(FinalsSeedingRepository.apply).parameters)
     assert params == {"self", "season_id", "competition_id", "actor", "reason"}
     assert len(HISTORICAL_FINALS_SEED_TEAM_NAMES) == 10
+
+
+def test_seed_row_table_rejects_an_eleventh_row_inserted_directly():
+    """Codex review (PR #188): the UNIQUE constraints on (snapshot_id,
+    seed_position) and (snapshot_id, season_entry_id) alone would still
+    accept an eleventh row -- a fresh, unused position and entry id -- if
+    inserted directly against the database after `apply()` already wrote
+    the ten legitimate rows (no UPDATE/DELETE trigger covers INSERT). The
+    `seed_position BETWEEN 1 AND 10` check closes that gap."""
+    ctx = build_2026_replay_season()
+    result = _repo(ctx).apply(ctx["season"].season_id, ctx["competition"].competition_id, actor=ACTOR, reason="apply")
+    with pytest.raises(IntegrityError):
+        ctx["database"].execute(
+            "INSERT INTO finals_seeding_snapshot_seed_row VALUES (?, ?, ?, ?)",
+            ("bogus-row-id", result["snapshot_id"], 11, "bogus-entry-id"),
+        )

@@ -123,7 +123,17 @@ def upgrade():
         sa.Column("season_entry_id", sa.Text(), nullable=False),
         sa.UniqueConstraint("snapshot_id", "seed_position", name="uq_finals_seeding_seed_position"),
         sa.UniqueConstraint("snapshot_id", "season_entry_id", name="uq_finals_seeding_seed_entry"),
-        sa.CheckConstraint("seed_position > 0", name="ck_finals_seeding_seed_position_positive"),
+        # Bounded 1-10, not just positive: the historical 2026 finals seed
+        # (`app.finals_seeding.HISTORICAL_FINALS_SEED_TEAM_NAMES`) always has
+        # exactly ten positions. Combined with the two UNIQUE constraints
+        # above (every position and every season_entry_id already taken once
+        # `apply()` inserts its ten rows) and the UPDATE/DELETE immutability
+        # triggers below, this closes the one remaining gap those leave open
+        # -- an INSERT of an eleventh row (position 11, an otherwise-unused
+        # season_entry_id) issued directly against the database after
+        # creation, which no UPDATE/DELETE trigger or existing constraint
+        # would reject (Codex review, PR #188).
+        sa.CheckConstraint("seed_position BETWEEN 1 AND 10", name="ck_finals_seeding_seed_position_range"),
     )
 
     if bind.dialect.name == "sqlite":

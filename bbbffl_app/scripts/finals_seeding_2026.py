@@ -50,7 +50,11 @@ ACTOR = ActorContext.anonymous_operator("replay_operator")
 def cmd_preview(database, args: argparse.Namespace) -> int:
     report = FinalsSeedingRepository(database).preview(args.season_id, args.competition_id)
     print(json.dumps(report, indent=2, sort_keys=True, default=str))
-    return 0 if report["replay_context_ready"] else 1
+    # Not just `replay_context_ready`: an existing snapshot that no longer
+    # matches the freshly resolved seed/competition also reports a
+    # diagnostic and `apply_permitted: false` (apply would fail closed) --
+    # that state must exit nonzero too, not read as validation success.
+    return 0 if report["replay_context_ready"] and report["apply_permitted"] else 1
 
 
 def cmd_apply(database, args: argparse.Namespace) -> int:

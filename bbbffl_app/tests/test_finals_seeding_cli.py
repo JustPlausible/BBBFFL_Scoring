@@ -6,6 +6,7 @@ import argparse
 
 import pytest
 
+from app.identity import IdentityRepository
 from scripts.finals_seeding_2026 import COMMANDS, build_parser, cmd_apply, cmd_preview, main
 from tests.finals_seeding_helpers import build_2026_replay_season
 
@@ -84,5 +85,31 @@ def test_cmd_preview_and_apply_round_trip_against_a_real_database():
 
 def test_cmd_preview_reports_failure_exit_code_outside_replay_context():
     ctx = build_2026_replay_season(year=2027)
+    namespace = argparse.Namespace(season_id=ctx["season"].season_id, competition_id=ctx["competition"].competition_id)
+    assert cmd_preview(ctx["database"], namespace) == 1
+
+
+def test_cmd_preview_reports_failure_exit_code_when_apply_would_conflict():
+    """Codex review (PR #188): `replay_context_ready` alone is not enough --
+    a preview that finds an existing snapshot no longer matching the
+    freshly resolved seed reports `apply_permitted: false` and a
+    diagnostic, and that must exit nonzero too, not read as success."""
+    ctx = build_2026_replay_season()
+    apply_namespace = argparse.Namespace(
+        season_id=ctx["season"].season_id,
+        competition_id=ctx["competition"].competition_id,
+        reason="first pass",
+    )
+    assert cmd_apply(ctx["database"], apply_namespace) == 0
+
+    identities = IdentityRepository(ctx["database"])
+    entries = {
+        identities.get_public_team(entry.season_entry_id).team_name: entry.season_entry_id for entry in ctx["entries"]
+    }
+    running_hots_id, plague_id = entries["Running Hots"], entries["The Plague"]
+    identities.rename_team(running_hots_id, "Temp Name", reason="swap")
+    identities.rename_team(plague_id, "Running Hots", reason="swap")
+    identities.rename_team(running_hots_id, "The Plague", reason="swap")
+
     namespace = argparse.Namespace(season_id=ctx["season"].season_id, competition_id=ctx["competition"].competition_id)
     assert cmd_preview(ctx["database"], namespace) == 1

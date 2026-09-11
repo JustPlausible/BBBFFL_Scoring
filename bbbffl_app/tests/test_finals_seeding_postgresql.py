@@ -11,11 +11,21 @@ suites (e.g. `tests/test_midseason_draft_postgresql.py`'s
 `itertools.count(2260)`), this file cannot hand each test its own season
 year, so every scenario below shares one 2026 season/apply in a single
 test rather than colliding on a repeated `INSERT`.
+
+The CI `postgres-migrations` job's own inline setup step already seeds a
+`year=2026` season into the shared `BBBFFL_DATABASE_URL` database before
+this suite's pytest step runs (`.github/workflows/ci.yml`'s "Upgrade twice
+and exercise scorer persistence and audit boundary" step), so this file
+cannot reuse that database directly -- it connects to a dedicated
+`<database>_finals_seeding` database instead (created on demand), fully
+isolated from every other step/test sharing the base database.
 """
 
 import os
 
+import psycopg
 import pytest
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
 from app.db import connect
@@ -25,11 +35,32 @@ from app.migrations import migrate
 from tests.finals_seeding_helpers import build_2026_replay_season
 
 
+def _isolated_database_url(base_url: str) -> str:
+    """Swap the base URL's database name for a dedicated
+    `<database>_finals_seeding` database, dropped and recreated fresh on
+    every call. This suite's hard-coded `year=2026` season must never
+    collide with another step or test's own use of the shared base
+    database (see module docstring), and must also never accumulate state
+    across repeated local runs the way a real, persistent database would
+    -- `WITH (FORCE)` drops it even if a prior run's pooled connection is
+    still technically open."""
+    url = make_url(base_url)
+    isolated_name = f"{url.database}_finals_seeding"
+    admin_conninfo = psycopg.conninfo.make_conninfo(
+        host=url.host, port=url.port or 5432, user=url.username, password=url.password, dbname="postgres"
+    )
+    with psycopg.connect(admin_conninfo, autocommit=True) as admin_connection:
+        admin_connection.execute(f'DROP DATABASE IF EXISTS "{isolated_name}" WITH (FORCE)')
+        admin_connection.execute(f'CREATE DATABASE "{isolated_name}"')
+    return url.set(database=isolated_name).render_as_string(hide_password=False)
+
+
 @pytest.fixture
 def postgres_database():
-    url = os.getenv("BBBFFL_DATABASE_URL")
-    if not url or not url.startswith("postgresql"):
+    base_url = os.getenv("BBBFFL_DATABASE_URL")
+    if not base_url or not base_url.startswith("postgresql"):
         pytest.skip("PostgreSQL finals-seeding regression requires BBBFFL_DATABASE_URL")
+    url = _isolated_database_url(base_url)
     migrate(url)
     database = connect(url)
     yield database

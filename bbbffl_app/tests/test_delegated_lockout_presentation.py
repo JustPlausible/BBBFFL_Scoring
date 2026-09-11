@@ -23,12 +23,13 @@ from app.coach_lineup import CoachLineupService
 from app.identity import IdentityRepository
 from app.lineup_proxy import LineupProxyService
 from app.lineups import WeeklyLineupRepository
-from app.lockouts import LockedSelectionError, LockoutTriggerRepository
+from app.lockouts import InvalidSelectionError, LockedSelectionError, LockoutTriggerRepository
 from app.opening_round import OpeningRoundNominationRepository, OpeningRoundRuleRepository
 from app.routes import delegated_operations
 from tests.test_competition_lifecycle import KnownRound
 from tests.test_lockouts import (
     ALL_MATCHES,
+    BYE_TEAM,
     EARLY_HOME,
     EARLY_MATCH_ID,
     EARLY_START,
@@ -43,6 +44,14 @@ from tests.test_lockouts import context as lockout_context
 
 OPERATOR = ActorContext.anonymous_operator("replay_operator")
 
+# `lockout_context()`'s default `operational(db, 2027, None)` accepts a
+# mapping of afl_season_id=2027, afl_round_id=2027 (see
+# tests.test_competition_lifecycle.configured) -- `afl_client_with_bye`
+# below must answer for that exact afl_round_id so
+# `RoundMatchFactsProvider.byes_for` (the real production wiring) resolves
+# a positive bye confirmation end to end.
+MAPPED_AFL_ROUND_ID = 2027
+
 
 def afl_client(matches):
     """Duck-typed AFL client: `get_matches` ignores the requested AFL round
@@ -53,6 +62,17 @@ def afl_client(matches):
     something to call once a submission exists -- these tests are not
     about bye-round advisories."""
     return SimpleNamespace(get_matches=lambda afl_round_id: matches, get_rounds=lambda afl_season_id: [])
+
+
+def afl_client_with_bye(matches, bye_team, *, afl_round_id=MAPPED_AFL_ROUND_ID):
+    """Like `afl_client`, but `get_rounds` positively confirms `bye_team` as
+    this round's AFL bye (issue #185) -- exercising the same
+    `RoundMatchFactsProvider.byes_for` production wiring `app.lockouts.
+    resolve_byes` consults, never a hand-rolled `FakeMatchFacts`."""
+    return SimpleNamespace(
+        get_matches=lambda requested_round_id: matches,
+        get_rounds=lambda afl_season_id: [SimpleNamespace(round_id=afl_round_id, round_number=1, byes=(bye_team,))],
+    )
 
 
 def _request(db, client):
@@ -916,3 +936,177 @@ def test_lockout_plan_orders_triggers_by_configured_sequence():
     view = delegated_operations._lineup_view(request, _principal(entry), _scope(db, round_, scope_row, entry))
     assert [t["trigger_key"] for t in view["lockout_plan"]] == ["early-1", "main"]
     assert [t["sequence"] for t in view["lockout_plan"]] == [1, 99]
+
+
+# ---------------------------------------------------------------------------
+# Issue #185: delegated-Scorer flow parity with the Coach page for an
+# invalid (bye-player) selection -- editable pre-lockout, submission
+# refused while it remains selected, replacement lets submission succeed.
+# ---------------------------------------------------------------------------
+
+
+def test_delegated_bye_player_position_is_editable_with_a_human_readable_explanation():
+    db, _, round_, entries, scope_row, pool, ownership = lockout_context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_selective(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], key="early-1", sequence=1)
+    configure_main(triggers, round_.bbbffl_round_id, [LATE_MATCH_ID], sequence=2)
+    bye_player = acquire(pool, ownership, scope_row, entry, 1, BYE_TEAM, name="Bye Club Player")
+    client = afl_client_with_bye(ALL_MATCHES, BYE_TEAM)
+
+    LineupProxyService(db, client).create_or_amend(
+        scope_row["season_id"],
+        scope_row["competition_id"],
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        {"F1": bye_player.season_player_id},
+        expected_revision=0,
+        actor=OPERATOR,
+    )
+
+    request = _request(db, client)
+    view = delegated_operations._lineup_view(request, _principal(entry), _scope(db, round_, scope_row, entry))
+    f1 = _lock_by_position(view)["F1"]
+    # Never disabled like a genuinely locked/indeterminate position -- the
+    # exact bug the 2026 Round 12 replay exposed.
+    assert f1["state"] == "invalid_selection"
+    assert f1["editable"] is True
+    assert f1["reason_display"] == "This player cannot be selected because Bye FC have no AFL match in this round."
+    # The raw provider team id/diagnostics remain available separately.
+    assert f1["afl_club_id"] == BYE_TEAM.team_id
+
+
+def test_delegated_submission_rejected_while_bye_player_selected_then_succeeds_after_replacement():
+    """The delegated-Scorer flow (`LineupProxyService`, `source_type=
+    'scorer_proxy'`) must behave exactly like the coach flow: fail closed
+    while a bye player remains selected, and accept a normal submission
+    once it is replaced -- both going through the identical shared
+    `guard_transition`/`InvalidSelectionError` boundary, never a
+    delegated-only bypass."""
+    db, _, round_, entries, scope_row, pool, ownership = lockout_context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_selective(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], key="early-1", sequence=1)
+    configure_main(triggers, round_.bbbffl_round_id, [LATE_MATCH_ID], sequence=2)
+    bye_player = acquire(pool, ownership, scope_row, entry, 1, BYE_TEAM, name="Bye Club Player")
+    replacement = acquire(pool, ownership, scope_row, entry, 2, UNCOVERED_HOME, name="Valid Replacement")
+    client = afl_client_with_bye(ALL_MATCHES, BYE_TEAM)
+    proxy = LineupProxyService(db, client)
+
+    draft = proxy.create_or_amend(
+        scope_row["season_id"],
+        scope_row["competition_id"],
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        {"F1": bye_player.season_player_id},
+        expected_revision=0,
+        actor=OPERATOR,
+    )
+
+    from app.lockouts import LockoutRepository, RoundMatchFactsProvider
+    from app.round_mapping import RoundMappingRepository
+
+    match_facts = RoundMatchFactsProvider(RoundMappingRepository(db), client)
+    guard = LockoutRepository(db).guard(match_facts=match_facts, evaluation_at=EARLY_START - timedelta(minutes=5))
+
+    with pytest.raises(InvalidSelectionError, match="Bye FC"):
+        proxy.submit(
+            draft.lineup_id,
+            expected_draft_revision=draft.revision,
+            expected_submission_version=0,
+            actor=OPERATOR,
+            reason="issue #185 delegated lockout presentation test",
+            lock_guard=guard,
+        )
+
+    draft2 = proxy.create_or_amend(
+        scope_row["season_id"],
+        scope_row["competition_id"],
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        {"F1": replacement.season_player_id},
+        expected_revision=draft.revision,
+        actor=OPERATOR,
+    )
+    submitted = proxy.submit(
+        draft2.lineup_id,
+        expected_draft_revision=draft2.revision,
+        expected_submission_version=0,
+        actor=OPERATOR,
+        reason="issue #185 delegated lockout presentation test replacement",
+        lock_guard=guard,
+    )
+    assert submitted.positions["F1"] == replacement.season_player_id
+
+    request = _request(db, client)
+    view = delegated_operations._lineup_view(request, _principal(entry), _scope(db, round_, scope_row, entry))
+    assert _lock_by_position(view)["F1"]["state"] == "editable"
+
+
+def test_delegated_main_lockout_still_freezes_a_bye_position_immutably():
+    """After the applicable lockout has genuinely activated, the delegated
+    flow's immutability is unchanged by this fix -- an invalid selection is
+    not a general bypass around lockout enforcement. A bye player already
+    sitting in a position from an earlier, unguarded submission (mirroring
+    the replay's historical data) becomes genuinely locked, not merely an
+    editable invalid selection, once main fires."""
+    db, _, round_, entries, scope_row, pool, ownership = lockout_context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_main(triggers, round_.bbbffl_round_id, [LATE_MATCH_ID])
+    bye_player = acquire(pool, ownership, scope_row, entry, 1, BYE_TEAM, name="Bye Club Player")
+    replacement = acquire(pool, ownership, scope_row, entry, 2, UNCOVERED_HOME, name="Too Late Replacement")
+    client = afl_client_with_bye(ALL_MATCHES, BYE_TEAM)
+    proxy = LineupProxyService(db, client)
+
+    draft = proxy.create_or_amend(
+        scope_row["season_id"],
+        scope_row["competition_id"],
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        {"F1": bye_player.season_player_id},
+        expected_revision=0,
+        actor=OPERATOR,
+    )
+    # Historical data already contains the bye player, exactly as the 2026
+    # replay's earlier submissions do -- established without a lock_guard,
+    # since the ordinary guarded path already refuses to accept a bye
+    # player into a brand-new submission (see the "rejected" test above).
+    submitted = proxy.submit(
+        draft.lineup_id,
+        expected_draft_revision=draft.revision,
+        expected_submission_version=0,
+        actor=OPERATOR,
+        reason="issue #185: historical pre-existing bye selection",
+        lock_guard=None,
+    )
+
+    from app.lockouts import LockoutRepository, RoundMatchFactsProvider
+    from app.round_mapping import RoundMappingRepository
+
+    match_facts = RoundMatchFactsProvider(RoundMappingRepository(db), client)
+    late_guard = LockoutRepository(db).guard(match_facts=match_facts, evaluation_at=LATE_START)
+    draft2 = proxy.create_or_amend(
+        scope_row["season_id"],
+        scope_row["competition_id"],
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        {"F1": replacement.season_player_id},
+        expected_revision=draft.revision,
+        actor=OPERATOR,
+    )
+    with pytest.raises(LockedSelectionError):
+        proxy.submit(
+            draft2.lineup_id,
+            expected_draft_revision=draft2.revision,
+            expected_submission_version=submitted.version,
+            actor=OPERATOR,
+            reason="issue #185: attempted post-main replacement, must be refused",
+            lock_guard=late_guard,
+        )
+    request = _request(db, client)
+    view = delegated_operations._lineup_view(request, _principal(entry), _scope(db, round_, scope_row, entry))
+    f1 = _lock_by_position(view)["F1"]
+    assert f1["state"] == "locked"
+    assert f1["editable"] is False
+    assert f1["season_player_id"] == bye_player.season_player_id  # the rejected draft edit never took effect

@@ -289,25 +289,89 @@ players remain wherever they were (editable, or locked by a different
 already-activated trigger). A *player* position is only ever `indeterminate`
 in one of two cases: the round has no lockout plan configured at all
 (`"lockout_plan_not_configured"`), or the player's own match cannot be
-resolved (`MatchResolutionError`). Ordinary coach edits fail closed against
-an indeterminate position exactly as they do against a locked one: an
+*reliably resolved at all* -- no known AFL club on record, or an ambiguous
+match (`MatchResolutionError`, but not its `NoScheduledMatchError` subclass
+-- see the next section). Ordinary coach edits fail closed against an
+indeterminate position exactly as they do against a locked one: an
 unchanged resubmission is safe (nothing about it changes), but introducing
 a different player is rejected.
+
+## Invalid selection: a known AFL bye is not an indeterminate position (issue #185)
+
+A player whose AFL club has **no scheduled match at all** in the round's
+mapped AFL round -- a bye -- is a different case from the indeterminate one
+above. Folding it into `INDETERMINATE` (as an earlier version of this
+module did) meant the position's *dropdown* was disabled purely because its
+*selection* was invalid, even though nothing had actually triggered a
+lockout -- the exact bug the 2026 Round 12 replay exposed (Zac Butters,
+Port Adelaide bye; Alex Neal-Bullen, Adelaide bye): a coach/Scorer had no
+in-app way to replace the invalid player before the round's own lockout
+ever activated.
+
+`resolve_match` finding the club absent from the round's fetched match list
+(`NoScheduledMatchError`) is only a *candidate* bye, though -- that absence
+alone could equally be an afl-api data gap, so it is never by itself treated
+as proof of anything editable. `_evaluate_position` additionally checks the
+club against `resolve_byes` -- afl-api's own round-level bye metadata
+(`Round.byes`, fetched once per evaluation call), the identical positive
+signal `app.lineup_validation`'s availability advisory already surfaces.
+Only once *positively confirmed* there does it report the position's own
+state, `LockState.INVALID_SELECTION`; unconfirmed (no `byes_for` on the
+`MatchFactsProvider` at all, afl-api reporting no byes for the round, or the
+club simply not being among them) stays `INDETERMINATE`, fail-closed,
+exactly as before this fix:
+
+- the **position stays editable** -- no *selective* trigger can ever cover a
+  bye player (selective triggers are keyed by specific AFL match ids, and a
+  bye player resolves to none), so only the round's own **main** trigger can
+  still freeze it, exactly like an ordinary vacancy (see "Deliberately
+  vacant positions" below). Once main activates, an invalid selection
+  reports `LOCKED`/`"main_lockout_triggered"` like any other remaining
+  position -- there is no special exemption from main lockout;
+- the **selection itself remains refused** by ordinary submission:
+  `guard_transition` raises `InvalidSelectionError` (never
+  `LockedSelectionError` -- a deliberately distinct exception, so a caller
+  can tell "this position is locked" apart from "this position is open, but
+  what's in it isn't legal") whether the invalid player was just proposed or
+  was left unchanged from an earlier submission. A coach/Scorer can always
+  replace the player and resubmit; simply resubmitting the same bye player
+  never succeeds.
+
+The primary, user-facing message names the AFL club by its human-readable
+display name (`season_player_pool.afl_team_name`, the same canonical name
+already cached for every other player-facing surface -- never a duplicated
+hard-coded team-name table): *"This player cannot be selected because
+Adelaide Crows have no AFL match in this round."* The raw provider team id
+remains available via `NoScheduledMatchError.afl_team_id` for
+diagnostics/logging even though it is no longer the primary message (the
+previous wording, `"no AFL match found for team 1 in the mapped round"`,
+exposed only the opaque provider id).
+
+This is a genuinely different fact from the indeterminate cases above, and
+deliberately stays that way: a missing club id or an ambiguous match is
+*unresolved* evidence, where this module has no safe basis for treating the
+position as editable, so it must keep failing closed exactly as before. A
+known bye is *resolved* evidence that happens to prove the selection
+invalid -- editability was never actually in question, only the player.
 
 ## Read model
 
 `LineupLockView` (`lock_state`'s return value) carries, per position, a
-`PositionLockState`: `state` (`editable`/`locked`/`indeterminate`),
-`reason` (`"not_yet_triggered"` / `"selective_trigger_activated"` /
-`"main_lockout_triggered"` / `"lockout_plan_not_configured"` / a
-`MatchResolutionError` message), `afl_match_id`, `effective_lock_at` (the
-scheduled start of the player's own resolved match), `observed_status` (its
-raw AFL status) and `irreversible` (true once backed by persisted
-`weekly_lineup_lock` evidence). `LockoutTriggerRepository.list_triggers`
-separately exposes the round's configured plan itself (trigger key, type,
-sequence, associated match IDs). Together these exist so a later coach/
-scorer UI can explain *why* a position is locked without recomputing any of
-these rules client-side. No UI is built in this issue.
+`PositionLockState`: `state` (`editable`/`locked`/`indeterminate`/
+`invalid_selection`), `reason` (`"not_yet_triggered"` /
+`"selective_trigger_activated"` / `"main_lockout_triggered"` /
+`"lockout_plan_not_configured"` / a `MatchResolutionError` message, already
+human-readable for the `invalid_selection` bye case), `afl_match_id`,
+`effective_lock_at` (the scheduled start of the player's own resolved
+match), `observed_status` (its raw AFL status) and `irreversible` (true
+once backed by persisted `weekly_lineup_lock` evidence -- always `False`
+for `invalid_selection`, which is never persisted there; see "Deliberately
+vacant positions" for why a not-yet-locked position has nothing durable to
+write). `LockoutTriggerRepository.list_triggers` separately exposes the
+round's configured plan itself (trigger key, type, sequence, associated
+match IDs). Together these exist so a later coach/scorer UI can explain
+*why* a position is locked without recomputing any of these rules
+client-side. No UI is built in this issue.
 
 ## Delegated lineup lock-state presentation (issue #138)
 
@@ -333,14 +397,19 @@ for position, because both call the identical boundary:
   page's JSON presentation of one `PositionLockState`: player display name
   and AFL club (resolved server-side, never left to the browser to guess
   from a `season_player_id`), `state` (`editable`/`locked`/
-  `indeterminate`), a `lock_type` that keeps an Opening Round deferred
-  nomination (`"opening_round_deferred"`) structurally distinct from an
-  ordinary `"selective_trigger"`/`"main_trigger"` lock rather than merging
-  them, a human-readable `reason_display` alongside the raw `reason_code`,
-  `afl_match_id`, `effective_lock_at`, `observed_status` and `irreversible`
-  exactly as `PositionLockState` reports them. `state: "indeterminate"`
-  renders exactly like `"locked"` (disabled, fail-closed) -- an
-  indeterminate position is never editable.
+  `indeterminate`/`invalid_selection`), a `lock_type` that keeps an Opening
+  Round deferred nomination (`"opening_round_deferred"`) structurally
+  distinct from an ordinary `"selective_trigger"`/`"main_trigger"` lock
+  rather than merging them, a human-readable `reason_display` alongside the
+  raw `reason_code`, `afl_match_id`, `effective_lock_at`, `observed_status`
+  and `irreversible` exactly as `PositionLockState` reports them.
+  `state: "indeterminate"` renders exactly like `"locked"` (disabled,
+  fail-closed) -- an indeterminate position is never editable.
+  `state: "invalid_selection"` (issue #185) is different again: `editable`
+  is `true` (the control is never disabled) and `reason_display` is already
+  the human-readable bye explanation -- both delegated and Coach surfaces
+  render it as an editable control carrying a distinct warning, never as a
+  disabled one.
 - **`app.lockouts.LockoutRepository.describe_triggers`** -- the ordered
   (by each trigger's configured `sequence`), presentation-ready view of a
   round's whole lockout plan the delegated page's "Lockout plan" panel

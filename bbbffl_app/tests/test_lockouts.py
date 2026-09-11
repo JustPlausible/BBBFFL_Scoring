@@ -7,23 +7,29 @@ sleeps, waits on wall-clock time, or talks to a live AFL API.
 """
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
 from app.afl_client import Match, Team
 from app.lineups import WeeklyLineupRepository
 from app.lockouts import (
+    InvalidSelectionError,
     LockedSelectionError,
     LockoutIntegrityError,
     LockoutRepository,
     LockoutTriggerRepository,
     LockState,
     MatchResolutionError,
+    NoScheduledMatchError,
+    RoundMatchFactsProvider,
     TriggerAlreadyActivatedError,
     evaluate_match_lock,
+    resolve_byes,
     resolve_match,
 )
 from app.player_pool import OwnershipRepository, PlayerPoolRepository
+from app.round_mapping import RoundMappingRepository
 from tests import afl_evidence
 from tests.db_helpers import migrated_connection
 from tests.test_competition_lifecycle import operational
@@ -36,6 +42,10 @@ UNCOVERED_HOME = Team(3001, "Uncovered FC")
 UNCOVERED_AWAY = Team(3002, "Uncovered Opp")
 STAGE_B_HOME = Team(4001, "Stage B FC")
 STAGE_B_AWAY = Team(4002, "Stage B Opp")
+# issue #185: a club deliberately absent from every match in ALL_MATCHES --
+# i.e. this round's *complete* fetched match list positively does not
+# include it -- models a genuine AFL bye (not merely a missing-data gap).
+BYE_TEAM = Team(5001, "Bye FC")
 
 EARLY_START = datetime(2027, 4, 3, 19, 20, tzinfo=timezone.utc)
 LATE_START = datetime(2027, 4, 5, 15, 10, tzinfo=timezone.utc)
@@ -93,11 +103,24 @@ ALL_MATCHES = [early_match(), late_match(), uncovered_match(), stage_b_match()]
 class FakeMatchFacts:
     """Duck-typed MatchFactsProvider returning a fixed, caller-controlled
     match list -- stands in for RoundMatchFactsProvider without touching
-    app.round_mapping or a real afl-api client."""
+    app.round_mapping or a real afl-api client.
 
-    def __init__(self, matches):
+    `byes` (issue #185), when given, is this round's *positively confirmed*
+    AFL bye club ids -- exactly what `RoundMatchFactsProvider.byes_for`
+    supplies in production (afl-api's own round-bye metadata). Defaults to
+    `None`: every pre-existing test that constructs `FakeMatchFacts(matches)`
+    without it gets no bye confirmation at all (`resolve_byes` returns
+    `None`), so a club merely absent from `matches` stays the ordinary
+    unresolved/`INDETERMINATE` case exactly as before this issue -- never
+    silently reclassified as a safe, editable bye."""
+
+    def __init__(self, matches, byes=None):
         self.matches = list(matches)
         self.calls = 0
+        self._byes = byes
+
+    def byes_for(self, bbbffl_round_id):
+        return self._byes
 
     def matches_for(self, bbbffl_round_id):
         self.calls += 1
@@ -157,7 +180,13 @@ def test_resolve_match_fails_explicitly_rather_than_guessing():
     matches = [early_match(), late_match()]
     with pytest.raises(MatchResolutionError, match="no known AFL club"):
         resolve_match(None, matches)
-    with pytest.raises(MatchResolutionError, match="no AFL match found"):
+    # issue #185: a team with no match in `matches` is a known, deterministic
+    # bye -- raised as the more specific `NoScheduledMatchError` (still a
+    # `MatchResolutionError`, so this generic `pytest.raises` still matches),
+    # with a human-readable primary message and the raw team id retained for
+    # diagnostics. See test_resolve_match_bye_is_deterministic_not_indeterminate
+    # below for the dedicated coverage.
+    with pytest.raises(MatchResolutionError, match="cannot be selected because AFL team 9999"):
         resolve_match(9999, matches)
     duplicated = [
         early_match(),
@@ -172,6 +201,31 @@ def test_resolve_match_fails_explicitly_rather_than_guessing():
     with pytest.raises(MatchResolutionError, match="ambiguous"):
         resolve_match(EARLY_HOME.team_id, duplicated)
     assert resolve_match(EARLY_AWAY.team_id, matches).match_id == EARLY_MATCH_ID
+
+
+def test_resolve_match_bye_is_a_distinct_deterministic_error_with_a_human_readable_message():
+    """issue #185: `NoScheduledMatchError` is raised (not the base
+    `MatchResolutionError`) when a team simply has no match this round --
+    deterministic evidence of an AFL bye, never merely unresolved data. The
+    primary message names the human-readable club when the caller supplies
+    one (never a hard-coded lookup table here -- see `_evaluate_position`,
+    which sources it from `season_player_pool.afl_team_name`), falling back
+    to the raw provider id only when no name was available; either way the
+    raw id remains on the exception for diagnostics/logging."""
+    matches = [early_match(), late_match()]
+    with pytest.raises(NoScheduledMatchError) as excinfo:
+        resolve_match(9999, matches, afl_team_name="Adelaide Crows")
+    assert (
+        str(excinfo.value) == "This player cannot be selected because Adelaide Crows have no AFL match in this round."
+    )
+    assert excinfo.value.afl_team_id == 9999
+    assert excinfo.value.afl_team_name == "Adelaide Crows"
+    assert isinstance(excinfo.value, MatchResolutionError)  # every existing `except MatchResolutionError` still works
+
+    with pytest.raises(NoScheduledMatchError) as no_name:
+        resolve_match(9999, matches)
+    assert str(no_name.value) == "This player cannot be selected because AFL team 9999 have no AFL match in this round."
+    assert no_name.value.afl_team_name is None
 
 
 # ---------------------------------------------------------------------------
@@ -1443,7 +1497,10 @@ def test_unresolvable_match_is_surfaced_as_indeterminate_in_read_model():
     # Even with main activated, a genuinely unresolvable player identity is
     # never silently swept into a lock decision.
     assert view.positions["F1"].state == LockState.INDETERMINATE
-    assert "no AFL match found" in view.positions["F1"].reason
+    # issue #185: unconfirmed against `resolve_byes` (this `FakeMatchFacts`
+    # implements no `byes_for` at all), so this stays the ordinary
+    # unresolved message, never the confirmed-bye one.
+    assert "cannot be selected because No Match Scheduled" in view.positions["F1"].reason
 
 
 def test_lock_state_rejects_unknown_positions():
@@ -1685,3 +1742,382 @@ def test_persisted_trigger_state_projects_activation_without_match_facts():
         for configured_match in view.configured_matches:
             assert configured_match["observed_status"] is None
             assert configured_match["start_time_utc"] is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #185: invalid selection (known AFL bye) vs. actual position lock.
+# ---------------------------------------------------------------------------
+
+
+def test_bye_player_selection_is_invalid_but_position_stays_editable_before_lockout():
+    """A player whose AFL club has no match this round is an invalid
+    selection, but -- unlike the old, over-broad INDETERMINATE handling
+    the 2026 Round 12 replay exposed -- the position itself is not locked:
+    no selective trigger can ever cover a club with no match to resolve to,
+    and main has not activated here."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_selective(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], key="early-1", sequence=1)
+    configure_main(triggers, round_.bbbffl_round_id, [LATE_MATCH_ID], sequence=2)
+    bye_player = acquire(pool, ownership, scope, entry, 1, BYE_TEAM, name="Bye Club Player")
+    lineups = WeeklyLineupRepository(db)
+    matches = FakeMatchFacts(ALL_MATCHES, byes=frozenset({BYE_TEAM.team_id}))
+    draft, submitted = establish(lineups, round_, entry, scope, {"F1": bye_player.season_player_id})
+
+    view = LockoutRepository(db).lock_state(
+        draft.lineup_id,
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        submitted.positions,
+        match_facts=matches,
+        evaluation_at=EARLY_START - timedelta(minutes=5),
+    )
+    f1 = view.positions["F1"]
+    assert f1.state == LockState.INVALID_SELECTION
+    assert f1.season_player_id == bye_player.season_player_id
+    assert f1.reason == "This player cannot be selected because Bye FC have no AFL match in this round."
+    assert f1.irreversible is False
+    assert f1.afl_match_id is None
+
+
+def test_ordinary_submission_rejects_an_unchanged_bye_player_still_selected():
+    """A position that already holds a bye player (e.g. carried over from an
+    earlier submission) must keep failing ordinary submission even when
+    that position is not itself being edited -- the selection, not just the
+    change, is what is invalid."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_selective(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], key="early-1", sequence=1)
+    configure_main(triggers, round_.bbbffl_round_id, [LATE_MATCH_ID], sequence=2)
+    bye_player = acquire(pool, ownership, scope, entry, 1, BYE_TEAM)
+    other = acquire(pool, ownership, scope, entry, 2, UNCOVERED_HOME)
+    lineups = WeeklyLineupRepository(db)
+    matches = FakeMatchFacts(ALL_MATCHES, byes=frozenset({BYE_TEAM.team_id}))
+    draft, submitted = establish(
+        lineups, round_, entry, scope, {"F1": bye_player.season_player_id, "M1": other.season_player_id}
+    )
+
+    # Resubmit with F1 left completely unchanged -- only M2 differs.
+    ruck = acquire(pool, ownership, scope, entry, 3, UNCOVERED_HOME, name="Ruck Pick")
+    draft2 = edit_draft(
+        lineups,
+        round_,
+        entry,
+        scope,
+        draft.lineup_id,
+        {**submitted.positions, "Ruck": ruck.season_player_id},
+        from_revision=draft.revision,
+    )
+    guard = LockoutRepository(db).guard(match_facts=matches, evaluation_at=EARLY_START - timedelta(minutes=5))
+    with pytest.raises(InvalidSelectionError, match="Bye FC"):
+        lineups.submit(
+            draft2.lineup_id,
+            expected_draft_revision=draft2.revision,
+            expected_submission_version=submitted.version,
+            lock_guard=guard,
+        )
+
+
+def test_ordinary_submission_rejects_a_newly_proposed_bye_player():
+    """Introducing a bye player for the first time is refused identically
+    to leaving one unchanged -- `InvalidSelectionError`, never silently
+    accepted just because the position itself was open."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_selective(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], key="early-1", sequence=1)
+    configure_main(triggers, round_.bbbffl_round_id, [LATE_MATCH_ID], sequence=2)
+    bye_player = acquire(pool, ownership, scope, entry, 1, BYE_TEAM)
+    lineups = WeeklyLineupRepository(db)
+    matches = FakeMatchFacts(ALL_MATCHES, byes=frozenset({BYE_TEAM.team_id}))
+    draft = lineups.save_draft(
+        scope["season_id"],
+        scope["competition_id"],
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        {"F1": bye_player.season_player_id},
+        expected_revision=0,
+    )
+    guard = LockoutRepository(db).guard(match_facts=matches, evaluation_at=EARLY_START - timedelta(minutes=5))
+    with pytest.raises(InvalidSelectionError, match="Bye FC"):
+        lineups.submit(
+            draft.lineup_id,
+            expected_draft_revision=draft.revision,
+            expected_submission_version=0,
+            lock_guard=guard,
+        )
+
+
+def test_replacing_a_bye_player_before_lockout_lets_normal_submission_succeed():
+    """The core acceptance criterion: once the invalid player is replaced
+    with an otherwise eligible squad member, ordinary submission succeeds
+    exactly as normal."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_selective(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], key="early-1", sequence=1)
+    configure_main(triggers, round_.bbbffl_round_id, [LATE_MATCH_ID], sequence=2)
+    bye_player = acquire(pool, ownership, scope, entry, 1, BYE_TEAM)
+    replacement = acquire(pool, ownership, scope, entry, 2, UNCOVERED_HOME, name="Valid Replacement")
+    lineups = WeeklyLineupRepository(db)
+    matches = FakeMatchFacts(ALL_MATCHES, byes=frozenset({BYE_TEAM.team_id}))
+    draft, submitted = establish(lineups, round_, entry, scope, {"F1": bye_player.season_player_id})
+
+    draft2 = edit_draft(
+        lineups,
+        round_,
+        entry,
+        scope,
+        draft.lineup_id,
+        {**submitted.positions, "F1": replacement.season_player_id},
+        from_revision=draft.revision,
+    )
+    guard = LockoutRepository(db).guard(match_facts=matches, evaluation_at=EARLY_START - timedelta(minutes=5))
+    resubmitted = lineups.submit(
+        draft2.lineup_id,
+        expected_draft_revision=draft2.revision,
+        expected_submission_version=submitted.version,
+        lock_guard=guard,
+    )
+    assert resubmitted.positions["F1"] == replacement.season_player_id
+
+    # And the read model now reports it as an ordinary editable position,
+    # not an invalid selection.
+    view = LockoutRepository(db).lock_state(
+        draft2.lineup_id,
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        resubmitted.positions,
+        match_facts=matches,
+        evaluation_at=EARLY_START - timedelta(minutes=1),
+    )
+    assert view.positions["F1"].state == LockState.EDITABLE
+
+
+def test_selective_lockout_never_covers_a_bye_position_it_stays_an_invalid_selection():
+    """A bye player can never be covered by a *selective* trigger -- those
+    are keyed by specific AFL match ids, and a bye player resolves to none.
+    Activating a selective trigger elsewhere in the round must not turn the
+    bye position into a genuinely locked one, and a genuinely selectively-
+    locked position elsewhere remains immutable exactly as before."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_selective(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], key="early-1", sequence=1)
+    configure_main(triggers, round_.bbbffl_round_id, [LATE_MATCH_ID], sequence=2)
+    early = acquire(pool, ownership, scope, entry, 1, EARLY_HOME)
+    bye_player = acquire(pool, ownership, scope, entry, 2, BYE_TEAM)
+    lineups = WeeklyLineupRepository(db)
+    matches = FakeMatchFacts(ALL_MATCHES, byes=frozenset({BYE_TEAM.team_id}))
+    draft, submitted = establish(
+        lineups, round_, entry, scope, {"F1": early.season_player_id, "M1": bye_player.season_player_id}
+    )
+
+    view = LockoutRepository(db).lock_state(
+        draft.lineup_id,
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        submitted.positions,
+        match_facts=matches,
+        evaluation_at=EARLY_START + timedelta(minutes=1),
+    )
+    assert view.positions["F1"].state == LockState.LOCKED
+    assert view.positions["F1"].reason == "selective_trigger_activated"
+    assert view.positions["M1"].state == LockState.INVALID_SELECTION
+
+    # The guard still refuses to touch the genuinely locked F1 -- even while
+    # M1's unrelated invalid selection is simultaneously being replaced, so
+    # this failure is decisively about F1's lock, not M1's still-pending bye.
+    guard = LockoutRepository(db).guard(match_facts=matches, evaluation_at=EARLY_START + timedelta(minutes=1))
+    other = acquire(pool, ownership, scope, entry, 3, EARLY_HOME, name="Blocked F1 Replacement")
+    replacement = acquire(pool, ownership, scope, entry, 4, UNCOVERED_HOME, name="M1 Replacement")
+    draft2 = edit_draft(
+        lineups,
+        round_,
+        entry,
+        scope,
+        draft.lineup_id,
+        {**submitted.positions, "F1": other.season_player_id, "M1": replacement.season_player_id},
+        from_revision=draft.revision,
+    )
+    with pytest.raises(LockedSelectionError):
+        lineups.submit(
+            draft2.lineup_id,
+            expected_draft_revision=draft2.revision,
+            expected_submission_version=submitted.version,
+            lock_guard=guard,
+        )
+    # ...while M1's bye player, considered alone (F1 left genuinely
+    # unchanged this time), can still be freely replaced.
+    draft3 = edit_draft(
+        lineups,
+        round_,
+        entry,
+        scope,
+        draft.lineup_id,
+        {**submitted.positions, "M1": replacement.season_player_id},
+        from_revision=draft2.revision,
+    )
+    resubmitted = lineups.submit(
+        draft3.lineup_id,
+        expected_draft_revision=draft3.revision,
+        expected_submission_version=submitted.version,
+        lock_guard=guard,
+    )
+    assert resubmitted.positions["M1"] == replacement.season_player_id
+
+
+def test_main_lockout_freezes_a_bye_position_exactly_like_any_other_remaining_position():
+    """Once the round's main trigger activates, an invalid selection
+    collapses into an ordinary locked position -- main freezes every
+    remaining position regardless of the player, and an invalid selection
+    is exactly such a remaining position."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_main(triggers, round_.bbbffl_round_id, [LATE_MATCH_ID])
+    bye_player = acquire(pool, ownership, scope, entry, 1, BYE_TEAM)
+    lineups = WeeklyLineupRepository(db)
+    matches = FakeMatchFacts(ALL_MATCHES, byes=frozenset({BYE_TEAM.team_id}))
+    draft, submitted = establish(lineups, round_, entry, scope, {"F1": bye_player.season_player_id})
+    lock_repo = LockoutRepository(db)
+
+    before = lock_repo.lock_state(
+        draft.lineup_id,
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        submitted.positions,
+        match_facts=matches,
+        evaluation_at=LATE_START - timedelta(minutes=1),
+    )
+    assert before.positions["F1"].state == LockState.INVALID_SELECTION
+
+    after = lock_repo.lock_state(
+        draft.lineup_id,
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        submitted.positions,
+        match_facts=matches,
+        evaluation_at=LATE_START,
+    )
+    assert after.positions["F1"].state == LockState.LOCKED
+    assert after.positions["F1"].reason == "main_lockout_triggered"
+    assert after.positions["F1"].irreversible is False  # see 'Deliberately vacant positions': nothing to persist
+
+    # Ordinary editing is now refused exactly like any other locked
+    # position -- lockout immutability is unchanged by this fix.
+    replacement = acquire(pool, ownership, scope, entry, 2, UNCOVERED_HOME, name="Too Late Replacement")
+    draft2 = edit_draft(
+        lineups,
+        round_,
+        entry,
+        scope,
+        draft.lineup_id,
+        {**submitted.positions, "F1": replacement.season_player_id},
+        from_revision=draft.revision,
+    )
+    late_guard = LockoutRepository(db).guard(match_facts=matches, evaluation_at=LATE_START)
+    with pytest.raises(LockedSelectionError):
+        lineups.submit(
+            draft2.lineup_id,
+            expected_draft_revision=draft2.revision,
+            expected_submission_version=submitted.version,
+            lock_guard=late_guard,
+        )
+
+
+def test_unresolved_evidence_is_never_misclassified_as_a_safe_editable_bye_correction():
+    """A genuinely unresolved case (no cached AFL club at all) must keep
+    failing closed exactly as before -- it must never be downgraded to the
+    new, editable INVALID_SELECTION state merely because some evidence
+    happens to be absent. Fail-closed behaviour for genuinely unresolved
+    evidence is unchanged by this fix."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_selective(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], key="early-1", sequence=1)
+    configure_main(triggers, round_.bbbffl_round_id, [LATE_MATCH_ID], sequence=2)
+    unresolved = pool.refresh_player(scope["season_id"], 887766, "Unknown Club Player")
+    ownership.acquire(unresolved.season_player_id, entry.season_entry_id)
+    lineups = WeeklyLineupRepository(db)
+    matches = FakeMatchFacts(ALL_MATCHES)
+    draft, submitted = establish(lineups, round_, entry, scope, {"F1": unresolved.season_player_id})
+
+    view = LockoutRepository(db).lock_state(
+        draft.lineup_id,
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        submitted.positions,
+        match_facts=matches,
+        evaluation_at=EARLY_START - timedelta(minutes=5),
+    )
+    assert view.positions["F1"].state == LockState.INDETERMINATE
+    assert "no known AFL club" in view.positions["F1"].reason
+
+    # Fail-closed: a differing replacement is refused exactly like any other
+    # indeterminate position -- never treated as freely editable.
+    replacement = acquire(pool, ownership, scope, entry, 3, UNCOVERED_HOME, name="Blocked Replacement")
+    draft2 = edit_draft(
+        lineups,
+        round_,
+        entry,
+        scope,
+        draft.lineup_id,
+        {**submitted.positions, "F1": replacement.season_player_id},
+        from_revision=draft.revision,
+    )
+    guard = LockoutRepository(db).guard(match_facts=matches, evaluation_at=EARLY_START - timedelta(minutes=5))
+    with pytest.raises(LockedSelectionError, match="indeterminate"):
+        lineups.submit(
+            draft2.lineup_id,
+            expected_draft_revision=draft2.revision,
+            expected_submission_version=submitted.version,
+            lock_guard=guard,
+        )
+
+
+def test_round_match_facts_provider_byes_for_resolves_confirmed_byes():
+    """`RoundMatchFactsProvider.byes_for` -- the production implementation
+    `resolve_byes` calls -- reuses the accepted round mapping to fetch
+    afl-api's own round-bye metadata, exactly like `app.lineup_validation`'s
+    availability advisory already does, never a duplicated hard-coded team
+    table (issue #185)."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    provider = RoundMatchFactsProvider(
+        RoundMappingRepository(db),
+        SimpleNamespace(
+            get_matches=lambda afl_round_id: ALL_MATCHES,
+            get_rounds=lambda afl_season_id: [SimpleNamespace(round_id=2027, round_number=1, byes=(BYE_TEAM,))],
+        ),
+    )
+    assert resolve_byes(provider, round_.bbbffl_round_id) == frozenset({BYE_TEAM.team_id})
+
+
+def test_round_match_facts_provider_byes_for_returns_none_when_unresolved():
+    """`byes_for`/`resolve_byes` return `None` -- never a guessed empty
+    set -- whenever byes cannot be positively established: no matching
+    round in afl-api's response, or afl-api reporting `byes=None` for the
+    round. Either way, `_evaluate_position` must keep failing closed rather
+    than infer a confirmation that was never actually given."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    no_matching_round = RoundMatchFactsProvider(
+        RoundMappingRepository(db),
+        SimpleNamespace(get_matches=lambda afl_round_id: ALL_MATCHES, get_rounds=lambda afl_season_id: []),
+    )
+    assert resolve_byes(no_matching_round, round_.bbbffl_round_id) is None
+
+    byes_not_reported = RoundMatchFactsProvider(
+        RoundMappingRepository(db),
+        SimpleNamespace(
+            get_matches=lambda afl_round_id: ALL_MATCHES,
+            get_rounds=lambda afl_season_id: [SimpleNamespace(round_id=2027, round_number=1, byes=None)],
+        ),
+    )
+    assert resolve_byes(byes_not_reported, round_.bbbffl_round_id) is None
+
+    # A provider with no `byes_for` at all (every plain `FakeMatchFacts`
+    # constructed without `byes=`, and any caller written before issue
+    # #185) is unconfirmed, not an error.
+    assert resolve_byes(FakeMatchFacts(ALL_MATCHES), round_.bbbffl_round_id) is None

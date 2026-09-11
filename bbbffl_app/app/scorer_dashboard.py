@@ -225,6 +225,12 @@ def _team_submission_state(draft, submission) -> str:
 
 def _position_lock_summary(positions: dict) -> dict:
     editable = sum(1 for p in positions.values() if p.state == LockState.EDITABLE)
+    # issue #185: an invalid selection (known AFL bye) that no trigger
+    # actually covers is still an editable position -- counted separately
+    # from `editable` so a Scorer can see it needs attention (a replacement
+    # is required before ordinary submission succeeds) without it being
+    # miscounted as either an ordinary open position or a lockout.
+    invalid_selection = sum(1 for p in positions.values() if p.state == LockState.INVALID_SELECTION)
     locked_selective = sum(
         1 for p in positions.values() if p.state == LockState.LOCKED and p.reason == "selective_trigger_activated"
     )
@@ -239,6 +245,7 @@ def _position_lock_summary(positions: dict) -> dict:
     indeterminate = sum(1 for p in positions.values() if p.state == LockState.INDETERMINATE)
     return {
         "editable": editable,
+        "invalid_selection": invalid_selection,
         "locked_selective": locked_selective,
         "locked_main": locked_main,
         "locked_other": locked_other,

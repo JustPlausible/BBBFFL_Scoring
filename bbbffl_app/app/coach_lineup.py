@@ -57,6 +57,12 @@ def resolve_position_locks(lockouts, lineup_id, bbbffl_round_id, season_entry_id
     an unresolved round mapping), every position comes back INDETERMINATE
     rather than confidently editable -- a failed read is never presented
     as safe to edit.
+
+    A position whose selected player has a known AFL bye but which no
+    trigger actually covers comes back `LockState.INVALID_SELECTION`, not
+    `INDETERMINATE` -- see app.lockouts's "Selection validity vs. position
+    lock state" (issue #185). `describe_ordinary_position` below renders it
+    as an editable control with a distinct explanation, never disabled.
     """
     try:
         return lockouts.lock_state(
@@ -131,6 +137,17 @@ def describe_ordinary_position(
         state, editable = "editable", True
         lock_type = "vacant" if season_player_id is None else "editable"
         reason_code, reason_display = lock.reason, humanize_lock_reason(lock.reason)
+    elif lock.state == LockState.INVALID_SELECTION:
+        # issue #185: the position itself is not locked -- no trigger has
+        # activated -- only its currently selected player is invalid (a
+        # known AFL bye). Stays editable (never disabled like LOCKED/
+        # INDETERMINATE below) so a replacement can be chosen; `lock.reason`
+        # is already the human-readable sentence `_evaluate_position` built
+        # (issue #185's UX requirement), so it is surfaced verbatim rather
+        # than through `humanize_lock_reason` (which would mangle a full
+        # sentence, e.g. lower-casing the club name via `.capitalize()`).
+        state, editable, lock_type = "invalid_selection", True, "invalid_selection"
+        reason_code, reason_display = lock.reason, lock.reason
     elif lock.state == LockState.LOCKED:
         state, editable = "locked", False
         lock_type = {

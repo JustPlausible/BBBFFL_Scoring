@@ -76,6 +76,56 @@ This is now used only to decide **trigger activation** (see
 `LockoutRepository._materialize_round_triggers`), not directly as a
 per-player decision -- see "The round lockout plan" above.
 
+## Selection validity vs. position lock state (issue #185)
+
+`_evaluate_position` answers two genuinely different questions, and keeps
+them genuinely separate rather than collapsing one into the other:
+
+1. **Is this position locked/indeterminate right now?** -- `LockState.
+   LOCKED`/`INDETERMINATE`, decided from trigger coverage and match/evidence
+   resolvability exactly as documented above. This governs *editability*:
+   `guard_transition` refuses to change a `LOCKED`/`INDETERMINATE` position
+   at all.
+2. **Can the position's *currently selected* player actually participate
+   this round?** -- independent of (1). `resolve_match` raising
+   `NoScheduledMatchError` (a club absent from the round's fetched match
+   list) is only a *candidate* bye, never by itself proof of one --
+   absence of a match is not evidence of a bye; it could equally be an
+   afl-api data gap (issue #185 is explicit: "do not infer that the
+   position is safely editable merely because some evidence is absent").
+   It is only treated as a known, deterministic fact once positively
+   confirmed against `resolve_byes` -- afl-api's own round-level bye
+   metadata (`Round.byes`, the identical signal `app.lineup_validation`'s
+   availability advisory already surfaces), fetched once per evaluation
+   call and passed down as `bye_ids`. Unconfirmed (`bye_ids` is `None`, or
+   the club is not in it) stays `INDETERMINATE` exactly as every "no match
+   found" case did before this fix -- the genuinely unresolved case must
+   keep failing closed because this module cannot safely tell whether the
+   position is even editable. Confirmed, it is `LockState.INVALID_SELECTION`:
+   the position stays editable (no trigger covers a club with no match to
+   resolve to, so only main lockout can still freeze it -- see below), but
+   `guard_transition` refuses to let that player stand in an ordinary
+   submission, replaced or not, raising `InvalidSelectionError` rather than
+   `LockedSelectionError`. A coach/Scorer can therefore always swap out a
+   confirmed bye player before lockout, exactly as they could swap out any
+   other selection, while ordinary submission keeps failing closed until
+   they do.
+
+   Once the round's *main* trigger activates, `INVALID_SELECTION` collapses
+   into an ordinary `LOCKED`/`"main_lockout_triggered"` position -- main
+   freezes every remaining position "regardless of whether that player's
+   own AFL match has started" (see "The round lockout plan" above), and an
+   invalid selection is exactly such a remaining position. A selective
+   trigger, by contrast, can never cover a bye player (selective triggers
+   are keyed by specific AFL match ids, and a bye player resolves to none),
+   so only main -- never a selective stage -- can turn an invalid selection
+   into a genuinely locked one.
+
+`app.coach_lineup.describe_ordinary_position` and both HTML surfaces render
+`INVALID_SELECTION` as an editable control carrying a distinct, human-
+readable explanation (never disabled like `LOCKED`/`INDETERMINATE`) -- see
+that module's docstring.
+
 ## Historical irreversibility
 
 Two independent, cooperating layers make "locked, permanently" actually
@@ -177,7 +227,7 @@ from typing import Protocol
 
 from sqlalchemy.exc import IntegrityError
 
-from app.afl_client import Match, is_recognized_match_status, normalize_match_status
+from app.afl_client import AflApiError, Match, is_recognized_match_status, normalize_match_status
 from app.audit import ENTITY_TYPE_LOCKOUT_TRIGGER, LOCKOUT_TRIGGER_CONFIGURED, ActorContext, append_event
 from app.db import _for_update_suffix, transaction
 from app.lineups import POSITIONS
@@ -191,11 +241,55 @@ class LockoutIntegrityError(ValueError):
 
 
 class MatchResolutionError(LockoutIntegrityError):
-    """A selected player could not be resolved to exactly one AFL match."""
+    """A selected player could not be resolved to exactly one AFL match.
+
+    This is the genuinely *unresolved* case -- no known AFL club on record,
+    or more than one match plausibly involving the resolved club -- where
+    this module has no safe way to know whether the position is actually
+    editable, and so must keep failing closed (`LockState.INDETERMINATE`).
+    See `NoScheduledMatchError` for the different, *deterministic* case of a
+    club with a confirmed bye (issue #185)."""
+
+
+class NoScheduledMatchError(MatchResolutionError):
+    """The selected player's AFL club is absent from the mapped round's own
+    fetched match list -- a *candidate* AFL bye. This absence alone is
+    deliberately not treated as confirmation: it could equally be an
+    afl-api data gap, so `_evaluate_position` only classifies it as a known,
+    deterministic bye (`LockState.INVALID_SELECTION`) once positively
+    confirmed against `resolve_byes`/afl-api's own round-bye metadata --
+    otherwise it stays `LockState.INDETERMINATE`, fail-closed, exactly like
+    every other unresolved case (issue #185's "do not infer editability
+    merely because some evidence is absent"). `afl_team_id` is always
+    populated; `afl_team_name` only when the caller had a cached display
+    name to pass -- both are retained here (never only embedded in the
+    message) so a caller/log can keep the raw provider identity even though
+    `str(self)` itself is written to be shown to a coach/Scorer directly."""
+
+    def __init__(self, afl_team_id: int, afl_team_name: str | None = None):
+        self.afl_team_id = afl_team_id
+        self.afl_team_name = afl_team_name
+        label = afl_team_name or f"AFL team {afl_team_id}"
+        super().__init__(f"This player cannot be selected because {label} have no AFL match in this round.")
 
 
 class LockedSelectionError(LockoutIntegrityError):
-    """An ordinary edit attempted to mutate a locked/indeterminate position."""
+    """An ordinary edit attempted to mutate a genuinely locked/indeterminate
+    position -- see `InvalidSelectionError` for the distinct "position is
+    still open, but its currently selected player is not a legal selection"
+    rejection (issue #185)."""
+
+
+class InvalidSelectionError(LockoutIntegrityError):
+    """Ordinary submission rejected because some position's final selected
+    player cannot legally participate this round (currently: a known AFL
+    bye, `NoScheduledMatchError`) -- *not* because the position itself is
+    locked. Deliberately distinct from `LockedSelectionError`: the position
+    remains editable (a caller may replace the invalid player and resubmit),
+    only the *selection* is refused. Raised whether the invalid player was
+    just proposed or was already sitting there unchanged from a previous
+    submission -- either way, ordinary submission must never let it stand
+    (issue #185)."""
 
 
 class TriggerAlreadyActivatedError(LockoutIntegrityError):
@@ -225,6 +319,16 @@ class LockState(str, Enum):
     EDITABLE = "editable"
     LOCKED = "locked"
     INDETERMINATE = "indeterminate"
+    # issue #185: a position whose *currently selected* player cannot
+    # legally participate this round (a known AFL bye -- deterministic,
+    # never merely unresolved evidence), but which no activated trigger
+    # actually covers. Distinct from both EDITABLE (nothing wrong with the
+    # current selection) and LOCKED/INDETERMINATE (the position itself
+    # cannot be changed): here the *position* remains open for editing, but
+    # the *selection* sitting in it must be replaced before ordinary
+    # submission can succeed. See this module's docstring, "Selection
+    # validity vs. position lock state".
+    INVALID_SELECTION = "invalid_selection"
 
 
 @dataclass(frozen=True)
@@ -310,7 +414,13 @@ class TriggerCoverage:
 class MatchFactsProvider(Protocol):
     """Duck-typed source of AFL match facts for one BBBFFL round. Tests
     supply a fixed fake; production composes the accepted round mapping
-    with the real `AflApiClient` (see `RoundMatchFactsProvider`)."""
+    with the real `AflApiClient` (see `RoundMatchFactsProvider`).
+
+    `byes_for` is optional (duck-typed via `getattr`, exactly like
+    `evaluation_at` below -- see `resolve_byes`): a provider that does not
+    implement it simply supplies no positive bye confirmation, which keeps
+    every existing test double (and any caller written before issue #185)
+    behaving exactly as before."""
 
     def matches_for(self, bbbffl_round_id: str) -> list[Match]: ...
 
@@ -330,6 +440,34 @@ class RoundMatchFactsProvider:
             raise MatchResolutionError(f"BBBFFL round {bbbffl_round_id} has no accepted AFL round mapping")
         return self._afl_client.get_matches(mapping.afl_round_id)
 
+    def byes_for(self, bbbffl_round_id: str) -> frozenset[int] | None:
+        """This round's confirmed AFL bye clubs, straight from afl-api's own
+        round metadata (`Round.byes`) -- the identical positive signal
+        `app.lineup_validation`'s availability advisory already uses
+        (issue #185's "reuse the canonical evidence already available in
+        the application model, never a duplicated hard-coded mapping").
+        `None` whenever this cannot be positively established (unmapped
+        round, no `get_rounds` on this `afl_client` at all -- some minimal
+        test doubles across this codebase implement only `get_matches`,
+        e.g. `tests.test_lineup_correction_api._NoMatchesAflClient` --
+        afl-api failure, or afl-api itself reporting `byes=None` for this
+        round) -- never an empty-but-confident frozenset guessed in its
+        place; see `resolve_byes`."""
+        mapping = self._round_mappings.resolve(bbbffl_round_id)
+        if mapping is None or mapping.afl_season_id is None:
+            return None
+        get_rounds = getattr(self._afl_client, "get_rounds", None)
+        if get_rounds is None:
+            return None
+        try:
+            rounds = get_rounds(mapping.afl_season_id)
+        except AflApiError:
+            return None
+        round_ = next((r for r in rounds if r.round_id == mapping.afl_round_id), None)
+        if round_ is None or round_.byes is None:
+            return None
+        return frozenset(team.team_id for team in round_.byes)
+
     def evaluation_at(self) -> datetime | None:
         """Return a replay's explicit clock, if it has one.
 
@@ -339,6 +477,27 @@ class RoundMatchFactsProvider:
         """
         clock = getattr(self._afl_client, "clock", None)
         return clock.now() if clock is not None else None
+
+
+def resolve_byes(match_facts: MatchFactsProvider, bbbffl_round_id: str) -> frozenset[int] | None:
+    """This round's confirmed AFL bye clubs (`afl_team_id`s), if
+    `match_facts` can supply them -- see `MatchFactsProvider.byes_for` and
+    `RoundMatchFactsProvider.byes_for`. This is the *only* thing
+    `_evaluate_position` trusts to classify a club with no resolvable match
+    as a deterministic bye (`LockState.INVALID_SELECTION`) rather than
+    genuinely unresolved evidence (`LockState.INDETERMINATE`) -- issue #185
+    is explicit that a club's mere absence from the fetched match list must
+    never, by itself, be inferred as a safe/editable bye. `None` -- never a
+    guessed empty set -- whenever this cannot be positively confirmed:
+    the provider has no `byes_for` at all, or it raised, or it reported it
+    could not resolve byes for this round."""
+    byes_for = getattr(match_facts, "byes_for", None)
+    if byes_for is None:
+        return None
+    try:
+        return byes_for(bbbffl_round_id)
+    except AflApiError:
+        return None
 
 
 def _evaluation_at(explicit: datetime | None, match_facts: MatchFactsProvider) -> datetime:
@@ -372,15 +531,31 @@ def evaluate_match_lock(match: Match, evaluation_at: datetime) -> tuple[LockStat
     return LockState.EDITABLE, "not_yet_started"
 
 
-def resolve_match(afl_team_id: int | None, matches: list[Match]) -> Match:
+def resolve_match(afl_team_id: int | None, matches: list[Match], *, afl_team_name: str | None = None) -> Match:
     """Resolve a season player's cached `afl_team_id` to exactly one AFL
     match. Never a name-based join; fails explicitly (never guesses) if the
-    match cannot be reliably resolved."""
+    match cannot be reliably resolved.
+
+    `matches` is always this round's *complete* fetched match list (see
+    `MatchFactsProvider`), so `afl_team_id` positively not appearing in any
+    of them is raised as the more specific `NoScheduledMatchError` (a
+    `MatchResolutionError` subclass, so every existing `except
+    MatchResolutionError` handler keeps working unchanged) rather than the
+    base class -- a *candidate* AFL bye, not yet confirmed one: a caller
+    that needs to tell a known bye apart from a genuine data gap must
+    additionally check the club against `resolve_byes`
+    (`app.lockouts._evaluate_position` does; see this module's "Selection
+    validity vs. position lock state", issue #185). `afl_team_name` is
+    purely for that exception's human-readable message -- optional, since
+    not every caller has a cached display name to pass (see
+    `app.opening_round._resolve_source_match`); omitting it falls back to
+    naming the raw provider team id instead of silently guessing a name.
+    """
     if afl_team_id is None:
         raise MatchResolutionError("selected player has no known AFL club; cannot resolve an AFL match")
     found = [match for match in matches if match.involves_team(afl_team_id)]
     if not found:
-        raise MatchResolutionError(f"no AFL match found for team {afl_team_id} in the mapped round")
+        raise NoScheduledMatchError(afl_team_id, afl_team_name)
     if len(found) > 1:
         raise MatchResolutionError(f"ambiguous AFL match resolution for team {afl_team_id}: {len(found)} matches found")
     return found[0]
@@ -776,6 +951,7 @@ class LockGuard:
     def __call__(self, conn, lineup_row, previous_positions, proposed_positions) -> None:
         at = self._at()
         matches = self._match_facts.matches_for(lineup_row["bbbffl_round_id"])
+        bye_ids = resolve_byes(self._match_facts, lineup_row["bbbffl_round_id"])
         coverage = self._repository._trigger_coverage(conn, lineup_row["bbbffl_round_id"])
         self._repository.guard_transition(
             conn,
@@ -785,6 +961,7 @@ class LockGuard:
             evaluation_at=at,
             matches=matches,
             coverage=coverage,
+            bye_ids=bye_ids,
         )
 
 
@@ -832,12 +1009,22 @@ class LockoutRepository:
         self._materialize_round_triggers(bbbffl_round_id, match_facts=match_facts, evaluation_at=at)
         self._materialize_lineup(lineup_id, match_facts=match_facts, evaluation_at=at)
         matches = match_facts.matches_for(bbbffl_round_id)
+        bye_ids = resolve_byes(match_facts, bbbffl_round_id)
         with transaction(self.database) as conn:
             existing = self._existing_locks(conn, lineup_id)
             coverage = self._trigger_coverage(conn, bbbffl_round_id)
             view = {
                 position: self._evaluate_position(
-                    conn, existing, lineup_id, position, season_player_id, at, matches, coverage, materializable=False
+                    conn,
+                    existing,
+                    lineup_id,
+                    position,
+                    season_player_id,
+                    at,
+                    matches,
+                    coverage,
+                    bye_ids,
+                    materializable=False,
                 )
                 for position, season_player_id in positions.items()
             }
@@ -1065,6 +1252,7 @@ class LockoutRepository:
         evaluation_at: datetime,
         matches: list[Match],
         coverage: TriggerCoverage,
+        bye_ids: frozenset[int] | None = None,
     ) -> PositionLockState:
         """Live (never materializing/persisting anything: `materializable=
         False`) lock evaluation for one candidate `(position,
@@ -1075,9 +1263,16 @@ class LockoutRepository:
         prefer over a fresh evaluation because no submission has ever been
         materialized for this lineup (see `_materialize_lineup`'s docstring:
         it only ever writes evidence for a lineup's *effective submission*,
-        never a private draft)."""
+        never a private draft).
+
+        `bye_ids` defaults to `None` (no positive bye confirmation) rather
+        than requiring every caller to resolve it: issue #146's adjudication
+        workflow is a narrow, distinct correction path (see its own module
+        docstring) that this fix does not extend -- an unconfirmed bye
+        candidate there still resolves to `INDETERMINATE`/defaults to
+        vacant exactly as it always has, never silently confirmed."""
         return self._evaluate_position(
-            conn, {}, None, position, season_player_id, evaluation_at, matches, coverage, materializable=False
+            conn, {}, None, position, season_player_id, evaluation_at, matches, coverage, bye_ids, materializable=False
         )
 
     def trigger_activation_instant(self, conn, bbbffl_round_id: str, afl_match_id: int) -> str | None:
@@ -1146,6 +1341,7 @@ class LockoutRepository:
         evaluation_at: datetime,
         matches: list[Match],
         coverage: TriggerCoverage,
+        bye_ids: frozenset[int] | None = None,
     ) -> None:
         """Reject a proposed submission that mutates a locked or
         indeterminate position, or that introduces a brand-new player whose
@@ -1158,7 +1354,20 @@ class LockoutRepository:
         Read-only with respect to persisted evidence (`materializable=
         False` throughout): this runs inside the caller's own transaction,
         which may go on to roll back if this raises, so nothing durable can
-        be written here -- see `LockGuard`/this module's docstring."""
+        be written here -- see `LockGuard`/this module's docstring.
+
+        issue #185: `LockState.INVALID_SELECTION` (a position no trigger
+        actually covers, but whose currently selected player has a known
+        AFL bye) is deliberately excluded from the first loop's "position
+        cannot be changed" tuple -- unlike `LOCKED`/`INDETERMINATE`, nothing
+        here actually prevents replacing that player, only accepting it.
+        Both loops instead raise the distinct `InvalidSelectionError` for
+        it: the first loop when the invalid selection is left *unchanged*
+        (still present in the final proposed lineup), the second when a
+        *newly proposed* player is itself invalid. Either way ordinary
+        submission keeps failing closed while an invalid player remains
+        selected, without ever disabling the position itself.
+        """
         existing = self._existing_locks(conn, lineup_id)
         for position, previous_player in previous_positions.items():
             proposed_player = proposed_positions.get(position)
@@ -1171,12 +1380,15 @@ class LockoutRepository:
                 evaluation_at,
                 matches,
                 coverage,
+                bye_ids,
                 materializable=False,
             )
             if evaluated.state in (LockState.LOCKED, LockState.INDETERMINATE) and proposed_player != previous_player:
                 raise LockedSelectionError(
                     f"position {position} cannot be changed ({evaluated.state.value}: {evaluated.reason})"
                 )
+            if evaluated.state == LockState.INVALID_SELECTION and proposed_player == previous_player:
+                raise InvalidSelectionError(evaluated.reason)
         for position, proposed_player in proposed_positions.items():
             if proposed_player is None or proposed_player == previous_positions.get(position):
                 continue
@@ -1189,8 +1401,11 @@ class LockoutRepository:
                 evaluation_at,
                 matches,
                 coverage,
+                bye_ids,
                 materializable=False,
             )
+            if evaluated.state == LockState.INVALID_SELECTION:
+                raise InvalidSelectionError(evaluated.reason)
             if evaluated.state != LockState.EDITABLE:
                 raise LockedSelectionError(
                     f"cannot select a player for {position} whose AFL match is not editable "
@@ -1290,6 +1505,7 @@ class LockoutRepository:
             ).fetchall()
             effective = {row["position"]: row["season_player_id"] for row in slots}
             matches = match_facts.matches_for(header["bbbffl_round_id"])
+            bye_ids = resolve_byes(match_facts, header["bbbffl_round_id"])
             coverage = self._trigger_coverage(conn, header["bbbffl_round_id"])
             existing = self._existing_locks(conn, lineup_id)
             for position, season_player_id in effective.items():
@@ -1302,6 +1518,7 @@ class LockoutRepository:
                     evaluation_at,
                     matches,
                     coverage,
+                    bye_ids,
                     materializable=True,
                 )
 
@@ -1335,6 +1552,7 @@ class LockoutRepository:
         evaluation_at,
         matches,
         coverage: TriggerCoverage,
+        bye_ids: frozenset[int] | None = None,
         *,
         materializable: bool,
     ) -> PositionLockState:
@@ -1407,9 +1625,44 @@ class LockoutRepository:
             )
         season_player = self._season_player(conn, season_player_id)
         afl_team_id = season_player["afl_team_id"] if season_player else None
+        afl_team_name = season_player["afl_team_name"] if season_player else None
         try:
-            match = resolve_match(afl_team_id, matches)
+            match = resolve_match(afl_team_id, matches, afl_team_name=afl_team_name)
+        except NoScheduledMatchError as exc:
+            # issue #185: this club is not in the round's fetched match
+            # list, but that absence alone is never treated as a confirmed
+            # bye -- it could equally be an afl-api data gap. Only a
+            # positive confirmation from `bye_ids` (afl-api's own round-bye
+            # metadata; see `resolve_byes`) makes this a known, deterministic
+            # fact rather than genuinely unresolved evidence. Without that
+            # confirmation this stays INDETERMINATE, fail-closed, exactly as
+            # every "no match found" case did before this fix.
+            if bye_ids is None or afl_team_id not in bye_ids:
+                return PositionLockState(
+                    position, season_player_id, LockState.INDETERMINATE, str(exc), None, None, None, False
+                )
+            # A confirmed bye is never itself proof of a *lockout* -- only
+            # the round's own main trigger (or, for a resolvable match, a
+            # selective trigger covering it) locks a position outright. A
+            # bye player can never be covered by a selective trigger (those
+            # are keyed by AFL match id, and this player resolves to none),
+            # so main activation is the only thing that can still freeze
+            # this position; short of that it stays editable, with the
+            # invalid selection surfaced distinctly so a replacement is
+            # still required before ordinary submission can succeed
+            # (`guard_transition`).
+            if coverage.main_activated:
+                return PositionLockState(
+                    position, season_player_id, LockState.LOCKED, "main_lockout_triggered", None, None, None, False
+                )
+            return PositionLockState(
+                position, season_player_id, LockState.INVALID_SELECTION, str(exc), None, None, None, False
+            )
         except MatchResolutionError as exc:
+            # Genuinely unresolved (no known AFL club on record, or an
+            # ambiguous match) -- unlike the deterministic bye above, this
+            # module has no safe basis for treating the position as
+            # editable, so it stays fail-closed exactly as before.
             return PositionLockState(
                 position, season_player_id, LockState.INDETERMINATE, str(exc), None, None, None, False
             )
@@ -1436,7 +1689,7 @@ class LockoutRepository:
 
     def _season_player(self, conn, season_player_id):
         return conn.execute(
-            "SELECT afl_team_id FROM season_player_pool WHERE season_player_id=?",
+            "SELECT afl_team_id, afl_team_name FROM season_player_pool WHERE season_player_id=?",
             (season_player_id,),
         ).fetchone()
 

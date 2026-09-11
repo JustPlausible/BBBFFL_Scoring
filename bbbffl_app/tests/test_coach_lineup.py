@@ -1,19 +1,27 @@
+from datetime import timedelta
 from types import SimpleNamespace
 
-from app.coach_lineup import CoachLineupService
+import pytest
+
+from app.coach_lineup import CoachLineupService, describe_ordinary_position
 from app.lineups import POSITIONS, WeeklyLineupRepository
-from app.lockouts import LockoutRepository, LockoutTriggerRepository, LockState
+from app.lockouts import InvalidSelectionError, LockoutRepository, LockoutTriggerRepository, LockState
 from app.player_pool import OwnershipRepository, PlayerPoolRepository
 from tests.db_helpers import migrated_connection
 from tests.test_competition_lifecycle import operational
 from tests.test_lockouts import (
     ALL_MATCHES,
+    BYE_TEAM,
+    EARLY_MATCH_ID,
+    EARLY_START,
     LATE_HOME,
     LATE_MATCH_ID,
     LATE_START,
+    UNCOVERED_HOME,
     FakeMatchFacts,
     acquire,
     configure_main,
+    configure_selective,
     context,
     establish,
 )
@@ -128,3 +136,113 @@ def test_view_reports_a_main_locked_vacancy_from_the_submission_not_a_rejected_d
     # the coach's own rejected pick.
     assert interchange_lock.season_player_id is None
     assert rendered.selected_players["Interchange"] is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #185: coach flow presentation of an invalid (bye-player) selection.
+# ---------------------------------------------------------------------------
+
+
+def test_coach_view_reports_a_bye_player_as_editable_with_a_replacement_offered():
+    """Before any lockout, a bye player is reported editable, not disabled
+    like a genuinely locked/indeterminate position -- and the coach's own
+    current owned squad (including an eligible replacement) is still
+    offered for selection, exactly like any other editable position."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    entry = entries[0]
+    coach_row = db.execute(
+        "SELECT coach_id FROM season_entry_coach_history WHERE season_entry_id=? AND ended_at IS NULL",
+        (entry.season_entry_id,),
+    ).fetchone()
+    triggers = LockoutTriggerRepository(db)
+    configure_selective(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], key="early-1", sequence=1)
+    configure_main(triggers, round_.bbbffl_round_id, [LATE_MATCH_ID], sequence=2)
+    bye_player = acquire(pool, ownership, scope, entry, 1, BYE_TEAM, name="Bye Club Player")
+    replacement = acquire(pool, ownership, scope, entry, 2, UNCOVERED_HOME, name="Valid Replacement")
+    lineups = WeeklyLineupRepository(db)
+    establish(lineups, round_, entry, scope, {"F1": bye_player.season_player_id})
+
+    # `context()`'s default `operational(db, 2027, None)` accepts a mapping
+    # of afl_season_id=2027, afl_round_id=2027 (see test_competition_
+    # lifecycle.configured) -- the fake `get_rounds` below must answer for
+    # that exact afl_round_id so `RoundMatchFactsProvider.byes_for` (the
+    # real production wiring, not a hand-rolled FakeMatchFacts) resolves a
+    # positive bye confirmation end to end.
+    service = CoachLineupService(
+        db,
+        afl_client=SimpleNamespace(
+            get_matches=lambda afl_round_id: ALL_MATCHES,
+            get_rounds=lambda afl_season_id: [SimpleNamespace(round_id=2027, round_number=1, byes=(BYE_TEAM,))],
+        ),
+    )
+    rendered = service.view(coach_row["coach_id"], scope["season_id"], round_.bbbffl_round_id)
+
+    f1 = rendered.locks["F1"]
+    assert f1.state == LockState.INVALID_SELECTION
+    assert "Bye FC" in f1.reason
+    # The coach can still see/select the eligible replacement.
+    offered = {player.season_player_id for player in rendered.players}
+    assert replacement.season_player_id in offered
+    assert rendered.selected_players["F1"].season_player_id == bye_player.season_player_id
+
+
+def test_describe_ordinary_position_renders_invalid_selection_as_an_editable_control():
+    """Direct unit coverage of the shared presentation boundary both the
+    Coach and delegated Replay Operator surfaces call (issue #138/#185):
+    `editable` is `True` (never disabled like locked/indeterminate) and the
+    already-human-readable reason is surfaced verbatim, not mangled by
+    `humanize_lock_reason`'s `.capitalize()` (which would lower-case the
+    club name)."""
+    from app.lockouts import PositionLockState
+
+    lock = PositionLockState(
+        "F1",
+        "player-1",
+        LockState.INVALID_SELECTION,
+        "This player cannot be selected because Adelaide Crows have no AFL match in this round.",
+        None,
+        None,
+        None,
+        False,
+    )
+    row = describe_ordinary_position("F1", lock, None, None, "player-1", None)
+    assert row["state"] == "invalid_selection"
+    assert row["editable"] is True
+    assert row["lock_type"] == "invalid_selection"
+    assert row["reason_code"] == lock.reason
+    assert (
+        row["reason_display"]
+        == "This player cannot be selected because Adelaide Crows have no AFL match in this round."
+    )
+    assert row["draft_diverges"] is False
+
+
+def test_coach_submission_is_rejected_while_bye_player_remains_selected():
+    """The ordinary coach submission path (`WeeklyLineupRepository.submit`
+    via `OpeningRoundSelectionGuard`/`LockGuard`) fails closed while an
+    invalid (bye) selection remains, with the human-readable club name in
+    the error the coach page shows."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_selective(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], key="early-1", sequence=1)
+    configure_main(triggers, round_.bbbffl_round_id, [LATE_MATCH_ID], sequence=2)
+    bye_player = acquire(pool, ownership, scope, entry, 1, BYE_TEAM)
+    lineups = WeeklyLineupRepository(db)
+    draft = lineups.save_draft(
+        scope["season_id"],
+        scope["competition_id"],
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        {"F1": bye_player.season_player_id},
+        expected_revision=0,
+    )
+    matches = FakeMatchFacts(ALL_MATCHES, byes=frozenset({BYE_TEAM.team_id}))
+    guard = LockoutRepository(db).guard(match_facts=matches, evaluation_at=EARLY_START - timedelta(minutes=5))
+    with pytest.raises(InvalidSelectionError, match="Bye FC"):
+        lineups.submit(
+            draft.lineup_id,
+            expected_draft_revision=draft.revision,
+            expected_submission_version=0,
+            lock_guard=guard,
+        )

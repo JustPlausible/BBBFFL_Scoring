@@ -130,7 +130,7 @@ function renderSelectors(seasons,dashboard){
 
 function lockSummaryLine(s){
   if(!s)return 'Lock state unavailable';
-  return `${s.editable} editable · ${s.locked_selective} selective-locked · ${s.locked_main} main-locked${s.indeterminate?` · ${s.indeterminate} indeterminate`:''}`;
+  return `${s.editable} editable · ${s.locked_selective} selective-locked · ${s.locked_main} main-locked${s.invalid_selection?` · ${s.invalid_selection} invalid selection (needs replacement)`:''}${s.indeterminate?` · ${s.indeterminate} indeterminate`:''}`;
 }
 
 function teamRow(t){

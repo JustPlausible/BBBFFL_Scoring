@@ -32,6 +32,19 @@ EXPECTED_COACH_LINEUP_ERRORS = (
     ValueError,
 )
 
+# issue #185 (Codex review, PR #186): a position whose *authoritative*
+# (effective-submission) state is `EDITABLE` **or** `INVALID_SELECTION` is
+# still open to being changed -- an invalid (bye) selection is never itself
+# a lockout, so both states must defer to the coach's/Scorer's current
+# *live* draft pick the same way `EDITABLE` alone used to. Both
+# `CoachLineupService.view()` and `app.routes.delegated_operations.
+# _lineup_view` overlay the live draft evaluation only for a position whose
+# authoritative lock is in this set; without `INVALID_SELECTION` included,
+# a replacement saved to the draft for a bye position would never actually
+# render (the old submitted bye player would keep showing, and a
+# subsequent Submit would resend it, rejected again).
+DRAFT_DEFERRING_LOCK_STATES = (LockState.EDITABLE, LockState.INVALID_SELECTION)
+
 # The eight starting-lineup positions, excluding Interchange -- issue #98's
 # vacancy-confirmation UX safeguard only prompts about these. Interchange
 # itself being unnamed is ordinary/common and not the "did the coach forget
@@ -57,6 +70,12 @@ def resolve_position_locks(lockouts, lineup_id, bbbffl_round_id, season_entry_id
     an unresolved round mapping), every position comes back INDETERMINATE
     rather than confidently editable -- a failed read is never presented
     as safe to edit.
+
+    A position whose selected player has a known AFL bye but which no
+    trigger actually covers comes back `LockState.INVALID_SELECTION`, not
+    `INDETERMINATE` -- see app.lockouts's "Selection validity vs. position
+    lock state" (issue #185). `describe_ordinary_position` below renders it
+    as an editable control with a distinct explanation, never disabled.
     """
     try:
         return lockouts.lock_state(
@@ -131,6 +150,17 @@ def describe_ordinary_position(
         state, editable = "editable", True
         lock_type = "vacant" if season_player_id is None else "editable"
         reason_code, reason_display = lock.reason, humanize_lock_reason(lock.reason)
+    elif lock.state == LockState.INVALID_SELECTION:
+        # issue #185: the position itself is not locked -- no trigger has
+        # activated -- only its currently selected player is invalid (a
+        # known AFL bye). Stays editable (never disabled like LOCKED/
+        # INDETERMINATE below) so a replacement can be chosen; `lock.reason`
+        # is already the human-readable sentence `_evaluate_position` built
+        # (issue #185's UX requirement), so it is surfaced verbatim rather
+        # than through `humanize_lock_reason` (which would mangle a full
+        # sentence, e.g. lower-casing the club name via `.capitalize()`).
+        state, editable, lock_type = "invalid_selection", True, "invalid_selection"
+        reason_code, reason_display = lock.reason, lock.reason
     elif lock.state == LockState.LOCKED:
         state, editable = "locked", False
         lock_type = {
@@ -402,7 +432,19 @@ class CoachLineupService:
                 **{
                     position: draft_locks[position]
                     for position, lock in locks.items()
-                    if lock.state == LockState.EDITABLE and position in draft_locks
+                    if lock.state in DRAFT_DEFERRING_LOCK_STATES
+                    and position in draft_locks
+                    # issue #185 Codex re-review: only defer to the draft's
+                    # own live evaluation when that evaluation is itself
+                    # still open. Otherwise (the coach saved a replacement
+                    # that would itself currently be rejected -- e.g. a
+                    # player whose own match a trigger has since covered),
+                    # keep showing the authoritative state instead: an
+                    # INVALID_SELECTION position must stay editable so a
+                    # *further* correction remains possible, never flip to
+                    # looking locked/indeterminate (disabled) just because
+                    # one saved draft candidate turned out to be invalid.
+                    and draft_locks[position].state in DRAFT_DEFERRING_LOCK_STATES
                 },
             }
         # Built from `locks`, not `draft.positions`, for the same reason:

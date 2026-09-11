@@ -32,6 +32,7 @@ from tests.round_review_helpers import Facts, full_round, progress_to_review
 from tests.test_competition_lifecycle import operational
 from tests.test_lockouts import (
     ALL_MATCHES,
+    BYE_TEAM,
     EARLY_MATCH_ID,
     EARLY_START,
     acquire,
@@ -436,6 +437,56 @@ def test_correction_becomes_available_once_a_position_actually_locks():
     assert row["lock_summary"]["locked_main"] >= 1
     assert row["correction_available"] is True
     assert row["correction_url"] is not None
+
+
+class _RoundWithBye:
+    def __init__(self, round_id, bye_team):
+        self.round_id = round_id
+        self.round_number = 1
+        self.byes = (bye_team,)
+
+
+class _AflClientWithBye:
+    """Duck-typed AFL client answering both `get_matches` (ignoring the
+    requested id, like every other dashboard test double here) and
+    `get_rounds` with a positively confirmed bye for `afl_round_id`."""
+
+    def __init__(self, matches, bye_team, afl_round_id):
+        self._matches = matches
+        self._bye_team = bye_team
+        self._afl_round_id = afl_round_id
+
+    def get_matches(self, round_id):
+        return self._matches
+
+    def get_rounds(self, season_id):
+        return [_RoundWithBye(self._afl_round_id, self._bye_team)]
+
+
+def test_invalid_selection_bucket_is_populated_via_the_cached_match_facts_byes_lookup():
+    """Codex review (PR #186): `_CachedMatchFacts` (this dashboard's
+    per-build memoizing wrapper) must forward `byes_for` to its inner
+    `RoundMatchFactsProvider`, not just `matches_for`/`evaluation_at`.
+    Without it, `app.lockouts.resolve_byes` finds no `byes_for` on the
+    wrapper at all (duck-typed via `getattr`) and treats every bye on this
+    dashboard as permanently unconfirmed -- every confirmed bye would read
+    back `INDETERMINATE` and this `invalid_selection` count would stay zero
+    even though the underlying afl-api evidence positively confirms it."""
+    db, lifecycle, round_, entries, scope, pool, ownership = lockout_context(year=8922)
+    triggers = LockoutTriggerRepository(db)
+    configure_main(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID])
+    entry_zero = entries[0]
+    bye_player = acquire(pool, ownership, scope, entry_zero, 90102, BYE_TEAM)
+    lineups = WeeklyLineupRepository(db)
+    establish(lineups, round_, entry_zero, scope, {"F1": bye_player.season_player_id})
+    for entry in entries[1:]:
+        establish(lineups, round_, entry, scope, {})
+
+    afl = _AflClientWithBye(ALL_MATCHES, BYE_TEAM, afl_round_id=8922)
+    view = _dashboard(db, afl, _season_id(lifecycle, round_), round_id=round_.bbbffl_round_id)
+    row = next(r for r in view["lineups"] if r["season_entry_id"] == entry_zero.season_entry_id)
+    assert row["lock_summary"]["invalid_selection"] >= 1
+    assert row["lock_summary"]["indeterminate"] == 0
 
 
 def test_evidence_outage_is_distinguished_from_no_lockout_plan_configured():

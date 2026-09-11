@@ -31,6 +31,7 @@ from app.identity import IdentityRepository
 from app.ladder import LadderRepository
 from app.migrations import migrate
 from tests.finals_seeding_helpers import build_2026_replay_season
+from tests.midseason_draft_helpers import build_season
 
 ACTOR = ActorContext.anonymous_operator("replay_operator")
 
@@ -333,6 +334,18 @@ def test_resolve_finals_seed_order_ignores_a_snapshot_scoped_to_a_different_comp
     # competition, exactly as `LadderRepository.snapshot` documents.
     with pytest.raises(KeyError):
         resolve_finals_seed_order(ctx["database"], ctx["season"].season_id, "some-other-competition-id")
+
+
+def test_resolve_finals_seed_order_rejects_a_competition_id_from_a_different_season():
+    """Codex review (PR #188): `LadderRepository.snapshot` derives its own
+    season solely from `competition_id` and never checks the caller's
+    `season_id` -- an accidental cross-season `competition_id` must fail
+    closed rather than silently seeding one season from another season's
+    ladder."""
+    ctx = build_2026_replay_season()
+    other = build_season(database=ctx["database"], year=2201, trigger_round=1, regular_season_round_count=1)
+    with pytest.raises(FinalsSeedingContextError):
+        resolve_finals_seed_order(ctx["database"], ctx["season"].season_id, other["competition"].competition_id)
 
 
 # -- 11. Live/2027 isolation, generic-ladder-editor guard ------------------

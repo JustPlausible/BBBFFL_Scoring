@@ -546,9 +546,21 @@ def resolve_finals_seed_order(
     season (see `_require_replay_context`), so every other season -- 2027
     and beyond included -- always takes this second, ordinary path with no
     special-casing required at the call site.
+
+    Raises `FinalsSeedingContextError` if `competition_id` does not belong
+    to `season_id` at all -- `LadderRepository.snapshot` derives its own
+    season solely from `competition_id` and never checks the caller's
+    `season_id` against it, so an accidental cross-season `competition_id`
+    would otherwise silently seed one season from a different season's
+    ladder (Codex review, PR #188).
     """
     snapshot = FinalsSeedingRepository(database).get_snapshot(season_id)
     if snapshot is not None and snapshot.competition_id == competition_id:
         return tuple(row.season_entry_id for row in snapshot.seed_rows)
     ladder = LadderRepository(database).snapshot(competition_id, through_round)
+    if ladder.season_id != season_id:
+        raise FinalsSeedingContextError(
+            f"competition_id {competition_id!r} belongs to season {ladder.season_id!r}, not the requested "
+            f"season {season_id!r}"
+        )
     return tuple(row.season_entry_id for row in ladder.rows)

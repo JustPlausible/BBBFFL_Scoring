@@ -83,6 +83,24 @@ def test_exact_equality_is_an_explicit_shared_sporting_rank():
     assert all(row.tied and row.tie_group == ("a", "z") for row in snapshot.rows)
 
 
+def test_latest_included_round_names_the_actual_cutoff_not_the_requested_one():
+    """Issue #180: `through_round` is merely the requested cutoff (it can
+    name a round with no results at all, e.g. a scheduled future round);
+    `latest_included_round` must report the highest round number actually
+    represented among the results folded in, or ``None`` when nothing is
+    included yet."""
+    inputs = (result(1, "m1", "a", "b", "100", "80"),)
+    only_round_one_played = calculate_ladder("s", "ordinary", 1, ("a", "b"), inputs)
+    assert only_round_one_played.latest_included_round == 1
+
+    requested_ahead_of_results = calculate_ladder("s", "ordinary", 11, ("a", "b"), inputs)
+    assert requested_ahead_of_results.through_round == 11
+    assert requested_ahead_of_results.latest_included_round == 1
+
+    nothing_played_yet = calculate_ladder("s", "ordinary", 1, ("a", "b"), ())
+    assert nothing_played_yet.latest_included_round is None
+
+
 def test_round_boundary_and_rebuild_are_deterministic_and_season_labelled():
     inputs = (result(2, "m2", "b", "a", "10", "20"), result(1, "m1", "a", "b", "5", "10"))
     after_one = calculate_ladder("2026", "ordinary-2026", 1, ("b", "a"), inputs)

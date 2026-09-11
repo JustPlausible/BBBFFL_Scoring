@@ -48,6 +48,14 @@ class LadderSnapshot:
     season_id: str
     competition_id: str
     through_round: int
+    # The highest round_number actually represented among the results
+    # folded into this snapshot -- never simply `through_round` (the
+    # requested cutoff), which a caller may pass for a round that has not
+    # been played/finalised yet (issue #180: a scheduled round's ladder
+    # subtitle must name the latest round that actually contributed, not
+    # the round page being browsed). ``None`` when no results are included
+    # at all (e.g. before the season's first round is finalised).
+    latest_included_round: int | None
     rows: tuple[LadderRow, ...]
     result_references: tuple[ResultReference, ...]
 
@@ -143,7 +151,8 @@ def calculate_ladder(
         )
         prior_key = key
     references = tuple(ResultReference(result.matchup_id, result.official_version) for result in selected)
-    return LadderSnapshot(season_id, competition_id, through_round, tuple(rows), references)
+    latest_included_round = max((result.round_number for result in selected), default=None)
+    return LadderSnapshot(season_id, competition_id, through_round, latest_included_round, tuple(rows), references)
 
 
 class LadderRepository:

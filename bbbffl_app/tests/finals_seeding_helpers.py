@@ -42,3 +42,13 @@ def build_2026_replay_season(database=None, **kwargs):
     kwargs.setdefault("regular_season_round_count", 20)
     kwargs.setdefault("team_names", MATHEMATICAL_ORDER_TEAM_NAMES)
     return build_season(database, **kwargs)
+
+
+def all_draws(lifecycle, round_id, _entries):
+    """A `score_fn` for `build_season`/`build_2026_replay_season`: every
+    match in every round is drawn 100-100, so a fair round-robin leaves
+    every entry with identical played/wins/draws/losses/PF/PA -- a
+    guaranteed, maximal unresolved ladder tie (`app.ladder.LadderRow.
+    tied`), for exercising `app.finals_seeding.resolve_finals_seed_order`'s
+    refusal to silently treat that tie as a real seed decision."""
+    return {match.matchup_id: (100, 100) for match in lifecycle.list_matchups(round_id)}

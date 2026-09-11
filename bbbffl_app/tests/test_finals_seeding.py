@@ -25,12 +25,13 @@ from app.finals_seeding import (
     FinalsSeedingContextError,
     FinalsSeedingRepository,
     FinalsSeedingResolutionError,
+    UnresolvedLadderTieError,
     resolve_finals_seed_order,
 )
 from app.identity import IdentityRepository
 from app.ladder import LadderRepository
 from app.migrations import migrate
-from tests.finals_seeding_helpers import build_2026_replay_season
+from tests.finals_seeding_helpers import all_draws, build_2026_replay_season
 from tests.midseason_draft_helpers import build_season
 
 ACTOR = ActorContext.anonymous_operator("replay_operator")
@@ -346,6 +347,31 @@ def test_resolve_finals_seed_order_rejects_a_competition_id_from_a_different_sea
     other = build_season(database=ctx["database"], year=2201, trigger_round=1, regular_season_round_count=1)
     with pytest.raises(FinalsSeedingContextError):
         resolve_finals_seed_order(ctx["database"], ctx["season"].season_id, other["competition"].competition_id)
+
+
+def test_resolve_finals_seed_order_refuses_an_unresolved_ladder_tie_without_a_snapshot():
+    """Codex review (PR #188): `LadderSnapshot.rows`' `season_entry_id`
+    ordering exists solely for repeatable serialization of an unresolved
+    tie, never as a real tiebreak -- the mathematical-ladder fallback must
+    refuse rather than silently let a UUID decide finals seeding."""
+    ctx = build_2026_replay_season(score_fn=all_draws)
+    ladder = LadderRepository(ctx["database"]).snapshot(ctx["competition"].competition_id, 20)
+    assert all(row.tied for row in ladder.rows)  # sanity: a genuine full tie
+    with pytest.raises(UnresolvedLadderTieError):
+        resolve_finals_seed_order(ctx["database"], ctx["season"].season_id, ctx["competition"].competition_id)
+
+
+def test_resolve_finals_seed_order_from_a_snapshot_ignores_a_tied_live_ladder():
+    """The historical snapshot path never touches `LadderRow.tied` -- it
+    returns the already-resolved, audited historical order directly and
+    never even reaches the mathematical-ladder tie check."""
+    ctx = build_2026_replay_season(score_fn=all_draws)
+    ladder = LadderRepository(ctx["database"]).snapshot(ctx["competition"].competition_id, 20)
+    assert all(row.tied for row in ladder.rows)  # the live ladder is genuinely, fully tied
+    _repo(ctx).apply(ctx["season"].season_id, ctx["competition"].competition_id, actor=ACTOR, reason="apply")
+
+    order = resolve_finals_seed_order(ctx["database"], ctx["season"].season_id, ctx["competition"].competition_id)
+    assert len(order) == 10
 
 
 # -- 11. Live/2027 isolation, generic-ladder-editor guard ------------------

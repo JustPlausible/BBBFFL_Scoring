@@ -138,6 +138,17 @@ class FinalsSeedingConflictError(FinalsSeedingError):
     it -- refusing to silently replace an existing immutable snapshot."""
 
 
+class UnresolvedLadderTieError(FinalsSeedingError):
+    """`resolve_finals_seed_order`'s mathematical-ladder fallback found an
+    unresolved tie (`app.ladder.LadderRow.tied`). `app.ladder`'s own module
+    docstring and every replay playbook that reads it are explicit that
+    exact equality is an audited Scorer/competition-governance decision,
+    never an invented tiebreak -- `LadderSnapshot.rows`' `season_entry_id`
+    ordering exists solely for repeatable *serialization*, and silently
+    treating it as a real seed decision would let a UUID determine finals
+    qualification or a higher-seed advantage."""
+
+
 def _id() -> str:
     return str(uuid4())
 
@@ -553,6 +564,15 @@ def resolve_finals_seed_order(
     `season_id` against it, so an accidental cross-season `competition_id`
     would otherwise silently seed one season from a different season's
     ladder (Codex review, PR #188).
+
+    Raises `UnresolvedLadderTieError` if the mathematical-ladder fallback
+    has any unresolved tie (`LadderRow.tied`) -- `LadderSnapshot.rows`'
+    `season_entry_id` ordering exists solely for repeatable serialization,
+    never as a real tiebreak (see `app.ladder`'s module docstring), so a
+    caller reaching this fallback with a genuine tie must resolve it
+    through an explicit audited decision before a seed order can be
+    produced (Codex review, PR #188). A snapshot never hits this: the
+    historical seed order is already a resolved, audited fact.
     """
     snapshot = FinalsSeedingRepository(database).get_snapshot(season_id)
     if snapshot is not None and snapshot.competition_id == competition_id:
@@ -562,5 +582,12 @@ def resolve_finals_seed_order(
         raise FinalsSeedingContextError(
             f"competition_id {competition_id!r} belongs to season {ladder.season_id!r}, not the requested "
             f"season {season_id!r}"
+        )
+    tied_entries = [row.season_entry_id for row in ladder.rows if row.tied]
+    if tied_entries:
+        raise UnresolvedLadderTieError(
+            f"cannot derive a deterministic finals seed order: the mathematical ladder has an unresolved tie "
+            f"among {tied_entries} -- this requires an explicit, audited Scorer/competition-governance "
+            "determination, never the ladder's own season_entry_id serialization order"
         )
     return tuple(row.season_entry_id for row in ladder.rows)

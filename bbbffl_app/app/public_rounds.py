@@ -336,8 +336,21 @@ def latest_ordinary_season_id(database, seasons):
 
 
 def build_public_ladder(ladder_repository, identities, competition_id, through_round):
-    """Allow-list the authoritative #59 snapshot without reordering it."""
+    """Allow-list the authoritative #59 snapshot without reordering it.
+
+    The reported ``through_round`` names the latest round actually
+    represented among the results folded into ``rows`` -- never simply the
+    round page a visitor is browsing (issue #180). Browsing forward to a
+    scheduled/future round must not imply that round's results contributed
+    to the standings shown; the ladder continues to describe whatever
+    finalised round it was last built from. Falls back to the requested
+    ``through_round`` only when nothing has been finalised at all yet
+    (there is no earlier round to name instead).
+    """
     snapshot = ladder_repository.snapshot(competition_id, through_round)
+    displayed_through_round = (
+        snapshot.latest_included_round if snapshot.latest_included_round is not None else snapshot.through_round
+    )
     rows = []
     for row in snapshot.rows:
         team = identities.get_public_team(row.season_entry_id)
@@ -356,4 +369,4 @@ def build_public_ladder(ladder_repository, identities, competition_id, through_r
                 "tied": row.tied,
             }
         )
-    return {"season_id": snapshot.season_id, "through_round": snapshot.through_round, "rows": rows}
+    return {"season_id": snapshot.season_id, "through_round": displayed_through_round, "rows": rows}

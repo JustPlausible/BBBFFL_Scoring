@@ -49,6 +49,35 @@ def _publish_round_one(database, year, afl_round=100):
     return round_row, entries
 
 
+def _publish_round(database, round_row, round_number, afl_round, offset=0):
+    """Open, progress-to-review and publish one more fixture round beyond
+    Round 1 in a season `_publish_round_one` already started -- the same
+    lifecycle steps it runs, for a round number that needs its own
+    `bbbffl_round` definition first. Lets a test finalise several
+    consecutive rounds to exercise ladder provenance (issue #180) rather
+    than only ever a lone published Round 1."""
+    from app.competition_lifecycle import CompetitionLifecycleRepository
+    from app.round_mapping import RoundMappingRepository
+    from app.season import SeasonRepository
+    from tests.test_competition_lifecycle import KnownRound
+
+    seasons = SeasonRepository(database)
+    lifecycle = CompetitionLifecycleRepository(database)
+    round_def = seasons.create_round(
+        round_row.competition_id, f"round-{round_number}", f"Round {round_number}", round_number
+    )
+    RoundMappingRepository(database).accept(
+        round_def.bbbffl_round_id,
+        round_row.season_id,
+        afl_round,
+        KnownRound(round_row.season_id, afl_round),
+    )
+    lifecycle.create_ordinary_round(round_def.bbbffl_round_id)
+    progress_to_review(lifecycle, round_def.bbbffl_round_id)
+    lifecycle.publish_results(round_def.bbbffl_round_id, scores(lifecycle, round_def.bbbffl_round_id, offset=offset))
+    return lifecycle.get_round(round_def.bbbffl_round_id)
+
+
 def test_round_index_lists_every_fixture_round_with_definitions_layered_on(season_client):
     client = season_client
     round_row, _ = _publish_round_one(client.app.state.database, 9001)
@@ -302,15 +331,66 @@ def test_historical_ladder_reflects_only_results_published_through_the_selected_
 
     # The ladder for a future, unplayed round must show exactly what was
     # published through Round 1 -- never "today's" ladder mislabelled, and
-    # never inflated by rounds that have not been played yet.
+    # never inflated by rounds that have not been played yet. Its subtitle
+    # must likewise name Round 1, the latest round actually finalised --
+    # never Round 10, the merely-scheduled round being browsed (issue
+    # #180); see test_scheduled_future_round_ladder_subtitle_* below for
+    # the dedicated regression coverage.
     ladder_round_1 = client.get(f"/api/public/seasons/{season_id}/rounds/1/ladder").json()
     ladder_round_10 = client.get(f"/api/public/seasons/{season_id}/rounds/10/ladder").json()
     assert ladder_round_1["through_round"] == 1
-    assert ladder_round_10["through_round"] == 10
+    assert ladder_round_10["through_round"] == 1
     assert ladder_round_1["rows"] == ladder_round_10["rows"]
     assert all(row["played"] == 1 for row in ladder_round_1["rows"])
     assert all(row["team_name"] for row in ladder_round_1["rows"])
     assert all("season_entry_id" not in row for row in ladder_round_1["rows"])
+
+
+def test_scheduled_future_round_ladder_subtitle_names_the_latest_finalised_round(season_client):
+    """Issue #180: after Round 10 is finalised, browsing forward to
+    scheduled Round 11 must keep showing the Round 10 ladder *and* label
+    it as such -- the subtitle must never imply Round 11 (not yet played)
+    contributed to the standings, and must name the actual latest
+    finalised round rather than merely "one less than whatever round is
+    being viewed"."""
+    client = season_client
+    database = client.app.state.database
+    round_row, _ = _publish_round_one(database, 9013, afl_round=200)
+    for round_number in range(2, 11):
+        round_row = _publish_round(database, round_row, round_number, afl_round=200 + round_number, offset=round_number)
+    season_id = round_row.season_id
+
+    preview = client.get(f"/api/public/seasons/{season_id}/rounds/11").json()
+    assert preview["round_state"] == "scheduled"  # Round 11 has not been opened at all
+
+    finalised = client.get(f"/api/public/seasons/{season_id}/rounds/10/ladder").json()
+    future = client.get(f"/api/public/seasons/{season_id}/rounds/11/ladder").json()
+
+    assert finalised["through_round"] == 10
+    assert future["through_round"] == 10  # not 11: Round 11 contributes nothing yet
+    assert future["rows"] == finalised["rows"]
+    assert all(row["played"] == 10 for row in future["rows"])
+
+
+def test_finalised_historical_round_ladder_subtitle_still_names_that_round(season_client):
+    """The fix must not simply always report "the latest finalised round in
+    the whole season" -- browsing back to an earlier finalised round after
+    a later one has since been finalised too must still describe that
+    earlier round's own as-of cutoff, exactly as before (issue #180's
+    'preserve correct historical behaviour' requirement)."""
+    client = season_client
+    database = client.app.state.database
+    round_one, _ = _publish_round_one(database, 9014, afl_round=300)
+    round_two = _publish_round(database, round_one, 2, afl_round=301, offset=1)
+    season_id = round_two.season_id
+
+    ladder_round_1 = client.get(f"/api/public/seasons/{season_id}/rounds/1/ladder").json()
+    ladder_round_2 = client.get(f"/api/public/seasons/{season_id}/rounds/2/ladder").json()
+
+    assert ladder_round_1["through_round"] == 1
+    assert ladder_round_2["through_round"] == 2
+    assert all(row["played"] == 1 for row in ladder_round_1["rows"])
+    assert all(row["played"] == 2 for row in ladder_round_2["rows"])
 
 
 def test_matchup_links_to_existing_detailed_view_only_once_a_round_is_opened(season_client):

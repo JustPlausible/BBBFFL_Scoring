@@ -197,11 +197,21 @@ def _lineup_view(request: Request, principal: Principal, scope: dict) -> dict:
         # Still open under the authoritative state (editable, or an invalid
         # selection no trigger actually covers -- issue #185, Codex review
         # on PR #186) -> present (and let the operator continue editing)
-        # their own current draft pick, live-evaluated; already locked/
-        # indeterminate there -> the draft's value is presentational-only
-        # divergence, never the primary value.
+        # their own current draft pick, live-evaluated -- but only when that
+        # live evaluation is itself still open too; a draft candidate that
+        # would itself currently be rejected (e.g. a player whose own match
+        # a trigger has since covered) must never flip an INVALID_SELECTION
+        # position to look locked/indeterminate (disabled), or the operator
+        # loses any further way to correct it (Codex re-review). Already
+        # genuinely locked/indeterminate under the authoritative state ->
+        # the draft's value is presentational-only divergence, never the
+        # primary value.
+        draft_lock = draft_locks[position]
         display_lock = (
-            draft_locks[position] if authoritative_lock.state in DRAFT_DEFERRING_LOCK_STATES else authoritative_lock
+            draft_lock
+            if authoritative_lock.state in DRAFT_DEFERRING_LOCK_STATES
+            and draft_lock.state in DRAFT_DEFERRING_LOCK_STATES
+            else authoritative_lock
         )
         draft_value = draft.positions[position]
         draft_player = (

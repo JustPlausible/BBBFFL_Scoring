@@ -432,7 +432,19 @@ class CoachLineupService:
                 **{
                     position: draft_locks[position]
                     for position, lock in locks.items()
-                    if lock.state in DRAFT_DEFERRING_LOCK_STATES and position in draft_locks
+                    if lock.state in DRAFT_DEFERRING_LOCK_STATES
+                    and position in draft_locks
+                    # issue #185 Codex re-review: only defer to the draft's
+                    # own live evaluation when that evaluation is itself
+                    # still open. Otherwise (the coach saved a replacement
+                    # that would itself currently be rejected -- e.g. a
+                    # player whose own match a trigger has since covered),
+                    # keep showing the authoritative state instead: an
+                    # INVALID_SELECTION position must stay editable so a
+                    # *further* correction remains possible, never flip to
+                    # looking locked/indeterminate (disabled) just because
+                    # one saved draft candidate turned out to be invalid.
+                    and draft_locks[position].state in DRAFT_DEFERRING_LOCK_STATES
                 },
             }
         # Built from `locks`, not `draft.positions`, for the same reason:

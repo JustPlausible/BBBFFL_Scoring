@@ -1029,6 +1029,79 @@ def test_delegated_view_reflects_a_proxy_draft_replacement_saved_over_a_submitte
     assert f1["draft_diverges"] is False
 
 
+def test_delegated_view_keeps_an_invalid_selection_editable_after_a_bad_draft_candidate():
+    """Codex re-review (PR #186): the delegated flow shares the exact same
+    draft-overlay logic as the coach flow (`app.coach_lineup.
+    DRAFT_DEFERRING_LOCK_STATES`), so it must not regress the same way: a
+    proxy draft replacement that would itself currently be rejected (a
+    player whose own match an already-activated selective trigger now
+    covers) must never make an INVALID_SELECTION position render as
+    locked/indeterminate -- the operator must retain a further way to
+    correct it."""
+    db, _, round_, entries, scope_row, pool, ownership = lockout_context()
+    entry = entries[0]
+    triggers = LockoutTriggerRepository(db)
+    configure_selective(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], key="early-1", sequence=1)
+    configure_main(triggers, round_.bbbffl_round_id, [LATE_MATCH_ID], sequence=2)
+    bye_player = acquire(pool, ownership, scope_row, entry, 1, BYE_TEAM, name="Bye Club Player")
+    bad_candidate = acquire(pool, ownership, scope_row, entry, 2, EARLY_HOME, name="Now-Locked Candidate")
+    client = afl_client_with_bye(ALL_MATCHES, BYE_TEAM)
+    proxy = LineupProxyService(db, client)
+
+    draft = proxy.create_or_amend(
+        scope_row["season_id"],
+        scope_row["competition_id"],
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        {"F1": bye_player.season_player_id},
+        expected_revision=0,
+        actor=OPERATOR,
+    )
+    submitted = proxy.submit(
+        draft.lineup_id,
+        expected_draft_revision=draft.revision,
+        expected_submission_version=0,
+        actor=OPERATOR,
+        reason="issue #185: historical pre-existing bye selection",
+        lock_guard=None,
+    )
+
+    from app.lockouts import LockoutRepository, RoundMatchFactsProvider
+    from app.round_mapping import RoundMappingRepository
+
+    # Durably activate the selective trigger before the operator saves
+    # their (bad) draft pick -- mirrors an earlier GET having already
+    # observed it, exactly as production always does before any save.
+    match_facts = RoundMatchFactsProvider(RoundMappingRepository(db), client)
+    LockoutRepository(db).lock_state(
+        draft.lineup_id,
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        submitted.positions,
+        match_facts=match_facts,
+        evaluation_at=EARLY_START + timedelta(minutes=1),
+    )
+
+    proxy.create_or_amend(
+        scope_row["season_id"],
+        scope_row["competition_id"],
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        {**submitted.positions, "F1": bad_candidate.season_player_id},
+        expected_revision=draft.revision,
+        actor=OPERATOR,
+    )
+
+    request = _request(db, client)
+    view = delegated_operations._lineup_view(request, _principal(entry), _scope(db, round_, scope_row, entry))
+    f1 = _lock_by_position(view)["F1"]
+    # Still an editable invalid selection -- the original submitted bye
+    # player, never the now-locked bad candidate, and never disabled.
+    assert f1["state"] == "invalid_selection"
+    assert f1["editable"] is True
+    assert f1["season_player_id"] == bye_player.season_player_id
+
+
 def test_delegated_submission_rejected_while_bye_player_selected_then_succeeds_after_replacement():
     """The delegated-Scorer flow (`LineupProxyService`, `source_type=
     'scorer_proxy'`) must behave exactly like the coach flow: fail closed

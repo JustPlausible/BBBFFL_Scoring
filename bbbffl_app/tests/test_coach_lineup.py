@@ -12,6 +12,7 @@ from tests.test_competition_lifecycle import operational
 from tests.test_lockouts import (
     ALL_MATCHES,
     BYE_TEAM,
+    EARLY_HOME,
     EARLY_MATCH_ID,
     EARLY_START,
     LATE_HOME,
@@ -230,6 +231,66 @@ def test_coach_view_reflects_a_draft_replacement_saved_over_a_submitted_bye_play
     assert rendered.locks["F1"].state == LockState.EDITABLE
     assert rendered.locks["F1"].season_player_id == replacement.season_player_id
     assert rendered.selected_players["F1"].season_player_id == replacement.season_player_id
+
+
+def test_coach_view_keeps_an_invalid_selection_editable_after_a_bad_draft_candidate():
+    """Codex re-review (PR #186): saving a draft replacement that would
+    itself currently be rejected (e.g. a player whose own match an
+    already-activated selective trigger now covers) must never make an
+    INVALID_SELECTION position render as locked/indeterminate. Before this
+    fix, the draft-overlay blindly trusted the draft candidate's own
+    evaluation, so one bad saved pick left the coach with no further way to
+    correct the position through the UI -- even though the true
+    authoritative position (the still-selected bye player) remains
+    genuinely open until main lockout activates."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    entry = entries[0]
+    coach_row = db.execute(
+        "SELECT coach_id FROM season_entry_coach_history WHERE season_entry_id=? AND ended_at IS NULL",
+        (entry.season_entry_id,),
+    ).fetchone()
+    triggers = LockoutTriggerRepository(db)
+    configure_selective(triggers, round_.bbbffl_round_id, [EARLY_MATCH_ID], key="early-1", sequence=1)
+    configure_main(triggers, round_.bbbffl_round_id, [LATE_MATCH_ID], sequence=2)
+    bye_player = acquire(pool, ownership, scope, entry, 1, BYE_TEAM, name="Bye Club Player")
+    bad_candidate = acquire(pool, ownership, scope, entry, 2, EARLY_HOME, name="Now-Locked Candidate")
+    lineups = WeeklyLineupRepository(db)
+    draft, submitted = establish(lineups, round_, entry, scope, {"F1": bye_player.season_player_id})
+
+    # Durably activate the selective trigger before the coach saves their
+    # (bad) draft pick -- mirrors an earlier GET having already observed
+    # it, exactly as production always does before any save can occur.
+    matches = FakeMatchFacts(ALL_MATCHES, byes=frozenset({BYE_TEAM.team_id}))
+    LockoutRepository(db).lock_state(
+        draft.lineup_id,
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        submitted.positions,
+        match_facts=matches,
+        evaluation_at=EARLY_START + timedelta(minutes=1),
+    )
+
+    service = CoachLineupService(
+        db,
+        afl_client=SimpleNamespace(
+            get_matches=lambda afl_round_id: ALL_MATCHES,
+            get_rounds=lambda afl_season_id: [SimpleNamespace(round_id=2027, round_number=1, byes=(BYE_TEAM,))],
+        ),
+    )
+    entry_context = service.resolve(coach_row["coach_id"], scope["season_id"], round_.bbbffl_round_id)
+    service.save(
+        scope["season_id"],
+        round_.bbbffl_round_id,
+        entry_context,
+        {**submitted.positions, "F1": bad_candidate.season_player_id},
+        draft.revision,
+    )
+
+    rendered = service.view(coach_row["coach_id"], scope["season_id"], round_.bbbffl_round_id)
+    # Still an editable invalid selection -- the original submitted bye
+    # player, never the now-locked bad candidate, and never disabled.
+    assert rendered.locks["F1"].state == LockState.INVALID_SELECTION
+    assert rendered.locks["F1"].season_player_id == bye_player.season_player_id
 
 
 def test_describe_ordinary_position_renders_invalid_selection_as_an_editable_control():

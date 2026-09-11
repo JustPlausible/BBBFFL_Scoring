@@ -2121,3 +2121,54 @@ def test_round_match_facts_provider_byes_for_returns_none_when_unresolved():
     # constructed without `byes=`, and any caller written before issue
     # #185) is unconfirmed, not an error.
     assert resolve_byes(FakeMatchFacts(ALL_MATCHES), round_.bbbffl_round_id) is None
+
+
+def test_bye_player_fails_closed_when_no_lockout_plan_is_configured():
+    """issue #185 Codex re-review: a confirmed bye must still fail closed
+    exactly like an ordinary resolvable player when the round has no
+    lockout plan configured at all -- this module has no basis for knowing
+    whether some future trigger configuration would have covered the
+    position, so it must never report a safely-editable INVALID_SELECTION
+    in that scenario. Before this fix, the bye branch checked only
+    `coverage.main_activated`, skipping the `lockout_plan_not_configured`
+    fail-closed check every other position already respects."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    entry = entries[0]
+    # Deliberately no LockoutTriggerRepository configuration at all.
+    bye_player = acquire(pool, ownership, scope, entry, 1, BYE_TEAM)
+    lineups = WeeklyLineupRepository(db)
+    matches = FakeMatchFacts(ALL_MATCHES, byes=frozenset({BYE_TEAM.team_id}))
+    draft, submitted = establish(lineups, round_, entry, scope, {"F1": bye_player.season_player_id})
+
+    view = LockoutRepository(db).lock_state(
+        draft.lineup_id,
+        round_.bbbffl_round_id,
+        entry.season_entry_id,
+        submitted.positions,
+        match_facts=matches,
+        evaluation_at=EARLY_START - timedelta(minutes=5),
+    )
+    assert view.positions["F1"].state == LockState.INDETERMINATE
+    assert view.positions["F1"].reason == "lockout_plan_not_configured"
+
+    # And ordinary submission fails closed exactly like any other
+    # indeterminate position -- never treated as a freely editable/
+    # clearable invalid selection just because no plan exists yet.
+    replacement = acquire(pool, ownership, scope, entry, 2, UNCOVERED_HOME, name="Blocked Replacement")
+    draft2 = edit_draft(
+        lineups,
+        round_,
+        entry,
+        scope,
+        draft.lineup_id,
+        {**submitted.positions, "F1": replacement.season_player_id},
+        from_revision=draft.revision,
+    )
+    guard = LockoutRepository(db).guard(match_facts=matches, evaluation_at=EARLY_START - timedelta(minutes=5))
+    with pytest.raises(LockedSelectionError, match="indeterminate"):
+        lineups.submit(
+            draft2.lineup_id,
+            expected_draft_revision=draft2.revision,
+            expected_submission_version=submitted.version,
+            lock_guard=guard,
+        )

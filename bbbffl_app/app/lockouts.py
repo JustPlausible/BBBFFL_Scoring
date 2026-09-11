@@ -1641,6 +1641,24 @@ class LockoutRepository:
                 return PositionLockState(
                     position, season_player_id, LockState.INDETERMINATE, str(exc), None, None, None, False
                 )
+            # issue #185 Codex re-review: a confirmed bye still needs a
+            # round lockout plan to safely decide anything -- without one,
+            # this module has no basis for knowing whether some future
+            # trigger configuration would have covered this position, so it
+            # must fail closed exactly like the ordinary resolvable-match
+            # path below (`"lockout_plan_not_configured"`), never be
+            # reported as a safely-editable invalid selection.
+            if not coverage.configured:
+                return PositionLockState(
+                    position,
+                    season_player_id,
+                    LockState.INDETERMINATE,
+                    "lockout_plan_not_configured",
+                    None,
+                    None,
+                    None,
+                    False,
+                )
             # A confirmed bye is never itself proof of a *lockout* -- only
             # the round's own main trigger (or, for a resolvable match, a
             # selective trigger covering it) locks a position outright. A

@@ -217,8 +217,12 @@ SEASON_CENTRE = {"app.season_centre"}
 # #178) is the same shape: a narrow, audited replay/migration-style
 # continuation operation over the season/fixture model, composed only by
 # `scripts.replay_2026_second_half_continuation`, never by a route.
+# `app.finals_seeding` (issue #187) is the same shape again: a narrow,
+# audited, replay-only finals-seeding snapshot over the season/ladder model
+# (it reads `app.ladder` to freeze a copy, never mutating it), composed only
+# by `scripts.finals_seeding_2026`, never by a route.
 DRAFT_BOARD = {"app.draft_board"}
-REPLAY_BOOTSTRAP = {"app.replay_bootstrap", "app.replay_continuation"}
+REPLAY_BOOTSTRAP = {"app.replay_bootstrap", "app.replay_continuation", "app.finals_seeding"}
 
 # Round-opening preflight (#105): an application read model over the
 # persisted mapping/lifecycle, lockout and Opening Round boundaries.  Like

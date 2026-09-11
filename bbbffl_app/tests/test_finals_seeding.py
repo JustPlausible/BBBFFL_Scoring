@@ -11,10 +11,13 @@ generic ladder editor.
 """
 
 import inspect
+import tempfile
+from pathlib import Path
 
 import pytest
 
 from app.audit import ActorContext, AuditEventRepository
+from app.db import connect
 from app.finals_seeding import (
     FINALS_SEEDING_SNAPSHOT_CREATED,
     HISTORICAL_FINALS_SEED_TEAM_NAMES,
@@ -26,6 +29,7 @@ from app.finals_seeding import (
 )
 from app.identity import IdentityRepository
 from app.ladder import LadderRepository
+from app.migrations import migrate
 from tests.finals_seeding_helpers import build_2026_replay_season
 
 ACTOR = ActorContext.anonymous_operator("replay_operator")
@@ -73,6 +77,23 @@ def test_preview_reports_readiness_without_writing_anything():
 
     # No table this module owns has a row yet.
     assert ctx["database"].execute("SELECT COUNT(*) AS n FROM finals_seeding_snapshot").fetchone()["n"] == 0
+
+
+def test_preview_reports_a_clean_diagnostic_before_the_owning_migration_has_run():
+    """Codex review (PR #188): `finals_seeding_snapshot` did not exist
+    before `0028_finals_seeding` -- a database still at the prior head must
+    get a clean diagnostic from `preview`, not an unhandled database
+    error, matching every other fail-closed diagnostic in this module."""
+    path = Path(tempfile.mkstemp(suffix=".db")[1])
+    migrate(f"sqlite:///{path}", "0027_midseason_draft")
+    database = connect(f"sqlite:///{path}")
+    ctx = build_2026_replay_season(database=database)
+
+    report = _repo(ctx).preview(ctx["season"].season_id, ctx["competition"].competition_id)
+    assert report["replay_context_ready"] is False
+    assert report["snapshot_exists"] is False
+    assert report["apply_permitted"] is False
+    assert "0028_finals_seeding" in report["diagnostic"]
 
 
 def test_preview_reports_material_differences_for_the_three_named_teams():

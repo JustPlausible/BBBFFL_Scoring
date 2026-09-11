@@ -58,6 +58,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
+from sqlalchemy.exc import DBAPIError
+
 from app.audit import ActorContext, append_event
 from app.db import _for_update_suffix, transaction
 from app.ladder import LadderRepository
@@ -311,9 +313,12 @@ class FinalsSeedingRepository:
 
     def preview(self, season_id: str, competition_id: str) -> dict:
         """Read-only status/preview: never mutates, never takes a row lock.
-        Safe to call at any time. Reports the same context/resolution checks
-        `apply` performs, without acting on them."""
-        existing = self.get_snapshot(season_id)
+        Safe to call at any time -- including against a database not yet
+        migrated to at least `0028_finals_seeding`, which reports a clean
+        diagnostic here rather than an unhandled database error, since the
+        `finals_seeding_snapshot` table this method reads first did not
+        exist before that migration. Reports the same context/resolution
+        checks `apply` performs, without acting on them."""
         report: dict = {
             "season_id": season_id,
             "competition_id": competition_id,
@@ -323,10 +328,20 @@ class FinalsSeedingRepository:
             "historical_seed_order": None,
             "material_differences": None,
             "historical_rationale": HISTORICAL_DISCREPANCY_RATIONALE,
-            "snapshot_exists": existing is not None,
-            "existing_snapshot_id": existing.snapshot_id if existing is not None else None,
+            "snapshot_exists": False,
+            "existing_snapshot_id": None,
             "apply_permitted": False,
         }
+        try:
+            existing = self.get_snapshot(season_id)
+        except DBAPIError as exc:
+            report["diagnostic"] = (
+                "could not read the finals_seeding_snapshot table -- migrate the database to at least "
+                f"0028_finals_seeding before preview (underlying error: {exc.orig or exc})"
+            )
+            return report
+        report["snapshot_exists"] = existing is not None
+        report["existing_snapshot_id"] = existing.snapshot_id if existing is not None else None
         try:
             _require_replay_context(self.database.execute, self.database, season_id, competition_id, locked=False)
         except (FinalsSeedingContextError, KeyError) as exc:

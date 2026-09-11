@@ -292,6 +292,34 @@ def test_coach_view_keeps_an_invalid_selection_editable_after_a_bad_draft_candid
     assert rendered.locks["F1"].state == LockState.INVALID_SELECTION
     assert rendered.locks["F1"].season_player_id == bye_player.season_player_id
 
+    # Codex re-review, second finding: the rendered template's enabled
+    # selector must pre-select the same authoritative (bye) player, never
+    # the raw draft's rejected candidate underneath a warning describing a
+    # different player -- and an unchanged Submit must resend the
+    # authoritative player, not silently resend the rejected candidate.
+    from fastapi.templating import Jinja2Templates
+
+    from app.coach_lineup import COACH_LINEUP_POSITION_GROUPS, COACH_LINEUP_POSITIONS
+    from app.config import BASE_DIR
+
+    templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
+    html = templates.get_template("coach_lineup.html").render(
+        coach=SimpleNamespace(display_name="Test Coach"),
+        lineup=rendered,
+        positions=COACH_LINEUP_POSITIONS,
+        position_groups=COACH_LINEUP_POSITION_GROUPS,
+        errors=(),
+        notice=None,
+        csrf_token="test-csrf-token",
+    )
+    f1_select_start = html.index('name="position_F1"')
+    f1_select_html = html[f1_select_start : html.index("</select>", f1_select_start)]
+    assert f'value="{bye_player.season_player_id}" selected' in f1_select_html
+    # The rejected candidate may still appear as an ordinary, unselected
+    # option (it is a legitimately owned squad member) -- it must simply
+    # not be the one marked `selected`.
+    assert f'value="{bad_candidate.season_player_id}" selected' not in f1_select_html
+
 
 def test_describe_ordinary_position_renders_invalid_selection_as_an_editable_control():
     """Direct unit coverage of the shared presentation boundary both the

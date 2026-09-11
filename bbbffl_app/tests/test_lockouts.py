@@ -6,6 +6,7 @@ Every evaluation below supplies an explicit `evaluation_at` -- no test
 sleeps, waits on wall-clock time, or talks to a live AFL API.
 """
 
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -2121,6 +2122,55 @@ def test_round_match_facts_provider_byes_for_returns_none_when_unresolved():
     # constructed without `byes=`, and any caller written before issue
     # #185) is unconfirmed, not an error.
     assert resolve_byes(FakeMatchFacts(ALL_MATCHES), round_.bbbffl_round_id) is None
+
+
+class _StaleAwareAflClient:
+    """Duck-typed AFL client exposing `evidence_batch()`/`is_evidence_fresh()`
+    exactly like `app.afl_resilience.ResilientAflClient` -- mirrors
+    `tests.test_lineup_validation.AvailabilityFixture`, the same pattern
+    `app.lineup_validation.LineupValidationService._add_availability`'s own
+    staleness test double uses."""
+
+    def __init__(self, matches, round_id, bye_team, *, stale):
+        self._matches = matches
+        self._round_id = round_id
+        self._bye_team = bye_team
+        self.stale = stale
+
+    def get_matches(self, afl_round_id):
+        return self._matches
+
+    def get_rounds(self, season_id):
+        return [SimpleNamespace(round_id=self._round_id, round_number=1, byes=(self._bye_team,))]
+
+    @contextmanager
+    def evidence_batch(self):
+        class Batch:
+            def is_evidence_fresh(inner_self):
+                return not self.stale
+
+        yield Batch()
+
+
+def test_round_match_facts_provider_byes_for_rejects_stale_cached_evidence():
+    """issue #185 Codex re-review: `ResilientAflClient` can satisfy
+    `get_rounds` from a recent cached fallback (up to its configured
+    staleness window) when a live request fails, without raising -- so a
+    plain success is not by itself proof the byes list is current.
+    `byes_for` must check `evidence_batch()`/`is_evidence_fresh()` exactly
+    like `app.lineup_validation.LineupValidationService._add_availability`
+    already does, rather than trusting whatever a duck-typed client
+    returns unconditionally."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    fresh = RoundMatchFactsProvider(
+        RoundMappingRepository(db), _StaleAwareAflClient(ALL_MATCHES, 2027, BYE_TEAM, stale=False)
+    )
+    assert resolve_byes(fresh, round_.bbbffl_round_id) == frozenset({BYE_TEAM.team_id})
+
+    stale = RoundMatchFactsProvider(
+        RoundMappingRepository(db), _StaleAwareAflClient(ALL_MATCHES, 2027, BYE_TEAM, stale=True)
+    )
+    assert resolve_byes(stale, round_.bbbffl_round_id) is None
 
 
 def test_bye_player_fails_closed_when_no_lockout_plan_is_configured():

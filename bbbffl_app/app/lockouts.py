@@ -220,6 +220,7 @@ boundary here is what a later management UI would call).
 state without recomputing these rules itself.
 """
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -450,23 +451,47 @@ class RoundMatchFactsProvider:
         round, no `get_rounds` on this `afl_client` at all -- some minimal
         test doubles across this codebase implement only `get_matches`,
         e.g. `tests.test_lineup_correction_api._NoMatchesAflClient` --
-        afl-api failure, or afl-api itself reporting `byes=None` for this
-        round) -- never an empty-but-confident frozenset guessed in its
-        place; see `resolve_byes`."""
+        afl-api failure, afl-api itself reporting `byes=None` for this
+        round, or -- issue #185 Codex re-review -- a `ResilientAflClient`
+        response served from a stale cached fallback rather than a live
+        read) -- never an empty-but-confident frozenset guessed in its
+        place; see `resolve_byes`.
+
+        Uses the same `evidence_batch()`/`is_evidence_fresh()` staleness
+        boundary `app.lineup_validation.LineupValidationService.
+        _add_availability` already checks before trusting `Round.byes`:
+        `ResilientAflClient` can satisfy `get_rounds` from a recent cached
+        value (up to its configured `stale_ttl_seconds`) when a live
+        request fails, without raising -- so a plain success here is not
+        by itself proof the byes list is current. Confirming a bye from
+        stale round metadata while a *fresh* match-list read independently
+        omits that club's match would let a genuinely unresolved
+        discrepancy (e.g. an upstream correction the cache has not caught
+        up with yet) masquerade as a known, safely-editable bye instead of
+        staying fail-closed. Plain contract clients/fakes with no
+        `evidence_batch` (every test double in this module's own suite)
+        have nothing to be stale, so a successful read from one is always
+        trusted -- exactly `_add_availability`'s own `nullcontext`
+        fallback."""
         mapping = self._round_mappings.resolve(bbbffl_round_id)
         if mapping is None or mapping.afl_season_id is None:
             return None
         get_rounds = getattr(self._afl_client, "get_rounds", None)
         if get_rounds is None:
             return None
+        evidence_batch = getattr(self._afl_client, "evidence_batch", None)
+        batch_context = evidence_batch() if callable(evidence_batch) else nullcontext(None)
         try:
-            rounds = get_rounds(mapping.afl_season_id)
+            with batch_context as batch:
+                rounds = get_rounds(mapping.afl_season_id)
+                round_ = next((r for r in rounds if r.round_id == mapping.afl_round_id), None)
+                if round_ is None or round_.byes is None:
+                    return None
+                if batch is not None and not batch.is_evidence_fresh():
+                    return None
+                return frozenset(team.team_id for team in round_.byes)
         except AflApiError:
             return None
-        round_ = next((r for r in rounds if r.round_id == mapping.afl_round_id), None)
-        if round_ is None or round_.byes is None:
-            return None
-        return frozenset(team.team_id for team in round_.byes)
 
     def evaluation_at(self) -> datetime | None:
         """Return a replay's explicit clock, if it has one.

@@ -45,7 +45,7 @@ select { width:100%; min-height:48px; border:1px solid #59636e; border-radius:9p
 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 <input type="hidden" name="draft_revision" value="{{ lineup.draft.revision }}">
 <input type="hidden" name="submission_version" value="{{ lineup.submission.version if lineup.submission else 0 }}">
-{% macro render_slot(position, lineup) %}{% set selected = lineup.draft.positions[position] %}{% set selected_player = lineup.selected_players[position] %}{% set lock = lineup.locks.get(position) %}{% set deferred = lineup.deferred.get(position) %}
+{% macro render_slot(position, lineup) %}{% set lock = lineup.locks.get(position) %}{# issue #185 Codex re-review: the enabled selector's pre-filled value must come from the authoritative lock (matching `lineup.selected_players`, computed the same way server-side), never the raw draft -- a saved draft candidate that itself evaluates locked/indeterminate keeps the authoritative lock (see coach_lineup.py's overlay), and the select must show that same authoritative player, not the rejected candidate underneath a warning describing someone else. #}{% set selected = lock.season_player_id if lock else lineup.draft.positions[position] %}{% set selected_player = lineup.selected_players[position] %}{% set deferred = lineup.deferred.get(position) %}
  {# issue #185: an invalid selection (a known AFL bye) is never itself a
     lockout -- only genuinely LOCKED/INDETERMINATE positions are disabled
     below. The position stays editable so the coach can replace the player;

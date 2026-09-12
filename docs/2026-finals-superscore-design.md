@@ -746,18 +746,29 @@ and is therefore a safe no-op for SuperScore (no matchup rows exist to
 match), which means a SuperScore lineup correction today would **not**
 invalidate the new entry-scoped ruling boundary's rows at all — the exact
 correctness gap `_invalidate_stale_review_state` exists to prevent for the
-ordinary/finals case. #192 must close this, following the same precedent
-`_invalidate_stale_review_state`'s own docstring sets (it reaches into
-`app.round_review`'s tables by raw SQL rather than importing that module,
-because `app.round_review` sits above the season model): extend `app.
-lineups`'s invalidation step with an equivalent additive, raw-SQL clear of
-the new entry-scoped ruling table when one exists for the corrected round/
-entry/position, or provide #192's own analogous hook that whatever wraps
-`submit_correction` for a SuperScore lineup calls atomically alongside it.
-Either way, a corrected SuperScore lineup's stale rulings must not silently
-keep applying to the replacement player — this is an additive extension
-consistent with `app.lineups`'s own existing pattern, not a change to its
-behaviour for any existing ordinary/finals caller.
+ordinary/finals case.
+
+**There is only one safe fix here, not two — correction (Codex review,
+PR #196, eighth round): an external wrapper cannot provide atomicity.**
+`submit_correction` opens and commits its own transaction internally
+(`with transaction(self.database) as conn:`) and exposes neither that
+connection nor a callback hook to any caller — verified directly against
+`app/lineups.py`. A separate function called before or after
+`submit_correction`, however "atomic" it looks written down, is
+necessarily a second, independent transaction: a crash or a concurrent
+write between the two leaves the corrected lineup and the entry-scoped
+ruling table disagreeing, exactly the inconsistency `_invalidate_stale_
+review_state` exists to prevent. **#192 must therefore extend `app.
+lineups` itself** — either widen `_invalidate_stale_review_state` with an
+additive, raw-SQL clear of the new entry-scoped ruling table (mirroring how
+it already reaches into `app.round_review`'s tables by raw SQL rather than
+importing that module), or add a narrow callback parameter that `submit_
+correction` invokes from *inside* its own existing transaction. A
+disconnected external hook is not an acceptable alternative. A corrected
+SuperScore lineup's stale rulings must not silently keep applying to the
+replacement player — this is an additive extension consistent with `app.
+lineups`'s own existing pattern, not a change to its behaviour for any
+existing ordinary/finals caller.
 
 ### Scoring
 
@@ -1066,7 +1077,11 @@ order (each row's "Depends on" names the prerequisite rows):
    explicit bracket-participant eligibility enforcement `WeeklyLineup
    Repository` itself does not provide; the confirmed Week-1/seed-1 Week-2
    cross-stream carry-forward fallback (shared with #192's SS1 mechanism);
-   the new variable-match-count (never one, never five — 2/2/1/1 across
+   **a finals-specific review-readiness/sign-off adapter, required
+   unconditionally regardless of #197's path** (`app.round_review.
+   build_round_review`/`attempt_signoff` hard-code "exactly five
+   matchups" independent of the schema fork — see "Scoring" above); the
+   new variable-match-count (never one, never five — 2/2/1/1 across
    weeks 1-4) publish/correction command, built on whichever matchup shape
    #197/#190 produced; public/coach/Scorer views covering all six finals
    matches. Depends on: #190.
@@ -1083,9 +1098,13 @@ order (each row's "Depends on" names the prerequisite rows):
    finals track at the schema level, though its bracket-specific work
    remains independent of #190/#191's).
 5. **[#193 — SuperScore scoring, leaderboard and publication](https://github.com/JustPlausible/BBBFFL_Scoring/issues/193)**
-   — the new leaderboard-shaped official-result representation,
-   ranking/joint-winner computation, publish/correction command, and
-   public/coach/Scorer views. Depends on: #192.
+   — **the new entry-scoped calculation path** (reusing `app.scoring`'s
+   formulas directly, since `MatchupCalculationService.calculate_round`
+   iterates `bbbffl_matchup` rows and SuperScore deliberately has none —
+   see "Scoring" under "SuperScore design"), the new leaderboard-shaped
+   official-result representation, ranking/joint-winner computation,
+   publish/correction command, and public/coach/Scorer views. Depends on:
+   #192.
 6. **[#194 — Operator audit/correction/recovery support for finals and SuperScore](https://github.com/JustPlausible/BBBFFL_Scoring/issues/194)**
    — the finals/SuperScore-specific audit action catalogue, checkpoint
    procedure extending the second-half playbook (or a new

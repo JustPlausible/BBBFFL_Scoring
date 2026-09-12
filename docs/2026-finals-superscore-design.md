@@ -716,6 +716,25 @@ of thing `docs/plans/2027-season-model.md`'s design principle 8 ("audit
 exceptional changes rather than silently rewriting history") anticipates
 but does not itself resolve.
 
+**If #197 chooses the shared-table path, the existing ordinary correction
+endpoint must be fenced off from finals matchups — verified directly
+against `app/routes/round_review.py` (Codex review, PR #196, thirteenth
+round).** `POST /matchup/{matchup_id}/correct` and its `_authorise_matchup`
+helper check only that the matchup exists and that its round's season is in
+scope — there is no `stream_type` check at all, unlike the routes catalogued
+in "A wider pattern" above. Under the shared-table path, a finals matchup
+*is* a `bbbffl_matchup` row, so this endpoint would accept its `matchup_id`
+and call `app.round_review.attempt_correction` directly: a new official-
+result version is recorded, but the finals-specific correction path above
+(and its downstream-pairing/premiership decision) is never invoked. Whoever
+implements the shared-table path in #197, and the finals correction work in
+#191, must make this endpoint reject a finals matchup (dispatching it
+through the finals correction boundary instead) rather than silently
+correcting it through the ordinary path. **This is conditional on #197's
+choice**: under the parallel-storage path, a finals matchup is never a
+`bbbffl_matchup` row, so `_authorise_matchup`'s existing lookup already
+404s it — no additional fencing is needed there.
+
 ### Grand Final/season winner recording and end-of-season completion
 
 New: an explicit `season.premiership.recorded` (or similar) audit event and

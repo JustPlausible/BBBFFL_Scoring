@@ -11,11 +11,13 @@ versioned official results.
 populates `fixture_draw_id`/`fixture_draw_version`/`fixture_round_number`
 from a frozen `season_fixture_draw` and always creates exactly five
 `bbbffl_matchup` rows from `season_fixture_matchup`. `create_non_ordinary_
-round`/`create_stream_matchup` are the schema-level counterparts for
-`finals`/`superscore` streams, which have no pre-drawn fixture to snapshot
-(finals pairings are derived from results; SuperScore has no pairing at
-all) -- they persist a lifecycle/matchup row with a null fixture context
-instead. `_validate_frozen_context` is the one place that treats these two
+round` is the schema-level counterpart for both `finals`/`superscore`
+streams, which have no pre-drawn fixture to snapshot -- it persists a
+lifecycle row with a null fixture context instead. `create_stream_matchup`
+is `finals`-only (SuperScore is matchup-free by design; see its own
+docstring), and persists a matchup row with no `fixture_matchup_id`,
+since a finals pairing is derived from results, never a pre-drawn
+fixture. `_validate_frozen_context` is the one place that treats these two
 shapes differently (see its own docstring); every other method in this
 module, and every other module that reads `bbbffl_round_lifecycle`/
 `bbbffl_matchup` by `bbbffl_round_id`/`matchup_id` (`app.lineups`, `app.
@@ -337,11 +339,15 @@ class CompetitionLifecycleRepository:
         #197): the schema-level primitive #190's finals bracket module
         pairs against, once it has actually computed which two entries meet
         in a given week -- this method itself makes no pairing/bracket
-        decision. Only usable for a round already in a non-ordinary
-        stream's lifecycle (`create_non_ordinary_round`); an ordinary
-        round's matchups are only ever created by `create_ordinary_round`'s
-        fixture-derived path, so ordinary-round matchup integrity is never
-        put at risk by this more permissive method."""
+        decision. Only usable for a round already in a `finals`-typed
+        stream's lifecycle (`create_non_ordinary_round`); `superscore` is
+        deliberately excluded (per docs/2026-finals-superscore-design.md,
+        SuperScore is matchup-free by design -- a matchup created for one
+        would silently be processed by the generic matchup-keyed
+        calculation/review queries as though it were a real head-to-head).
+        An ordinary round's matchups are only ever created by `create_
+        ordinary_round`'s fixture-derived path, so ordinary-round matchup
+        integrity is never put at risk by this more permissive method."""
         if home_season_entry_id == away_season_entry_id:
             raise ValueError("a matchup requires two distinct entries")
         with transaction(self.database) as conn:
@@ -353,8 +359,14 @@ class CompetitionLifecycleRepository:
             ).fetchone()
             if not round_row:
                 raise KeyError(bbbffl_round_id)
-            if round_row["stream_type"] == "ordinary":
-                raise ValueError("create_stream_matchup requires a non-ordinary competition stream")
+            if round_row["stream_type"] != "finals":
+                raise ValueError("create_stream_matchup requires a finals competition stream")
+            entries = conn.execute(
+                "SELECT season_entry_id FROM season_entry WHERE season_id=? AND season_entry_id IN (?, ?)",
+                (round_row["season_id"], home_season_entry_id, away_season_entry_id),
+            ).fetchall()
+            if {row["season_entry_id"] for row in entries} != {home_season_entry_id, away_season_entry_id}:
+                raise ValueError("both entries must belong to the round's own season")
             matchup_id = str(uuid4())
             conn.execute(
                 "INSERT INTO bbbffl_matchup VALUES (?, ?, NULL, ?, ?, ?, NULL, 1)",

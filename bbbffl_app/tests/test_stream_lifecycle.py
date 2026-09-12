@@ -154,10 +154,31 @@ def test_create_ordinary_round_still_rejects_a_finals_stream():
 def test_create_stream_matchup_rejects_an_ordinary_round():
     database = migrated_connection()
     lifecycle, round_, entries = operational(database)
-    with pytest.raises(ValueError, match="non-ordinary"):
+    with pytest.raises(ValueError, match="finals competition stream"):
         lifecycle.create_stream_matchup(
             round_.bbbffl_round_id, 1, entries[0].season_entry_id, entries[1].season_entry_id
         )
+
+
+def test_create_stream_matchup_rejects_a_superscore_round():
+    """SuperScore is matchup-free by design (docs/2026-finals-superscore-
+    design.md) -- `create_stream_matchup` is a finals-only primitive."""
+    db, lifecycle, _season, round_, entries = _non_ordinary_round("superscore", year=2062)
+    with pytest.raises(ValueError, match="finals competition stream"):
+        lifecycle.create_stream_matchup(
+            round_.bbbffl_round_id, 1, entries[0].season_entry_id, entries[1].season_entry_id
+        )
+
+
+def test_create_stream_matchup_rejects_an_entry_from_a_different_season():
+    db, lifecycle, season, round_, entries = _non_ordinary_round("finals", year=2063)
+    other_identities = IdentityRepository(db)
+    other_season = SeasonRepository(db).create_season(2064, "2064 other season")
+    outsider = other_identities.create_entry(
+        other_season.season_id, "outsider", other_identities.create_coach("Outsider Coach").coach_id, "Outsider"
+    )
+    with pytest.raises(ValueError, match="own season"):
+        lifecycle.create_stream_matchup(round_.bbbffl_round_id, 1, entries[0].season_entry_id, outsider.season_entry_id)
 
 
 # -- Frozen-context validation is stream-aware but still mapping-checked ----

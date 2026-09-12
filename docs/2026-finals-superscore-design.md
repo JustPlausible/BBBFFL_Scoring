@@ -33,13 +33,23 @@ editor or a 2027 replay exception (see "Explicit non-goals" at the end).
   Absolutes, The Crabs, One Percenters, Motherruckers, Pommy Rules, The
   Plague.
 - `resolve_finals_seed_order(database, season_id, competition_id)` is the
-  one integration seam any finals/SuperScore code must call for seed order.
-  It already handles both cases (a 2026 snapshot exists; no snapshot exists,
-  so fall back to the mathematical ladder) with no special-casing required
-  at the call site, and every non-2026 season takes the second path
-  automatically because a snapshot can only ever exist for `year == 2026`.
-  **Finals/SuperScore implementation must consume this function's return
-  value; it must never recompute or override seed order itself.**
+  documented integration seam for seed order in the general case, and its
+  logic — a 2026 snapshot exists; no snapshot exists, so fall back to the
+  mathematical ladder, tied-row check included — is exactly what the finals
+  bracket module must apply. **Correction (Codex review, PR #196, sixth
+  round): the finals bracket module does not literally call this function**
+  — see "Seed consumption" below for why calling it and then separately
+  re-reading for provenance is itself unsafe, and for the single-read
+  mechanism (`FinalsSeedingRepository.get_snapshot`, or one `LadderRepository.
+  snapshot` call) that applies this function's *exact* logic — including
+  its `snapshot.competition_id == competition_id` and `ladder.season_id ==
+  season_id` fail-closed checks — from one consistent read instead. Every
+  non-2026 season still takes the mathematical-ladder path automatically,
+  with no special-casing at the call site; only *how* that path's result and
+  provenance are captured together changed. **Finals/SuperScore
+  implementation must never recompute or override seed order through any
+  path other than this one (whether by calling the function directly, or by
+  applying its exact fallback logic against a single ladder read).**
 - The season/database lineage is a single continuous line: the same
   `bbbffl_season` row (`season_id = 3832745c-c19a-4224-bceb-86ded6baa09c`)
   and the same `player_ownership_period`/result/audit history used since
@@ -153,13 +163,32 @@ is a new prerequisite issue, not present when this decomposition was first
 written, that resolves this once for both finals and SuperScore rather
 than letting #190 and #192 each independently reinvent (or silently
 diverge on) the same decision. It offers two paths — loosening the
-fixture-draw linkage to optional for non-ordinary streams (after which the
-existing modules genuinely are reusable unchanged), or building parallel
-lifecycle/matchup storage with a dispatching lookup (a deeper change, since
-that means `app.lineups`/`app.lockouts` are not, in fact, left byte-for-byte
-unchanged) — and leaves the choice, with its reasoning, to whoever
-implements it. **#190 and #192 both now depend on #197's outcome**, which
-changes their "Depends on" relative to the original decomposition below.
+fixture-draw linkage to optional for non-ordinary streams, or building
+parallel lifecycle/matchup storage with a dispatching lookup (a deeper
+change, since that means `app.lineups`/`app.lockouts` are not, in fact,
+left byte-for-byte unchanged) — and leaves the choice, with its reasoning,
+to whoever implements it.
+
+**Correction (Codex review, PR #196, sixth round): making the fixture-draw
+columns nullable is not, by itself, sufficient for path 1 — verified
+directly against `app/competition_lifecycle.py`.**
+`CompetitionLifecycleRepository.transition`'s `upcoming -> open` step (a
+transition every round, finals/SuperScore included, must go through) calls
+`_validate_frozen_context`, which reads `season_fixture_draw WHERE
+fixture_draw_id=?` using the round's own `fixture_draw_id` and raises
+`ValueError("frozen fixture context changed; round remains closed")` when
+that lookup finds no row — exactly what happens when `fixture_draw_id` is
+null. A finals or SuperScore round created under path 1 would therefore
+still be permanently stuck at `upcoming`, unable to ever open, unless
+`_validate_frozen_context` is *also* made stream-aware: skip the
+fixture-draw check when `fixture_draw_id` is null, while still performing
+its other check (the accepted AFL-round-mapping revision, which stays
+meaningful regardless of stream type). **Path 1's scope in #197 therefore
+includes this lifecycle-transition change, not only the column-nullability
+migration** — describing it as a schema-only change understates the work.
+
+**#190 and #192 both now depend on #197's outcome**, which changes their
+"Depends on" relative to the original decomposition below.
 
 Every place elsewhere in this document that says a module is "reusable
 unchanged" for finals or SuperScore lineup submission/lockout should be
@@ -211,17 +240,34 @@ identify the exact official-result versions the order was actually derived
 from (`LadderSnapshot.result_references`, the `(matchup_id, official_
 version)` pairs, does).** The correct shape is one read, not two:
 1. Call `app.finals_seeding.FinalsSeedingRepository.get_snapshot(season_id)`
-   first. If it returns a snapshot, use its order and record its
-   `snapshot_id` as provenance — done, no ladder involved at all.
-2. Only if no snapshot exists, call `app.ladder.LadderRepository.snapshot
-   (competition_id, through_round)` **once** — this single `LadderSnapshot`
-   object is both the source of the seed order (its `rows`, after checking
-   for `tied` exactly as `resolve_finals_seed_order`'s own fallback path
-   does, raising `UnresolvedLadderTieError` on a genuine tie) *and* the
-   source of its exact provenance (persist its `result_references` — every
-   `(matchup_id, official_version)` pair that produced it — alongside
-   `through_round`/`latest_included_round`, not those two round numbers
-   alone).
+   first. **Retain `resolve_finals_seed_order`'s own fail-closed check
+   here, not just the happy path (Codex review, PR #196, sixth round):**
+   a non-`None` result is only usable if `snapshot.competition_id ==
+   competition_id` (the ordinary `competition_id` this bracket was given) —
+   `get_snapshot` itself only takes `season_id`, so this equality check is
+   what stops a season that happens to carry a snapshot scoped to some
+   other competition from being silently accepted here. If it returns a
+   snapshot **and** that check passes, use its order and record its
+   `snapshot_id` as provenance — done, no ladder involved at all. If it
+   returns a snapshot whose `competition_id` does *not* match, treat this
+   exactly as "no snapshot" and fall through to step 2 (mirroring
+   `resolve_finals_seed_order`'s own behaviour) rather than raising.
+2. Only if no matching snapshot exists, call `app.ladder.LadderRepository.
+   snapshot(competition_id, through_round)` **once** — this single
+   `LadderSnapshot` object is both the source of the seed order (its
+   `rows`, after checking for `tied` exactly as `resolve_finals_seed_
+   order`'s own fallback path does, raising `UnresolvedLadderTieError` on a
+   genuine tie) *and* the source of its exact provenance (persist its
+   `result_references` — every `(matchup_id, official_version)` pair that
+   produced it — alongside `through_round`/`latest_included_round`, not
+   those two round numbers alone). **Retain the second fail-closed check
+   here too:** `resolve_finals_seed_order` verifies `ladder.season_id ==
+   season_id` and raises `FinalsSeedingContextError` otherwise, because
+   `LadderRepository.snapshot` derives its own season solely from
+   `competition_id` and never checks the caller's `season_id` against it —
+   without this check, a wrong-but-plausible `competition_id` could freeze
+   a different season's ladder into this bracket. Perform the identical
+   check on this single read and raise the same way.
 
 This means the finals bracket module does not call `app.finals_seeding.
 resolve_finals_seed_order` as an opaque black box for the no-snapshot case;

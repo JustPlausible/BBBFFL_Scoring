@@ -169,6 +169,24 @@ change, since that means `app.lineups`/`app.lockouts` are not, in fact,
 left byte-for-byte unchanged) — and leaves the choice, with its reasoning,
 to whoever implements it.
 
+**If path 2 is chosen, the dispatching lookup must also cover `app.
+lineup_adjudication`, not only `app.lineups`/`app.lockouts` — correction
+(Codex review, PR #196, ninth round), verified directly against `app/
+lineup_adjudication.py`.** `LineupAdjudicationService._eligibility` —
+which the cross-stream carry-forward fallback extension (see "Coach
+lineup/submission behaviour" and "SuperScore design" below) depends on —
+independently queries `SELECT state FROM bbbffl_round_lifecycle WHERE
+bbbffl_round_id=?` and treats a missing row as `round_state = "unknown"`,
+which then fails its own `round_state not in ("live", "review")` check and
+refuses the adjudication outright. Under path 2 (no `bbbffl_round_
+lifecycle` row for finals/SuperScore rounds at all), this lookup would
+always see "unknown" and always refuse — meaning the entire cross-stream
+fallback mechanism #191/#192 need would be unreachable, independent of
+whatever `app.lineups`/`app.lockouts` dispatching #197 built. **#197's
+path-2 scope must include making this specific lookup dispatch-aware too**
+(or #191/#192 must provide their own adapter in front of it) — do not
+assume changing only `app.lineups`/`app.lockouts` is sufficient.
+
 **Correction (Codex review, PR #196, sixth round): making the fixture-draw
 columns nullable is not, by itself, sufficient for path 1 — verified
 directly against `app/competition_lifecycle.py`.**
@@ -252,8 +270,22 @@ version)` pairs, does).** The correct shape is one read, not two:
    returns a snapshot whose `competition_id` does *not* match, treat this
    exactly as "no snapshot" and fall through to step 2 (mirroring
    `resolve_finals_seed_order`'s own behaviour) rather than raising.
-2. Only if no matching snapshot exists, call `app.ladder.LadderRepository.
-   snapshot(competition_id, through_round)` **once** — this single
+2. Only if no matching snapshot exists, **first verify every configured
+   regular-season round is actually `final`** — correction (Codex review,
+   PR #196, ninth round), verified directly against `app/ladder.py`.
+   `LadderRepository.snapshot`'s query filters to `l.state='final' AND
+   l.fixture_round_number<=?` and **silently returns whatever subset of
+   rounds already happens to be final** — it does not check that the
+   season's full regular-season round count (`through_round`, normally 20)
+   has actually been reached. Calling it before every round is final would
+   silently freeze a seed order computed from an incomplete ladder, with
+   no error at all. Perform the same completion check `app.finals_seeding.
+   _require_replay_context` already does for the snapshot-creation path
+   (every round from 1 through the season's `regular_season_round_count`
+   is present and `state == 'final'`) before proceeding to the ladder read
+   below — fail closed, do not proceed, if it is not. Only once that
+   passes, call `app.ladder.LadderRepository.snapshot(competition_id,
+   through_round)` **once** — this single
    `LadderSnapshot` object is both the source of the seed order (its
    `rows`, after checking for `tied` exactly as `resolve_finals_seed_
    order`'s own fallback path does, raising `UnresolvedLadderTieError` on a
@@ -910,19 +942,22 @@ new needs inventing here, only applying:
   it — all through the existing `AuditEventRepository.list_events`/
   `get_event` read boundary, no new read mechanism required.
 - **Provenance linking back to the H&A replay and the finals-seeding
-  snapshot.** Correction (Codex review, PR #196, fourth round): an earlier
-  version of this paragraph claimed every seed-dependent call is "inherently
-  traceable" back to its source because it calls `resolve_finals_seed_order`
-  — but "Seed consumption" above now establishes the opposite: the resolver
-  is called **exactly once**, at bracket creation, and returns only a bare
-  tuple with no provenance of its own. Traceability therefore has to be
-  built, not assumed: `finals_bracket` must persist an explicit provenance
-  reference (the `finals_seeding_snapshot_id` when `FinalsSeedingRepository.
-  get_snapshot` found one, or the mathematical `LadderSnapshot`'s own
-  identifying fields otherwise, per "Seed consumption") at the moment it
-  freezes the order, and every later reader (an audit payload, a display,
-  a tie-break) reads that persisted reference on the bracket row — never a
-  fresh resolver call, and never an assumption that one exists implicitly.
+  snapshot.** Correction (Codex review, PR #196, ninth round — a fourth-
+  round fix to this exact paragraph still hadn't caught up with "Seed
+  consumption"'s later, further-corrected mechanism): traceability is
+  never established by calling `resolve_finals_seed_order` at all — "Seed
+  consumption" above is explicit that the bracket module calls `app.
+  finals_seeding.FinalsSeedingRepository.get_snapshot` or, failing that,
+  makes **one** `app.ladder.LadderRepository.snapshot` call, and derives
+  both the order and its exact provenance from that single read (never a
+  direct call to the resolver function, which returns only a bare tuple
+  with no provenance of its own and would require an unsafe second read to
+  recover one). `finals_bracket` persists that provenance reference (the
+  `finals_seeding_snapshot_id`, or the mathematical `LadderSnapshot`'s
+  `result_references` and round numbers) at the moment it freezes the
+  order, and every later reader (an audit payload, a display, a tie-break)
+  reads that persisted reference on the bracket row — never a fresh read
+  of any kind, resolver or otherwise.
   This is a small, explicit write this design requires, not something
   calling the resolver already gives for free.
 - **End-of-season completion / archive**: this investigation found that

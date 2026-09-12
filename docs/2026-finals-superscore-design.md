@@ -575,6 +575,24 @@ shape), or provide dedicated finals/SuperScore adjudication routes. Without
 this, a Scorer applying the confirmed Week-1/seed-1/SS1 fallback in
 production has no reachable endpoint at all.
 
+**Widening `_authorise_round`'s stream filter alone would reopen the
+bracket-eligibility hole this document already requires closed elsewhere
+— correction (Codex review, PR #196, twelfth round), verified directly
+against `app/routes/lineup_adjudication.py`.** The route's separate
+`_authorise_entry` helper — called for every entry-targeting request —
+only checks `entry.season_id == scope["season_id"]`; it has no concept of
+"is this entry actually one of this bracket round's legitimate
+participants," and neither does `LineupAdjudicationService` itself. Once
+`_authorise_round` is widened to accept finals rounds, a request naming an
+eliminated seed (6th-10th) directly would pass every check this route/
+service currently performs and could create or correct a finals lineup
+for a team with no business playing that round. **This is the same
+bracket-participant eligibility check "Coach lineup/submission behaviour"
+above already requires for ordinary submission — it must be applied at
+this entry-authorization layer too**, not only in the plain `submit`/
+`submit_positions` path, preferably inside the domain service (so it
+covers every route that reaches it) rather than duplicated per-route.
+
 ### Scoring
 
 The scoring *formulas* are unchanged — the same nine-position `app.scoring`

@@ -1365,6 +1365,63 @@ round_review.py`'s existing ordinary-result machinery:**
   `computed_as_of_review_version` (which cannot and does not encode this
   dimension).
 
+  **A further correction (Codex review, PR #196, twenty-ninth round): none
+  of the locking/recheck discipline above proves the calculations being
+  published reflect *current* upstream AFL facts — it only proves nothing
+  changed between snapshot assembly and the publish lock.** If AFL evidence
+  changes but nothing has *triggered* a recalculation since, the
+  calculation row, its revision/fingerprint, and `review_version` all stay
+  exactly as they were — every check above passes cleanly — while the score
+  about to be published is still built from outdated evidence. **The
+  ordinary competition already solves exactly this problem, and the
+  SuperScore publish/correction command must reuse the same discipline, not
+  reinvent a weaker one: verified directly against `app/routes/
+  round_review.py`'s `signoff` route, which recomputes every matchup
+  (`state.calculations.calculate_round(round_id)`) immediately before
+  validating readiness, inside one `afl_client.evidence_batch()` scope, and
+  fails closed on `evidence_fresh` rather than trusting whatever was last
+  calculated.** The SuperScore publish and correction commands must, inside
+  that same evidence-batch scope, recompute all ten entries via this
+  design's entry-scoped calculation path immediately before assembling the
+  publish snapshot, and fail closed (refuse to publish) if the evidence
+  batch reports itself not fresh — exactly mirroring `signoff`'s shape,
+  adapted from five matchups to ten entries. This does not replace the
+  review-state/calculation-row locking above (a residual, much narrower
+  race between "recompute finishes" and "the publish transaction commits"
+  still needs it) — it closes the larger, more fundamental gap that no
+  amount of locking a stale calculation against itself can close: staleness
+  relative to the outside world, not staleness relative to a prior read.
+- **A further correction (Codex review, PR #196, twenty-ninth round): the
+  calculation service itself needs a monotonic guard against upstream
+  evidence, or two overlapping calculations for the same entry can let an
+  older one silently overwrite a newer one.** Two calculations for the same
+  entry can overlap a single upstream AFL-evidence correction: one starts
+  (and captures `review_version`) before the correction, one after — both
+  capture the *same* `review_version`, since AFL evidence changes don't
+  touch it (only lineup/ruling changes do). If the calculation using
+  *older* evidence happens to finish and persist *after* the one using
+  newer evidence, its round-25/26 captured-`review_version` recheck still
+  passes (nothing about `review_version` changed), and it becomes the
+  entry's latest calculation by revision number — even though it reflects
+  strictly older facts than the calculation it just overwrote. Ordering by
+  "persisted last" is not the same as "reflects the newest evidence."
+  **The calculation service must therefore also capture a monotonic
+  upstream-evidence marker — the existing `upstream_revision`/`upstream_
+  observed_at` fields `app.calculations`'s real `bbbffl_matchup_calculation`
+  table already carries for exactly this purpose (verified directly against
+  `MatchupCalculationService._persist`) — and, at persist time inside the
+  same locked transaction, refuse to persist (treat as superseded, discard)
+  if the entry's currently-stored calculation already carries an
+  equal-or-newer `upstream_revision` than the one this calculation used.**
+  A calculation may only ever advance the row's `upstream_revision`
+  forward, never backward — "highest upstream revision wins," not
+  "whoever's transaction commits last wins." Coordinated with (but distinct
+  from) the twenty-ninth round's other correction above: the fresh-recompute
+  discipline sharply narrows how often overlapping calculations for the
+  same entry can occur at all, but does not make this guard unnecessary,
+  since other triggers (e.g. live recalculation as AFL facts stream in
+  during a match) can still race independently of a publish attempt.
+
 ### Publication; public/coach/Scorer views
 
 - **Public:** a SuperScore leaderboard for the current round (and,
@@ -1629,6 +1686,28 @@ consistent with confirmed rules but not itself a league rule), and
    revision superseding the old one, audited the same way), or the
    explicit elimination history keeps naming the original, now-incorrect
    loser even after the pairing downstream of it has been fixed.
+   **Option (b)'s scope is narrower than it needs to be even with the
+   elimination fix above, if the downstream week has already been played
+   or published — Codex review, PR #196, twenty-ninth round.** Superseding
+   only the pairing and elimination records is not enough once the
+   downstream week has its own submitted lineups, rulings, a calculation,
+   and an immutable published official result attached to the *old*
+   (now-incorrect) participants: a corrected Week 1 winner can produce a
+   Week 2 pairing whose already-published official score was earned by
+   teams that, after the correction, should never have played each other
+   at all. **Option (b), if chosen, must therefore itself decide between
+   two sub-options, and this document does not pick between them: (b-i)
+   block the cascade once any downstream play state exists — lineups
+   submitted, a ruling recorded, a calculation run, or a result published
+   — reducing to something closer to option (a) from that point forward;
+   or (b-ii) define an audited invalidation/versioning-and-replay
+   procedure for every affected downstream artifact — lineups, rulings,
+   calculation, and official result, not merely the pairing and
+   elimination rows — for every week the correction's cascade reaches.**
+   Whichever of (a), (b-i), (b-ii), or (c) Steve confirms, the answer must
+   explicitly state which downstream artifacts a cascade is allowed to
+   touch, not only "the pairing" as an earlier draft of this document
+   implied.
 5. **Unresolved: SuperScore prize amounts/configuration for the 2026
    replay.** `2027-season-model.md` confirms a monetary prize exists per
    SuperScore round but this investigation found no specific 2026 amount

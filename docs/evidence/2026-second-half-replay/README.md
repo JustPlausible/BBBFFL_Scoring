@@ -35,7 +35,9 @@ replay-only historical finals-seeding snapshot. See
 [`finals-seeding-2026.md`](finals-seeding-2026.md).
 
 Issue #168 is the execution tracker closed by this evidence set. The next replay
-phase is planned under issue #170 (finals and four-round SuperScore replay).
+phase is planned under issue #170 (finals and four-round SuperScore replay);
+see [`docs/2026-finals-superscore-design.md`](../../2026-finals-superscore-design.md)
+for the resulting design and follow-up issue decomposition.
 
 ## Documents
 

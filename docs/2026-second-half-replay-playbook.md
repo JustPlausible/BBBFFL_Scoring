@@ -723,8 +723,10 @@ Second-half-specific checks:
 
 This playbook stops at the completed home-and-away season. The next phase
 (finals seeding from the locked top-five, the four-week finals bracket,
-and the four independent SuperScore streams) is a separate, not-yet-written
-operational playbook, matching
+and the four independent SuperScore streams) is planned in
+[`docs/2026-finals-superscore-design.md`](2026-finals-superscore-design.md)
+(issue #170), which decomposes it into implementation issues; its own
+operational playbook remains separate and not-yet-written, matching
 `docs/evidence/2026-first-half-replay/second-half-handoff.md`'s own
 "Intended scope" list (items 4–6) and the roadmap's Milestone E
 (`docs/roadmap/2027-season-roadmap.md`). Before starting it:

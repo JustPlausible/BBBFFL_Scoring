@@ -350,6 +350,29 @@ implementation should treat this as a confirmed requirement to build, not
 an unresolved question to raise with Steve (historical-gap question 7,
 below, is updated accordingly).
 
+**This fallback must be reachable through the real, supported post-lockout
+path, not just exist as a bare standalone function — correction (Codex
+review, PR #196, fourth round).** By the time a fallback is actually
+needed (a coach genuinely missed the deadline), the round's lockout has
+already activated, so an ordinary `submit`/`submit_positions` call would
+simply be rejected by the lock guard — that is exactly why `app.
+lineup_adjudication.LineupAdjudicationService.apply_carry_forward_fallback`
+exists as the supported authority for this situation. But that method (and
+its preview) both call `self._carry_forward.resolve_source(season_id,
+competition_id, ...)` internally, hard-coded to the *same* `competition_id`
+— a bare new standalone cross-stream function, called on its own, would
+never actually be exercised by the real missed-deadline operational path.
+**#191 (and #192, for SS1) must therefore extend `LineupAdjudicationService`
+itself** — e.g. an optional, narrowly-scoped `fallback_source_competition_
+id` parameter on `apply_carry_forward_fallback`/its preview, defaulting to
+`None` (meaning "same `competition_id`", the existing behaviour, byte-for-
+byte unchanged for every ordinary/non-fallback caller) — rather than
+building a disconnected helper next to it. The finals/SuperScore call site
+is the only place ever permitted to pass a non-default value, and only for
+the confirmed Week-1/seed-1-Week-2/SS1 cases; `app.lineup_adjudication`
+itself must not expose this as a free-form capability any other caller
+could invoke.
+
 ### Scoring
 
 The scoring *formulas* are unchanged — the same nine-position `app.scoring`
@@ -488,14 +511,24 @@ accidentally sourcing a SuperScore lineup (or vice versa) by mistake, and it
 must **not** be weakened or removed — but it also means the confirmed SS1
 fallback rule above (derive from the coach's most recent *ordinary*
 lineup) cannot go through `resolve_source`/`carry_forward` as written today.
-This needs a small, distinct, explicitly-named function (e.g. `app.
-superscore.resolve_ss1_fallback_source` or similar, in whichever module ends
-up owning SuperScore) that performs exactly one narrow, audited cross-stream
-copy — SS1 only, ordinary-competition source only, coach's most recent
-*submitted* ordinary lineup only — never a generic "carry forward from any
-other stream" capability. This is a small, well-bounded addition, not a
-reason to widen `app.carry_forward` itself; flagging it here so the
-SuperScore follow-up issue does not have to rediscover it.
+
+**A bare standalone function is not enough on its own — correction (Codex
+review, PR #196, fourth round), the same finding as finals' identical gap
+above.** By the time SS1's fallback is actually needed (a coach genuinely
+missed the deadline), SS1's lockout has already activated, so the real
+supported path is `app.lineup_adjudication.LineupAdjudicationService.
+apply_carry_forward_fallback`, not a raw ordinary `submit` call — and that
+method hard-codes `self._carry_forward.resolve_source(season_id,
+competition_id, ...)` to the *same* `competition_id` internally. #192 must
+extend `LineupAdjudicationService` itself (the optional `fallback_source_
+competition_id` parameter described under finals' "Coach lineup/submission
+behaviour" above) rather than building a disconnected `app.superscore.
+resolve_ss1_fallback_source`-style helper that the real post-lockout
+workflow would never actually call. This is a small, well-bounded,
+default-`None`-preserves-existing-behaviour addition to `app.lineup_
+adjudication`, not a reason to widen `app.carry_forward` itself — and it is
+the *same* extension finals needs, so #191 and #192 should implement and
+test it together rather than each adding a competing parameter.
 
 ### Roster/list construction and player eligibility
 
@@ -540,6 +573,33 @@ by `season_entry_id` + round + slot, not `matchup_id`), following `app.
 round_review`'s validation/CAS-versioning/audit conventions but adapted to
 that key shape — not a stream-scoped call into the existing module. This
 belongs to whichever issue owns SuperScore's round lifecycle (#192).
+
+**This new ruling boundary must also invalidate itself on a lineup
+correction — correction (Codex review, PR #196, fourth round), a gap the
+original identification of this boundary missed.** `app.lineups.
+WeeklyLineupRepository.submit_correction` calls a private helper,
+`_invalidate_stale_review_state`, that clears any `bbbffl_matchup_slot_
+ruling`/`bbbffl_matchup_interchange_ruling`/`bbbffl_matchup_override` row
+for a position the correction actually changed — specifically so a ruling
+recorded against the *pre-correction* occupant of a slot can never keep
+silently applying to whoever the correction just installed there instead.
+That helper queries `bbbffl_matchup` by `bbbffl_round_id`/`season_entry_id`
+and is therefore a safe no-op for SuperScore (no matchup rows exist to
+match), which means a SuperScore lineup correction today would **not**
+invalidate the new entry-scoped ruling boundary's rows at all — the exact
+correctness gap `_invalidate_stale_review_state` exists to prevent for the
+ordinary/finals case. #192 must close this, following the same precedent
+`_invalidate_stale_review_state`'s own docstring sets (it reaches into
+`app.round_review`'s tables by raw SQL rather than importing that module,
+because `app.round_review` sits above the season model): extend `app.
+lineups`'s invalidation step with an equivalent additive, raw-SQL clear of
+the new entry-scoped ruling table when one exists for the corrected round/
+entry/position, or provide #192's own analogous hook that whatever wraps
+`submit_correction` for a SuperScore lineup calls atomically alongside it.
+Either way, a corrected SuperScore lineup's stale rulings must not silently
+keep applying to the replacement player — this is an additive extension
+consistent with `app.lineups`'s own existing pattern, not a change to its
+behaviour for any existing ordinary/finals caller.
 
 ### Scoring
 
@@ -680,12 +740,21 @@ new needs inventing here, only applying:
   it — all through the existing `AuditEventRepository.list_events`/
   `get_event` read boundary, no new read mechanism required.
 - **Provenance linking back to the H&A replay and the finals-seeding
-  snapshot**: every finals/SuperScore repository call that needs a seed
-  order calls `resolve_finals_seed_order`, so the resulting bracket/
-  leaderboard rows are inherently traceable to the same `finals_seeding_
-  snapshot_id` (or, for a season with none, the same Round 20 `LadderSnapshot`)
-  already recorded in `provenance-manifest.md`. No separate cross-reference
-  mechanism needs to be built.
+  snapshot.** Correction (Codex review, PR #196, fourth round): an earlier
+  version of this paragraph claimed every seed-dependent call is "inherently
+  traceable" back to its source because it calls `resolve_finals_seed_order`
+  — but "Seed consumption" above now establishes the opposite: the resolver
+  is called **exactly once**, at bracket creation, and returns only a bare
+  tuple with no provenance of its own. Traceability therefore has to be
+  built, not assumed: `finals_bracket` must persist an explicit provenance
+  reference (the `finals_seeding_snapshot_id` when `FinalsSeedingRepository.
+  get_snapshot` found one, or the mathematical `LadderSnapshot`'s own
+  identifying fields otherwise, per "Seed consumption") at the moment it
+  freezes the order, and every later reader (an audit payload, a display,
+  a tie-break) reads that persisted reference on the bracket row — never a
+  fresh resolver call, and never an assumption that one exists implicitly.
+  This is a small, explicit write this design requires, not something
+  calling the resolver already gives for free.
 - **End-of-season completion / archive**: this investigation found that
   `app.season.SeasonRepository.transition_lifecycle`'s `active -> completed`
   transition is **not currently enforced as a write-blocking gate anywhere**
@@ -772,9 +841,15 @@ consistent with confirmed rules but not itself a league rule), and
    season specifically, including whether any AFL scheduling quirk
    analogous to Opening Round affects them). This should be confirmed
    against `afl-api` evidence the same way `app.round_mapping` was
-   populated and validated for Rounds 1-20, as an early step of the finals-
-   lifecycle follow-up issue, not assumed from the general "AFL Rounds
-   21-24" description in the season model.
+   populated and validated for Rounds 1-20. **Correction (Codex review,
+   PR #196, fourth round): this is not solely a SuperScore concern.** Every
+   `bbbffl_round_lifecycle`-shaped row — a finals week's just as much as a
+   SuperScore round's — needs its own accepted `round_afl_mapping_revision`
+   before it can be created/opened at all, even when a finals week and a
+   concurrent SuperScore round point at the same underlying AFL round
+   number. #190 must confirm/create the four finals weeks' own mappings as
+   part of building the finals round lifecycle, not defer this entirely to
+   #192's SuperScore-only mapping work.
 7. **No longer unresolved — reclassified as a confirmed historical rule
    after further Codex review of PR #196.** An earlier draft of this
    document listed the finals-stream Week 1 (and seed 1's Week 2) lineup

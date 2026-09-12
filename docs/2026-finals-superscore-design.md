@@ -365,6 +365,39 @@ version)` pairs, does).** The correct shape is one read, not two:
    a different season's ladder into this bracket. Perform the identical
    check on this single read and raise the same way.
 
+**A further correction (Codex review, PR #196, fourteenth round): the
+single read from step 2 above is still not coupled to the transaction that
+persists `finals_bracket`, so a supported ordinary-result correction can
+commit in the gap between them.** The single-read fix above closes the race
+between *two separate reads* (an earlier draft of this design called
+`resolve_finals_seed_order` and then separately re-called `LadderRepository.
+snapshot`); it does not, by itself, close the race between that one read
+and the later write. If a Scorer corrects an already-final regular-season
+result after step 2's `LadderRepository.snapshot` call returns but before
+the bracket-creation transaction commits its `INSERT`, the bracket
+permanently freezes a seed order — and a `result_references` provenance
+record — that was already superseded at the moment it was written.
+Persisting the stale `result_references` makes this traceable after the
+fact; it does not prevent it. **The bracket-creation transaction must
+therefore re-verify every captured `(matchup_id, official_version)`
+reference — e.g. against `bbbffl_matchup.effective_official_version` — for
+that exact set of matchups, inside the same transaction that inserts
+`finals_bracket`, and abort (for the caller to retry step 2 from scratch)
+if any has changed**, the same compare-and-swap discipline `app.carry_
+forward.CarryForwardService.carry_forward` already applies to a carried-
+forward lineup's source submission via `require_unchanged`, rather than a
+plain read followed by an unguarded write. `app.midseason_draft.
+confirm_ladder` (which this design otherwise mirrors for the "freeze an
+independent copy" pattern) does not re-verify result freshness this way
+either — it only re-checks the season's trigger-round *configuration*
+between its two transactions, not the ladder's own result versions — so it
+is not a sufficient precedent to copy for this specific check; fixing that
+gap in `confirm_ladder` itself is existing ordinary-season code and out of
+scope for this document. This requirement applies only to the ladder-
+fallback path (step 2); the snapshot path (step 1) reads an already-
+immutable `FinalsSeedingRepository` snapshot at bracket-creation time, so
+no live result can go stale underneath it.
+
 This means the finals bracket module does not call `app.finals_seeding.
 resolve_finals_seed_order` as an opaque black box for the no-snapshot case;
 it reimplements that one small fallback step (snapshot-driven order plus

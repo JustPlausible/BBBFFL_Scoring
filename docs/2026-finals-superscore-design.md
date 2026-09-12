@@ -1601,12 +1601,17 @@ order (each row's "Depends on" names the prerequisite rows):
    an `input_snapshot`-equivalent scoring-input record per matchup** (not
    merely reuse `publish_results`' versioning/immutability shape, since
    `_freeze_matchup_inputs` belongs to `attempt_signoff`, not to
-   `publish_results` itself) **and lock the same prerequisite matchup
-   row(s) #190's "advance bracket" step locks**; public/coach/Scorer views
-   covering all six finals matches. **Acceptance requires every finals result
-   correction/cascade entry point to take the owning season-row lock in its
-   write transaction and fail closed once the season is completed.** Depends
-   on: #190.
+   `publish_results` itself), **lock the same prerequisite matchup row(s)
+   #190's "advance bracket" step locks, and — inside its own publish/
+   correction transaction, before committing — separately lock and
+   revalidate each published matchup's calculation row (revision/
+   fingerprint) alongside its `bbbffl_matchup.review_version`**, since
+   `MatchupCalculationService._persist` advances the former without ever
+   touching the latter, and either alone can go stale between snapshot
+   assembly and commit; public/coach/Scorer views covering all six finals
+   matches. **Acceptance requires every finals result correction/cascade
+   entry point to take the owning season-row lock in its write transaction
+   and fail closed once the season is completed.** Depends on: #190.
 4. **[#192 — SuperScore roster, eligibility and lifecycle setup](https://github.com/JustPlausible/BBBFFL_Scoring/issues/192)**
    — the `superscore` competition-stream round lifecycle (built on #197's
    chosen storage shape), weekly lineup submission/lockout wired to it

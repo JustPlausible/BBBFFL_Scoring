@@ -1199,6 +1199,30 @@ round_review.py`'s existing ordinary-result machinery:**
   correction work and #193's calculation/publication work one durable
   serialization point even before a first calculation exists.
 
+  **A fifth correction (Codex review, PR #196, twenty-first round): "a
+  lineup correction" above is too narrow — every effective lineup
+  submission must advance this row, not only a post-lockout correction.**
+  During a live SuperScore round, staged lockout still permits a coach to
+  submit or resubmit still-unlocked positions through the ordinary
+  `submit`/`submit_positions` path (not `submit_correction`, which is the
+  distinct post-lockout admin pathway) — a normal, pre-lockout resubmission
+  after some positions have already locked. If a calculation has already
+  run against the entry's prior submission, and the coach then resubmits an
+  unlocked position, that resubmission changes what the effective lineup
+  *is* without going through `submit_correction` at all — invisible to a
+  review-state advance scoped only to "correction," so the publisher's CAS
+  check would not catch it, and a stale pre-resubmission calculation could
+  become the official score. **Every write that changes an entry's
+  effective submitted lineup for the round — the initial submission, any
+  unlocked resubmission, and a post-lockout correction alike — must lock
+  and advance that entry's review-state row in the same transaction**, not
+  only the narrower "correction" case. (Equivalently, the publisher could
+  instead revalidate each captured calculation's source lineup version
+  under the publication locks rather than relying solely on the review-state
+  counter to reflect every submission path — but the review-state-row
+  approach is preferred for consistency with the rest of this mechanism,
+  and to avoid a second, parallel validation rule.)
+
   The SuperScore publisher and correction command must `SELECT ... FOR
   UPDATE` all ten review-state rows in deterministic `season_entry_id` order,
   verify that all ten exist, and compare each current `review_version` with
@@ -1303,10 +1327,25 @@ new needs inventing here, only applying:
   before any result-changing operation can proceed.
 - **Checkpoint timing**: the same discipline as
   `docs/2026-second-half-replay-playbook.md` sections G/I/K — a paired
-  database/checkpoint backup after the finals-seeding snapshot is applied
-  (already done, see the provenance manifest's "Round 20 / home-and-away
-  boundary"), then after each finals week finalises and after each
-  SuperScore round finalises. Final archival evidence follows this strict
+  database/checkpoint backup after the finals-seeding snapshot is applied,
+  then after each finals week finalises and after each SuperScore round
+  finalises. **Correction (Codex review, PR #196, twenty-first round): the
+  post-apply backup above is not already done — verified directly against
+  the provenance manifest.** `docs/evidence/2026-second-half-replay/
+  provenance-manifest.md`'s "Round 20 / home-and-away boundary" section
+  records only the "End-of-home-and-away database/checkpoint snapshots...
+  retained privately **before** finals-seeding apply" — the pre-apply
+  backup, not a subsequent one taken *after* the snapshot was applied. The
+  manifest's separate "Finals-seeding snapshot" section records the
+  snapshot's own audit/database facts (snapshot id, audit event id,
+  replay-context validation) but no independent paired-backup confirmation
+  after it. Treat the post-apply checkpoint as an **outstanding step**, not
+  a completed one: #194 must take (and record in the evidence directory,
+  per its own scope) a paired database/checkpoint backup after the
+  finals-seeding snapshot before relying on it as a recovery point — do not
+  assume it already exists, and do not skip it on the belief that this
+  document's earlier draft already confirmed it. Final archival evidence
+  follows this strict
   order: (1) lock the owning season row; (2) fail-closed verification that
   **every required finals round** is in lifecycle state `final` and that **all four
   named SuperScore rounds, SS1-SS4,** exist and are `final`; (3) lock the
@@ -1509,9 +1548,14 @@ order (each row's "Depends on" names the prerequisite rows):
    finals round lifecycle (built on #197's chosen storage shape), and a
    CLI-first operator tool mirroring `scripts/finals_seeding_2026.py`'s
    preview/apply shape. Resolves historical-gap questions 3 and 4 above as
-   an explicit design step before writing code. Any correction-triggered
-   cascade it owns must take the shared season-row lock and reject a completed
-   season before changing pairings or elimination history. Depends on: #197.
+   an explicit design step before writing code, **and confirms/creates the
+   four finals weeks' own accepted `round_afl_mapping_revision`s
+   (historical-gap question 6's finals half) — lifecycle creation/opening
+   for a finals week needs one regardless of SuperScore's own mapping
+   work, so this is this issue's scope too, not deferred to #192.** Any
+   correction-triggered cascade it owns must take the shared season-row lock
+   and reject a completed season before changing pairings or elimination
+   history. Depends on: #197.
 3. **[#191 — Finals lineup, scoring and publication](https://github.com/JustPlausible/BBBFFL_Scoring/issues/191)**
    — weekly lineup submission and lockout wired to the `finals` competition
    stream once #197 has landed (including the shared cross-stream fallback

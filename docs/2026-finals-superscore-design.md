@@ -148,14 +148,26 @@ only participants for the remainder of the season.
 
 ### Seed consumption
 
-Every place the finals bracket needs "the top five" or "which seed beat
-which seed" must call `app.finals_seeding.resolve_finals_seed_order` exactly
-once per decision and treat its returned tuple as the authoritative seed
-order — never re-deriving from `app.ladder.LadderRepository.snapshot`
-directly, and never hard-coding the 2026 team names or IDs. This is what
-makes the same bracket-generation code correct for a future season that has
-no seeding snapshot at all (falls through to the mathematical ladder
-automatically).
+The finals bracket module calls `app.finals_seeding.resolve_finals_seed_order`
+**exactly once, at bracket creation**, and freezes the returned tuple into
+the persisted `finals_bracket` row (recommend also recording whichever
+provenance the resolver's result carries — the `finals_seeding_snapshot_id`
+when one was used, or the mathematical `LadderSnapshot`'s own identifying
+fields otherwise — mirroring `app.midseason_draft.confirm_ladder`'s "freeze
+an independent copy" pattern for the exact same reason). **Every later
+decision that needs the seed order — tie-break resolution in a later week,
+a display, an audit payload — reads the bracket's own frozen seed, and never
+calls `resolve_finals_seed_order` again for this bracket.** This matters
+because, for a season with no finals-seeding snapshot (any season other
+than this 2026 replay), `resolve_finals_seed_order` recomputes the
+mathematical ladder fresh on every call; if a supported post-final
+home-and-away result correction changed that ladder after Week 1's bracket
+was already built and played, a second, later call could return a
+different order than the one the bracket actually used — silently
+desynchronising a tie-break decision in Week 3 from the pairings Week 1
+was actually built from (Codex review, PR #196). Never hard-code the 2026
+team names or IDs; this is what keeps the same bracket-generation code
+correct for a future season that has no seeding snapshot at all.
 
 **Which `competition_id` to pass matters and is easy to get wrong.**
 `resolve_finals_seed_order(database, season_id, competition_id)` resolves
@@ -248,10 +260,42 @@ document and must not be silently invented by #191.
 
 ### Scoring
 
-Reuse `app.calculations.MatchupCalculationService`/`app.scoring` unchanged
-— the same nine-position formulas, the same DNP/Interchange/override
-machinery (`app.round_review`), the same calculated-vs-official-result
-separation. Nothing about BBBFFL scoring changes for finals.
+The scoring *formulas* are unchanged — the same nine-position `app.scoring`
+core every stream uses. **But whether `app.calculations.
+MatchupCalculationService`/`app.round_review`/`app.competition_lifecycle`'s
+existing storage can be called literally unchanged is a real open question
+this design does not resolve, corrected after Codex review of PR #196
+found that an earlier draft overstated this as settled.** Verified directly
+against the schema: `bbbffl_matchup` (migration `0010_competition_
+lifecycle.py`) declares `fixture_matchup_id` as a **non-nullable** foreign
+key into `season_fixture_matchup` — the fixed, pre-drawn round-robin
+fixture — and constrains `matchup_order BETWEEN 1 AND 5`. A finals match has
+no `season_fixture_matchup` row to reference at all (there is no pre-drawn
+finals fixture — see "Match generation/representation" above), so a finals
+bracket module cannot insert an ordinary `bbbffl_matchup` row, and therefore
+cannot call `MatchupCalculationService.calculate_matchup`/`calculate_round`
+or `app.round_review`'s matchup-keyed DNP/Interchange/override methods
+against it, without one of:
+
+- a schema change (e.g. making `fixture_matchup_id` nullable, or otherwise
+  loosening the constraint) so a finals match can populate `bbbffl_matchup`
+  without a fixture-draw row, after which `app.calculations`/`app.
+  round_review`/`app.competition_lifecycle`'s existing methods genuinely do
+  become reusable unchanged; or
+- a finals-specific parallel calculation/ruling/result path, structurally
+  similar to the entry-scoped path SuperScore already needs (see "SuperScore
+  design" below) but keyed by a finals matchup rather than by a bare entry.
+
+This decomposition does not pick between these — that is #190/#191's design
+decision to make and justify, informed by whichever is less invasive to the
+existing ordinary-competition tables. What this document commits to is that
+the choice must be made **explicitly and early** in #190, not discovered
+partway through #191 after #190 has already fixed a schema shape that
+turns out not to fit.
+
+Whichever path is chosen, nothing about the DNP/Interchange/override
+*rules* changes for finals — only where the resulting rulings/calculated
+scores are stored.
 
 ### Progression and elimination
 
@@ -282,9 +326,10 @@ publishes nothing of its own for seed 1.
   week's result, who is eliminated, who advances) — the legacy Grand Final
   prototype's single-matchup detail view is reasonable evidence for what
   the "click a match to see live positional detail" experience should look
-  like, generalised to whichever of the four matches is selected.
-  `docs/plans/2027-season-model.md`'s "Public spectator scope" already
-  confirms a public finals bracket is intended.
+  like, generalised to whichever of the **six finals matches across the
+  four weeks** (two in Week 1, two in Week 2, one each in Weeks 3-4 — never
+  four) is selected. `docs/plans/2027-season-model.md`'s "Public spectator
+  scope" already confirms a public finals bracket is intended.
 - **Coach:** identical weekly-lineup submission experience to an ordinary
   round, plus bracket context (who they play, what a win/loss means for
   progression).
@@ -690,15 +735,20 @@ order (each row's "Depends on" names the prerequisite rows):
    writing code. Depends on: this document.
 2. **[#191 — Finals lineup, scoring and publication](https://github.com/JustPlausible/BBBFFL_Scoring/issues/191)**
    — weekly lineup submission and lockout wired to the `finals` competition
-   stream (no new lineup code, only stream-scoping); the new single-match
-   publish/correction command described above; public/coach/Scorer views.
-   Depends on: #190.
+   stream (no new lineup code, only stream-scoping); the new
+   variable-match-count (never one, never five — 2/2/1/1 across weeks 1-4)
+   publish/correction command described above, resolving the
+   `fixture_matchup_id` schema question "Scoring" above raises; public/
+   coach/Scorer views covering all six finals matches. Depends on: #190.
 3. **[#192 — SuperScore roster, eligibility and lifecycle setup](https://github.com/JustPlausible/BBBFFL_Scoring/issues/192)**
    — the `superscore` competition-stream round lifecycle, weekly lineup
    submission/lockout wired to it, the new narrow SS1 cross-stream fallback
-   function, and DNP/Interchange reuse. Resolves historical-gap question 6
-   (round mapping) for the SuperScore rounds as part of setup. Depends on:
-   this document (independent of #190-#191; can run in parallel).
+   function, and the new **entry-scoped** DNP/Interchange/override ruling
+   boundary (not a reuse of `app.round_review`'s matchup-keyed methods —
+   see "DNP, Interchange and loophole rulings" under "SuperScore design").
+   Resolves historical-gap question 6 (round mapping) for the SuperScore
+   rounds as part of setup. Depends on: this document (independent of
+   #190-#191; can run in parallel).
 4. **[#193 — SuperScore scoring, leaderboard and publication](https://github.com/JustPlausible/BBBFFL_Scoring/issues/193)**
    — the new leaderboard-shaped official-result representation,
    ranking/joint-winner computation, publish/correction command, and

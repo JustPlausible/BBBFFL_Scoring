@@ -1,8 +1,31 @@
-"""Persisted ordinary competition lifecycle built on frozen fixtures and mappings.
+"""Persisted competition lifecycle built on frozen fixtures and mappings.
 
 Upstream statuses are observations only.  They are deliberately never consulted
 by lifecycle transitions, and calculated snapshots never share storage with
 versioned official results.
+
+## Ordinary vs. finals/superscore rounds (issue #197)
+
+`create_ordinary_round` is completely unchanged and remains the only way an
+`ordinary`-streamed round gets a `bbbffl_round_lifecycle` row: it always
+populates `fixture_draw_id`/`fixture_draw_version`/`fixture_round_number`
+from a frozen `season_fixture_draw` and always creates exactly five
+`bbbffl_matchup` rows from `season_fixture_matchup`. `create_non_ordinary_
+round`/`create_stream_matchup` are the schema-level counterparts for
+`finals`/`superscore` streams, which have no pre-drawn fixture to snapshot
+(finals pairings are derived from results; SuperScore has no pairing at
+all) -- they persist a lifecycle/matchup row with a null fixture context
+instead. `_validate_frozen_context` is the one place that treats these two
+shapes differently (see its own docstring); every other method in this
+module, and every other module that reads `bbbffl_round_lifecycle`/
+`bbbffl_matchup` by `bbbffl_round_id`/`matchup_id` (`app.lineups`, `app.
+lineup_adjudication`, `app.calculations`, `app.round_review`), works
+identically for either shape without any code change -- see
+docs/2026-finals-superscore-design.md's "A foundational schema fork" and
+its issue #197 resolution note for the full reasoning and call-site audit.
+This module still creates no finals bracket, no SuperScore round, and
+applies no SuperScore scoring rule -- that remains #190/#192's job, built
+on top of these two primitives.
 """
 
 import json
@@ -37,9 +60,13 @@ class CompetitionRound:
     bbbffl_round_id: str
     competition_id: str
     season_id: str
-    fixture_draw_id: str
-    fixture_draw_version: int
-    fixture_round_number: int
+    # `None` for a non-ordinary (finals/superscore) round -- issue #197.
+    # Always populated together for an ordinary round; see
+    # `ck_lifecycle_fixture_context_all_or_none` (migrations/versions/
+    # 0029_stream_lifecycle.py) and `create_non_ordinary_round`.
+    fixture_draw_id: str | None
+    fixture_draw_version: int | None
+    fixture_round_number: int | None
     mapping_id: str
     mapping_revision: int
     provider: str
@@ -55,7 +82,10 @@ class CompetitionRound:
 class Matchup:
     matchup_id: str
     bbbffl_round_id: str
-    fixture_matchup_id: str
+    # `None` for a finals matchup created via `create_stream_matchup` (issue
+    # #197) -- finals pairings are derived from results, not a pre-drawn
+    # fixture. Always populated for an ordinary matchup (`create_ordinary_round`).
+    fixture_matchup_id: str | None
     matchup_order: int
     home_season_entry_id: str
     away_season_entry_id: str
@@ -203,6 +233,155 @@ class CompetitionLifecycleRepository:
                 },
             )
         return self.get_round(bbbffl_round_id)
+
+    def create_non_ordinary_round(
+        self,
+        bbbffl_round_id,
+        *,
+        actor=ActorContext.anonymous_operator("admin"),
+        reason=None,
+    ):
+        """Give a finals/superscore-typed round a `bbbffl_round_lifecycle`
+        row with no frozen fixture-draw context (issue #197) -- the
+        schema-level counterpart to `create_ordinary_round` for the two
+        stream types that have no pre-drawn fixture to snapshot (finals
+        pairings are derived from results; SuperScore has no pairing at
+        all). This is deliberately the *only* thing this method does: it
+        creates no matchup (see `create_stream_matchup`), computes no
+        bracket/pairing and applies no SuperScore scoring rule -- those are
+        #190/#192's job, built on top of this primitive.
+
+        An accepted, unambiguous AFL mapping is still required, exactly as
+        for an ordinary round (docs/2026-finals-superscore-design.md's
+        "the mapping-revision validation ... stays meaningful regardless of
+        stream type") -- only the fixture-draw linkage is skipped.
+        `fixture_draw_id`/`fixture_draw_version`/`fixture_round_number` are
+        persisted as `NULL` together (`ck_lifecycle_fixture_context_all_or_
+        none`), so `_validate_frozen_context` below can later tell this
+        round apart from an ordinary one purely from its own row, without
+        consulting `competition_stream.stream_type` again."""
+        with transaction(self.database) as conn:
+            logical = conn.execute(
+                "SELECT r.*, c.season_id, c.stream_type FROM bbbffl_round r "
+                "JOIN competition_stream c ON c.competition_id=r.competition_id "
+                "WHERE r.bbbffl_round_id=?" + _for_update_suffix(self.database),
+                (bbbffl_round_id,),
+            ).fetchone()
+            if not logical:
+                raise KeyError(bbbffl_round_id)
+            if logical["stream_type"] == "ordinary":
+                raise ValueError("create_non_ordinary_round requires a non-ordinary competition stream")
+            if conn.execute(
+                "SELECT 1 FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?",
+                (bbbffl_round_id,),
+            ).fetchone():
+                raise ValueError("round lifecycle already exists")
+            mapping = conn.execute(
+                "SELECT m.mapping_id, m.current_revision, r.* FROM round_afl_mapping m "
+                "JOIN round_afl_mapping_revision r ON r.mapping_id=m.mapping_id AND r.revision=m.current_revision "
+                "WHERE m.bbbffl_round_id=?" + _for_update_suffix(self.database),
+                (bbbffl_round_id,),
+            ).fetchone()
+            if (
+                not mapping
+                or mapping["state"] != "accepted"
+                or mapping["afl_season_id"] is None
+                or mapping["afl_round_id"] is None
+            ):
+                raise ValueError("round requires one accepted, unambiguous AFL mapping")
+            now = _now()
+            conn.execute(
+                "INSERT INTO bbbffl_round_lifecycle VALUES "
+                "(?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, 'upcoming', 1, ?, ?)",
+                (
+                    bbbffl_round_id,
+                    logical["competition_id"],
+                    logical["season_id"],
+                    mapping["mapping_id"],
+                    mapping["revision"],
+                    mapping["provider"],
+                    mapping["afl_season_id"],
+                    mapping["afl_round_id"],
+                    now,
+                    now,
+                ),
+            )
+            append_event(
+                conn,
+                actor=actor,
+                action="competition.round.created",
+                entity_type="competition.round",
+                entity_id=bbbffl_round_id,
+                entity_version="1",
+                reason=reason,
+                after_state={"state": "upcoming"},
+                payload={
+                    "stream_type": logical["stream_type"],
+                    "mapping_id": mapping["mapping_id"],
+                    "mapping_revision": mapping["revision"],
+                },
+            )
+        return self.get_round(bbbffl_round_id)
+
+    def create_stream_matchup(
+        self,
+        bbbffl_round_id,
+        matchup_order,
+        home_season_entry_id,
+        away_season_entry_id,
+        *,
+        actor=ActorContext.anonymous_operator("admin"),
+        reason=None,
+    ):
+        """Persist one finals matchup with no `fixture_matchup_id` (issue
+        #197): the schema-level primitive #190's finals bracket module
+        pairs against, once it has actually computed which two entries meet
+        in a given week -- this method itself makes no pairing/bracket
+        decision. Only usable for a round already in a non-ordinary
+        stream's lifecycle (`create_non_ordinary_round`); an ordinary
+        round's matchups are only ever created by `create_ordinary_round`'s
+        fixture-derived path, so ordinary-round matchup integrity is never
+        put at risk by this more permissive method."""
+        if home_season_entry_id == away_season_entry_id:
+            raise ValueError("a matchup requires two distinct entries")
+        with transaction(self.database) as conn:
+            round_row = conn.execute(
+                "SELECT l.*, c.stream_type FROM bbbffl_round_lifecycle l "
+                "JOIN competition_stream c ON c.competition_id=l.competition_id "
+                "WHERE l.bbbffl_round_id=?" + _for_update_suffix(self.database),
+                (bbbffl_round_id,),
+            ).fetchone()
+            if not round_row:
+                raise KeyError(bbbffl_round_id)
+            if round_row["stream_type"] == "ordinary":
+                raise ValueError("create_stream_matchup requires a non-ordinary competition stream")
+            matchup_id = str(uuid4())
+            conn.execute(
+                "INSERT INTO bbbffl_matchup VALUES (?, ?, NULL, ?, ?, ?, NULL, 1)",
+                (
+                    matchup_id,
+                    bbbffl_round_id,
+                    matchup_order,
+                    home_season_entry_id,
+                    away_season_entry_id,
+                ),
+            )
+            append_event(
+                conn,
+                actor=actor,
+                action="competition.matchup.created",
+                entity_type="competition.matchup",
+                entity_id=matchup_id,
+                entity_version="1",
+                reason=reason,
+                after_state={
+                    "bbbffl_round_id": bbbffl_round_id,
+                    "matchup_order": matchup_order,
+                    "home_season_entry_id": home_season_entry_id,
+                    "away_season_entry_id": away_season_entry_id,
+                },
+            )
+        return self.get_matchup(matchup_id)
 
     def transition(
         self,
@@ -635,15 +814,27 @@ class CompetitionLifecycleRepository:
                 )
 
     def _validate_frozen_context(self, conn, row):
-        draw = conn.execute(
-            "SELECT state, version FROM season_fixture_draw WHERE fixture_draw_id=?",
-            (row["fixture_draw_id"],),
-        ).fetchone()
+        """Issue #197: a `fixture_draw_id` of `NULL` means this round was
+        created by `create_non_ordinary_round` (finals/superscore), which
+        never had a frozen fixture-draw context to snapshot in the first
+        place -- there is nothing to re-validate there, so that half of the
+        check is skipped entirely rather than failing closed against a
+        context that was never captured. The accepted-mapping check below
+        is unconditional: it "stays meaningful regardless of stream type"
+        (docs/2026-finals-superscore-design.md) and every round, ordinary
+        or not, is created with one. An ordinary round's `fixture_draw_id`
+        is always non-null (`ck_lifecycle_fixture_context_all_or_none`), so
+        its existing fixture-draw validation is completely unchanged."""
+        if row["fixture_draw_id"] is not None:
+            draw = conn.execute(
+                "SELECT state, version FROM season_fixture_draw WHERE fixture_draw_id=?",
+                (row["fixture_draw_id"],),
+            ).fetchone()
+            if not draw or draw["state"] != "frozen" or draw["version"] != row["fixture_draw_version"]:
+                raise ValueError("frozen fixture context changed; round remains closed")
         mapping = conn.execute(
             "SELECT current_revision FROM round_afl_mapping WHERE mapping_id=?" + _for_update_suffix(self.database),
             (row["mapping_id"],),
         ).fetchone()
-        if not draw or draw["state"] != "frozen" or draw["version"] != row["fixture_draw_version"]:
-            raise ValueError("frozen fixture context changed; round remains closed")
         if not mapping or mapping["current_revision"] != row["mapping_revision"]:
             raise ValueError("accepted mapping changed; round remains closed pending explicit resolution")

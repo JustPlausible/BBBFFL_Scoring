@@ -1242,6 +1242,110 @@ def test_finals_seeding_downgrade_succeeds_when_no_snapshot_exists(tmp_path):
     migrate(url)
 
 
+def test_upgrade_from_finals_seeding_head_loosens_fixture_linkage_for_non_ordinary_rounds(tmp_path):
+    """Issue #197 (Path 1, "loosen the fixture-draw linkage"): 0029 makes
+    `bbbffl_round_lifecycle`'s fixture-draw columns and `bbbffl_matchup.
+    fixture_matchup_id` nullable, additively -- the pre-migration schema
+    could not represent a non-ordinary (finals/superscore) round's lifecycle
+    or matchup at all."""
+    from app.competition_lifecycle import CompetitionLifecycleRepository
+    from app.identity import IdentityRepository
+    from app.round_mapping import RoundMappingRepository
+    from tests.test_competition_lifecycle import KnownRound
+
+    url = _url(tmp_path / "stream-lifecycle-upgrade.db")
+    migrate(url, "0028_finals_seeding")
+    engine = create_engine(url)
+    before = {c["name"]: c["nullable"] for c in inspect(engine).get_columns("bbbffl_round_lifecycle")}
+    assert before["fixture_draw_id"] is False
+    assert before["fixture_draw_version"] is False
+    assert before["fixture_round_number"] is False
+    matchup_before = {c["name"]: c["nullable"] for c in inspect(engine).get_columns("bbbffl_matchup")}
+    assert matchup_before["fixture_matchup_id"] is False
+    engine.dispose()
+
+    migrate(url)
+    engine = create_engine(url)
+    after = {c["name"]: c["nullable"] for c in inspect(engine).get_columns("bbbffl_round_lifecycle")}
+    assert after["fixture_draw_id"] is True
+    assert after["fixture_draw_version"] is True
+    assert after["fixture_round_number"] is True
+    matchup_after = {c["name"]: c["nullable"] for c in inspect(engine).get_columns("bbbffl_matchup")}
+    assert matchup_after["fixture_matchup_id"] is True
+    engine.dispose()
+
+    # A finals-typed round can now obtain a lifecycle row and a matchup with
+    # no fixture linkage at all -- see app/competition_lifecycle.py's
+    # create_non_ordinary_round/create_stream_matchup and
+    # tests/test_stream_lifecycle.py for full behavioural coverage.
+    connection = connect(url)
+    seasons = SeasonRepository(connection)
+    season = seasons.create_season(2070, "2070 finals migration check")
+    rules = seasons.create_rules_version(season.season_id, "canonical", 1, "Rules")
+    competition = seasons.create_competition(season.season_id, rules.rules_version_id, "finals", "Finals", "finals")
+    round_ = seasons.create_round(competition.competition_id, "finals-1", "Finals Week 1", 1)
+    RoundMappingRepository(connection).accept(round_.bbbffl_round_id, 2070, 2070, KnownRound(2070, 2070))
+    lifecycle = CompetitionLifecycleRepository(connection)
+    lifecycle.create_non_ordinary_round(round_.bbbffl_round_id)
+    identities = IdentityRepository(connection)
+    home = identities.create_entry(
+        season.season_id, "finals-home", identities.create_coach("Home Coach").coach_id, "Home"
+    )
+    away = identities.create_entry(
+        season.season_id, "finals-away", identities.create_coach("Away Coach").coach_id, "Away"
+    )
+    matchup = lifecycle.create_stream_matchup(round_.bbbffl_round_id, 1, home.season_entry_id, away.season_entry_id)
+    assert lifecycle.get_round(round_.bbbffl_round_id).fixture_draw_id is None
+    assert matchup.fixture_matchup_id is None
+    connection.close()
+
+
+def test_stream_lifecycle_downgrade_refuses_loss_of_null_fixture_context(tmp_path):
+    """A `bbbffl_round_lifecycle`/`bbbffl_matchup` row with a null fixture
+    context cannot be represented by the pre-0029 schema -- the downgrade
+    must refuse rather than silently invent a fixture linkage that never
+    existed."""
+    from app.competition_lifecycle import CompetitionLifecycleRepository
+    from app.round_mapping import RoundMappingRepository
+    from tests.test_competition_lifecycle import KnownRound
+
+    url = _url(tmp_path / "stream-lifecycle-downgrade-refused.db")
+    migrate(url)
+    connection = connect(url)
+    seasons = SeasonRepository(connection)
+    season = seasons.create_season(2071, "2071 finals migration check")
+    rules = seasons.create_rules_version(season.season_id, "canonical", 1, "Rules")
+    competition = seasons.create_competition(season.season_id, rules.rules_version_id, "finals", "Finals", "finals")
+    round_ = seasons.create_round(competition.competition_id, "finals-1", "Finals Week 1", 1)
+    RoundMappingRepository(connection).accept(round_.bbbffl_round_id, 2071, 2071, KnownRound(2071, 2071))
+    CompetitionLifecycleRepository(connection).create_non_ordinary_round(round_.bbbffl_round_id)
+    connection.close()
+
+    with pytest.raises(RuntimeError, match="null fixture context"):
+        downgrade(url, "0028_finals_seeding")
+
+
+def test_stream_lifecycle_downgrade_succeeds_when_every_round_has_a_fixture_context(tmp_path):
+    """The downgrade round-trips cleanly for the ordinary-only data every
+    pre-#197 database actually has."""
+    from tests.test_competition_lifecycle import operational
+
+    url = _url(tmp_path / "stream-lifecycle-downgrade-ok.db")
+    migrate(url)
+    connection = connect(url)
+    operational(connection, 2072, 2072)
+    connection.close()
+
+    downgrade(url, "0028_finals_seeding")
+    engine = create_engine(url)
+    columns = {c["name"]: c["nullable"] for c in inspect(engine).get_columns("bbbffl_round_lifecycle")}
+    assert columns["fixture_draw_id"] is False
+    matchup_columns = {c["name"]: c["nullable"] for c in inspect(engine).get_columns("bbbffl_matchup")}
+    assert matchup_columns["fixture_matchup_id"] is False
+    engine.dispose()
+    migrate(url)  # re-upgrading afterward remains harmless
+
+
 def test_revision_chain_has_single_head():
     cfg = Config("alembic.ini")
     assert ScriptDirectory.from_config(cfg).get_heads() == [HEAD]

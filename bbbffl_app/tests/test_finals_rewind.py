@@ -19,7 +19,13 @@ and reports the affected artifacts -- it never invalidates/replays them."""
 import pytest
 
 from app.audit import ActorContext
-from app.finals import DownstreamPlayStateError, FinalsBracketAdvanceStateError, FinalsBracketRepository
+from app.competition_lifecycle import CompetitionLifecycleRepository
+from app.finals import (
+    DownstreamPlayStateError,
+    FinalsBracketAdvanceStateError,
+    FinalsBracketRepository,
+    StaleFinalsResultError,
+)
 from app.finals_preflight import open_finals_week
 from tests.finals_helpers import (
     accept_week_mapping,
@@ -383,6 +389,16 @@ def test_open_finals_week_never_materialises_a_pairing_superseded_mid_open():
     repo.rewind_bracket(bracket.bracket_id, 1, actor=ACTOR, reason="supersede before materialisation", apply=True)
 
     round_id = repo.get_week_round_id(bracket.bracket_id, 2)
+    # `_materialise_pairing` is only ever really invoked from inside
+    # `open_finals_week`, which always creates the round's lifecycle row
+    # first (Codex review, PR #201's lifecycle-then-pairing lock order) --
+    # match that precondition here so this direct call exercises the same
+    # state a real race would find it in, rather than the unrelated "no
+    # finals lifecycle to attach to" error a truly nonexistent round would
+    # raise.
+    CompetitionLifecycleRepository(built["database"]).create_non_ordinary_round(
+        round_id, actor=ACTOR, reason="lifecycle row created before materialisation, matching open_finals_week"
+    )
     materialised = repo._materialise_pairing(round_id, stale_second_semi, actor=ACTOR, reason="stale attempt")
     assert materialised is False
 
@@ -452,3 +468,108 @@ def test_open_finals_week_fails_closed_when_its_own_read_races_a_rewind(monkeypa
 
     reopened = open_finals_week(built["database"], bracket.bracket_id, 2, actor=ACTOR)
     assert reopened["round"].state == "open"
+
+
+def test_rewind_preview_reports_expected_versions_and_apply_detects_a_stale_one():
+    """Codex review, PR #201: unlike `advance_bracket`, `rewind_bracket`
+    accepted no `expected_versions` at all -- an operator's `apply` always
+    derived from whatever the prerequisite results happened to be *right
+    now*, silently superseding pairings from a correction that landed after
+    their preview rather than rejecting the now-stale preview. A preview's
+    own `expected_versions` (mirroring `preview_advance_bracket`) must be
+    accepted and re-checked under the same prerequisite-matchup lock."""
+    built, bracket, repo = _bracket_with_mappings(2411)
+    week1_pairings = _week1_to_week2(built, repo, bracket, qf_result=(100, 50), ef_result=(50, 100))
+
+    # First correction: makes a rewind non-trivial (something to preview).
+    correct_official_result(built["database"], week1_pairings["qf"].matchup_id, 70, 100, reason="first QF correction")
+    preview = repo.rewind_bracket(
+        bracket.bracket_id, 1, actor=ACTOR, reason="preview before second correction", apply=False
+    )
+    assert not preview["no_change_needed"]
+    expected_versions = preview["expected_versions"]
+    assert week1_pairings["ef"].matchup_id in expected_versions
+
+    # Second correction lands on the *other* prerequisite (EF) after the
+    # preview above captured its version -- an apply using that stale
+    # preview must never proceed silently.
+    correct_official_result(
+        built["database"], week1_pairings["ef"].matchup_id, 60, 90, reason="second correction races the preview"
+    )
+
+    with pytest.raises(StaleFinalsResultError):
+        repo.rewind_bracket(
+            bracket.bracket_id,
+            1,
+            actor=ACTOR,
+            reason="apply against a now-stale preview",
+            apply=True,
+            expected_versions=expected_versions,
+        )
+
+    # Nothing was superseded by the aborted apply.
+    all_pairings = repo.list_pairings(bracket.bracket_id, week_number=2, include_superseded=True)
+    assert all(p.status == "active" for p in all_pairings)
+
+    # A fresh preview/apply (current versions) still works normally.
+    fresh_versions = repo.rewind_bracket(bracket.bracket_id, 1, actor=ACTOR, reason="fresh preview", apply=False)[
+        "expected_versions"
+    ]
+    applied = repo.rewind_bracket(
+        bracket.bracket_id,
+        1,
+        actor=ACTOR,
+        reason="apply against a fresh preview",
+        apply=True,
+        expected_versions=fresh_versions,
+    )
+    assert not applied["blocked"]
+
+
+def test_materialise_pairing_locks_the_round_lifecycle_row_before_the_pairing_row(monkeypatch):
+    """Codex review, PR #201: `_downstream_play_state` (called from
+    `rewind_bracket`, in the same transaction that later supersedes a
+    pairing row) locks the round's `bbbffl_round_lifecycle` row before it
+    ever touches `finals_bracket_pairing`. `_materialise_pairing` used to
+    acquire the opposite order (pairing, then lifecycle) -- two concurrent
+    transactions each already holding the lock the other needs next can
+    only be resolved by PostgreSQL aborting one with a deadlock error,
+    instead of the intended retryable stale-pairing refusal. Pins the fix:
+    `_materialise_pairing` must acquire the identical lifecycle-then-
+    pairing order `_downstream_play_state` uses, removing the cycle."""
+    from app.db import _TransactionConnection
+
+    built, bracket, repo = _bracket_with_mappings(2412)
+    _week1_to_week2(built, repo, bracket, qf_result=(100, 50), ef_result=(50, 100))
+
+    locked_order: list[str] = []
+    recording = {"on": False}
+    real_execute = _TransactionConnection.execute
+
+    def recording_execute(self, statement, parameters=()):
+        if recording["on"]:
+            if "FROM bbbffl_round_lifecycle" in statement:
+                locked_order.append("lifecycle")
+            elif "FROM finals_bracket_pairing WHERE pairing_id" in statement:
+                locked_order.append("pairing")
+        return real_execute(self, statement, parameters)
+
+    monkeypatch.setattr(_TransactionConnection, "execute", recording_execute)
+
+    real_materialise = FinalsBracketRepository._materialise_pairing
+
+    def recording_materialise(self, round_id, pairing, *, actor, reason):
+        recording["on"] = True
+        try:
+            return real_materialise(self, round_id, pairing, actor=actor, reason=reason)
+        finally:
+            recording["on"] = False
+
+    monkeypatch.setattr(FinalsBracketRepository, "_materialise_pairing", recording_materialise)
+
+    open_finals_week(built["database"], bracket.bracket_id, 2, actor=ACTOR)
+
+    # Week 2 has two non-bye slots (second_semi, first_semi), each
+    # materialised via its own `_materialise_pairing` transaction -- every
+    # one of them must lock lifecycle strictly before pairing.
+    assert locked_order == ["lifecycle", "pairing", "lifecycle", "pairing"]

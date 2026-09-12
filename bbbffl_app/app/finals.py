@@ -470,6 +470,37 @@ class FinalsBracketRepository:
         try:
             with transaction(self.database) as conn:
                 if seed_source == "ladder":
+                    # Codex review, PR #201: `FinalsSeedingRepository.apply`
+                    # could create the authoritative 2026 historical snapshot
+                    # concurrently, after `_resolve_seed`'s unlocked read
+                    # above observed none but before this transaction
+                    # commits -- freezing the mathematical ladder order in
+                    # that race would permanently diverge from the now-
+                    # existing snapshot (the two are known to differ), and
+                    # the bracket's own uniqueness constraint would prevent
+                    # a clean retry once that happens. `apply` locks this
+                    # exact `bbbffl_season` row (`_require_replay_context`,
+                    # `locked=True`) before it creates the snapshot, so
+                    # locking it here too and rechecking for the snapshot
+                    # closes the race: either this transaction acquires the
+                    # lock first (and `apply` then waits, and finds the
+                    # season correctly seeded, since the bracket is
+                    # unaffected by snapshot creation), or `apply` commits
+                    # first and this read observes the new snapshot and
+                    # aborts for a fresh retry.
+                    conn.execute(
+                        "SELECT season_id FROM bbbffl_season WHERE season_id=?" + _for_update_suffix(self.database),
+                        (season_id,),
+                    )
+                    raced_snapshot = conn.execute(
+                        "SELECT competition_id FROM finals_seeding_snapshot WHERE season_id=?", (season_id,)
+                    ).fetchone()
+                    if raced_snapshot is not None and raced_snapshot["competition_id"] == ordinary_competition_id:
+                        raise StaleSeedOrderError(
+                            "a finals-seeding snapshot for this season was created concurrently while the "
+                            "mathematical ladder order was being resolved; retry bracket creation from a fresh "
+                            "read so it freezes the authoritative snapshot instead"
+                        )
                     for reference in sorted(provenance["result_references"], key=lambda r: r.matchup_id):
                         row = conn.execute(
                             "SELECT effective_official_version FROM bbbffl_matchup WHERE matchup_id=?"
@@ -626,6 +657,26 @@ class FinalsBracketRepository:
         rather than materialise stale, no-longer-active participants
         (Codex review, PR #201)."""
         with transaction(self.database) as conn:
+            # Codex review, PR #201: `_downstream_play_state` (called from
+            # `rewind_bracket`, in the same transaction that later
+            # supersedes this exact pairing row) locks the round's
+            # `bbbffl_round_lifecycle` row before it ever touches
+            # `finals_bracket_pairing`. Locking the pairing row first here
+            # -- the opposite order -- lets two concurrent transactions each
+            # hold the lock the other needs next (this one: pairing then
+            # lifecycle; rewind: lifecycle then pairing), which PostgreSQL
+            # can only resolve by aborting one with a deadlock error instead
+            # of the intended retryable stale-pairing refusal. Locking
+            # lifecycle-then-pairing here, matching rewind's order, removes
+            # the cycle.
+            round_row = conn.execute(
+                "SELECT l.*, c.stream_type FROM bbbffl_round_lifecycle l "
+                "JOIN competition_stream c ON c.competition_id = l.competition_id "
+                "WHERE l.bbbffl_round_id=?" + _for_update_suffix(self.database),
+                (round_id,),
+            ).fetchone()
+            if round_row is None or round_row["stream_type"] != "finals":
+                raise FinalsBracketAdvanceStateError("finals week round does not have a finals lifecycle to attach to")
             current = conn.execute(
                 "SELECT matchup_id, status FROM finals_bracket_pairing WHERE pairing_id=?"
                 + _for_update_suffix(self.database),
@@ -637,14 +688,6 @@ class FinalsBracketRepository:
                 return False
             if current["matchup_id"] is not None:
                 return True  # already materialised by a concurrent caller -- idempotent no-op
-            round_row = conn.execute(
-                "SELECT l.*, c.stream_type FROM bbbffl_round_lifecycle l "
-                "JOIN competition_stream c ON c.competition_id = l.competition_id "
-                "WHERE l.bbbffl_round_id=?" + _for_update_suffix(self.database),
-                (round_id,),
-            ).fetchone()
-            if round_row is None or round_row["stream_type"] != "finals":
-                raise FinalsBracketAdvanceStateError("finals week round does not have a finals lifecycle to attach to")
             matchup_id = _id()
             conn.execute(
                 "INSERT INTO bbbffl_matchup VALUES (?, ?, NULL, ?, ?, ?, NULL, 1)",
@@ -799,7 +842,14 @@ class FinalsBracketRepository:
     # -- Correction-triggered rewind -------------------------------------------
 
     def rewind_bracket(
-        self, bracket_id: str, from_week: int, *, actor: ActorContext, reason: str, apply: bool = False
+        self,
+        bracket_id: str,
+        from_week: int,
+        *,
+        actor: ActorContext,
+        reason: str,
+        apply: bool = False,
+        expected_versions: dict[str, int] | None = None,
     ) -> dict:
         """Steve's confirmed correction/rewind policy: re-derive `from_week +
         1`'s already-persisted pairing(s)/elimination from `from_week`'s
@@ -808,10 +858,18 @@ class FinalsBracketRepository:
         being superseded has no downstream play state. `apply=False`
         (default) is a read-only preview -- it reports what would change and
         what would block, but never mutates and never raises
-        `DownstreamPlayStateError`. `apply=True` performs the same
+        `DownstreamPlayStateError`; its report includes `expected_versions`
+        (mirroring `preview_advance_bracket`), the exact versions to pass
+        back into a later `apply=True` call. `apply=True` performs the same
         computation and either commits the supersede or raises
         `DownstreamPlayStateError` if anything is blocked, atomically: never
-        a partial supersede of only the pairing or only the elimination."""
+        a partial supersede of only the pairing or only the elimination.
+        `expected_versions` (from a prior preview call) is re-checked under
+        the same prerequisite-matchup lock `advance_bracket` uses, raising
+        `StaleFinalsResultError` instead of silently superseding pairings
+        derived from a result that changed since that preview (Codex
+        review, PR #201) -- without it, `apply` derives from whatever the
+        prerequisite matchups' official results happen to be right now."""
         if from_week not in (1, 2, 3):
             raise ValueError("from_week must be 1, 2, or 3")
         if apply and (not reason or not reason.strip()):
@@ -823,7 +881,7 @@ class FinalsBracketRepository:
         source_ids = self._source_matchup_ids(bracket_id, from_week)
 
         with transaction(self.database) as conn:
-            locked = {mid: self._lock_matchup_version(conn, mid, None) for mid in sorted(source_ids)}
+            locked = {mid: self._lock_matchup_version(conn, mid, expected_versions) for mid in sorted(source_ids)}
             derivation = self._derive(conn, bracket_id, from_week, seed_rank, locked)
 
             pairing_changes: list[dict] = []
@@ -892,6 +950,7 @@ class FinalsBracketRepository:
                 "elimination_change": elimination_change,
                 "no_change_needed": not pairing_changes and elimination_change is None,
                 "blocked": any_blocked,
+                "expected_versions": locked,
             }
             if not apply:
                 return report

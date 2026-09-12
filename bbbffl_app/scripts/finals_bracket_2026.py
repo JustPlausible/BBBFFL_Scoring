@@ -24,18 +24,20 @@ subcommand name:
     python -m scripts.finals_bracket_2026 --database-url ... advance preview --bracket-id <id> --from-week 1
     python -m scripts.finals_bracket_2026 --database-url ... advance apply --bracket-id <id> --from-week 1 \\
         --reason "..." --expected-versions '{"<matchup_id>": 1, "<matchup_id>": 1}'
-    python -m scripts.finals_bracket_2026 --database-url ... rewind --bracket-id <id> --from-week 1 --reason "..." [--apply]
+    python -m scripts.finals_bracket_2026 --database-url ... rewind --bracket-id <id> --from-week 1 --reason "..." \\
+        [--apply] [--expected-versions '{"<matchup_id>": 1}']
 
 `preview` subcommands and `rewind` without `--apply` never mutate.
 
-`advance apply --expected-versions` is optional but strongly recommended:
-paste in the `expected_versions` object `advance preview` printed. Without
-it, `advance apply` derives from whatever the prerequisite matchups'
-official results happen to be *right now* -- if a correction landed between
-your `preview` and `apply` calls, it silently advances from the corrected
-result rather than rejecting your now-stale preview. With it, a correction
-in that gap is detected under lock and `advance apply` aborts
-(`StaleFinalsResultError`) instead.
+`advance apply --expected-versions` and `rewind --apply --expected-versions`
+are both optional but strongly recommended: paste in the `expected_versions`
+object the corresponding preview call (`advance preview`, or `rewind`
+without `--apply`) printed. Without it, `apply` derives from whatever the
+prerequisite matchups' official results happen to be *right now* -- if a
+correction landed between your preview and apply calls, it silently
+proceeds from the corrected result rather than rejecting your now-stale
+preview. With it, a correction in that gap is detected under lock and
+`apply` aborts (`StaleFinalsResultError`) instead.
 """
 
 from __future__ import annotations
@@ -109,8 +111,16 @@ def cmd_advance_apply(database, args: argparse.Namespace) -> int:
 
 def cmd_rewind(database, args: argparse.Namespace) -> int:
     repo = FinalsBracketRepository(database)
+    expected_versions = json.loads(args.expected_versions) if args.expected_versions else None
     try:
-        report = repo.rewind_bracket(args.bracket_id, args.from_week, actor=ACTOR, reason=args.reason, apply=args.apply)
+        report = repo.rewind_bracket(
+            args.bracket_id,
+            args.from_week,
+            actor=ACTOR,
+            reason=args.reason,
+            apply=args.apply,
+            expected_versions=expected_versions,
+        )
     except DownstreamPlayStateError as exc:
         _print(exc.report)
         print(f"rewind refused: {exc}", file=sys.stderr)
@@ -170,6 +180,12 @@ def build_parser() -> argparse.ArgumentParser:
     rewind.add_argument("--from-week", type=int, required=True, choices=(1, 2, 3))
     rewind.add_argument("--reason", required=True)
     rewind.add_argument("--apply", action="store_true", help="omit to preview only; never mutates without this flag")
+    rewind.add_argument(
+        "--expected-versions",
+        help="JSON object of {matchup_id: official_version}, copied from a prior rewind preview's own output -- "
+        "when supplied, a version that changed since your preview aborts the apply instead of silently superseding "
+        "pairings derived from the corrected result",
+    )
 
     return parser
 

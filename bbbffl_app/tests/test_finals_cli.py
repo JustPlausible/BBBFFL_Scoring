@@ -168,7 +168,9 @@ def test_cli_preview_apply_round_trip_and_full_lifecycle_against_a_real_database
     week2 = FinalsBracketRepository(database).list_pairings(bracket.bracket_id, week_number=2)
     assert len(week2) == 2
 
-    rewind_ns = argparse.Namespace(bracket_id=bracket.bracket_id, from_week=1, reason="CLI rewind preview", apply=False)
+    rewind_ns = argparse.Namespace(
+        bracket_id=bracket.bracket_id, from_week=1, reason="CLI rewind preview", apply=False, expected_versions=None
+    )
     assert cmd_rewind(database, rewind_ns) == 0
 
 

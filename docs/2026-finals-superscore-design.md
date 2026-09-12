@@ -199,22 +199,40 @@ only participants for the remainder of the season.
 
 ### Seed consumption
 
-The finals bracket module calls `app.finals_seeding.resolve_finals_seed_order`
-**exactly once, at bracket creation**, and freezes the returned tuple into
-the persisted `finals_bracket` row. **Correction (Codex review, PR #196):
-`resolve_finals_seed_order` itself returns only a bare tuple of
-`season_entry_id` strings — it carries no provenance of its own.** Freezing
-real provenance alongside the order therefore requires an explicit second
-step at bracket-creation time, not an assumption that the resolver's result
-"carries" it: call `app.finals_seeding.FinalsSeedingRepository.get_snapshot
-(season_id)` to check whether a snapshot exists and, if so, record its
-`snapshot_id`; if none exists, record instead that the order came from the
-mathematical ladder (e.g. the `LadderSnapshot`'s `through_round` and
-`latest_included_round`, from the same `LadderRepository.snapshot` call
-`resolve_finals_seed_order` makes internally). Persist whichever applies
-onto `finals_bracket` alongside the frozen order, mirroring `app.
-midseason_draft.confirm_ladder`'s "freeze an independent copy" pattern for
-the exact same reason. **Every later
+The finals bracket module resolves the seed order **exactly once, at
+bracket creation**, and freezes both the order and its exact provenance
+into the persisted `finals_bracket` row. **Correction (Codex review,
+PR #196, fifth round): an earlier fix here still recommended calling
+`resolve_finals_seed_order` and then *separately* re-calling `LadderRepository.
+snapshot` afterward to recover provenance — two independent calls that can
+observe two different ladder states if a result correction lands between
+them, and even then `through_round`/`latest_included_round` alone don't
+identify the exact official-result versions the order was actually derived
+from (`LadderSnapshot.result_references`, the `(matchup_id, official_
+version)` pairs, does).** The correct shape is one read, not two:
+1. Call `app.finals_seeding.FinalsSeedingRepository.get_snapshot(season_id)`
+   first. If it returns a snapshot, use its order and record its
+   `snapshot_id` as provenance — done, no ladder involved at all.
+2. Only if no snapshot exists, call `app.ladder.LadderRepository.snapshot
+   (competition_id, through_round)` **once** — this single `LadderSnapshot`
+   object is both the source of the seed order (its `rows`, after checking
+   for `tied` exactly as `resolve_finals_seed_order`'s own fallback path
+   does, raising `UnresolvedLadderTieError` on a genuine tie) *and* the
+   source of its exact provenance (persist its `result_references` — every
+   `(matchup_id, official_version)` pair that produced it — alongside
+   `through_round`/`latest_included_round`, not those two round numbers
+   alone).
+
+This means the finals bracket module does not call `app.finals_seeding.
+resolve_finals_seed_order` as an opaque black box for the no-snapshot case;
+it reimplements that one small fallback step (snapshot-driven order plus
+tie check) inline against a single ladder read, precisely so the order and
+its provenance always describe the *same* read rather than two. (The
+snapshot-exists case is unaffected — it was already a single, consistent
+`get_snapshot` call.) Persist whichever provenance applies onto `finals_
+bracket` alongside the frozen order, mirroring `app.midseason_draft.
+confirm_ladder`'s "freeze an independent copy" pattern for the exact same
+reason. **Every later
 decision that needs the seed order — tie-break resolution in a later week,
 a display, an audit payload — reads the bracket's own frozen seed, and never
 calls `resolve_finals_seed_order` again for this bracket.** This matters
@@ -357,21 +375,46 @@ needed (a coach genuinely missed the deadline), the round's lockout has
 already activated, so an ordinary `submit`/`submit_positions` call would
 simply be rejected by the lock guard — that is exactly why `app.
 lineup_adjudication.LineupAdjudicationService.apply_carry_forward_fallback`
-exists as the supported authority for this situation. But that method (and
-its preview) both call `self._carry_forward.resolve_source(season_id,
-competition_id, ...)` internally, hard-coded to the *same* `competition_id`
-— a bare new standalone cross-stream function, called on its own, would
-never actually be exercised by the real missed-deadline operational path.
-**#191 (and #192, for SS1) must therefore extend `LineupAdjudicationService`
-itself** — e.g. an optional, narrowly-scoped `fallback_source_competition_
-id` parameter on `apply_carry_forward_fallback`/its preview, defaulting to
-`None` (meaning "same `competition_id`", the existing behaviour, byte-for-
-byte unchanged for every ordinary/non-fallback caller) — rather than
-building a disconnected helper next to it. The finals/SuperScore call site
-is the only place ever permitted to pass a non-default value, and only for
-the confirmed Week-1/seed-1-Week-2/SS1 cases; `app.lineup_adjudication`
-itself must not expose this as a free-form capability any other caller
-could invoke.
+exists as the supported authority for this situation.
+
+**A naive `fallback_source_competition_id` parameter on `resolve_source`
+itself does not work — second correction (Codex review, PR #196, fifth
+round), verified directly against `app/carry_forward.py`.**
+`CarryForwardService.resolve_source(season_id, competition_id,
+bbbffl_round_id, season_entry_id)` first requires the **target**
+`bbbffl_round_id` to belong to that same `competition_id` (`SELECT sequence
+FROM bbbffl_round WHERE bbbffl_round_id=? AND competition_id=?` — raises
+`LineupIntegrityError` otherwise), then finds the source lineup by
+comparing `r.sequence < target["sequence"]` **within that one
+competition**. For a finals-Week-1 (or SS1) target round, simply swapping
+in the ordinary `competition_id` breaks the first check outright (the
+target round belongs to the *finals*/*superscore* stream, not the
+ordinary one) — and even if it didn't, `sequence` numbers restart
+independently per stream (finals Week 1 and SS1 are both sequence 1;
+ordinary Round 20 is sequence 20), so comparing them across streams is
+meaningless, not merely differently-scoped.
+
+**The correct shape is a distinct resolution function with separate target
+and source scopes, not a parameter threaded through the existing
+same-stream lookup.** For exactly the confirmed cross-stream cases (finals
+Week 1 and seed 1's Week 2; SuperScore SS1), the "source" is unambiguous
+and does not need a sequence comparison at all: it is simply *the entry's
+most recent submitted lineup in the ordinary competition* (highest
+`sequence` with a non-null `effective_submission_version`) — there is
+nothing to compare it against, since the target round has no comparable
+position in that sequence space. #191/#192 should add a small, separate
+function (e.g. `resolve_cross_stream_fallback_source(database, season_id,
+source_competition_id, season_entry_id)`, alongside — not inside —
+`app.carry_forward`) that performs exactly this one lookup, and extend
+`LineupAdjudicationService.apply_carry_forward_fallback`/its preview with
+an optional parameter that, when the confirmed cross-stream case applies,
+uses this function's result **in place of** (not in addition to)
+`self._carry_forward.resolve_source`'s same-stream call — while preserving
+`apply_carry_forward_fallback`'s existing atomic `require_unchanged`
+re-validation against whichever source it resolved, exactly as the
+same-stream case already does. Every other caller's behaviour (the
+default, no cross-stream case indicated) must remain byte-for-byte
+unchanged.
 
 ### Scoring
 
@@ -390,6 +433,25 @@ shape #197 actually produced, not assume unchanged reuse by default.
 Whichever path is chosen, nothing about the DNP/Interchange/override
 *rules* changes for finals — only where the resulting rulings/calculated
 scores are stored.
+
+**If #197 chooses parallel storage, the finals adapter also needs its own
+correction-invalidation hook — a conditional case this document's earlier
+fix only stated for SuperScore, corrected after further Codex review of
+PR #196 (fifth round) found the same gap recurs here.**
+`WeeklyLineupRepository.submit_correction`'s `_invalidate_stale_review_
+state` queries and bumps only `bbbffl_matchup` and clears only the
+existing matchup-keyed ruling tables. If finals matches live in a parallel
+table instead of `bbbffl_matchup` (the path-2 outcome from #197), a finals
+lineup correction after a DNP/Interchange/override ruling has been
+recorded would not invalidate that ruling either — the identical
+correctness gap "SuperScore design" below describes, just conditional on
+which path #197 took rather than unconditional. If and only if #197 chose
+parallel storage, #191's finals adapter must clear changed-slot rulings
+and advance its own CAS revision inside the same correction transaction,
+mirroring `_invalidate_stale_review_state`'s existing behaviour for the
+ordinary case. If #197 instead loosened the schema, this is unconditionally
+covered already: an ordinary `bbbffl_matchup` row exists and `_invalidate_
+stale_review_state` handles it exactly as it does for an ordinary round.
 
 ### Progression and elimination
 
@@ -518,17 +580,34 @@ above.** By the time SS1's fallback is actually needed (a coach genuinely
 missed the deadline), SS1's lockout has already activated, so the real
 supported path is `app.lineup_adjudication.LineupAdjudicationService.
 apply_carry_forward_fallback`, not a raw ordinary `submit` call — and that
-method hard-codes `self._carry_forward.resolve_source(season_id,
-competition_id, ...)` to the *same* `competition_id` internally. #192 must
-extend `LineupAdjudicationService` itself (the optional `fallback_source_
-competition_id` parameter described under finals' "Coach lineup/submission
-behaviour" above) rather than building a disconnected `app.superscore.
-resolve_ss1_fallback_source`-style helper that the real post-lockout
-workflow would never actually call. This is a small, well-bounded,
-default-`None`-preserves-existing-behaviour addition to `app.lineup_
-adjudication`, not a reason to widen `app.carry_forward` itself — and it is
-the *same* extension finals needs, so #191 and #192 should implement and
-test it together rather than each adding a competing parameter.
+method calls `self._carry_forward.resolve_source(season_id, competition_id,
+...)` internally.
+
+**That standalone function also cannot be a parameter threaded into
+`resolve_source` itself — second correction (Codex review, PR #196, fifth
+round), verified directly against `app/carry_forward.py`, the same
+mechanical problem as finals' identical case above.** `resolve_source`
+requires its *target* `bbbffl_round_id` to belong to the `competition_id`
+passed in, then compares source-round `sequence` against the target's
+*within that one competition* — so an SS1 target round paired with the
+ordinary `competition_id` fails the first check outright, and `sequence`
+numbers restart independently per stream regardless (SS1 is sequence 1,
+Round 20 is sequence 20 — not comparable). The fix, shared verbatim with
+finals: a small separate function (e.g.
+`resolve_cross_stream_fallback_source(database, season_id,
+source_competition_id, season_entry_id)`) that looks up simply *the
+entry's most recent submitted lineup in the ordinary competition* — no
+target round, no sequence comparison, since there is nothing meaningful to
+compare against across streams — and an extension to
+`LineupAdjudicationService.apply_carry_forward_fallback`/its preview that
+uses this function's result **in place of** the same-stream `resolve_
+source` call when the confirmed SS1 case applies, while preserving the
+method's existing atomic `require_unchanged` re-validation. This is a
+small, well-bounded, default-preserves-existing-behaviour addition to
+`app.lineup_adjudication`, not a reason to widen `app.carry_forward`
+itself — and it is the *same* extension finals needs, so #191 and #192
+should implement and test it together rather than each adding a competing
+mechanism.
 
 ### Roster/list construction and player eligibility
 

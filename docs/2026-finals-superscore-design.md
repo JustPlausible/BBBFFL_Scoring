@@ -495,6 +495,22 @@ same-stream case already does. Every other caller's behaviour (the
 default, no cross-stream case indicated) must remain byte-for-byte
 unchanged.
 
+**Extending the service layer is still not enough on its own — a Scorer
+has no way to reach it, correction (Codex review, PR #196, tenth round),
+verified directly against `app/routes/lineup_adjudication.py`.**
+`_authorise_round`, the shared authorization helper every adjudication
+route calls first, hard-filters `WHERE ... c.stream_type='ordinary'` and
+raises `HTTPException(404, "Unknown ordinary BBBFFL round")` for anything
+else — a finals or SuperScore round is rejected at the route layer before
+the request ever reaches `LineupAdjudicationService`, regardless of how
+correctly that service was extended above. **#191/#192 must also adapt
+(or add sibling) HTTP routes**: widen `_authorise_round`'s stream filter
+to accept `finals`/`superscore` (with its per-round participant listing,
+currently derived from matchup rows, adapted for SuperScore's matchup-free
+shape), or provide dedicated finals/SuperScore adjudication routes. Without
+this, a Scorer applying the confirmed Week-1/seed-1/SS1 fallback in
+production has no reachable endpoint at all.
+
 ### Scoring
 
 The scoring *formulas* are unchanged — the same nine-position `app.scoring`
@@ -630,6 +646,23 @@ same time, since both are facts available as soon as Round 20's ladder is
 locked, independent of finals: no design tension there, just a small
 addition. See "End-of-season completion" in the shared audit section below
 for how this interacts with `Season.lifecycle_state`.
+
+**Unresolved: what happens to these two records if the result they were
+derived from is later corrected — flagged (Codex review, PR #196, tenth
+round), not resolved by this document.** The ordinary competition supports
+a post-final result correction (a new reason-carrying official-result
+version, per `docs/competition-lifecycle.md`). If a Grand Final correction
+changes the winner, or a Round 20 home-and-away correction changes who
+finished last, the separately persisted premiership/wooden-spoon record
+would keep naming the original entry unless something re-derives it — and
+unlike a mid-bracket finals result, the Grand Final has no downstream
+pairing to cascade through, so this is a distinct question from historical-
+gap #4 above, not the same one restated. #195 must decide: (a) derive these
+facts live from effective results on every read rather than persisting a
+frozen record at all, or (b) persist a frozen record but give it its own
+audited re-recording path triggered by a relevant correction. Confirm with
+Steve which is intended, or propose one explicitly with tradeoffs, before
+#195 implements either.
 
 ## SuperScore design
 
@@ -801,6 +834,21 @@ SuperScore lineup's stale rulings must not silently keep applying to the
 replacement player — this is an additive extension consistent with `app.
 lineups`'s own existing pattern, not a change to its behaviour for any
 existing ordinary/finals caller.
+
+**This in-transaction fix is still unreachable through the supported
+Scorer correction workflow — the same route-layer gap as the adjudication
+finding above, correction (Codex review, PR #196, tenth round), verified
+directly against `app/routes/lineup_correction.py`.** Its own
+`_authorise_round` hard-filters `stream_type='ordinary'` the same way
+`lineup_adjudication`'s does, and its round-entry listing is likewise
+matchup-derived — so a Scorer has no way to invoke a finals/SuperScore
+correction at all through the existing HTTP surface, regardless of how
+correctly `app.lineups`'s invalidation extension is implemented. (Under
+#197's parallel-storage path, `LineupCorrectionService.describe` also
+reads `bbbffl_round_lifecycle` directly, adding a second reason this route
+would need adaptation there.) **#191/#192 must adapt this route the same
+way as the adjudication route above** — the correction extension this
+section describes has no way to be exercised in production otherwise.
 
 ### Scoring
 

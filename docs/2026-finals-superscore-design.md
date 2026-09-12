@@ -1333,10 +1333,37 @@ round_review.py`'s existing ordinary-result machinery:**
   staleness rather than a mid-publish race) if any row is missing or its
   current version does not match its calculation's recorded one; only then
   may it insert the atomic leaderboard revision and advance the round
-  toward `final`. Calculation rows remain derived and never the lock/CAS
-  authority themselves — the review-state row's current version is — but
-  the calculation's own `computed_as_of_review_version` is exactly what the
-  publisher checks that authority against.
+  toward `final`.
+
+  **A further correction (Codex review, PR #196, twenty-eighth round): the
+  review-state check above closes staleness from lineup/ruling changes, but
+  not staleness from a same-`review_version` recalculation — the publisher
+  must also lock and re-verify each entry's calculation row itself, not
+  rely on the review-state check alone.** A recalculation can legitimately
+  produce a new score without `review_version` changing at all — e.g. an
+  upstream AFL-evidence correction changes the scoring inputs' *values*
+  without any lineup, ruling, or correction touching the entry's effective
+  submission — so the calculation's `computed_as_of_review_version` is
+  unchanged (correctly: the entry's lineup/ruling truth genuinely didn't
+  change), yet the calculation's own revision/fingerprint (and its score)
+  did. If the publisher assembles its snapshot from an older calculation
+  revision, and a newer one persists afterward — still against the same
+  `review_version`, so the review-state check alone sees no staleness —
+  the publisher would freeze the old score even though a newer, different
+  calculation exists. **The publisher must therefore also, inside the same
+  locked transaction, re-read (or lock and compare) each entry's
+  calculation row's revision/fingerprint against the value captured when
+  the snapshot was assembled**, exactly as required of the finals
+  publish/correction path (see "Finals result publication" above) — the
+  review-state row is the authority for *lineup/ruling* truth; the
+  calculation row's own revision is the (separate) authority for whether
+  the snapshot reflects the *latest computation* against that truth. Both
+  checks are required; neither alone is sufficient. Calculation rows
+  remain derived, never the lock/CAS authority for *review* state — but
+  they are the authority the publisher must independently re-verify for
+  *computation* freshness, via their own revision/fingerprint, not via
+  `computed_as_of_review_version` (which cannot and does not encode this
+  dimension).
 
 ### Publication; public/coach/Scorer views
 
@@ -1748,7 +1775,12 @@ order (each row's "Depends on" names the prerequisite rows):
    `computed_as_of_review_version` (not merely whatever version the
    publisher itself captured moments earlier) — a stale calculation must
    never pass by virtue of nothing racing during the publish transaction
-   alone. Every SuperScore correction/republication must also take the
+   alone — **and, separately, also re-verify each entry's calculation
+   row's own revision/fingerprint against the value captured at snapshot
+   assembly, since a same-`review_version` recalculation (e.g. an
+   upstream AFL-evidence correction) changes the calculation without
+   changing `review_version` at all, and the review-state check alone
+   cannot see it.** Every SuperScore correction/republication must also take the
    owning season-row lock and reject a completed season in that same write
    transaction.**
    Depends on: #192.

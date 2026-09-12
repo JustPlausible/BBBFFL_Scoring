@@ -584,41 +584,42 @@ independently testable PR, matching the granularity `app.finals_seeding`
 and `app.midseason_draft` were each delivered at. Recommended execution
 order (each row's "Depends on" names the prerequisite rows):
 
-1. **Finals bracket generation and lifecycle** — `app.finals`: bracket
-   creation from `resolve_finals_seed_order`, the four-week pairing/
-   progression state machine, elimination recording, the finals round
-   lifecycle, and a CLI-first operator tool mirroring `scripts/finals_
-   seeding_2026.py`'s preview/apply shape. Resolves historical-gap
-   questions 3 and 4 above as an explicit design step before writing code.
-   Depends on: this document.
-2. **Finals lineup, scoring and publication** — weekly lineup submission
-   and lockout wired to the `finals` competition stream (no new lineup
-   code, only stream-scoping); the new single-match publish/correction
-   command described above; public/coach/Scorer views. Depends on: 1.
-3. **SuperScore roster, eligibility and lifecycle setup** — the
-   `superscore` competition-stream round lifecycle, weekly lineup
-   submission/lockout wired to it, the new narrow SS1 cross-stream
-   fallback function, and DNP/Interchange reuse. Resolves historical-gap
-   question 6 (round mapping) for the SuperScore rounds as part of setup.
-   Depends on: this document (independent of 1-2; can run in parallel).
-4. **SuperScore scoring, leaderboard and publication** — the new
-   leaderboard-shaped official-result representation, ranking/joint-winner
-   computation, publish/correction command, and public/coach/Scorer views.
-   Depends on: 3.
-5. **Operator audit/correction/recovery support for finals and
-   SuperScore** — the finals/SuperScore-specific audit action catalogue,
-   checkpoint procedure extending the second-half playbook (or a new
+1. **[#190 — Finals bracket generation and lifecycle](https://github.com/JustPlausible/BBBFFL_Scoring/issues/190)**
+   — `app.finals`: bracket creation from `resolve_finals_seed_order`, the
+   four-week pairing/progression state machine, elimination recording, the
+   finals round lifecycle, and a CLI-first operator tool mirroring
+   `scripts/finals_seeding_2026.py`'s preview/apply shape. Resolves
+   historical-gap questions 3 and 4 above as an explicit design step before
+   writing code. Depends on: this document.
+2. **[#191 — Finals lineup, scoring and publication](https://github.com/JustPlausible/BBBFFL_Scoring/issues/191)**
+   — weekly lineup submission and lockout wired to the `finals` competition
+   stream (no new lineup code, only stream-scoping); the new single-match
+   publish/correction command described above; public/coach/Scorer views.
+   Depends on: #190.
+3. **[#192 — SuperScore roster, eligibility and lifecycle setup](https://github.com/JustPlausible/BBBFFL_Scoring/issues/192)**
+   — the `superscore` competition-stream round lifecycle, weekly lineup
+   submission/lockout wired to it, the new narrow SS1 cross-stream fallback
+   function, and DNP/Interchange reuse. Resolves historical-gap question 6
+   (round mapping) for the SuperScore rounds as part of setup. Depends on:
+   this document (independent of #190-#191; can run in parallel).
+4. **[#193 — SuperScore scoring, leaderboard and publication](https://github.com/JustPlausible/BBBFFL_Scoring/issues/193)**
+   — the new leaderboard-shaped official-result representation,
+   ranking/joint-winner computation, publish/correction command, and
+   public/coach/Scorer views. Depends on: #192.
+5. **[#194 — Operator audit/correction/recovery support for finals and SuperScore](https://github.com/JustPlausible/BBBFFL_Scoring/issues/194)**
+   — the finals/SuperScore-specific audit action catalogue, checkpoint
+   procedure extending the second-half playbook (or a new
    `2026-finals-replay` evidence directory), and the operator playbook
    itself (the "not-yet-written" document section L of the second-half
-   playbook already anticipates). Depends on: 2 and 4 (needs real
+   playbook already anticipates). Depends on: #191 and #193 (needs real
    operations to document).
-6. **End-of-season completion, premiership/wooden-spoon recording, and
-   2026/2027 archival isolation** — the premiership/wooden-spoon audit
-   event and record, the season-completion lifecycle transition, and a
-   decision (with implementation if warranted) on whether `Season.
-   lifecycle_state == "completed"` should become an enforced write-blocking
-   gate before 2027 begins. Depends on: 2 and 4 (needs the Grand Final and
-   SS4 to actually be publishable).
+6. **[#195 — End-of-season completion, premiership/wooden-spoon recording and 2026/2027 archival isolation](https://github.com/JustPlausible/BBBFFL_Scoring/issues/195)**
+   — the premiership/wooden-spoon audit event and record, the
+   season-completion lifecycle transition, and a decision (with
+   implementation if warranted) on whether `Season.lifecycle_state ==
+   "completed"` should become an enforced write-blocking gate before 2027
+   begins. Depends on: #191 and #193 (needs the Grand Final and SS4 to
+   actually be publishable), and generally follows #194.
 
 Each issue, when filed, should carry: the relevant confirmed-rule excerpts
 from this document (not a re-derivation), the specific historical-gap

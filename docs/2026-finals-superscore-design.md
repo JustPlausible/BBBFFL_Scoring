@@ -1139,28 +1139,57 @@ stale calculation can acquire a fresh `review_version` and sail through
 the publisher's check undetected — Codex review, PR #196, twenty-fifth
 round.** The calculation service reads an entry's scoring inputs
 (lineup, rulings) at the start of computation, then some time later locks
-the review-state row to persist its result and advance `review_version`.
-If a lineup correction or ruling lands *during* that computation window —
-after the inputs were read, but before the calculation's own persistence
-transaction locks the row — the calculation still computes from the
-now-stale inputs, and its persistence still advances `review_version` to
-a new value (since advancing is unconditional on "a mutation happened,"
-not on "the inputs used are still current"). A publisher assembling its
-snapshot after this point captures that *new* `review_version` as current
-— its later CAS recheck passes, because nothing changes after that point,
-even though the calculation itself was already computed from obsolete
-inputs. Locking at persistence time closes the calculation-vs-publish
-race; it does not close the read-inputs-vs-persist-calculation race
-inside the calculation service itself. The calculation service must
-therefore capture the entry's `review_version` at the moment it reads its
-scoring inputs (before computing), then, inside the same transaction that
-locks the review-state row to persist the calculation, compare the row's
-current `review_version` against that captured value — aborting the
-persist (and requiring the caller to re-read inputs and recompute) if it
-has changed. Only a calculation whose inputs were never invalidated
-during computation may advance the row when it persists. Calculation rows are derived mutable data and may be absent;
-no operation may use their existence or revision as a substitute for review
-state.
+the review-state row to persist its result. If a lineup correction or
+ruling lands *during* that computation window — after the inputs were
+read, but before the calculation's own persistence transaction locks the
+row — the calculation still computes from the now-stale inputs. The
+calculation service must therefore capture the entry's `review_version`
+at the moment it reads its scoring inputs (before computing), then,
+inside the same transaction that locks the review-state row to persist
+the calculation, compare the row's current `review_version` against that
+captured value — aborting the persist (and requiring the caller to
+re-read inputs and recompute) if it has changed.
+
+**A further correction (Codex review, PR #196, twenty-sixth round): the
+calculation itself must not *advance* `review_version` on successful
+persist — it must instead *record* which version it was computed against,
+and the publisher must check that recorded value against the row's
+current version, not merely "unchanged since the publisher's own read."**
+The round-25 fix above closes the race *during* one calculation's own
+compute window; it does not close a simpler, more common case: a
+calculation persists successfully (against review_version `v3`, say), and
+*afterward* — with no race at all, just an ordinary later event — a new
+ruling or lineup correction lands and legitimately advances the row to
+`v4`. No further calculation has run yet to reflect `v4`. When the
+publisher later assembles its snapshot, it reads whatever `review_version`
+happens to be on the row *right now* (`v4`) as its "expected" value, locks
+the row, sees `v4` again (nothing raced during the publish transaction
+itself), and its CAS check passes cleanly — yet the calculated score it is
+about to publish still reflects the stale, pre-`v4` inputs. The CAS check
+as originally specified only ever detects a race *within the publish
+transaction's own window*; it cannot detect staleness that already existed
+*before* the publisher ever looked, because the publisher has no way to
+tell "the current version" from "the version this calculation actually
+reflects" — both looked identical from where it was standing. Fix: the
+entry-scoped calculated snapshot must persist the exact `review_version`
+it was computed against as `computed_as_of_review_version` (captured at
+the same moment as the round-25 check, above) — a *description of what the
+calculation is a derivation of*, not a stamp claiming new truth. Because a
+calculation never introduces new truth (only lineups, rulings, and
+corrections do), it must **not** advance `review_version` itself on
+success — doing so was the original (now-superseded) instruction, and is
+precisely what let a stale calculation look current. The publisher must
+then, for each entry, lock the review-state row and compare its *current*
+`review_version` against that entry's latest calculation's
+`computed_as_of_review_version` — not against whatever the publisher itself
+captured moments earlier. A mismatch means the calculation is stale
+relative to the row's actual current state (regardless of whether anything
+changed during the publish transaction), and publication must abort/block
+for that entry until a fresh calculation, computed against the row's
+current version, exists. Calculation rows are derived mutable data and may
+be absent; no operation may use their existence, revision, or
+`computed_as_of_review_version` as a substitute for review state itself —
+only as the fact publication checks that state against.
 
 ### A genuine SuperScore-specific abstraction: leaderboard results, not matchups
 
@@ -1292,12 +1321,18 @@ round_review.py`'s existing ordinary-result machinery:**
 
   The SuperScore publisher and correction command must `SELECT ... FOR
   UPDATE` all ten review-state rows in deterministic `season_entry_id` order,
-  verify that all ten exist, and compare each current `review_version` with
-  the value captured when its scoring snapshot was assembled. It aborts for
-  the caller to rebuild/retry if any row is missing or changed; only then may
-  it insert the atomic leaderboard revision and advance the round toward
-  `final`. It may additionally validate calculation revisions/fingerprints as
-  snapshot provenance, but calculation rows are never the lock/CAS authority.
+  verify that all ten exist, and — per the twenty-sixth-round correction
+  above — compare each row's *current* `review_version` against that
+  entry's latest calculated snapshot's own `computed_as_of_review_version`,
+  not against a value the publisher itself captured earlier. It aborts for
+  the caller to rebuild/retry (recalculating first, if the mismatch is
+  staleness rather than a mid-publish race) if any row is missing or its
+  current version does not match its calculation's recorded one; only then
+  may it insert the atomic leaderboard revision and advance the round
+  toward `final`. Calculation rows remain derived and never the lock/CAS
+  authority themselves — the review-state row's current version is — but
+  the calculation's own `computed_as_of_review_version` is exactly what the
+  publisher checks that authority against.
 
 ### Publication; public/coach/Scorer views
 
@@ -1689,8 +1724,10 @@ order (each row's "Depends on" names the prerequisite rows):
    ranking/joint-winner computation, a publish/correction command that
    **locks and re-verifies, per entry, the always-present review-state row and
    its shared review-revision counter that *every* effective lineup write
-   (initial submission, unlocked resubmission, and correction alike),
-   ruling, and recalculation advances** —
+   (initial submission, unlocked resubmission, and correction alike) and
+   ruling advances** — **never recalculation itself** (a calculation
+   derives from truth, it is not new truth, and must not advance the
+   counter — see below) —
    not merely the calculation revision, which none of those need
    touch — inside the same transaction that writes the new revision (the
    same race already fixed for bracket creation and advance-bracket,
@@ -1698,13 +1735,18 @@ order (each row's "Depends on" names the prerequisite rows):
    must also advance this counter), and public/coach/Scorer views. **Acceptance
    requires calculation persistence to capture the entry's `review_version`
    before reading scoring inputs, then compare it against the row's current
-   value under lock at persist time — aborting rather than advancing if it
-   changed while computing — not merely to lock/advance that durable state
-   unconditionally; publication must lock all ten state rows in deterministic
-   order, reject a missing or changed row, and never depend on a calculation
-   row as the CAS/locking record. Every SuperScore correction/republication
-   must also take the owning season-row lock and reject a completed season in
-   that same write transaction.**
+   value under lock at persist time — aborting rather than persisting if it
+   changed while computing, and, on success, recording that captured value
+   as the calculation's own `computed_as_of_review_version` rather than
+   advancing the row itself; publication must lock all ten state rows in
+   deterministic order, reject a missing row, and reject any row whose
+   *current* `review_version` does not equal its latest calculation's
+   `computed_as_of_review_version` (not merely whatever version the
+   publisher itself captured moments earlier) — a stale calculation must
+   never pass by virtue of nothing racing during the publish transaction
+   alone. Every SuperScore correction/republication must also take the
+   owning season-row lock and reject a completed season in that same write
+   transaction.**
    Depends on: #192.
 6. **[#195 — End-of-season completion, premiership/wooden-spoon recording and 2026/2027 archival isolation](https://github.com/JustPlausible/BBBFFL_Scoring/issues/195)**
    — the premiership/wooden-spoon audit event and record, the

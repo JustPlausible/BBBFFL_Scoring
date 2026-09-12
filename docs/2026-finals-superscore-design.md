@@ -294,23 +294,24 @@ team names or IDs; this is what keeps the same bracket-generation code
 correct for a future season that has no seeding snapshot at all.
 
 **Which `competition_id` to pass matters and is easy to get wrong.**
-`resolve_finals_seed_order(database, season_id, competition_id)` resolves
+`resolve_finals_seed_order(database, season_id, competition_id)` — and the
+single-read mechanism above, which applies the exact same logic — resolves
 the snapshot (or the mathematical-ladder fallback) *for that
 `competition_id`* — and the 2026 finals-seeding snapshot is scoped to the
 **ordinary** home-and-away `competition_id` (`9de8e7d3-8d56-4c5c-
 afd0-803b787e4055`, per `provenance-manifest.md`), because that is the
 `competition_id` `FinalsSeedingRepository.apply` was called against. A new
 `finals`-typed `competition_stream` is a *different* `competition_id`.
-Calling `resolve_finals_seed_order` with the finals `competition_id`
-instead of the ordinary one will not find the snapshot (it is scoped to a
-different ID) and will silently fall through to computing a mathematical
-ladder *for the finals competition* — which has no Round 1-20 results at
-all, since those live under the ordinary stream. **The finals bracket
-module must therefore retain and pass the ordinary home-and-away
-`competition_id` to `resolve_finals_seed_order`, separately from the new
-`finals` `competition_id` it creates its own rounds/rulings under.** This
-is not an edge case to discover during implementation; #190's acceptance
-criteria must test it explicitly (Codex review, PR #196).
+Resolving with the finals `competition_id` instead of the ordinary one will
+not find the snapshot (it is scoped to a different ID) and will silently
+fall through to computing a mathematical ladder *for the finals
+competition* — which has no Round 1-20 results at all, since those live
+under the ordinary stream. **The finals bracket module must therefore
+retain and pass the ordinary home-and-away `competition_id` into the
+single-read mechanism above, separately from the new `finals`
+`competition_id` it creates its own rounds/rulings under.** This is not an
+edge case to discover during implementation; #190's acceptance criteria
+must test it explicitly (Codex review, PR #196).
 
 ### Match generation/representation — a new finals bracket abstraction
 
@@ -465,20 +466,45 @@ unchanged.
 ### Scoring
 
 The scoring *formulas* are unchanged — the same nine-position `app.scoring`
-core every stream uses. Whether `app.calculations.MatchupCalculationService`
-/`app.round_review`/`app.competition_lifecycle`'s existing storage can be
-called literally unchanged for finals matches depends entirely on which
-path #197 (see above) chooses for the `bbbffl_matchup.fixture_matchup_id`
-constraint: if #197 loosens the schema, these existing methods genuinely
-are reusable unchanged; if #197 builds parallel storage instead, finals
-needs its own calculation/ruling/result path analogous to what SuperScore
-always needed (see "SuperScore design" below). This document does not pick
-between these — that is #197's decision — but #191 must build on whichever
-shape #197 actually produced, not assume unchanged reuse by default.
+core every stream uses. Two different layers of `app.calculations`/`app.
+round_review` behave differently here, and conflating them was an earlier
+draft's mistake:
 
-Whichever path is chosen, nothing about the DNP/Interchange/override
+- **Matchup-level calculation and ruling storage** (`MatchupCalculationService.
+  calculate_matchup`, `RoundReviewRepository.record_dnp_ruling`/
+  `record_interchange_ruling`/`record_override`, all keyed by `matchup_id`)
+  depends entirely on which path #197 chooses for the `bbbffl_matchup.
+  fixture_matchup_id` constraint: if #197 loosens the schema, these are
+  genuinely reusable unchanged; if #197 builds parallel storage, finals
+  needs its own calculation/ruling path analogous to SuperScore's (see
+  "SuperScore design" below).
+- **Round-level review/sign-off is a separate, unconditional gap —
+  correction (Codex review, PR #196, seventh round), verified directly
+  against `app/round_review.py`.** `build_round_review` hard-codes `if
+  len(reviews) != 5: round_blockers.append(...)`, and `attempt_signoff`'s
+  own docstring states it publishes "if every one of the five matchups is
+  ready." **This is unconditional on #197's choice** — even if #197 loosens
+  the schema so finals matches populate ordinary `bbbffl_matchup` rows,
+  `build_round_review`/`attempt_signoff` still refuse any round that
+  doesn't have exactly five matchups, and every finals week has one or two.
+  Finals therefore needs its own review/sign-off adapter (variable-match-
+  count aware) regardless of which path #197 takes — it can still call the
+  same underlying matchup-level ruling methods (once #197 resolves whether
+  those are reusable unchanged or need the parallel path), but it cannot
+  call `build_round_review`/`attempt_signoff` themselves. See "Finals
+  result publication" below, which already reaches a compatible conclusion
+  for the write side; this extends the same reasoning to the read/
+  readiness side.
+
+This document does not pick between #197's two paths for the matchup-level
+layer — that is #197's decision — but #191 must build the round-level
+adapter regardless of that choice, and must build the matchup-level layer
+on whichever shape #197 actually produced.
+
+Whichever path #197 takes, nothing about the DNP/Interchange/override
 *rules* changes for finals — only where the resulting rulings/calculated
-scores are stored.
+scores are stored, and (per above) how round-level readiness/sign-off is
+computed.
 
 **If #197 chooses parallel storage, the finals adapter also needs its own
 correction-invalidation hook — a conditional case this document's earlier
@@ -521,6 +547,13 @@ week and publishes all of them atomically in one transaction, rather than
 either literally calling the ordinary five-matchup method or assuming
 exactly one match (Codex review, PR #196). Week 1's bye is not a match and
 publishes nothing of its own for seed 1.
+
+This new command is not optional polish on top of otherwise-reusable
+review machinery — per "Scoring" above, `app.round_review.
+build_round_review`/`attempt_signoff` themselves hard-code "exactly five
+matchups" independent of #197's schema choice, so a finals-specific
+review-readiness/sign-off adapter is required unconditionally, not merely
+when #197 happens to build parallel storage.
 
 ### Public, coach and Scorer/operator views
 
@@ -806,7 +839,8 @@ rules above.
 | Round can even accept a submission (`bbbffl_round_lifecycle` exists) | yes | **conditional on #197** | **conditional on #197** | fixture-draw-linked schema fork; see "A foundational schema fork" |
 | Staged lockout (selective/main triggers) | yes | conditional on #197 | conditional on #197 | `app.lockouts`, same prerequisite as above |
 | Finals/SuperScore-participant eligibility enforcement | n/a (fixed 10) | **new** (top-5/bracket-participant check, not in `WeeklyLineupRepository`) | **new** (all-10 check) | finals module (#191) / SuperScore module (#192) each enforce their own |
-| DNP/Interchange/override ruling storage | yes | conditional on #197 | **no** (entry-scoped, not `matchup_id`-keyed regardless of #197) | `app.round_review` for ordinary, and for finals only if #197 loosens the schema; new entry-scoped ruling boundary for SuperScore always |
+| Matchup-level DNP/Interchange/override ruling storage | yes | conditional on #197 | **no** (entry-scoped, not `matchup_id`-keyed regardless of #197) | `app.round_review`'s matchup-keyed methods for ordinary, and for finals only if #197 loosens the schema; new entry-scoped ruling boundary for SuperScore always |
+| Round-level review readiness/sign-off (`build_round_review`/`attempt_signoff`) | yes | **no, regardless of #197** | **no, regardless of #197** | both hard-code "exactly five matchups"; finals/SuperScore each need their own variable-count-aware adapter unconditionally |
 | Participation evidence assessment | yes | yes | yes | `app.participation.assess_participation` unchanged (matchup-independent) |
 | Scoring formulas | yes | yes | yes | `app.scoring` unchanged |
 | Calculated-vs-official separation *implementation* | yes | conditional on #197 | **no** (entry-scoped regardless of #197) | `app.calculations.MatchupCalculationService` for ordinary, and for finals only if #197 loosens the schema; new entry-scoped calculation path for SuperScore always |
@@ -1015,9 +1049,12 @@ order (each row's "Depends on" names the prerequisite rows):
    Depends on: this document. **Must land before #190 or #192 create any
    actual finals/SuperScore round.**
 2. **[#190 — Finals bracket generation and lifecycle](https://github.com/JustPlausible/BBBFFL_Scoring/issues/190)**
-   — `app.finals`: bracket creation from `resolve_finals_seed_order`
-   (called once, frozen with real provenance from `FinalsSeedingRepository.
-   get_snapshot`/`LadderRepository.snapshot`, never re-called), the
+   — `app.finals`: bracket creation via the single-read seed-resolution
+   mechanism (`FinalsSeedingRepository.get_snapshot`, or one
+   `LadderRepository.snapshot` call applying `resolve_finals_seed_order`'s
+   exact fallback logic and both its fail-closed checks — never a direct
+   call to that function followed by a second provenance read), frozen
+   once with its exact provenance, never re-resolved; the
    four-week pairing/progression state machine, elimination recording, the
    finals round lifecycle (built on #197's chosen storage shape), and a
    CLI-first operator tool mirroring `scripts/finals_seeding_2026.py`'s
@@ -1076,7 +1113,9 @@ the finals-seeding snapshot's write path, or introduce any 2027 capability.
 
 - No change to `app.ladder`, `app.finals_seeding`'s write path, or the
   mathematical-ladder-vs-historical-seed decision. Finals/SuperScore code
-  only ever *reads* `resolve_finals_seed_order`'s result.
+  only ever *reads* the seed order and its provenance (via the single-read
+  mechanism in "Seed consumption" above), and freezes that result once —
+  never a write to either module.
 - No generic ladder or seeding editor of any kind.
 - No 2027/live-season capability, flag, or exception introduced by this
   design or its follow-up issues. Every new repository described above is

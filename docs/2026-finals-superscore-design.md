@@ -841,13 +841,25 @@ totally-ordered `upstream_revision` value to compare at persist time to
 stop it — `upstream_revision`/`upstream_observed_at` are caller-supplied,
 default to `None`, and no real call site populates them. The finals
 calculation path must therefore serialize, not compare: it must hold an
-exclusive lock on the matchup's `bbbffl_matchup` row across its entire
+exclusive lock on the matchup's serialization row across its entire
 compute-then-persist window — acquired before reading scoring/evidence
 inputs, held through persisting the calculation and committing — so a
 second calculation for the same matchup cannot start computing until the
 first has finished, making "persisted last" and "reflects the newest
 evidence" the same statement again without requiring any ordering field
-the real evidence client does not provide.
+the real evidence client does not provide. **Which row that lock targets
+is #197-path-dependent, not always `bbbffl_matchup` — Codex review, PR
+#196, thirty-third round.** Under #197's shared-table path, a finals
+match *is* a `bbbffl_matchup` row and that row is the correct lock target,
+exactly as written above. Under #197's parallel-storage path, a finals
+match has no `bbbffl_matchup` row at all, so requiring a lock on one
+would be unimplementable on that path — silently skipping the lock
+instead would reopen exactly the stale-overwrite race this correction
+exists to close. This must lock whichever always-present matchup/
+serialization row #197's chosen path actually exposes (the same "shared
+serialization record #197's chosen path exposes" already referenced for
+the calculation-row/`review_version` revalidation two corrections above),
+never unconditionally `bbbffl_matchup`.
 
 **A third correction closes a gap the per-matchup lock above does not, on
 its own, cover for the bulk recompute-before-publish path specifically —
@@ -868,17 +880,21 @@ recomputes from its own already-stale cached facts and overwrites the
 corrected calculation — the lock correctly serializes *access to the row*,
 but does not by itself guarantee the facts used were fetched after the
 lock was acquired. **The bulk recompute path must therefore acquire every
-matchup lock it will need, in deterministic order, before constructing or
-populating any shared facts cache for that batch** — mirroring the
-deterministic-order multi-row locking this design already requires
-elsewhere (SuperScore's ten `superscore_entry_review_state` rows, the
-per-matchup calculation-row/`review_version` revalidation above) — rather
-than locking each matchup individually as the bulk loop reaches it. This
-applies equally to SuperScore's own fresh-evidence-batch bulk recompute
-(the twenty-ninth round's requirement, "Scoring" below): if its
+matchup lock it will need (whichever row #197's chosen path exposes, per
+the correction immediately above), in deterministic order, before
+constructing or populating any shared facts cache for that batch** —
+mirroring the deterministic-order multi-row locking this design already
+requires elsewhere (SuperScore's ten `superscore_entry_review_state` rows,
+the per-matchup calculation-row/`review_version` revalidation above) —
+rather than locking each matchup individually as the bulk loop reaches
+it. This applies equally to SuperScore's own fresh-evidence-batch bulk
+recompute (the twenty-ninth round's requirement, "Scoring" below): if its
 implementation uses an analogous shared per-round facts cache across the
 ten entries, it must acquire all ten entry locks up front, before
-populating that cache, for the identical reason.
+populating that cache, for the identical reason — SuperScore's
+`superscore_entry_review_state` row is not #197-path-dependent, since
+SuperScore never has `bbbffl_matchup` rows regardless of which path #197
+chooses for finals.
 
 This new command is not optional polish on top of otherwise-reusable
 review machinery — per "Scoring" above, `app.round_review.
@@ -1899,7 +1915,11 @@ order (each row's "Depends on" names the prerequisite rows):
    assembling its input snapshots, failing closed if not `evidence_fresh`
    (mirroring `signoff` and SuperScore's publisher), and requires the
    finals calculation path to hold an exclusive lock on each matchup's
-   `bbbffl_matchup` row across its entire compute-then-persist window
+   serialization row (`bbbffl_matchup` under #197's shared-table path;
+   whichever always-present matchup/serialization row #197's
+   parallel-storage path exposes otherwise — never unconditionally
+   `bbbffl_matchup`, which does not exist for a finals match under that
+   path) across its entire compute-then-persist window
    (acquired before reading inputs, held through persisting and
    committing) rather than comparing an `upstream_revision` value no live
    call site actually populates with an ordered marker** — so a matchup

@@ -754,6 +754,25 @@ either literally calling the ordinary five-matchup method or assuming
 exactly one match (Codex review, PR #196). Week 1's bye is not a match and
 publishes nothing of its own for seed 1.
 
+**This new command must also freeze the same scoring-input snapshot the
+ordinary sign-off path freezes, not merely reuse `publish_results`'
+versioning/immutability shape — Codex review, PR #196, eighteenth round,
+verified directly against `app/round_review.py` and `app/competition_
+lifecycle.py`.** `_freeze_matchup_inputs` (rules version, calculation
+revision/fingerprint, both sides' lineup/DNP/interchange/override state,
+who/when finalised it) is called by `attempt_signoff`/`attempt_correction`,
+*not* by `publish_results` itself — `publish_results`'s `input_snapshots`
+parameter is optional and defaults to `None`. Because the finals-specific
+adapter this section requires necessarily replaces `attempt_signoff` (see
+below), simply calling into `publish_results` with the reused *shape* and
+forgetting to also assemble and pass an equivalent `input_snapshots` payload
+would silently publish immutable finals scores with no record of the
+lineup/calculation/ruling state that produced them — true regardless of
+which #197 path is chosen, and not obviated by it. The finals publish and
+correction commands must therefore assemble and pass the same kind of
+per-matchup input snapshot `_freeze_matchup_inputs` does, adapted to
+whichever matchup representation #197/#190 produced.
+
 This new command is not optional polish on top of otherwise-reusable
 review machinery — per "Scoring" above, `app.round_review.
 build_round_review`/`attempt_signoff` themselves hard-code "exactly five
@@ -1121,6 +1140,26 @@ round_review.py`'s existing ordinary-result machinery:**
   otherwise a later recalculation could leave an already-published
   SuperScore result unexplainable, exactly the gap `input_snapshot` exists
   to close for the ordinary case.
+- **A third correction (Codex review, PR #196, eighteenth round): the
+  publish/correction command must also re-verify the ten captured
+  calculation revisions inside the same transaction that writes the new
+  leaderboard revision, or the same read-then-write race already fixed for
+  bracket creation and advance-bracket recurs here.** If a lineup
+  correction, ruling, or recalculation commits after the ten entry
+  snapshots are assembled but before the leaderboard-revision `INSERT`
+  commits, this requirement can still publish stale scores and snapshots
+  as the new official revision. The ordinary path closes the identical gap
+  by locking `bbbffl_matchup` rows (`_locked_matchups`) and comparing
+  `expected_review_versions` against them inside `publish_results`'s own
+  transaction — the check and the write can never race specifically
+  because both happen against the same locked rows, not because the check
+  merely runs inside a transaction. The SuperScore publisher and
+  correction command must do the same: `SELECT ... FOR UPDATE` the ten
+  entries' entry-scoped calculation rows, in a deterministic order (e.g.
+  sorted by `season_entry_id`), and compare each one's current calculation
+  revision against the value captured when the snapshots were assembled,
+  aborting for the caller to retry if any has changed, before inserting the
+  new revision.
 
 ### Publication; public/coach/Scorer views
 
@@ -1405,9 +1444,13 @@ order (each row's "Depends on" names the prerequisite rows):
    matchups" independent of the schema fork — see "Scoring" above); the
    new variable-match-count (one or two matches per week, never a fixed
    five — 2/2/1/1 across weeks 1-4) publish/correction command, built on
-   whichever matchup shape
-   #197/#190 produced; public/coach/Scorer views covering all six finals
-   matches. Depends on: #190.
+   whichever matchup shape #197/#190 produced, **which must itself freeze
+   an `input_snapshot`-equivalent scoring-input record per matchup** (not
+   merely reuse `publish_results`' versioning/immutability shape, since
+   `_freeze_matchup_inputs` belongs to `attempt_signoff`, not to
+   `publish_results` itself) **and lock the same prerequisite matchup
+   row(s) #190's "advance bracket" step locks**; public/coach/Scorer views
+   covering all six finals matches. Depends on: #190.
 4. **[#192 — SuperScore roster, eligibility and lifecycle setup](https://github.com/JustPlausible/BBBFFL_Scoring/issues/192)**
    — the `superscore` competition-stream round lifecycle (built on #197's
    chosen storage shape), weekly lineup submission/lockout wired to it,
@@ -1425,9 +1468,15 @@ order (each row's "Depends on" names the prerequisite rows):
    formulas directly, since `MatchupCalculationService.calculate_round`
    iterates `bbbffl_matchup` rows and SuperScore deliberately has none —
    see "Scoring" under "SuperScore design"), the new leaderboard-shaped
-   official-result representation, ranking/joint-winner computation,
-   publish/correction command, and public/coach/Scorer views. Depends on:
-   #192.
+   official-result representation as **one atomic round-level revision
+   covering all ten entries** (never versioned per-entry in isolation),
+   with each revision **freezing every entry's scoring inputs** the same
+   way `bbbffl_official_result.input_snapshot` does for the ordinary case,
+   ranking/joint-winner computation, a publish/correction command that
+   **locks and re-verifies the ten entries' calculation revisions inside
+   the same transaction that writes the new revision** (the same race
+   already fixed for bracket creation and advance-bracket, applied here),
+   and public/coach/Scorer views. Depends on: #192.
 6. **[#194 — Operator audit/correction/recovery support for finals and SuperScore](https://github.com/JustPlausible/BBBFFL_Scoring/issues/194)**
    — the finals/SuperScore-specific audit action catalogue, checkpoint
    procedure extending the second-half playbook (or a new

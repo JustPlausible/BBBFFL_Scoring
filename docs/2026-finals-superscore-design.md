@@ -586,14 +586,27 @@ when one exists (the common case, Week 2 onward for a team that played and
 submitted the previous week) — this is exactly `app.carry_forward`'s
 existing same-`competition_id` behaviour, unchanged — and fall back to the
 entry's most recent **ordinary** submission (cross-stream) only when no
-finals-stream predecessor exists at all: every finalist in Week 1, and
-seed 1 specifically again in Week 2 (their only finals-stream history at
-that point is a bye, which has no submitted lineup of its own). This is
-the *same* cross-stream mechanism SuperScore's SS1 needs (see "SuperScore
-design" below) — #191 and #192 should share one narrow cross-stream
-fallback function rather than each building their own, and #191's
-implementation should treat this as a confirmed requirement to build, not
-an unresolved question to raise with Steve.
+finals-stream predecessor exists at all: every finalist **who actually
+plays a Week 1 match** (seeds 2-5; seed 1's bye has no match and therefore
+no lineup requirement at all), and seed 1 specifically again in Week 2
+(their only finals-stream history at that point is the bye, which has no
+submitted lineup of its own). **Correction (Codex review, PR #196,
+twenty-fourth round): the Week 1 fallback must not be applied to seed 1.**
+Seed 1 has no Week 1 match and must not be given an artificial Week-1
+finals-stream submission — if it were, `CarryForwardService.resolve_
+source`'s same-stream lookup (which simply finds the most recent BBBFFL
+round with a non-null `effective_submission_version` in the same
+`competition_id`) would find that phantom Week-1 row as seed 1's "most
+recent finals-stream predecessor" for Week 2, silently skip the required
+cross-stream fallback to Round 20, and carry forward the wrong (and
+possibly stale, if the ordinary Round 20 lineup is later corrected)
+provenance and content. Scope the Week 1 fallback strictly to entries with
+an actual Week 1 pairing. This is the *same* cross-stream mechanism
+SuperScore's SS1 needs (see "SuperScore design" below) — #191 and #192
+should share one narrow cross-stream fallback function rather than each
+building their own, and #191's implementation should treat this as a
+confirmed requirement to build, not an unresolved question to raise with
+Steve.
 
 **This fallback must be reachable through the real, supported post-lockout
 path, not just exist as a bare standalone function — correction (Codex

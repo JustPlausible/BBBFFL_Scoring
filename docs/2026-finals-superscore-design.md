@@ -820,6 +820,35 @@ advance-bracket, and SuperScore's publisher; finals' publish/correction
 command is new code, not reused `attempt_signoff`, so it must not silently
 inherit the narrower guarantee the ordinary path happens to get away with.
 
+**Two further corrections carry SuperScore's twenty-ninth/thirty-first
+round fixes into this finals adapter — Codex review, PR #196, thirty-first
+round.** First: none of the locking above proves the finals scores being
+published reflect *current* upstream AFL facts, only that nothing changed
+since the snapshot was assembled — exactly the gap identified for
+SuperScore. The finals publish/correction command must recompute the
+round's matchups (`state.calculations.calculate_round(round_id)`) inside
+one fresh `evidence_batch()` scope immediately before assembling its input
+snapshots, and fail closed if the batch reports itself not
+`evidence_fresh` — the same discipline the ordinary `signoff` route and
+SuperScore's publisher both already require, adapted from five/ten
+independent units to finals' matchups. Second: the `SELECT ... FOR UPDATE`
+revalidation above closes a narrower race than it first appears to — two
+overlapping calculations for the *same* matchup around an AFL-evidence
+correction can still let an older one overwrite a newer one via ordinary
+commit-order, exactly as identified for SuperScore, and (verified against
+`app/calculations.py` and `app/afl_resilience.py`) there is no live,
+totally-ordered `upstream_revision` value to compare at persist time to
+stop it — `upstream_revision`/`upstream_observed_at` are caller-supplied,
+default to `None`, and no real call site populates them. The finals
+calculation path must therefore serialize, not compare: it must hold an
+exclusive lock on the matchup's `bbbffl_matchup` row across its entire
+compute-then-persist window — acquired before reading scoring/evidence
+inputs, held through persisting the calculation and committing — so a
+second calculation for the same matchup cannot start computing until the
+first has finished, making "persisted last" and "reflects the newest
+evidence" the same statement again without requiring any ordering field
+the real evidence client does not provide.
+
 This new command is not optional polish on top of otherwise-reusable
 review machinery — per "Scoring" above, `app.round_review.
 build_round_review`/`attempt_signoff` themselves hard-code "exactly five
@@ -1391,47 +1420,49 @@ round_review.py`'s existing ordinary-result machinery:**
   still needs it) — it closes the larger, more fundamental gap that no
   amount of locking a stale calculation against itself can close: staleness
   relative to the outside world, not staleness relative to a prior read.
-- **A further correction (Codex review, PR #196, twenty-ninth round): the
-  calculation service itself needs a monotonic guard against upstream
-  evidence, or two overlapping calculations for the same entry can let an
-  older one silently overwrite a newer one.** Two calculations for the same
-  entry can overlap a single upstream AFL-evidence correction: one starts
-  (and captures `review_version`) before the correction, one after — both
-  capture the *same* `review_version`, since AFL evidence changes don't
-  touch it (only lineup/ruling changes do). If the calculation using
-  *older* evidence happens to finish and persist *after* the one using
-  newer evidence, its round-25/26 captured-`review_version` recheck still
-  passes (nothing about `review_version` changed), and it becomes the
-  entry's latest calculation by revision number — even though it reflects
-  strictly older facts than the calculation it just overwrote. Ordering by
-  "persisted last" is not the same as "reflects the newest evidence."
-  **The calculation service must therefore also capture a monotonic
-  upstream-evidence marker — the existing `upstream_revision`/`upstream_
-  observed_at` fields `app.calculations`'s real `bbbffl_matchup_calculation`
-  table already carries for exactly this purpose (verified directly against
-  `MatchupCalculationService._persist`) — and, at persist time inside the
-  same locked transaction, refuse to persist (treat as superseded, discard)
-  if the entry's currently-stored calculation already carries a strictly
-  newer `upstream_revision` than the one this calculation used.** Reject
-  only strictly *older* evidence; a calculation that used the *same*
-  `upstream_revision` as the stored row must still be allowed to persist —
-  that is the ordinary case of recomputing after a lineup submission,
-  resubmission, correction, or ruling advances `review_version` without
-  any AFL evidence changing at all. Rejecting equal-evidence calculations
-  would leave the entry's `computed_as_of_review_version` permanently
-  stale (and publication permanently failing its round-26 freshness check)
-  until unrelated upstream evidence next changes. Ordering among two
-  calculations that share the same `upstream_revision` for the same entry
-  is decided by the existing round-25/26 review-version CAS, not by this
-  guard. A calculation may only ever advance the row's `upstream_revision`
-  forward, never backward — "highest upstream revision wins, ties broken
-  by review-version CAS," not "whoever's transaction commits last wins."
-  Coordinated with (but distinct from) the twenty-ninth round's other
-  correction above: the fresh-recompute discipline sharply narrows how
-  often overlapping calculations for the same entry can occur at all, but
-  does not make this guard unnecessary, since other triggers (e.g. live
-  recalculation as AFL facts stream in during a match) can still race
-  independently of a publish attempt.
+- **A further correction (Codex review, PR #196, twenty-ninth round,
+  superseded — not merely amended — by the thirty-first round): the
+  twenty-ninth/thirtieth round's "monotonic `upstream_revision`" guard
+  cannot work against the real schema and must be replaced with
+  serialization, not repaired.** The twenty-ninth round required comparing
+  `upstream_revision` at persist time to stop an older-evidence calculation
+  overwriting a newer one. **Verified directly against `app/calculations.py`
+  and `app/afl_resilience.py`, this cannot be implemented as specified:**
+  `upstream_revision`/`upstream_observed_at` are plain caller-supplied
+  parameters to `calculate_round`/`calculate_matchup`, defaulting to `None`
+  — and every real call site (`app/routes/round_review.py`'s `signoff` and
+  its `calculate_round`/`calculate_matchup` calls) passes neither, so the
+  column is never populated with an ordered value by any code that exists
+  today. `_calculate` explicitly excludes both fields from the calculation's
+  fingerprint hash, treating them as diagnostic provenance, not an ordering
+  key. And `EvidenceBatch`, the only live evidence-freshness interface, only
+  exposes `is_evidence_fresh()` — a boolean, never a comparable revision
+  token. Comparing `upstream_revision` at persist time therefore compares
+  `None` against `None` and can never detect an out-of-order overwrite.
+  **The fix is to serialize each entry's compute-then-persist window
+  instead of inventing a new ordering token no live evidence source
+  provides:** the entry-scoped calculation path must acquire an exclusive
+  lock on the entry's `superscore_entry_review_state` row (the same row the
+  round-18-through-26 review-version CAS already locks) *before* reading
+  any scoring/evidence inputs, and hold it through persisting its result
+  and committing — not merely capture-then-recheck a value at the two
+  endpoints, but hold the lock across the entire window between them. A
+  second calculation for the same entry started while the first is still
+  computing simply blocks until the first's transaction commits or aborts,
+  so two calculations for the same entry can never interleave at all:
+  whichever one starts (and therefore reads evidence) later is guaranteed
+  to persist later too, making "persisted last" and "reflects the newest
+  evidence" the same statement again, without requiring any orderable field
+  the real evidence client does not provide. This closes exactly the gap
+  the twenty-ninth round identified, through mutual exclusion instead of a
+  comparison that cannot be implemented against the current
+  `EvidenceBatch`/`upstream_revision` reality. The twenty-ninth round's
+  separate fresh-evidence-batch-recompute-before-publish requirement above
+  is unaffected and still stands — this replaces only the discarded
+  "compare `upstream_revision`" mechanism, narrowing (not eliminating) how
+  often the lock is contended at all, since the recompute-before-publish
+  discipline already limits how many calculations for the same entry are
+  in flight at once.
 
 ### Publication; public/coach/Scorer views
 
@@ -1808,7 +1839,18 @@ order (each row's "Depends on" names the prerequisite rows):
    assembly and commit; public/coach/Scorer views covering all six finals
    matches. **Acceptance requires every finals result correction/cascade
    entry point to take the owning season-row lock in its write transaction
-   and fail closed once the season is completed.** Depends on: #190.
+   and fail closed once the season is completed.** **Acceptance also
+   requires the publish/correction command to recompute the round's
+   matchups under one fresh `evidence_batch()` scope immediately before
+   assembling its input snapshots, failing closed if not `evidence_fresh`
+   (mirroring `signoff` and SuperScore's publisher), and requires the
+   finals calculation path to hold an exclusive lock on each matchup's
+   `bbbffl_matchup` row across its entire compute-then-persist window
+   (acquired before reading inputs, held through persisting and
+   committing) rather than comparing an `upstream_revision` value no live
+   call site actually populates with an ordered marker** — so a matchup
+   calculation using older AFL evidence can never overwrite one already
+   computed from newer evidence. Depends on: #190.
 4. **[#192 — SuperScore roster, eligibility and lifecycle setup](https://github.com/JustPlausible/BBBFFL_Scoring/issues/192)**
    — the `superscore` competition-stream round lifecycle (built on #197's
    chosen storage shape), weekly lineup submission/lockout wired to it
@@ -1874,16 +1916,21 @@ order (each row's "Depends on" names the prerequisite rows):
    command to recompute all ten entries under one fresh `evidence_batch()`
    scope immediately before assembling the snapshot and fail closed if not
    `evidence_fresh` (mirroring `round_review.py`'s existing `signoff`
-   route), and requires calculation persistence to capture a monotonic
-   `upstream_revision`/`upstream_observed_at` marker (the existing
-   `bbbffl_matchup_calculation` columns) and refuse to persist if the
-   entry's currently-stored calculation already carries a strictly newer
-   `upstream_revision` — rejecting only strictly older evidence, never an
-   equal-evidence recomputation, with ties among equal-`upstream_revision`
-   calculations broken by the review-version CAS above — so a stale or
-   out-of-order calculation can never become the entry's latest row and
-   the leaderboard can never publish evidence older than current AFL
-   facts.** Every SuperScore correction/republication must also take the
+   route), and requires the entry-scoped calculation path to hold an
+   exclusive lock on the entry's `superscore_entry_review_state` row across
+   its *entire* compute-then-persist window — acquired before reading any
+   scoring/evidence inputs, held through persisting the result and
+   committing — rather than comparing an `upstream_revision`/`upstream_
+   observed_at` value (a column no live call site actually populates with
+   an ordered marker — verified against `app/calculations.py` and
+   `app/afl_resilience.py`'s `EvidenceBatch`, which exposes only a boolean
+   `is_evidence_fresh()`). Serializing the compute window this way makes
+   two calculations for the same entry mutually exclusive, so a later
+   calculation (and the newer evidence it read) can never be overwritten by
+   an earlier one that is still finishing — so a stale or out-of-order
+   calculation can never become the entry's latest row and the leaderboard
+   can never publish evidence older than current AFL facts.** Every
+   SuperScore correction/republication must also take the
    owning season-row lock and reject a completed season in that same write
    transaction.**
    Depends on: #192.

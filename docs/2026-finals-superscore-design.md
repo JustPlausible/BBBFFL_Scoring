@@ -115,6 +115,57 @@ genuinely new abstractions, not a parameter change to the ordinary
 lifecycle** — this is why the follow-up decomposition below gives each its
 own issue rather than trying to widen `create_ordinary_round`.
 
+## A foundational schema fork found by Codex review, resolved by a new prerequisite issue
+
+**This section was added after Codex review of PR #196 found that the
+original decomposition's "reuse `app.lineups`/`app.lockouts`/`app.
+calculations`/`app.round_review` unchanged, only stream-scoped" claim was
+wrong at the schema level for both finals and SuperScore, not just for
+SuperScore's scoring as first identified.** Verified directly against the
+migration and the repository code, not merely against the design's own
+earlier prose:
+
+- `bbbffl_round_lifecycle` (migration `0010_competition_lifecycle.py`)
+  declares `fixture_draw_id`, `fixture_draw_version`, and
+  `fixture_round_number` all `nullable=False`, foreign-keyed to `season_
+  fixture_draw` — the fixed, pre-drawn round-robin fixture. A finals or
+  SuperScore round has no fixture-draw row to reference at all.
+- **This blocks lineup submission itself, not merely scoring.**
+  `app.lineups.WeeklyLineupRepository._finalize_submission` — the single
+  core function every submission source (coach, carry-forward, proxy,
+  correction, adjudication) goes through — reads `bbbffl_round_lifecycle`'s
+  `state` and raises `LineupIntegrityError` if no row exists. Without
+  resolving this, **no finals or SuperScore lineup can ever be submitted at
+  all**, regardless of anything else this design or its follow-up issues
+  build. Every earlier claim in this document that "lineup submission and
+  lockout are reusable unchanged, only stream-scoped" is true only once
+  this is resolved — it is a shared prerequisite, not an implementation
+  detail internal to #191 or #192.
+- The identical shape of problem recurs one level down, for finals
+  specifically: `bbbffl_matchup`'s `fixture_matchup_id` is likewise
+  `nullable=False`, foreign-keyed to `season_fixture_matchup`, which is why
+  `app.calculations`/`app.round_review`'s matchup-keyed methods can't be
+  called against a finals match either (SuperScore has no matchups at all
+  by design, so only the round-lifecycle layer above applies to it).
+
+**[Issue #197](https://github.com/JustPlausible/BBBFFL_Scoring/issues/197)**
+is a new prerequisite issue, not present when this decomposition was first
+written, that resolves this once for both finals and SuperScore rather
+than letting #190 and #192 each independently reinvent (or silently
+diverge on) the same decision. It offers two paths — loosening the
+fixture-draw linkage to optional for non-ordinary streams (after which the
+existing modules genuinely are reusable unchanged), or building parallel
+lifecycle/matchup storage with a dispatching lookup (a deeper change, since
+that means `app.lineups`/`app.lockouts` are not, in fact, left byte-for-byte
+unchanged) — and leaves the choice, with its reasoning, to whoever
+implements it. **#190 and #192 both now depend on #197's outcome**, which
+changes their "Depends on" relative to the original decomposition below.
+
+Every place elsewhere in this document that says a module is "reusable
+unchanged" for finals or SuperScore lineup submission/lockout should be
+read as "reusable unchanged once #197 lands" — restated here once rather
+than qualified at every occurrence.
+
 ## Main finals design
 
 ### Confirmed bracket structure
@@ -150,11 +201,20 @@ only participants for the remainder of the season.
 
 The finals bracket module calls `app.finals_seeding.resolve_finals_seed_order`
 **exactly once, at bracket creation**, and freezes the returned tuple into
-the persisted `finals_bracket` row (recommend also recording whichever
-provenance the resolver's result carries — the `finals_seeding_snapshot_id`
-when one was used, or the mathematical `LadderSnapshot`'s own identifying
-fields otherwise — mirroring `app.midseason_draft.confirm_ladder`'s "freeze
-an independent copy" pattern for the exact same reason). **Every later
+the persisted `finals_bracket` row. **Correction (Codex review, PR #196):
+`resolve_finals_seed_order` itself returns only a bare tuple of
+`season_entry_id` strings — it carries no provenance of its own.** Freezing
+real provenance alongside the order therefore requires an explicit second
+step at bracket-creation time, not an assumption that the resolver's result
+"carries" it: call `app.finals_seeding.FinalsSeedingRepository.get_snapshot
+(season_id)` to check whether a snapshot exists and, if so, record its
+`snapshot_id`; if none exists, record instead that the order came from the
+mathematical ladder (e.g. the `LadderSnapshot`'s `through_round` and
+`latest_included_round`, from the same `LadderRepository.snapshot` call
+`resolve_finals_seed_order` makes internally). Persist whichever applies
+onto `finals_bracket` alongside the frozen order, mirroring `app.
+midseason_draft.confirm_ladder`'s "freeze an independent copy" pattern for
+the exact same reason. **Every later
 decision that needs the seed order — tie-break resolution in a later week,
 a display, an audit payload — reads the bracket's own frozen seed, and never
 calls `resolve_finals_seed_order` again for this bracket.** This matters
@@ -246,52 +306,63 @@ which `competition_id` the round belongs to.
 
 ### Coach lineup/submission behaviour
 
-Reuse `app.lineups.WeeklyLineupRepository` unchanged, scoped to the `finals`
-competition stream's rounds. The nine-position structure, private-draft-vs-
-submit distinction, and resubmission-while-unlocked rules are identical to
-an ordinary round. Failure-to-submit carry-forward for a finals round
-sources from that entry's most recent finals-stream submission — but two
-cases have **no** finals-stream predecessor at all and therefore no
-same-stream source: every finalist in Week 1 (the finals stream's first
-round), and seed 1 specifically again in Week 2, since seed 1's only
-finals-stream history at that point is a bye with no submitted lineup of
-its own. See historical-gap question 7 below; this is not resolved by this
-document and must not be silently invented by #191.
+Reuse `app.lineups.WeeklyLineupRepository` unchanged (once #197 lands — see
+above), scoped to the `finals` competition stream's rounds. The
+nine-position structure, private-draft-vs-submit distinction, and
+resubmission-while-unlocked rules are identical to an ordinary round.
+
+**Eligibility is not enforced by `WeeklyLineupRepository` itself and must
+be enforced by the finals module (Codex review, PR #196).**
+`WeeklyLineupRepository._validate_scope` only checks that the competition,
+round, and entry belong to the same season — it has no concept of "is this
+entry actually one of this specific finals match's two participants" or
+"is this entry even still in the top five". Left unenforced, an eliminated
+seed (6th-10th) could submit a lineup against a finals round it has no
+business playing in, with nothing beyond route-level visibility stopping
+it. The finals module (#191) must validate the submitting entry against
+its own bracket's known participants for that specific round *before*
+calling into `WeeklyLineupRepository`, rather than relying on
+`WeeklyLineupRepository`'s generic same-season scope check alone.
+
+**Failure-to-submit carry-forward is a confirmed rule, not an open
+question — correction to an earlier draft of this document.**
+`docs/plans/2027-season-model.md`'s "Failure to submit" section states
+that for "the normal home-and-away competition and continuing finals
+participation," the default carry-forward source "normally means the
+coach's previous premiership/home-and-away lineup" — using "premiership"
+as the same umbrella term the document elsewhere uses for "ordinary
+home-and-away plus finals, as opposed to SuperScore" (see its "All-time
+record scope" section). Read together with the immediately following,
+structurally identical SS1 rule ("derived from that coach's most recently
+named ordinary BBBFFL team"), the intended mechanical rule for finals is:
+carry forward from the entry's most recent **finals-stream** submission
+when one exists (the common case, Week 2 onward for a team that played and
+submitted the previous week) — this is exactly `app.carry_forward`'s
+existing same-`competition_id` behaviour, unchanged — and fall back to the
+entry's most recent **ordinary** submission (cross-stream) only when no
+finals-stream predecessor exists at all: every finalist in Week 1, and
+seed 1 specifically again in Week 2 (their only finals-stream history at
+that point is a bye, which has no submitted lineup of its own). This is
+the *same* cross-stream mechanism SuperScore's SS1 needs (see "SuperScore
+design" below) — #191 and #192 should share one narrow cross-stream
+fallback function rather than each building their own, and #191's
+implementation should treat this as a confirmed requirement to build, not
+an unresolved question to raise with Steve (historical-gap question 7,
+below, is updated accordingly).
 
 ### Scoring
 
 The scoring *formulas* are unchanged — the same nine-position `app.scoring`
-core every stream uses. **But whether `app.calculations.
-MatchupCalculationService`/`app.round_review`/`app.competition_lifecycle`'s
-existing storage can be called literally unchanged is a real open question
-this design does not resolve, corrected after Codex review of PR #196
-found that an earlier draft overstated this as settled.** Verified directly
-against the schema: `bbbffl_matchup` (migration `0010_competition_
-lifecycle.py`) declares `fixture_matchup_id` as a **non-nullable** foreign
-key into `season_fixture_matchup` — the fixed, pre-drawn round-robin
-fixture — and constrains `matchup_order BETWEEN 1 AND 5`. A finals match has
-no `season_fixture_matchup` row to reference at all (there is no pre-drawn
-finals fixture — see "Match generation/representation" above), so a finals
-bracket module cannot insert an ordinary `bbbffl_matchup` row, and therefore
-cannot call `MatchupCalculationService.calculate_matchup`/`calculate_round`
-or `app.round_review`'s matchup-keyed DNP/Interchange/override methods
-against it, without one of:
-
-- a schema change (e.g. making `fixture_matchup_id` nullable, or otherwise
-  loosening the constraint) so a finals match can populate `bbbffl_matchup`
-  without a fixture-draw row, after which `app.calculations`/`app.
-  round_review`/`app.competition_lifecycle`'s existing methods genuinely do
-  become reusable unchanged; or
-- a finals-specific parallel calculation/ruling/result path, structurally
-  similar to the entry-scoped path SuperScore already needs (see "SuperScore
-  design" below) but keyed by a finals matchup rather than by a bare entry.
-
-This decomposition does not pick between these — that is #190/#191's design
-decision to make and justify, informed by whichever is less invasive to the
-existing ordinary-competition tables. What this document commits to is that
-the choice must be made **explicitly and early** in #190, not discovered
-partway through #191 after #190 has already fixed a schema shape that
-turns out not to fit.
+core every stream uses. Whether `app.calculations.MatchupCalculationService`
+/`app.round_review`/`app.competition_lifecycle`'s existing storage can be
+called literally unchanged for finals matches depends entirely on which
+path #197 (see above) chooses for the `bbbffl_matchup.fixture_matchup_id`
+constraint: if #197 loosens the schema, these existing methods genuinely
+are reusable unchanged; if #197 builds parallel storage instead, finals
+needs its own calculation/ruling/result path analogous to what SuperScore
+always needed (see "SuperScore design" below). This document does not pick
+between these — that is #197's decision — but #191 must build on whichever
+shape #197 actually produced, not assume unchanged reuse by default.
 
 Whichever path is chosen, nothing about the DNP/Interchange/override
 *rules* changes for finals — only where the resulting rulings/calculated
@@ -440,10 +511,14 @@ WeeklyLineupRepository._validate_ownership`.
 
 Identical to the ordinary competition for everything that is genuinely
 about *selection*, not *scoring*: reuse `app.lineups`, `app.lockouts`, and
-`app.lineup_validation` unchanged, scoped to the `superscore` competition
-stream's rounds. `app.participation.assess_participation` is also reusable
-unchanged — it is a pure, stateless evidence-assessment function with no
-`matchup_id` dependency at all.
+`app.lineup_validation` unchanged **once #197 lands** (see "A foundational
+schema fork" above — `bbbffl_round_lifecycle`'s fixture-draw requirement
+blocks lineup submission for SuperScore rounds exactly as it does for
+finals, and this is a shared prerequisite, not something #192 resolves on
+its own), scoped to the `superscore` competition stream's rounds. `app.
+participation.assess_participation` is also reusable unchanged regardless
+— it is a pure, stateless evidence-assessment function with no `matchup_id`
+or round-lifecycle dependency at all.
 
 ### DNP, Interchange and loophole rulings — a second genuine SuperScore-specific abstraction
 
@@ -542,15 +617,17 @@ rules above.
 
 | Behaviour | Ordinary | Finals | SuperScore | Reuse |
 |---|---|---|---|---|
-| Nine-position lineup structure/validation | yes | yes | yes | `app.lineups`, `app.lineup_validation` unchanged |
-| Staged lockout (selective/main triggers) | yes | yes | yes | `app.lockouts` unchanged |
-| DNP/Interchange/override ruling storage | yes | yes | **no** (entry-scoped, not `matchup_id`-keyed) | `app.round_review` reused for ordinary/finals only; new entry-scoped ruling boundary for SuperScore |
+| Nine-position lineup structure/validation | yes | yes | yes | `app.lineups`, `app.lineup_validation` |
+| Round can even accept a submission (`bbbffl_round_lifecycle` exists) | yes | **conditional on #197** | **conditional on #197** | fixture-draw-linked schema fork; see "A foundational schema fork" |
+| Staged lockout (selective/main triggers) | yes | conditional on #197 | conditional on #197 | `app.lockouts`, same prerequisite as above |
+| Finals/SuperScore-participant eligibility enforcement | n/a (fixed 10) | **new** (top-5/bracket-participant check, not in `WeeklyLineupRepository`) | **new** (all-10 check) | finals module (#191) / SuperScore module (#192) each enforce their own |
+| DNP/Interchange/override ruling storage | yes | conditional on #197 | **no** (entry-scoped, not `matchup_id`-keyed regardless of #197) | `app.round_review` for ordinary, and for finals only if #197 loosens the schema; new entry-scoped ruling boundary for SuperScore always |
 | Participation evidence assessment | yes | yes | yes | `app.participation.assess_participation` unchanged (matchup-independent) |
 | Scoring formulas | yes | yes | yes | `app.scoring` unchanged |
-| Calculated-vs-official separation *implementation* | yes | yes | **no** (entry-scoped, not `matchup_id`-keyed) | `app.calculations.MatchupCalculationService` reused for ordinary/finals only; new entry-scoped calculation path for SuperScore |
+| Calculated-vs-official separation *implementation* | yes | conditional on #197 | **no** (entry-scoped regardless of #197) | `app.calculations.MatchupCalculationService` for ordinary, and for finals only if #197 loosens the schema; new entry-scoped calculation path for SuperScore always |
 | Player ownership/eligibility | yes | yes | yes | `app.player_pool` unchanged |
 | Same-stream carry-forward | yes | yes | yes (SS2+) | `app.carry_forward` unchanged |
-| Cross-stream carry-forward (ordinary Round 20 -> SS1) | n/a | n/a | **SS1 only** | new narrow function, see above |
+| Cross-stream carry-forward (most recent ordinary lineup) | n/a | **Week 1 and seed 1's Week 2** (confirmed rule) | **SS1 only** (confirmed rule) | one shared narrow function for both, see above |
 | Fixed pre-drawn fixture (season_fixture_matchup) | yes | **no** | **no** | ordinary-only; cannot be reused |
 | Head-to-head two-team official result | yes | yes | **no** | new leaderboard result shape for SuperScore |
 | Pairing known before the round starts | yes | **no** (weeks 2-3 depend on prior result) | n/a (no pairing) | new finals bracket module |
@@ -698,26 +775,28 @@ consistent with confirmed rules but not itself a league rule), and
    populated and validated for Rounds 1-20, as an early step of the finals-
    lifecycle follow-up issue, not assumed from the general "AFL Rounds
    21-24" description in the season model.
-7. **Unresolved: the finals-stream Week 1 (and seed 1's Week 2) lineup
-   fallback** (raised during Codex review of PR #196). A finals-stream
-   round's normal fallback is carry-forward from that entry's own previous
-   finals-stream submission (see "Coach lineup/submission behaviour"
-   above), but two cases genuinely have no such predecessor: every
-   finalist's very first finals-stream round (Week 1), and seed 1
-   specifically again in Week 2 (their only finals-stream history at that
-   point is a bye, which has no submitted lineup at all). No source
-   reviewed (season model, decisions, workbook findings) states whether
-   this should (a) fall back to that entry's most recent *ordinary*
-   lineup — the same cross-stream pattern already confirmed for SuperScore
-   SS1, which would mean the narrow cross-stream fallback function
-   described under "SuperScore design" needs a finals-aware sibling or
-   generalisation rather than being SuperScore-only; (b) require an
-   explicit scorer/proxy-entered lineup with no automatic carry-forward,
-   matching `app.carry_forward`'s existing "Round 1 has no predecessor"
-   behaviour (`NoCarryForwardSourceError`); or (c) something else. Confirm
-   with Steve, or propose one explicitly with tradeoffs, before #191
-   implements finals lineup submission — it must not be silently invented
-   mid-PR.
+7. **No longer unresolved — reclassified as a confirmed historical rule
+   after further Codex review of PR #196.** An earlier draft of this
+   document listed the finals-stream Week 1 (and seed 1's Week 2) lineup
+   fallback as an open question with no source stating the answer. That
+   was incorrect: `docs/plans/2027-season-model.md`'s "Failure to submit"
+   section does state it, using "premiership" as its own umbrella term for
+   "ordinary home-and-away plus finals" (see that document's "All-time
+   record scope" section for the same usage) — "for the normal home-and-away
+   competition and continuing finals participation, this normally means the
+   coach's previous premiership/home-and-away lineup," read together with
+   the structurally identical, immediately-following SS1 rule. The
+   mechanical rule is therefore: same-finals-stream carry-forward when a
+   finals-stream predecessor exists (the common case), falling back
+   cross-stream to the entry's most recent **ordinary** submission only
+   when it doesn't (every finalist's Week 1, and seed 1's Week 2 again).
+   This is now a **confirmed requirement** for #191 to implement (see
+   "Coach lineup/submission behaviour" above), sharing its cross-stream
+   fallback function with SuperScore's SS1 mechanism (#192) rather than
+   each building its own. Nothing here remains to ask Steve about, unless
+   implementation uncovers a genuine further ambiguity the season model
+   text does not resolve (e.g. an exact tie-break if both an ordinary and a
+   finals-stream predecessor arguably exist in some edge case).
 
 ## Follow-up issues
 
@@ -726,41 +805,58 @@ independently testable PR, matching the granularity `app.finals_seeding`
 and `app.midseason_draft` were each delivered at. Recommended execution
 order (each row's "Depends on" names the prerequisite rows):
 
-1. **[#190 — Finals bracket generation and lifecycle](https://github.com/JustPlausible/BBBFFL_Scoring/issues/190)**
-   — `app.finals`: bracket creation from `resolve_finals_seed_order`, the
+1. **[#197 — Generalize round-lifecycle and matchup storage for finals/SuperScore streams](https://github.com/JustPlausible/BBBFFL_Scoring/issues/197)**
+   — a prerequisite discovered during Codex review of PR #196, not present
+   in the original decomposition: resolves the `bbbffl_round_lifecycle`/
+   `bbbffl_matchup` fixture-draw-linkage schema fork described in "A
+   foundational schema fork" above, which blocks lineup submission for
+   **both** finals and SuperScore, not just finals scoring. Pure
+   platform/schema package; no bracket or SuperScore-specific logic.
+   Depends on: this document. **Must land before #190 or #192 create any
+   actual finals/SuperScore round.**
+2. **[#190 — Finals bracket generation and lifecycle](https://github.com/JustPlausible/BBBFFL_Scoring/issues/190)**
+   — `app.finals`: bracket creation from `resolve_finals_seed_order`
+   (called once, frozen with real provenance from `FinalsSeedingRepository.
+   get_snapshot`/`LadderRepository.snapshot`, never re-called), the
    four-week pairing/progression state machine, elimination recording, the
-   finals round lifecycle, and a CLI-first operator tool mirroring
-   `scripts/finals_seeding_2026.py`'s preview/apply shape. Resolves
-   historical-gap questions 3 and 4 above as an explicit design step before
-   writing code. Depends on: this document.
-2. **[#191 — Finals lineup, scoring and publication](https://github.com/JustPlausible/BBBFFL_Scoring/issues/191)**
+   finals round lifecycle (built on #197's chosen storage shape), and a
+   CLI-first operator tool mirroring `scripts/finals_seeding_2026.py`'s
+   preview/apply shape. Resolves historical-gap questions 3 and 4 above as
+   an explicit design step before writing code. Depends on: #197.
+3. **[#191 — Finals lineup, scoring and publication](https://github.com/JustPlausible/BBBFFL_Scoring/issues/191)**
    — weekly lineup submission and lockout wired to the `finals` competition
-   stream (no new lineup code, only stream-scoping); the new
-   variable-match-count (never one, never five — 2/2/1/1 across weeks 1-4)
-   publish/correction command described above, resolving the
-   `fixture_matchup_id` schema question "Scoring" above raises; public/
-   coach/Scorer views covering all six finals matches. Depends on: #190.
-3. **[#192 — SuperScore roster, eligibility and lifecycle setup](https://github.com/JustPlausible/BBBFFL_Scoring/issues/192)**
-   — the `superscore` competition-stream round lifecycle, weekly lineup
-   submission/lockout wired to it, the new narrow SS1 cross-stream fallback
-   function, and the new **entry-scoped** DNP/Interchange/override ruling
+   stream (no new lineup code, only stream-scoping, once #197 has landed);
+   explicit bracket-participant eligibility enforcement `WeeklyLineup
+   Repository` itself does not provide; the confirmed Week-1/seed-1 Week-2
+   cross-stream carry-forward fallback (shared with #192's SS1 mechanism);
+   the new variable-match-count (never one, never five — 2/2/1/1 across
+   weeks 1-4) publish/correction command, built on whichever matchup shape
+   #197/#190 produced; public/coach/Scorer views covering all six finals
+   matches. Depends on: #190.
+4. **[#192 — SuperScore roster, eligibility and lifecycle setup](https://github.com/JustPlausible/BBBFFL_Scoring/issues/192)**
+   — the `superscore` competition-stream round lifecycle (built on #197's
+   chosen storage shape), weekly lineup submission/lockout wired to it,
+   explicit all-ten-entries eligibility enforcement, the narrow SS1
+   cross-stream fallback function (shared with #191's finals Week-1/seed-1
+   mechanism), and the new **entry-scoped** DNP/Interchange/override ruling
    boundary (not a reuse of `app.round_review`'s matchup-keyed methods —
    see "DNP, Interchange and loophole rulings" under "SuperScore design").
    Resolves historical-gap question 6 (round mapping) for the SuperScore
-   rounds as part of setup. Depends on: this document (independent of
-   #190-#191; can run in parallel).
-4. **[#193 — SuperScore scoring, leaderboard and publication](https://github.com/JustPlausible/BBBFFL_Scoring/issues/193)**
+   rounds as part of setup. Depends on: #197 (no longer independent of the
+   finals track at the schema level, though its bracket-specific work
+   remains independent of #190/#191's).
+5. **[#193 — SuperScore scoring, leaderboard and publication](https://github.com/JustPlausible/BBBFFL_Scoring/issues/193)**
    — the new leaderboard-shaped official-result representation,
    ranking/joint-winner computation, publish/correction command, and
    public/coach/Scorer views. Depends on: #192.
-5. **[#194 — Operator audit/correction/recovery support for finals and SuperScore](https://github.com/JustPlausible/BBBFFL_Scoring/issues/194)**
+6. **[#194 — Operator audit/correction/recovery support for finals and SuperScore](https://github.com/JustPlausible/BBBFFL_Scoring/issues/194)**
    — the finals/SuperScore-specific audit action catalogue, checkpoint
    procedure extending the second-half playbook (or a new
    `2026-finals-replay` evidence directory), and the operator playbook
    itself (the "not-yet-written" document section L of the second-half
    playbook already anticipates). Depends on: #191 and #193 (needs real
    operations to document).
-6. **[#195 — End-of-season completion, premiership/wooden-spoon recording and 2026/2027 archival isolation](https://github.com/JustPlausible/BBBFFL_Scoring/issues/195)**
+7. **[#195 — End-of-season completion, premiership/wooden-spoon recording and 2026/2027 archival isolation](https://github.com/JustPlausible/BBBFFL_Scoring/issues/195)**
    — the premiership/wooden-spoon audit event and record, the
    season-completion lifecycle transition, and a decision (with
    implementation if warranted) on whether `Season.lifecycle_state ==

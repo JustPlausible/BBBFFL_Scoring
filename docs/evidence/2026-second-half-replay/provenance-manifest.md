@@ -10,34 +10,60 @@ recovery store under the evidence policy in [README.md](README.md).
 | Field | Value |
 |---|---|
 | Source state | Completed first-half replay through BBBFFL Round 9 |
-| Paired database/checkpoint verification | PASS; retained privately |
-| Checkpoint stage | `final-results` |
+| Source application baseline | `3abc503` |
+| Source database migration | `0026_lineup_adjudication` |
+| Paired database/checkpoint verification | PASS; private SHA-256 verification retained by operator |
+| Checkpoint effective time / stage | `2026-05-10T10:15:00Z` / `final-results` |
+| Finalised AFL round ids | 1343–1352 |
 | First-half evidence baseline | Verified against `docs/evidence/2026-first-half-replay/` before continuation |
 
 The second-half replay was created from a copy of the completed first-half
 working database rather than a new season bootstrap, preserving the earlier
-2026 submissions, results, ladder and audit history.
+2026 submissions, results, ladder and audit history. The private source archive
+and matching checkpoint remain integrity-bound by the operator's retained
+SHA-256 manifest; repository documentation records their executable/schema and
+checkpoint identity without publishing private recovery filenames or hashes.
 
 ## Second-half working copy
 
 | Field | Value |
 |---|---|
 | Working database | `bbbffl_2026_second_half` |
-| Restore/migration result | PASS |
+| `restored_from` | verified first-half Round 9 closeout pair described above (`2026-05-10T10:15:00Z`, `final-results`, AFL rounds 1343–1352) |
+| Application commit at restore | `3abc503` (confirmed by local reflog; restore archive created before the subsequent pull away from this commit) |
+| Migration head at restored baseline | `0026_lineup_adjudication` (confirmed by restoring the pre-migration archive into an isolated PostgreSQL database and running `python -m app.migrations current`) |
+| Database engine | PostgreSQL 16 |
+| Replay-clock assumption | replay time is supplied by the paired replay checkpoint; database and checkpoint are treated as one recovery boundary |
+| Provider-evidence assumption | second-half AFL evidence is acquired/validated ahead of replay and replay execution is isolated from live provider mutation |
 | Rounds 1–9 history retained | PASS |
 | Existing squads/ownership retained | PASS |
 | Existing official-result/audit history retained | PASS |
+
+A separate private pre-Round-10 recovery pair was then captured after the
+supported continuation/migration preparation. Its replay checkpoint was
+`2026-05-10T10:15:00Z`, stage `scheduled`, with no second-half AFL rounds yet
+finalised. This distinguishes the original restored Round 9 baseline from the
+ready-to-enter-Round-10 working state.
 
 ## 9-to-20-round continuation (issue #178 / PR #179)
 
 | Field | Value |
 |---|---|
 | Season id | `3832745c-c19a-4224-bceb-86ded6baa09c` |
+| Fixture draw id | `433ec8d9-a585-4cea-b5fe-d9cfdcabd40b` |
+| Fixture draw version after continuation | `3` |
 | Ordinary season length | extended from 9 to 20 rounds |
 | Existing Round 1–9 identities/history | preserved |
 | New ordinary rounds | Rounds 10–20 appended through supported continuation workflow |
+| Rotation version | `bbbffl-workbook-2026-v1` |
+| `replay.season.continued` audit event | `c0cd5471-90a2-422c-8487-ada9d2eed837` |
+| `fixture.draw.continued` audit event | `f081c8f1-dc5f-47f6-857c-a8d123c51e0f` |
+| Continuation reason | `2026 second-half replay continuation before Round 10` |
 | Idempotent status/validation | PASS |
-| Raw continuation audit identifiers | retained in private operator record |
+
+The continuation audit payload records preserved rounds 1–9, appended rounds
+10–20, creation of logical `round-10` through `round-20`, fixture draw version
+3 and the workbook rotation version above.
 
 ## Round 10 pre-draft boundary
 
@@ -89,7 +115,11 @@ rounds to reduce the risk of repetitive manual replay entry.
 | Round 20 lifecycle | final/published |
 | Mathematical ladder reproducible | PASS; recorded in `round-results.md` |
 | Earlier 2026 history retained | PASS |
+| Replay checkpoint effective time / stage | `2026-07-26T11:15:00Z` / `final-results` |
+| Finalised second-half AFL round ids | 1353–1363 |
 | End-of-home-and-away database/checkpoint snapshots | retained privately before finals-seeding apply |
+| Application handoff commit | `6fe937cf16343f3c0b2d0f3accd4a0168450441f` (`bbbffl:6fe937c`) |
+| Migration head at finals handoff | `0028_finals_seeding` |
 | Known material historical divergence | Round 12 and Round 13 winner-changing Scorer errors; documented in `finals-seeding-2026.md` |
 
 This paired restore point is the recovery boundary for the handoff to finals and

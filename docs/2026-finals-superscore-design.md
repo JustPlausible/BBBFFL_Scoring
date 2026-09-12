@@ -1320,7 +1320,9 @@ new needs inventing here, only applying:
   completeness while an earlier finals or SuperScore round remains missing,
   `review`, or otherwise unfinished. The archival step must also assert it is
   reading the completed season version established by step 5 and identified by
-  the completion event.
+  the completion event. **#195 owns steps 1-6 and ends by exposing that stable
+  completed-season version/completion-event identifier. #194 alone owns step 7
+  and its backup/recovery verification.**
 - **Backup/recovery**: identical `pg_dump`/`pg_restore` procedure as the
   rest of the second-half playbook; a not-yet-written finals/SuperScore
   playbook (already anticipated by section L of the current playbook)
@@ -1381,7 +1383,9 @@ new needs inventing here, only applying:
   the resulting lifecycle state is then enforced by every
   result-changing transaction, so a waiting correction cannot commit after
   the locks release and silently stale the checkpoint. Only after that durable
-  fence commits may the final archival/checkpoint evidence be created.
+  fence commits may #194 create the final archival/checkpoint evidence; #195's
+  completion acceptance ends at the committed, externally consumable completed
+  version/event identifier and does not include archive creation.
 
 ## Historical gaps requiring Steve's confirmation
 
@@ -1577,22 +1581,7 @@ order (each row's "Depends on" names the prerequisite rows):
    must also take the owning season-row lock and reject a completed season in
    that same write transaction.**
    Depends on: #192.
-6. **[#194 — Operator audit/correction/recovery support for finals and SuperScore](https://github.com/JustPlausible/BBBFFL_Scoring/issues/194)**
-   — the finals/SuperScore-specific audit action catalogue, checkpoint
-   procedure extending the second-half playbook (or a new
-   `2026-finals-replay` evidence directory), and the operator playbook
-   itself (the "not-yet-written" document section L of the second-half
-   playbook already anticipates). Its end-of-season checkpoint acceptance
-   criteria must document and test the ordered handoff: #195 verifies the full
-   set (every required finals round plus SS1-SS4 all `final`), atomically
-   materialises/verifies both provenance-bound award records, establishes the
-   completed-season fence, and commits; only then does #194 capture archival
-   evidence bound to that completed season version and containing/identifying
-   those award versions. It must never checkpoint Grand Final + SS4 alone,
-   omit either award, or capture the final archive from an unfenced active
-   season. Depends on: #191, #193 and #195 (needs the real operations, awards,
-   and completed-season fence to document).
-7. **[#195 — End-of-season completion, premiership/wooden-spoon recording and 2026/2027 archival isolation](https://github.com/JustPlausible/BBBFFL_Scoring/issues/195)**
+6. **[#195 — End-of-season completion, premiership/wooden-spoon recording and 2026/2027 archival isolation](https://github.com/JustPlausible/BBBFFL_Scoring/issues/195)**
    — the premiership/wooden-spoon audit event and record, the
    season-completion lifecycle transition, and the focused implementation of
    `Season.lifecycle_state == "completed"` as a durable write fence for
@@ -1611,14 +1600,27 @@ order (each row's "Depends on" names the prerequisite rows):
    remains missing or inconsistent; (d) only after the awards are valid does it
    record the completion audit event and mark the season completed, then commit;
    (e) a correction queued behind completion observes `completed` and mutates
-   nothing; and (f) final archival evidence is created only after that commit,
-   is bound to the completed season version, and identifies both award
-   versions. Award re-recording is available only while active. No reopen
-   bypass is included; any future reopen requires a separately designed,
-   reason-carrying audited path that invalidates/supersedes the previous
-   checkpoint marker.** Depends on:
-   #191 and #193 (needs every finals and SuperScore round to be finalisable);
-   #194 consumes this boundary for the final evidence step.
+   nothing; and (f) the committed command exposes a stable completed-season
+   version and completion-event identifier for downstream consumers. Award
+   re-recording is available only while active. No reopen bypass is included;
+   any future reopen requires a separately designed, reason-carrying audited
+   path that invalidates/supersedes the previous checkpoint marker. **Archive
+   creation is explicitly not part of #195's acceptance criteria.** Depends
+   on: #191 and #193 (needs every finals and SuperScore round to be
+   finalisable).
+7. **[#194 — Operator audit/correction/recovery support for finals and SuperScore](https://github.com/JustPlausible/BBBFFL_Scoring/issues/194)**
+   — the finals/SuperScore-specific audit action catalogue, checkpoint
+   procedure extending the second-half playbook (or a new
+   `2026-finals-replay` evidence directory), and the operator playbook itself
+   (the "not-yet-written" document section L of the second-half playbook already
+   anticipates). **#194 exclusively owns final archive/checkpoint creation.**
+   Its acceptance criteria must document and test consuming #195's committed
+   completed-season version/completion-event identifier, creating the archive
+   only afterward, and verifying that the evidence is bound to that exact
+   version/event and contains or identifies both award versions. It must never
+   checkpoint Grand Final + SS4 alone, omit either award, or capture the final
+   archive from an unfenced active season. Depends on: #191, #193 and #195
+   (needs the real operations and #195's stable completed boundary).
 
 Each issue should carry: the relevant confirmed-rule excerpts
 from this document (not a re-derivation), the specific historical-gap

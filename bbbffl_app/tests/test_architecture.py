@@ -132,6 +132,18 @@ GRAND_FINAL_VERTICAL = {
 # reached only via an already-constructed instance on `request.app.state`.
 ROUND_REVIEW = {"app.round_review"}
 
+# Finals bracket generation and lifecycle (issue #190): the finals-stream
+# counterpart to `app.round_review` -- it sits directly on top of the
+# persisted season model (`app.competition_lifecycle` for the finals
+# round/matchup transaction, `app.ladder` and `app.finals_seeding` for its
+# one-time, never-repeated seed read) rather than being a sibling of it,
+# because it too is meant to be imported directly by a route
+# (`app/routes/finals_preflight.py`) exactly the way `app.round_review` is
+# (see this file's ROUND_REVIEW comment). It builds no bracket logic into
+# `app.ladder`/`app.finals_seeding` themselves -- those remain read-only
+# dependencies, never depended upon in the other direction.
+FINALS = {"app.finals"}
+
 # Anonymous ordinary-season presentation/read service (issue #78).  It is an
 # allow-listed DTO layer above the persisted review and ladder boundaries;
 # routes may import it, while it never depends on HTTP or the composition root.
@@ -230,6 +242,17 @@ REPLAY_BOOTSTRAP = {"app.replay_bootstrap", "app.replay_continuation", "app.fina
 # dependency on HTTP or the composition root.
 ROUND_PREFLIGHT = {"app.round_preflight"}
 
+# Finals-week preflight/open-round adapter (issue #190): the finals-stream
+# counterpart to `app.round_preflight` -- an application read model over
+# `app.finals` (bracket/pairing state) and `app.round_mapping` (the
+# accepted AFL mapping a finals week needs exactly like an ordinary round).
+# Like `app.round_preflight`, this is the one permitted source
+# `app/routes/finals_preflight.py` reaches `app.round_mapping` through --
+# it must never import `app.round_mapping`/`app.competition_lifecycle`
+# directly (see this file's ROUND_PREFLIGHT/test_routes_never_import_
+# persistence_or_season_model_directly).
+FINALS_PREFLIGHT = {"app.finals_preflight"}
+
 # Scorer Operations Dashboard (issue #147): an aggregation/navigation read
 # model over the season model, lockouts, round preflight (#152), round
 # review (#58) and audit boundaries -- the same shape as
@@ -275,6 +298,7 @@ ROUTES = {
     "app.routes.scorer_dashboard",
     "app.routes.admin_dashboard",
     "app.routes.midseason_draft",
+    "app.routes.finals_preflight",
 }
 
 COMPOSITION_ROOT = {"app.main"}
@@ -289,6 +313,7 @@ ALL_GROUPS = (
     | AFL_EVIDENCE
     | REPLAY
     | ROUND_REVIEW
+    | FINALS
     | PUBLIC_READ_MODEL
     | OPENING_ROUND
     | AUTH
@@ -298,6 +323,7 @@ ALL_GROUPS = (
     | DRAFT_BOARD
     | REPLAY_BOOTSTRAP
     | ROUND_PREFLIGHT
+    | FINALS_PREFLIGHT
     | SCORER_DASHBOARD
     | ADMIN_DASHBOARD
     | ROUTES
@@ -564,6 +590,23 @@ def test_round_review_does_not_depend_on_routes_grand_final_or_composition_root(
     for module in sorted(ROUND_REVIEW):
         offending = graph[module] & forbidden
         assert not offending, f"{module} must not depend on {sorted(offending)}"
+
+
+def test_finals_does_not_depend_on_routes_grand_final_lockouts_or_composition_root(graph):
+    """`app.finals` (issue #190) sits directly on the season model plus
+    `app.finals_seeding` (its one-time seed read) -- but must stay a
+    sibling of the Grand Final vertical and must never depend on lockouts,
+    routes, or the composition root, exactly like `app.round_review`. The
+    reverse direction also holds: neither the season model nor
+    `app.finals_seeding` (replay bootstrap) may depend back on `app.finals`
+    -- it is a consumer of both, never a dependency of either."""
+    forbidden = GRAND_FINAL_VERTICAL | LOCKOUTS | ROUTES | COMPOSITION_ROOT
+    for module in sorted(FINALS):
+        offending = graph[module] & forbidden
+        assert not offending, f"{module} must not depend on {sorted(offending)}"
+
+    for module in sorted(SEASON_MODEL | LOCKOUTS | WEEKLY_SUBMISSION_SOURCES | REPLAY_BOOTSTRAP):
+        assert "app.finals" not in graph[module], f"{module} must not depend on app.finals"
 
 
 def test_opening_round_does_not_depend_on_grand_final_routes_or_composition_root(graph):

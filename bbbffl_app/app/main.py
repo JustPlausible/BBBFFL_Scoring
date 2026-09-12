@@ -80,6 +80,7 @@ from app.routes import coach_lineup as coach_lineup_routes
 from app.routes import context as context_routes
 from app.routes import delegated_operations as delegated_operations_routes
 from app.routes import draft as draft_routes
+from app.routes import finals_preflight as finals_preflight_routes
 from app.routes import fixture_setup as fixture_setup_routes
 from app.routes import lineup_adjudication as lineup_adjudication_routes
 from app.routes import lineup_correction as lineup_correction_routes
@@ -285,6 +286,7 @@ app.include_router(round_review_routes.router)
 app.include_router(round_review_routes.page_router)
 app.include_router(round_preflight_routes.router)
 app.include_router(round_preflight_routes.page_router)
+app.include_router(finals_preflight_routes.router)
 app.include_router(season_centre_routes.router)
 app.include_router(season_centre_routes.page_router)
 app.include_router(fixture_setup_routes.router)

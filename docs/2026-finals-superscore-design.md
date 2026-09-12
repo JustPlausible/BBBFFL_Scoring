@@ -1079,6 +1079,51 @@ completion, premiership/wooden-spoon correction or re-recording is rejected by
 the completed-season fence unless a separately designed audited reopen pathway
 has first returned the season to a writable state.
 
+### Resolution (issue #190, implemented): finals bracket generation and lifecycle
+
+Issue #190 is implemented in `app.finals` (`FinalsBracketRepository`),
+`app.finals_preflight`, `app/routes/finals_preflight.py`, migration
+`0030_finals_bracket.py`, and `scripts/finals_bracket_2026.py`, matching this
+design exactly, including both items Steve has now confirmed above (the
+tie-break rule and the correction/rewind policy — see "Historical gaps"
+items 3 and 4):
+
+- `finals_bracket`/`finals_bracket_seed`/`finals_bracket_result_reference`
+  freeze the seed order and its exact provenance at creation, via the
+  single-read-plus-locked-recheck mechanism "Seed consumption" describes —
+  never a call to `resolve_finals_seed_order` itself, and never re-resolved
+  afterwards.
+- `finals_bracket_week` gives each of the four weeks its own `bbbffl_round`
+  container (created together with the bracket) and its own
+  `round_afl_mapping`, confirmed the same way an ordinary round's is.
+- `finals_bracket_pairing`/`finals_bracket_elimination` are append-only in
+  effect (a correction supersedes, never overwrites — `status='active'` vs
+  `'superseded'`, linked by `superseded_by_*_id`), materialising Week 1's
+  bye/Qualifying Final/Elimination Final at bracket creation and deriving
+  each later week's pairing(s) and the one elimination each of Weeks 1-3
+  determines via `advance_bracket`.
+- `open_finals_week`/`app.finals_preflight` are the stream-aware preflight/
+  open-round adapter this design's "Coach lineup/submission behaviour" and
+  "Match generation/representation" sections require, since
+  `app.round_preflight`'s ordinary adapter hard-requires a five-matchup
+  frozen fixture a finals week never has.
+- `advance_bracket` and `rewind_bracket` both `SELECT ... FOR UPDATE` every
+  prerequisite `bbbffl_matchup` row, in deterministic (sorted `matchup_id`)
+  order, inside the same transaction that derives and persists a pairing —
+  proven under genuine competing PostgreSQL transactions in
+  `tests/test_finals_postgresql.py`, not merely an unlocked re-`SELECT`.
+  Because a finals matchup's official result lives in the same
+  `bbbffl_matchup`/`bbbffl_official_result` tables an ordinary matchup uses
+  (issue #197's Path 1), the existing `CompetitionLifecycleRepository.
+  correct_matchup_result` boundary already serializes against this same row
+  lock with no additional coordination code needed — the shared locking
+  contract #191 must honour for its own eventual publish/correction command.
+- This module still implements no coach lineup submission, scoring, or
+  result publication — the only "publish" it ever performs is materialising
+  a *pairing* into a real (score-less) `bbbffl_matchup` row; #191 owns
+  everything from lineup submission through publishing a finals week's
+  actual scores, on top of the bracket this issue builds.
+
 ## SuperScore design
 
 ### Confirmed historical requirements
@@ -1848,66 +1893,55 @@ consistent with confirmed rules but not itself a league rule), and
    contents (lineups and/or scores for SS1-SS4) be supplied as replay
    evidence, analogous to how the fixture-rotation table was extracted from
    the workbook for the ordinary season?
-3. **Unresolved: which seed number a tied final resolves against.**
-   `2027-season-model.md` says a tied final is won by "the team that
-   finished higher on the final home-and-away ladder." For the 2026 replay
-   specifically, that phrase is now ambiguous between two different,
-   non-identical orderings that both exist in this database: the
+3. **Resolved (Steve, issue #190 comment): which seed number a tied final
+   resolves against.** `2027-season-model.md` says a tied final is won by
+   "the team that finished higher on the final home-and-away ladder." For
+   the 2026 replay specifically, that phrase was ambiguous between two
+   different, non-identical orderings that both exist in this database: the
    *mathematical* Round 20 ladder rank, and the *historical finals-seeding
    snapshot* order (they disagree for exactly the three teams named in
-   issue #187 — Running Hots, Evil Absolutes, Motherruckers). Since the
-   finals bracket itself is built from the seeding snapshot, the internally
-   consistent choice is almost certainly "resolve a tie by the same seed
-   order that determined the bracket" (i.e. the snapshot order when one
-   exists) — but this is an **implementation recommendation**, not yet a
-   confirmed rule, and should be confirmed explicitly given the whole point
-   of issue #187 was to keep these two orderings from being silently
-   conflated.
-4. **Unresolved: correcting a finals result after the bracket has already
-   advanced past it.** No source reviewed (season model, decisions,
-   workbook findings) addresses what happens if a Week-1 result is
-   corrected after Week 2's pairing (derived from it) has already been
-   generated and possibly played. **Question for Steve:** should this be
-   (a) blocked outright (a finals result becomes uncorrectable once the
-   next week's round has opened), (b) require an explicit cascading
-   re-derivation with its own audited confirmation, or (c) handled as a
-   manual Scorer/quorum ruling recorded through the ordinary correction
-   pathway with no automatic cascade? This should be settled before the
-   finals-lifecycle follow-up issue is implemented, not discovered mid-PR.
-   **Whichever answer Steve gives must also cover the separately-persisted
-   `finals_bracket_elimination` record, not only downstream pairings —
-   verified directly against "Progression and elimination" above (Codex
-   review, PR #196, seventeenth round).** A correction that flips who won
-   the Elimination Final, First Semi-Final, or Preliminary Final also flips
-   who should be recorded as eliminated by it. Options (a)/(b)/(c) above
-   were framed only in terms of blocking or re-deriving the *next week's
-   pairing*; even under (b)'s cascading re-derivation, the elimination
-   record itself must be included in that same cascade (a new elimination
-   revision superseding the old one, audited the same way), or the
-   explicit elimination history keeps naming the original, now-incorrect
-   loser even after the pairing downstream of it has been fixed.
-   **Option (b)'s scope is narrower than it needs to be even with the
-   elimination fix above, if the downstream week has already been played
-   or published — Codex review, PR #196, twenty-ninth round.** Superseding
-   only the pairing and elimination records is not enough once the
-   downstream week has its own submitted lineups, rulings, a calculation,
-   and an immutable published official result attached to the *old*
-   (now-incorrect) participants: a corrected Week 1 winner can produce a
-   Week 2 pairing whose already-published official score was earned by
-   teams that, after the correction, should never have played each other
-   at all. **Option (b), if chosen, must therefore itself decide between
-   two sub-options, and this document does not pick between them: (b-i)
-   block the cascade once any downstream play state exists — lineups
-   submitted, a ruling recorded, a calculation run, or a result published
-   — reducing to something closer to option (a) from that point forward;
-   or (b-ii) define an audited invalidation/versioning-and-replay
-   procedure for every affected downstream artifact — lineups, rulings,
-   calculation, and official result, not merely the pairing and
-   elimination rows — for every week the correction's cascade reaches.**
-   Whichever of (a), (b-i), (b-ii), or (c) Steve confirms, the answer must
-   explicitly state which downstream artifacts a cascade is allowed to
-   touch, not only "the pairing" as an earlier draft of this document
-   implied.
+   issue #187 — Running Hots, Evil Absolutes, Motherruckers). Steve has now
+   confirmed the internally consistent answer this section's earlier
+   recommendation anticipated: **a tied finals match, including the Grand
+   Final, is won by the team with the higher frozen finals seed captured
+   when the finals bracket was created (the end-of-home-and-away finals-
+   seeding order)** — never a live/recomputed ladder, never percentage/PF/
+   points-for, and never re-derived at tie-break time. Implemented in
+   `app.finals.FinalsBracketRepository._winner_loser` (issue #190); every
+   seed comparison reads the bracket's own frozen `finals_bracket_seed`
+   rows, never `app.ladder`/`app.finals_seeding` again.
+4. **Resolved (Steve, issue #190 comment): correcting a finals result after
+   the bracket has already advanced past it.** No source reviewed (season
+   model, decisions, workbook findings) addressed what happens if a Week-1
+   result is corrected after Week 2's pairing (derived from it) has already
+   been generated and possibly played, and (per the seventeenth/twenty-ninth
+   Codex review rounds below) whether such a correction may also touch the
+   separately-persisted `finals_bracket_elimination` record and any
+   downstream play state. Steve has now confirmed **option (b-i)**: an
+   audited Scorer/Admin correction (through the normal, already-finals-
+   compatible correction boundary,
+   `CompetitionLifecycleRepository.correct_matchup_result`) always
+   preserves the original official-result version, pairing and elimination
+   history — never destructively overwritten. A separate, explicit,
+   operator-driven rewind/re-derivation step (preview-before-apply, actor/
+   reason audit provenance) may then supersede and regenerate the
+   *immediately* downstream pairing and its associated elimination record
+   together, atomically, but only while that downstream week has **no
+   downstream play state** — defined as at least: an authoritative lineup
+   submission, a genuinely locked position, a ruling/adjudication/override,
+   a persisted calculation, or a published official result. If any such
+   play state exists, the rewind fails closed and reports the affected
+   artifacts for a human competition decision; it never automatically
+   invalidates/replays them, and it never automatically recurses through
+   already-played downstream finals (a correction two weeks upstream of an
+   already-existing pairing is always blocked by that pairing's own
+   downstream week already necessarily having a published result, per the
+   causal ordering `advance_bracket` enforces). Implemented in
+   `app.finals.FinalsBracketRepository.rewind_bracket`/
+   `DownstreamPlayStateError` (issue #190); see
+   `tests/test_finals_rewind.py` for the full behaviour, including a test
+   proving the downstream pairing and elimination record can never describe
+   two different effective winners of the same corrected match.
 5. **Unresolved: SuperScore prize amounts/configuration for the 2026
    replay.** `2027-season-model.md` confirms a monetary prize exists per
    SuperScore round but this investigation found no specific 2026 amount

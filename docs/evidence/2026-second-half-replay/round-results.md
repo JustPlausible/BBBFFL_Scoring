@@ -46,3 +46,15 @@ no replay override should be introduced where it does not change a verified
 match outcome, and any variance material to draft or finals seeding must be
 reconciled through an explicit, evidence-backed administrative decision
 before it is used for that purpose.
+
+**Finals-seeding-material variance (issue #187).** Two Round 12/13 historical
+Scorer-error outcomes changed match winners and therefore the historical
+finals-seeding order for three teams (Running Hots, Evil Absolutes,
+Motherruckers) without being reconciled into the mathematical Round 20
+ladder -- see
+[`finals-seeding-2026.md`](finals-seeding-2026.md) for the full rationale
+and the audited snapshot mechanism (`app.finals_seeding`,
+`scripts/finals_seeding_2026.py`) that records the historical order for the
+finals/SuperScore replay to consume. No other score/PF/PA discrepancy
+recorded in this section changed a match winner, so none of them are
+reconciled by that mechanism.

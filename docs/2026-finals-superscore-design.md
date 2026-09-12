@@ -18,7 +18,10 @@ the finals or SuperScore system. This document is that plan, and the
 "Follow-up issues" section is its decomposition into implementable work.
 Season completion here means every required finals round **and** each of SS1,
 SS2, SS3 and SS4 has reached lifecycle state `final`; a final Grand Final and
-SS4 do not compensate for an unfinished earlier round in either stream.
+SS4 do not compensate for an unfinished earlier round in either stream. It
+also requires current, internally consistent premiership and wooden-spoon
+records bound to the effective result/snapshot versions from which they were
+derived; #195 atomically materialises them before setting `completed`.
 
 This document does **not** reopen the mathematical-ladder-vs-historical-seed
 decision (issue #169/#187/PR #188) and does not introduce a generic ladder
@@ -846,36 +849,32 @@ choice**: under the parallel-storage path, a finals matchup is never a
 
 ### Grand Final/season winner recording and end-of-season completion
 
-New: an explicit `season.premiership.recorded` (or similar) audit event and
-a small persisted record (premier `season_entry_id`, runner-up, Grand Final
-official-result reference) once the Grand Final is published — this is the
-"season winner" fact the 2027 season model's "Historical records" section
-expects to exist. The wooden spoon (last place, 10th on the home-and-away
-ladder — **not** finals-related) should be recorded the same way at the
-same time, since both are facts available as soon as Round 20's ladder is
-locked, independent of finals: no design tension there, just a small
-addition. See "End-of-season completion" in the shared audit section below
-for how this interacts with `Season.lifecycle_state`.
+New: explicit `season.premiership.recorded` and `season.wooden_spoon.recorded`
+(or one equivalent awards event) audit provenance plus persisted, versioned
+records. The premiership record contains the premier `season_entry_id`,
+runner-up, exact effective Grand Final official-result version, and its frozen
+bracket/finals-seeding provenance. The wooden-spoon record contains the last-
+placed `season_entry_id` and the frozen Round 20 mathematical-ladder snapshot/
+effective-result references used to establish that fact — it is an H&A fact,
+not derived from the finals bracket or historical finals-seeding order.
 
-**Unresolved: what happens to these two records if the result they were
-derived from is later corrected — flagged (Codex review, PR #196, tenth
-round), not resolved by this document.** The ordinary competition supports
-a post-final result correction (a new reason-carrying official-result
-version, per `docs/competition-lifecycle.md`). If a Grand Final correction
-changes the winner, or a Round 20 home-and-away correction changes who
-finished last, the separately persisted premiership/wooden-spoon record
-would keep naming the original entry unless something re-derives it — and
-unlike a mid-bracket finals result, the Grand Final has no downstream
-pairing to cascade through, so this is a distinct question from historical-
-gap #4 above, not the same one restated. #195 must decide: (a) derive these
-facts live from effective results on every read rather than persisting a
-frozen record at all, or (b) persist a frozen record but give it its own
-audited re-recording path triggered by a relevant correction. Confirm with
-Steve which is intended, or propose one explicitly with tradeoffs, before
-#195 implements either.
-Whichever representation #195 chooses, its correction/re-derivation path is
-available only before season completion unless a separately designed audited
-reopen pathway has first returned the season to a writable state.
+**#195 materialises both canonical award records inside the completion
+transaction, before establishing the completed-state fence.** After taking the
+season lock and locking/re-verifying the prerequisite effective result and
+snapshot rows, it derives both awards. If an identical current award version
+already exists, this step is idempotent; if an active-season correction made an
+existing award stale, it appends an audited superseding version in the same
+transaction. It must fail closed rather than complete if either award cannot be
+derived, its referenced result/snapshot version is no longer effective, or the
+two persisted current records do not exactly match those locked inputs. This
+removes any crash window in which the season could become completed before its
+required historical awards exist.
+
+Before completion, an ordinary Round 20 or Grand Final correction that changes
+an award may use this same reason-carrying re-recording boundary. After
+completion, premiership/wooden-spoon correction or re-recording is rejected by
+the completed-season fence unless a separately designed audited reopen pathway
+has first returned the season to a writable state.
 
 ## SuperScore design
 
@@ -1274,7 +1273,8 @@ new needs inventing here, only applying:
   `finals.result.published`, `finals.result.corrected`,
   `finals.elimination.recorded`, `superscore.round.opened`,
   `superscore.result.published`, `superscore.result.corrected`,
-  `season.premiership.recorded`) — never repurposing an existing action.
+  `season.premiership.recorded`, `season.wooden_spoon.recorded`,
+  `season.completed`) — never repurposing an existing action.
 - **Append-only, immutable published results**: finals and SuperScore
   official results follow the same "new version on correction, prior
   version protected by a database trigger" pattern as ordinary results and
@@ -1287,12 +1287,13 @@ new needs inventing here, only applying:
   correction, finals correction and any cascade of pairings/eliminations,
   SuperScore correction/republication, and premiership/wooden-spoon
   re-recording. The completion command takes the **same season-row lock**,
-  verifies the full round predicate, records the completion audit event, and
-  changes the lifecycle state to `completed` atomically. A correction already
-  holding the lock finishes before completion can verify; a correction waiting
-  behind completion acquires the lock afterward, observes `completed`, and
-  writes nothing. Checking lifecycle state outside that transaction, or only
-  at the route layer, is insufficient.
+  verifies the full round predicate, atomically materialises and verifies the
+  two award records against their locked provenance, records the completion
+  audit event, and changes the lifecycle state to `completed`. A correction
+  already holding the lock finishes before completion can verify; a correction
+  waiting behind completion acquires the lock afterward, observes `completed`,
+  and writes nothing. Checking lifecycle state outside that transaction, or
+  only at the route layer, is insufficient.
 
   There is no implicit administrative bypass. Reopening is outside this
   focused implementation; until a separate audited `reopen completed season`
@@ -1306,16 +1307,20 @@ new needs inventing here, only applying:
   (already done, see the provenance manifest's "Round 20 / home-and-away
   boundary"), then after each finals week finalises and after each
   SuperScore round finalises. Final archival evidence follows this strict
-  order: (1) under the season-row lock, fail-closed verification that **every
-  required finals round** is in lifecycle state `final` and that **all four
-  named SuperScore rounds, SS1-SS4,** exist and are `final`; (2) in that same
-  transaction, establish the durable completed-season write fence and its
-  audit event; then (3), only after that transaction commits, create the final
+  order: (1) lock the owning season row; (2) fail-closed verification that
+  **every required finals round** is in lifecycle state `final` and that **all four
+  named SuperScore rounds, SS1-SS4,** exist and are `final`; (3) lock the
+  effective Grand Final result and frozen Round 20 ladder/bracket provenance,
+  then idempotently create or supersede the premiership and wooden-spoon
+  records so both exactly reference those effective versions; (4) record the
+  completion audit event; (5) transition the season to `completed`; (6) commit
+  that single transaction; then (7), only afterward, create the final
   database/checkpoint evidence from the now-fenced completed state and bind it
   to the completion event/version. Grand Final + SS4 alone must never imply
   completeness while an earlier finals or SuperScore round remains missing,
   `review`, or otherwise unfinished. The archival step must also assert it is
-  reading the completed season version recorded by step 2.
+  reading the completed season version established by step 5 and identified by
+  the completion event.
 - **Backup/recovery**: identical `pg_dump`/`pg_restore` procedure as the
   rest of the second-half playbook; a not-yet-written finals/SuperScore
   playbook (already anticipated by section L of the current playbook)
@@ -1371,8 +1376,9 @@ new needs inventing here, only applying:
   Checking only the terminal labels (Grand Final and SS4), or merely checking
   that their results were published, is not valid evidence that the preceding
   rounds completed. The same full-set predicate gates the final archival
-  checkpoint. The predicate is rechecked in the transaction that marks the
-  season completed; the resulting lifecycle state is then enforced by every
+  checkpoint. The predicate and both provenance-bound award records are
+  rechecked/materialised in the transaction that marks the season completed;
+  the resulting lifecycle state is then enforced by every
   result-changing transaction, so a waiting correction cannot commit after
   the locks release and silently stale the checkpoint. Only after that durable
   fence commits may the final archival/checkpoint evidence be created.
@@ -1579,11 +1585,13 @@ order (each row's "Depends on" names the prerequisite rows):
    playbook already anticipates). Its end-of-season checkpoint acceptance
    criteria must document and test the ordered handoff: #195 verifies the full
    set (every required finals round plus SS1-SS4 all `final`), atomically
-   establishes the completed-season fence, and commits; only then does #194
-   capture archival evidence bound to that completed season version. It must
-   never checkpoint Grand Final + SS4 alone or capture the final archive from
-   an unfenced active season. Depends on: #191, #193 and #195 (needs the real
-   operations and completed-season fence to document).
+   materialises/verifies both provenance-bound award records, establishes the
+   completed-season fence, and commits; only then does #194 capture archival
+   evidence bound to that completed season version and containing/identifying
+   those award versions. It must never checkpoint Grand Final + SS4 alone,
+   omit either award, or capture the final archive from an unfenced active
+   season. Depends on: #191, #193 and #195 (needs the real operations, awards,
+   and completed-season fence to document).
 7. **[#195 — End-of-season completion, premiership/wooden-spoon recording and 2026/2027 archival isolation](https://github.com/JustPlausible/BBBFFL_Scoring/issues/195)**
    — the premiership/wooden-spoon audit event and record, the
    season-completion lifecycle transition, and the focused implementation of
@@ -1593,15 +1601,22 @@ order (each row's "Depends on" names the prerequisite rows):
    including ordinary corrections, finals corrections/cascades, SuperScore
    corrections/republication, and derived premiership/wooden-spoon changes;
    each takes the owning season-row lock in its write transaction and rejects
-   `completed`; (b) the completion command takes that same lock, rechecks under
-   lock/CAS that every required finals round and SS1-SS4 are all `final`, then
-   atomically records its audit event and marks the season completed—Grand
-   Final + SS4 is explicitly insufficient; (c) a correction queued behind
-   completion observes `completed` and mutates nothing; and (d) final archival
-   evidence is created only after the completion transaction commits and is
-   bound to that completed season version. No reopen bypass is included; any
-   future reopen requires a separately designed, reason-carrying audited path
-   that invalidates/supersedes the previous checkpoint marker.** Depends on:
+   `completed`; (b) the completion command takes that same lock and rechecks
+   under lock/CAS that every required finals round and SS1-SS4 are all `final`—
+   Grand Final + SS4 is explicitly insufficient; (c) while still in that
+   transaction, it locks the effective Grand Final result and frozen Round 20
+   ladder/bracket provenance, then idempotently creates or appends superseding
+   premiership and wooden-spoon versions whose references exactly match those
+   locked inputs, failing closed if either award cannot be derived/persisted or
+   remains missing or inconsistent; (d) only after the awards are valid does it
+   record the completion audit event and mark the season completed, then commit;
+   (e) a correction queued behind completion observes `completed` and mutates
+   nothing; and (f) final archival evidence is created only after that commit,
+   is bound to the completed season version, and identifies both award
+   versions. Award re-recording is available only while active. No reopen
+   bypass is included; any future reopen requires a separately designed,
+   reason-carrying audited path that invalidates/supersedes the previous
+   checkpoint marker.** Depends on:
    #191 and #193 (needs every finals and SuperScore round to be finalisable);
    #194 consumes this boundary for the final evidence step.
 

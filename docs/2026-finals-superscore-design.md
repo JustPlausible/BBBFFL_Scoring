@@ -385,17 +385,39 @@ that exact set of matchups, inside the same transaction that inserts
 `finals_bracket`, and abort (for the caller to retry step 2 from scratch)
 if any has changed**, the same compare-and-swap discipline `app.carry_
 forward.CarryForwardService.carry_forward` already applies to a carried-
-forward lineup's source submission via `require_unchanged`, rather than a
-plain read followed by an unguarded write. `app.midseason_draft.
-confirm_ladder` (which this design otherwise mirrors for the "freeze an
-independent copy" pattern) does not re-verify result freshness this way
-either — it only re-checks the season's trigger-round *configuration*
-between its two transactions, not the ladder's own result versions — so it
-is not a sufficient precedent to copy for this specific check; fixing that
-gap in `confirm_ladder` itself is existing ordinary-season code and out of
-scope for this document. This requirement applies only to the ladder-
-fallback path (step 2); the snapshot path (step 1) reads an already-
-immutable `FinalsSeedingRepository` snapshot at bracket-creation time, so
+forward lineup's source submission via `require_unchanged`.
+
+**A further correction (Codex review, PR #196, fifteenth round): moving
+that re-check inside the transaction is not, by itself, atomic unless the
+re-checked rows are actually locked, not merely re-read — verified directly
+against `app/lineups.py`'s own implementation of `require_unchanged`.**
+Under PostgreSQL's default READ COMMITTED isolation, a plain `SELECT`
+re-check inside the bracket-creation transaction can still observe the
+pre-correction version and then have a concurrent `correct_matchup_result`
+acquire its own row lock, update, and commit — all before the bracket's own
+`INSERT` commits — leaving the bracket frozen against a version that is
+already stale by the time it is persisted, exactly as before this fix.
+`require_unchanged`'s own implementation is not merely "the same
+discipline" in the abstract; it is safe specifically because it locks the
+source row with `SELECT ... FOR UPDATE` (via `app.db._for_update_suffix`)
+before comparing its version, not because it re-reads inside a transaction
+per se. The bracket-creation transaction must do the same: `SELECT ...
+FOR UPDATE` every captured matchup row, in a deterministic order (e.g.
+sorted by `matchup_id`, to avoid a deadlock against another concurrent
+locker of the same rows), *before* comparing each one's current version
+against its captured `result_references` entry — a plain unlocked
+re-`SELECT` does not close this race, only an explicit lock does. `app.
+midseason_draft.confirm_ladder` (which this design otherwise mirrors for
+the "freeze an independent copy" pattern) does not re-verify result
+freshness this way either — it only re-checks the season's trigger-round
+*configuration* between its two transactions, not the ladder's own result
+versions, and even that re-check is a locked re-read (`_for_update_suffix`
+on `bbbffl_season`) rather than a plain one — so it is not a sufficient
+precedent to copy for this specific check; fixing that gap in
+`confirm_ladder` itself is existing ordinary-season code and out of scope
+for this document. This requirement applies only to the ladder-fallback
+path (step 2); the snapshot path (step 1) reads an already-immutable
+`FinalsSeedingRepository` snapshot at bracket-creation time, so
 no live result can go stale underneath it.
 
 This means the finals bracket module does not call `app.finals_seeding.
@@ -1298,8 +1320,9 @@ order (each row's "Depends on" names the prerequisite rows):
    unconditionally regardless of #197's path** (`app.round_review.
    build_round_review`/`attempt_signoff` hard-code "exactly five
    matchups" independent of the schema fork — see "Scoring" above); the
-   new variable-match-count (never one, never five — 2/2/1/1 across
-   weeks 1-4) publish/correction command, built on whichever matchup shape
+   new variable-match-count (one or two matches per week, never a fixed
+   five — 2/2/1/1 across weeks 1-4) publish/correction command, built on
+   whichever matchup shape
    #197/#190 produced; public/coach/Scorer views covering all six finals
    matches. Depends on: #190.
 4. **[#192 — SuperScore roster, eligibility and lifecycle setup](https://github.com/JustPlausible/BBBFFL_Scoring/issues/192)**

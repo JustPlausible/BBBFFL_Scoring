@@ -219,6 +219,76 @@ unchanged" for finals or SuperScore lineup submission/lockout should be
 read as "reusable unchanged once #197 lands" — restated here once rather
 than qualified at every occurrence.
 
+### Resolution (issue #197, implemented): Path 1 chosen
+
+#197 chose **Path 1 (loosen the fixture-draw linkage)**, not Path 2
+(parallel lifecycle/matchup storage with a dispatching lookup). Path 1 is
+the lower-complexity option and it fully satisfies every acceptance
+criterion without a second storage shape: `bbbffl_round_lifecycle.
+fixture_draw_id`/`fixture_draw_version`/`fixture_round_number` and
+`bbbffl_matchup.fixture_matchup_id` became nullable (migration
+`0029_stream_lifecycle.py`, additive — no existing row or ordinary-round
+behaviour changes), and `CompetitionLifecycleRepository._validate_frozen_
+context` was made stream-aware exactly as this section anticipated: it
+skips the fixture-draw re-check when `fixture_draw_id` is null and always
+still enforces the accepted-mapping-revision check.
+
+Two new schema-level primitives on `CompetitionLifecycleRepository` give a
+finals/superscore round a lifecycle row (`create_non_ordinary_round`) and a
+finals matchup a row with no `fixture_matchup_id` (`create_stream_matchup`)
+— see `app/competition_lifecycle.py`'s module docstring. Neither creates a
+bracket, a pairing decision, a SuperScore round, or any scoring rule; that
+remains #190/#192's job, built on these two primitives. `create_ordinary_
+round` itself is completely unchanged.
+
+**Once a lifecycle/matchup row with a null fixture context exists, the
+call sites this section identified as blocking needed no code change at
+all**, because none of them join against `season_fixture_draw`/`season_
+fixture_matchup` — they only key off `bbbffl_round_id`/`matchup_id`:
+
+- `app.lineups.WeeklyLineupRepository._finalize_submission` — reads
+  `bbbffl_round_lifecycle.state` by `bbbffl_round_id`; resolves correctly
+  once the row exists, so `submit`/`submit_positions` work unchanged for a
+  finals/superscore round.
+- `app.lineup_adjudication.LineupAdjudicationService._eligibility` — the
+  identical `SELECT state FROM bbbffl_round_lifecycle WHERE bbbffl_
+  round_id=?` this section flagged as the path-2-specific risk; under
+  path 1 it resolves `live`/`review` correctly with no dispatch layer
+  needed, because the row it is looking for now exists.
+- `app.calculations.MatchupCalculationService.calculate_matchup`/
+  `calculate_round`, and `app.round_review`'s `record_dnp_ruling`/
+  `record_interchange_ruling`/`record_override`/`build_matchup_review`/
+  `attempt_correction`/`CompetitionLifecycleRepository.correct_matchup_
+  result` — all key by `matchup_id`, never `fixture_matchup_id`; proven
+  directly against a finals matchup with a null `fixture_matchup_id` in
+  `tests/test_stream_lifecycle.py`.
+
+**The one method that does need to change, and did:**
+`CompetitionLifecycleRepository._validate_frozen_context`, described above.
+
+**The repository-wide audit this issue required** (`grep -rn "bbbffl_
+round_lifecycle\|bbbffl_matchup\b"` under `bbbffl_app/app/`) found every
+other direct call site already scoped to `stream_type='ordinary'`, or a
+generic `LEFT JOIN` that already tolerates an absent/irrelevant row —
+exactly the "wider pattern" call sites the next section catalogues
+(`app.round_preflight`, `app.coach_lineup`, `app.scorer_dashboard`,
+`app.admin_dashboard`, `app.public_rounds`, `app.routes.lineup_
+adjudication`/`lineup_correction`/`delegated_operations`'s `_authorise_
+round` helpers, `app.ladder`, `app.finals_seeding`, `app.midseason_draft`,
+`app.replay`/`app.replay_continuation`). None of these needed a change for
+#197's own acceptance criteria (they are explicitly #190/#191/#192/#193's
+job, as the next section already says) and Path 1 does not introduce any
+new call site needing dispatch, since there is only ever one shape of
+`bbbffl_round_lifecycle`/`bbbffl_matchup` row, not two.
+
+**Ordinary-round compatibility**: every ordinary row is still written
+exclusively by the unmodified `create_ordinary_round`, which always
+populates all four fixture columns; `ck_lifecycle_fixture_context_all_or_
+none` (new in 0029) makes a partially-null row impossible at the database
+level regardless of caller; and `_validate_frozen_context`'s fixture-draw
+check runs unconditionally whenever `fixture_draw_id` is non-null, so an
+ordinary round's frozen-context validation is byte-for-byte unchanged.
+
 ### A wider pattern: `stream_type='ordinary'` is hard-coded across the application, not just in the modules already named
 
 **Added after the ninth and tenth Codex review rounds each found another

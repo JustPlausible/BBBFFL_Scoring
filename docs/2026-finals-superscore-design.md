@@ -502,6 +502,27 @@ draft`'s shape) should own:
   gaps" below for the one open question about *which* seed number a tie
   resolves against).
 
+**The same locked-re-check discipline the bracket-creation transaction
+needs for the ladder read (see "Seed consumption" above) applies equally to
+this "advance bracket" step — Codex review, PR #196, sixteenth round.**
+"Advance bracket" reads a prerequisite match's official result and derives
+next week's pairing from it; if a Scorer correction to that exact
+prerequisite match races the advance step — landing after the read but
+before the derived-pairing write commits — the persisted pairing would
+describe an already-superseded winner, without ever entering the
+already-advanced-correction handling below (because, from the correction's
+point of view, the bracket had not advanced yet when the correction
+committed). The advance-bracket transaction must therefore `SELECT ...
+FOR UPDATE` the prerequisite matchup row(s) it is reading — the same
+locking discipline as the bracket-creation transaction, not a plain
+re-read — and verify their effective official-result version while
+persisting the derived pairing in that same transaction, aborting for the
+caller to retry if the version has changed underneath it. The finals
+correction command (see "Finals result publication" and "Handling of
+corrections" below) must serialize against the identical row lock, so a
+correction and an in-flight advance can never both believe they are
+working from the same, now-stale result.
+
 ### Team naming and matchup presentation
 
 Reuse `app.identity.IdentityRepository`'s existing public season-entry/team-
@@ -769,7 +790,13 @@ design — it needs an explicit Scorer-facing decision path (recompute
 downstream pairings vs. flag for manual review), which is exactly the kind
 of thing `docs/plans/2027-season-model.md`'s design principle 8 ("audit
 exceptional changes rather than silently rewriting history") anticipates
-but does not itself resolve.
+but does not itself resolve. **A distinct, narrower race sits underneath
+that open design question — see "Match generation/representation" above:**
+the finals correction command must lock the same prerequisite matchup
+row(s) an in-flight "advance bracket" transaction is reading, so the two
+can never both proceed against what each believes is the current result;
+this is a concurrency-control requirement #191/#190 must implement
+regardless of which answer the Scorer-facing decision path above lands on.
 
 **If #197 chooses the shared-table path, the existing ordinary correction
 endpoint must be fenced off from finals matchups — verified directly

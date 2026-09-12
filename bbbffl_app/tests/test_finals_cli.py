@@ -77,6 +77,16 @@ def test_advance_apply_requires_a_reason_argument():
         )
 
 
+def test_open_week_requires_a_reason_argument():
+    """Codex review, PR #201: the module's own documented usage
+    (`open-week ... --reason "..."`) and its stated contract ("every
+    mutating subcommand requires an explicit, substantive --reason") were
+    both broken by a parser that didn't actually accept the flag."""
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--database-url", "sqlite:///x.db", "open-week", "--bracket-id", "b1", "--week", "1"])
+
+
 def test_rewind_requires_a_reason_and_defaults_to_preview_only():
     parser = build_parser()
     args = parser.parse_args(
@@ -140,7 +150,7 @@ def test_cli_preview_apply_round_trip_and_full_lifecycle_against_a_real_database
         round_id = FinalsBracketRepository(database).get_week_round_id(bracket.bracket_id, week)
         accept_week_mapping(database, round_id, year=2500, afl_round_id=9500 + week)
 
-    open_ns = argparse.Namespace(bracket_id=bracket.bracket_id, week=1)
+    open_ns = argparse.Namespace(bracket_id=bracket.bracket_id, week=1, reason="CLI open week 1")
     assert cmd_open_week(database, open_ns) == 0
     preflight = build_finals_week_preflight(database, bracket.bracket_id, 1)
     assert preflight["round_state"] == "open"

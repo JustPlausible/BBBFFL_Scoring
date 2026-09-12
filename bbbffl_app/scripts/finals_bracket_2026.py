@@ -90,7 +90,7 @@ def cmd_create_bracket_apply(database, args: argparse.Namespace) -> int:
 
 
 def cmd_open_week(database, args: argparse.Namespace) -> int:
-    open_finals_week(database, args.bracket_id, args.week, actor=ACTOR)
+    open_finals_week(database, args.bracket_id, args.week, actor=ACTOR, reason=args.reason)
     _print(build_finals_week_preflight(database, args.bracket_id, args.week))
     return 0
 
@@ -159,6 +159,7 @@ def build_parser() -> argparse.ArgumentParser:
     open_week = top.add_parser("open-week", help="open one finals week's round after preflight")
     open_week.add_argument("--bracket-id", required=True)
     open_week.add_argument("--week", type=int, required=True, choices=(1, 2, 3, 4))
+    open_week.add_argument("--reason", required=True)
 
     advance = top.add_parser("advance", help="derive and persist the next week's pairing/elimination")
     advance_sub = advance.add_subparsers(dest="mode", required=True)

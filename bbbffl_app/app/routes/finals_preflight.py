@@ -4,6 +4,8 @@ adapter (`app.finals_preflight`) -- the route-layer sibling
 `app/routes/round_preflight.py`'s own `stream_type='ordinary'`-scoped
 surface, never a modification of it."""
 
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.audit import ActorContext
@@ -35,6 +37,21 @@ def _csrf(request: Request, principal: Principal) -> None:
         request.headers.get("X-CSRF-Token"),
     ):
         raise HTTPException(403, "Invalid CSRF token")
+
+
+def _parse_expected_versions(expected_versions: str | None) -> dict[str, int] | None:
+    """`expected_versions` travels as a JSON-object query string, exactly
+    like the CLI's own `--expected-versions` -- the map a prior preview
+    call returned, to be re-checked under lock so a correction landing
+    between an operator's preview and apply request is detected
+    (`StaleFinalsResultError`) instead of silently authorising a derivation
+    different from the one they reviewed (Codex review, PR #201)."""
+    if not expected_versions:
+        return None
+    try:
+        return json.loads(expected_versions)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(400, "expected_versions must be a JSON object") from exc
 
 
 @router.get("/{bracket_id}")
@@ -75,13 +92,20 @@ def advance_week(
     from_week: int,
     request: Request,
     reason: str,
+    expected_versions: str | None = None,
     principal: Principal = Depends(require_finals_operator),
 ):
     _authorise_bracket(request, principal, bracket_id)
     _csrf(request, principal)
     repo = FinalsBracketRepository(request.app.state.database)
     try:
-        result = repo.advance_bracket(bracket_id, from_week, actor=_actor(principal), reason=reason)
+        result = repo.advance_bracket(
+            bracket_id,
+            from_week,
+            actor=_actor(principal),
+            reason=reason,
+            expected_versions=_parse_expected_versions(expected_versions),
+        )
     except FinalsBracketError as exc:
         raise HTTPException(409, str(exc)) from exc
     return {"bracket_id": bracket_id, **{k: v for k, v in result.items() if k != "bracket_id"}}
@@ -94,13 +118,21 @@ def rewind_week(
     request: Request,
     reason: str,
     apply: bool = False,
+    expected_versions: str | None = None,
     principal: Principal = Depends(require_finals_operator),
 ):
     _authorise_bracket(request, principal, bracket_id)
     _csrf(request, principal)
     repo = FinalsBracketRepository(request.app.state.database)
     try:
-        return repo.rewind_bracket(bracket_id, from_week, actor=_actor(principal), reason=reason, apply=apply)
+        return repo.rewind_bracket(
+            bracket_id,
+            from_week,
+            actor=_actor(principal),
+            reason=reason,
+            apply=apply,
+            expected_versions=_parse_expected_versions(expected_versions),
+        )
     except DownstreamPlayStateError as exc:
         raise HTTPException(409, {"message": str(exc), "report": exc.report}) from exc
     except FinalsBracketError as exc:

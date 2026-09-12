@@ -82,15 +82,18 @@ def build_finals_week_preflight(database, bracket_id: str, week_number: int) -> 
     }
 
 
-def open_finals_week(database, bracket_id: str, week_number: int, *, actor):
+def open_finals_week(database, bracket_id: str, week_number: int, *, actor, reason: str | None = None):
     """The finals equivalent of `app.round_preflight.open_preflight_round`:
     re-checks the same preflight this module's own read model reports
     before ever mutating, then delegates the actual lifecycle-creation/
     materialisation/open-transition work to
-    `FinalsBracketRepository.open_finals_week`."""
+    `FinalsBracketRepository.open_finals_week`. `reason` is optional here
+    (the repository method falls back to an auto-generated one) so this
+    stays usable from a preflight or route caller with nothing specific to
+    record; an operator-facing caller (the CLI) should still require one."""
     preflight = build_finals_week_preflight(database, bracket_id, week_number)
     if not preflight["readiness"]["safe_to_open"]:
         raise FinalsBracketAdvanceStateError(
             f"finals week {week_number} failed preflight and was not opened: {preflight['readiness']['blockers']}"
         )
-    return FinalsBracketRepository(database).open_finals_week(bracket_id, week_number, actor=actor)
+    return FinalsBracketRepository(database).open_finals_week(bracket_id, week_number, actor=actor, reason=reason)

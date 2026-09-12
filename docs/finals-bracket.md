@@ -47,6 +47,30 @@ Every later decision -- Week 1 pairing, a tie-break, an audit payload --
 reads the bracket's own frozen `finals_bracket_seed` rows, never a fresh
 ladder/snapshot read.
 
+This ladder-fallback path also locks the same `bbbffl_season` row
+`app.finals_seeding.FinalsSeedingRepository.apply`'s own
+`_require_replay_context(locked=True)` locks before it creates the 2026
+historical snapshot, and re-checks for one under that lock -- closing the
+race where `apply` creates the authoritative (and known-different) snapshot
+concurrently, after this method's own unlocked read observed none but
+before its transaction commits. **This protection is one-directional.** If
+instead `create_bracket`'s transaction wins that same season-row lock
+first and commits a ladder-sourced bracket, then `apply` (which was
+waiting on it) proceeds to create the historical snapshot anyway --
+`FinalsSeedingRepository.apply` has no way to know a bracket now exists,
+since checking `finals_bracket` from inside `app.finals_seeding` would
+create exactly the reverse dependency this issue's own architecture rule
+forbids (`app.finals_seeding` "remain[s] a read-only dependenc[y], never
+depended upon in the other direction" -- see `app.finals`'s module
+docstring and `tests/test_architecture.py::
+test_finals_does_not_depend_on_routes_grand_final_lockouts_or_composition_root`'s
+reverse-dependency assertion). Closing this direction would require
+`app.finals_seeding` to consult `app.finals`'s own table, which #190 cannot
+do without crossing that boundary itself; the documented operator workflow
+(finals-seeding `apply` before finals-bracket `create-bracket`, per issue
+#187's and this issue's own CLIs, never run concurrently against the same
+season) is the only thing preventing it in practice today.
+
 ## Two confirmed policies (Steve, issue #190)
 
 1. **Tie-break.** A tied finals match, including the Grand Final, is won by

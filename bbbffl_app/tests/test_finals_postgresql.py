@@ -31,9 +31,16 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 import app.competition_lifecycle as competition_lifecycle_module
+import app.finals as finals_module
 from app.audit import ActorContext
 from app.db import connect
-from app.finals import DownstreamPlayStateError, FinalsBracketRepository, StaleFinalsResultError, StaleSeedOrderError
+from app.finals import (
+    DownstreamPlayStateError,
+    FinalsBracketAdvanceStateError,
+    FinalsBracketRepository,
+    StaleFinalsResultError,
+    StaleSeedOrderError,
+)
 from app.finals_preflight import open_finals_week
 from app.migrations import migrate
 from app.season import SeasonRepository
@@ -347,3 +354,129 @@ def test_advance_bracket_locks_both_prerequisite_matchups_in_deterministic_order
     repo.advance_bracket(bracket.bracket_id, 1, actor=ACTOR, reason="deterministic lock order")
 
     assert locked_order == matchup_ids
+
+
+def test_concurrent_advance_bracket_calls_for_the_same_week_fail_closed_not_with_a_raw_integrity_error(
+    postgres_database, monkeypatch
+):
+    """Codex review, PR #201: `advance_bracket`'s target-slot pre-check ran
+    before any prerequisite matchup was locked, so two concurrent calls for
+    the same week could both pass it; the loser -- having waited on the
+    winner's prerequisite matchup lock(s) -- would then try to insert into
+    the now-occupied slot and hit the partial unique index as a raw,
+    uncaught IntegrityError instead of the intended, retryable domain
+    refusal. Proven here by having the winner hold its transaction open
+    (via a paused append_event, after its own prerequisite locks and
+    pairing inserts but before commit) while the loser's own
+    advance_bracket call genuinely blocks trying to acquire the identical
+    matchup locks, then resumes only after the winner commits."""
+    built, bracket, repo, pairings = _bracket_at_week1_played(postgres_database, 2905)
+
+    winner_holds_lock = threading.Event()
+    allow_winner_to_commit = threading.Event()
+    real_append = finals_module.append_event
+    call_count = {"n": 0}
+
+    def pause_first_advance(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            winner_holds_lock.set()
+            assert allow_winner_to_commit.wait(timeout=5)
+        return real_append(*args, **kwargs)
+
+    monkeypatch.setattr(finals_module, "append_event", pause_first_advance)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        winner = executor.submit(repo.advance_bracket, bracket.bracket_id, 1, actor=ACTOR, reason="winner of the race")
+        assert winner_holds_lock.wait(timeout=5)
+
+        loser = executor.submit(repo.advance_bracket, bracket.bracket_id, 1, actor=ACTOR, reason="loser of the race")
+        time.sleep(0.2)
+        assert not loser.done(), "advance_bracket did not wait for the same prerequisite matchup lock(s)"
+
+        allow_winner_to_commit.set()
+        winner.result(timeout=5)
+        with pytest.raises(FinalsBracketAdvanceStateError):
+            loser.result(timeout=5)
+
+    assert len(repo.list_pairings(bracket.bracket_id, week_number=2)) == 2
+
+
+def test_rewind_reloads_the_pairings_matchup_id_after_a_concurrent_materialisation_races_it(
+    postgres_database, monkeypatch
+):
+    """Codex review, PR #201: rewind_bracket's unlocked `existing` pairing
+    read can capture matchup_id=NULL, then wait to acquire the same
+    lifecycle lock a concurrent `_materialise_pairing` call already holds
+    while attaching a real matchup to that exact pairing. Once that
+    materialisation commits and rewind's own lock attempt succeeds, using
+    the stale cached matchup_id would leave the just-created matchup
+    referenced by neither the superseded nor the replacement pairing, while
+    still occupying the round's own uq_round_matchup_order slot. Proven
+    here by having the materialisation hold its lifecycle+pairing locks
+    open (via a paused append_event) while rewind's own transaction
+    genuinely blocks trying to acquire the identical lifecycle lock, then
+    resumes only once the materialisation commits.
+
+    Uses an Elimination Final correction (not a Qualifying Final one) so
+    only `first_semi` changes -- `second_semi` (seed1 v QF winner) is
+    entirely unaffected by the EF result, which keeps this test's outcome
+    independent of which of week 2's two slots `open_finals_week`'s own
+    loop happens to materialise first."""
+    built, bracket, repo, pairings = _bracket_at_week1_played(postgres_database, 2906)
+    repo.advance_bracket(bracket.bracket_id, 1, actor=ACTOR, reason="advance to week 2")
+    # `_bracket_at_week1_played` already accepted every week's mapping.
+    first_semi = next(p for p in repo.list_pairings(bracket.bracket_id, week_number=2) if p.slot == "first_semi")
+    assert first_semi.matchup_id is None  # not yet materialised
+
+    # Flips the EF result: only first_semi's away entry (the new EF winner)
+    # changes -- second_semi is untouched, so it can never be blocked/
+    # superseded here regardless of materialisation order.
+    correct_official_result(postgres_database, pairings["ef"].matchup_id, 10, 90, reason="races the materialisation")
+
+    materialisation_holds_lock = threading.Event()
+    allow_materialisation_to_commit = threading.Event()
+    real_append = finals_module.append_event
+
+    def pause_materialisation(conn, *args, **kwargs):
+        if kwargs.get("payload", {}).get("finals_pairing_id") == first_semi.pairing_id:
+            materialisation_holds_lock.set()
+            assert allow_materialisation_to_commit.wait(timeout=5)
+        return real_append(conn, *args, **kwargs)
+
+    monkeypatch.setattr(finals_module, "append_event", pause_materialisation)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        materialise = executor.submit(open_finals_week, postgres_database, bracket.bracket_id, 2, actor=ACTOR)
+        assert materialisation_holds_lock.wait(timeout=5)
+
+        rewind = executor.submit(
+            repo.rewind_bracket, bracket.bracket_id, 1, actor=ACTOR, reason="races the materialisation", apply=True
+        )
+        time.sleep(0.2)
+        assert not rewind.done(), (
+            "rewind_bracket did not wait for the same lifecycle row lock the materialisation holds"
+        )
+
+        allow_materialisation_to_commit.set()
+        materialise.result(timeout=5)
+        rewind_result = rewind.result(timeout=5)
+
+    assert not rewind_result["blocked"]
+    round_id = repo.get_week_round_id(bracket.bracket_id, 2)
+    matchup_count = postgres_database.execute(
+        "SELECT COUNT(*) AS n FROM bbbffl_matchup WHERE bbbffl_round_id=?", (round_id,)
+    ).fetchone()["n"]
+    assert matchup_count == 2  # first_semi's + second_semi's -- nothing orphaned
+
+    new_first_semi = next(p for p in repo.list_pairings(bracket.bracket_id, week_number=2) if p.slot == "first_semi")
+    assert new_first_semi.matchup_id is not None, (
+        "the concurrently materialised matchup must have been reconciled onto the replacement pairing, "
+        "not left orphaned with the replacement still unmaterialised"
+    )
+    reused_matchup = postgres_database.execute(
+        "SELECT home_season_entry_id, away_season_entry_id FROM bbbffl_matchup WHERE matchup_id=?",
+        (new_first_semi.matchup_id,),
+    ).fetchone()
+    assert reused_matchup["home_season_entry_id"] == new_first_semi.home_season_entry_id
+    assert reused_matchup["away_season_entry_id"] == new_first_semi.away_season_entry_id

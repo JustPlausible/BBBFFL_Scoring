@@ -794,6 +794,23 @@ class FinalsBracketRepository:
                         "use rewind_bracket to supersede an existing derivation"
                     )
             locked = {mid: self._lock_matchup_version(conn, mid, expected_versions) for mid in sorted(source_ids)}
+            # Codex review, PR #201: the check above ran before any
+            # prerequisite matchup was locked -- two concurrent
+            # advance_bracket(from_week=...) calls can both pass it, then
+            # both lock the same matchups (in the same deterministic order,
+            # so neither deadlocks) before one commits its new pairing(s)
+            # and the other resumes and tries to insert into the identical
+            # now-occupied slot, hitting the partial unique index as a raw
+            # IntegrityError instead of this domain refusal. Repeating the
+            # check now that every prerequisite is locked closes the gap:
+            # the loser observes the winner's committed pairing here and
+            # fails closed with the intended, retryable error.
+            for slot in self._target_slots(from_week):
+                if self._active_pairing_row(conn, bracket_id, target_week, slot) is not None:
+                    raise FinalsBracketAdvanceStateError(
+                        f"finals week {target_week} slot {slot!r} was advanced to by a concurrent caller while "
+                        "this transaction waited for the same prerequisite matchup lock(s); reload and retry"
+                    )
             derivation = self._derive(conn, bracket_id, from_week, seed_rank, locked)
 
             for slot, home, away, source1, source2 in derivation.new_pairings:
@@ -905,6 +922,27 @@ class FinalsBracketRepository:
                         {"slot": slot, "pairing_id": existing["pairing_id"], "blocked": True, "artifacts": artifacts}
                     )
                 else:
+                    # Codex review, PR #201: `_downstream_play_state` above
+                    # locks the round's lifecycle row (and, if `existing`'s
+                    # own matchup_id was already non-NULL, that matchup row
+                    # too) before returning. A concurrent `_materialise_
+                    # pairing` may have been holding that identical
+                    # lifecycle lock, attached a real matchup to this exact
+                    # pairing, and committed while we waited to acquire it
+                    # -- `existing["matchup_id"]` was captured by the
+                    # unlocked read above and would still show the stale
+                    # (pre-materialisation) value. Re-read it fresh now: no
+                    # further concurrent materialisation can land before
+                    # our own write below, since acquiring the lifecycle
+                    # lock above already blocks any other transaction that
+                    # needs it for the rest of ours. Using the stale value
+                    # would leave the just-materialised matchup referenced
+                    # by neither the superseded nor the replacement pairing,
+                    # while still occupying the round's own
+                    # uq_round_matchup_order slot.
+                    current_matchup_id = conn.execute(
+                        "SELECT matchup_id FROM finals_bracket_pairing WHERE pairing_id=?", (existing["pairing_id"],)
+                    ).fetchone()["matchup_id"]
                     pairing_changes.append(
                         {
                             "slot": slot,
@@ -914,7 +952,7 @@ class FinalsBracketRepository:
                             "new_away_season_entry_id": away,
                             "source1": source1,
                             "source2": source2,
-                            "matchup_id": existing["matchup_id"],
+                            "matchup_id": current_matchup_id,
                         }
                     )
 
@@ -1282,6 +1320,29 @@ class FinalsBracketRepository:
             (pairing_row["pairing_id"],),
         ).fetchone()
         round_id = round_row["bbbffl_round_id"] if round_row else None
+
+        locked_matchup = None
+        if matchup_id is not None:
+            # Codex review, PR #201: `CompetitionLifecycleRepository.
+            # correct_matchup_result` locks this identical `bbbffl_matchup`
+            # row *before* it ever locks `bbbffl_round_lifecycle`. Locking
+            # lifecycle first here (below) while a concurrent correction on
+            # this same downstream matchup locks matchup first is the
+            # opposite order -- two transactions each already holding the
+            # lock the other needs next, which PostgreSQL can only resolve
+            # via a deadlock abort instead of rewind deterministically
+            # observing the correction's published result. Locking matchup
+            # first here too, before lifecycle, matches correct_matchup_
+            # result's own order and removes the cycle; the lineup-
+            # submission race below only needs lifecycle locked at some
+            # point before reading `weekly_lineup`, not locked before
+            # matchup, so this reordering doesn't reopen that one.
+            locked_matchup = conn.execute(
+                "SELECT effective_official_version FROM bbbffl_matchup WHERE matchup_id=?"
+                + _for_update_suffix(self.database),
+                (matchup_id,),
+            ).fetchone()
+
         if round_id:
             # `app.lineups.WeeklyLineupRepository._finalize_submission`
             # locks this identical `bbbffl_round_lifecycle` row (`FOR
@@ -1322,11 +1383,6 @@ class FinalsBracketRepository:
             if activation:
                 artifacts.append({"type": "position_lock", "bbbffl_round_id": round_id})
         if matchup_id is not None:
-            locked_matchup = conn.execute(
-                "SELECT effective_official_version FROM bbbffl_matchup WHERE matchup_id=?"
-                + _for_update_suffix(self.database),
-                (matchup_id,),
-            ).fetchone()
             ruling = conn.execute(
                 "SELECT 1 FROM bbbffl_matchup_slot_ruling WHERE matchup_id=? "
                 "UNION SELECT 1 FROM bbbffl_matchup_interchange_ruling WHERE matchup_id=? "

@@ -810,15 +810,33 @@ check would not catch it either, since recalculation never advances
 `review_version` — the new official result could freeze the old score and
 the now-stale snapshot as if nothing had changed. The finals publish/
 correction transaction must therefore `SELECT ... FOR UPDATE` every
-captured matchup's calculation row (or whichever shared serialization
-record #197's chosen path exposes) alongside its `bbbffl_matchup.
-review_version`, in a deterministic order, and compare each against the
-value captured when its snapshot was assembled — aborting for the caller to
-rebuild/retry if either has changed — before inserting the official result.
-This mirrors the identical discipline already required of bracket creation,
+captured matchup's calculation row alongside its review-version counter —
+`bbbffl_matchup_calculation`'s revision/fingerprint alongside `bbbffl_
+matchup.review_version` under #197's shared-table path, or whichever
+equivalent calculation/serialization row and review-counter field #197's
+parallel-storage path exposes otherwise (never unconditionally
+`bbbffl_matchup.review_version`, which — per the correction below —
+does not exist for a finals match under that path either) — in a
+deterministic order, and compare each against the value captured when its
+snapshot was assembled — aborting for the caller to rebuild/retry if
+either has changed — before inserting the official result. This mirrors
+the identical discipline already required of bracket creation,
 advance-bracket, and SuperScore's publisher; finals' publish/correction
 command is new code, not reused `attempt_signoff`, so it must not silently
 inherit the narrower guarantee the ordinary path happens to get away with.
+**Both halves of this pair must be path-aware, not just the calculation-row
+half — Codex review, PR #196, thirty-fourth round.** The thirty-third
+round's correction below establishes that no `bbbffl_matchup` row exists
+for a finals match under #197's parallel-storage path at all; this
+revalidation's `bbbffl_matchup.review_version` half is exactly as
+unimplementable on that path as the calculation-serialization lock was,
+and omitting it (rather than substituting the equivalent counter on
+whichever parallel serialization row #197 exposes) would let a concurrent
+ruling or lineup correction publish stale inputs undetected. Both this
+publish-time revalidation and #191's Scope/Acceptance-criteria restatement
+of it must name the same #197-path-dependent review-counter substitution
+the calculation-serialization lock below already requires — not repeat
+`bbbffl_matchup.review_version` as if it always exists.
 
 **Two further corrections carry SuperScore's twenty-ninth/thirty-first
 round fixes into this finals adapter — Codex review, PR #196, thirty-first
@@ -1903,10 +1921,15 @@ order (each row's "Depends on" names the prerequisite rows):
    #190's "advance bracket" step locks, and — inside its own publish/
    correction transaction, before committing — separately lock and
    revalidate each published matchup's calculation row (revision/
-   fingerprint) alongside its `bbbffl_matchup.review_version`**, since
-   `MatchupCalculationService._persist` advances the former without ever
-   touching the latter, and either alone can go stale between snapshot
-   assembly and commit; public/coach/Scorer views covering all six finals
+   fingerprint) alongside its review-version counter** — `bbbffl_matchup.
+   review_version` under #197's shared-table path, or whichever equivalent
+   counter #197's parallel-storage path exposes otherwise (never
+   unconditionally `bbbffl_matchup.review_version`, which does not exist
+   for a finals match under that path) — since
+   `MatchupCalculationService._persist` advances the calculation row
+   without ever touching a review-version counter, and either alone can go
+   stale between snapshot assembly and commit; public/coach/Scorer views
+   covering all six finals
    matches. **Acceptance requires every finals result correction/cascade
    entry point to take the owning season-row lock in its write transaction
    and fail closed once the season is completed.** **Acceptance also

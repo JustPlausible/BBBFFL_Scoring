@@ -16,6 +16,12 @@ preserving the 2026 dataset as historical evidence alongside the eventual
 2027 live season. It is explicitly a planning issue: it does not implement
 the finals or SuperScore system. This document is that plan, and the
 "Follow-up issues" section is its decomposition into implementable work.
+Season completion here means every required finals round **and** each of SS1,
+SS2, SS3 and SS4 has reached lifecycle state `final`; a final Grand Final and
+SS4 do not compensate for an unfinished earlier round in either stream. It
+also requires current, internally consistent premiership and wooden-spoon
+records bound to the effective result/snapshot versions from which they were
+derived; #195 atomically materialises them before setting `completed`.
 
 This document does **not** reopen the mathematical-ladder-vs-historical-seed
 decision (issue #169/#187/PR #188) and does not introduce a generic ladder
@@ -804,7 +810,10 @@ when #197 happens to build parallel storage.
 Exactly the existing audited pathway: a post-final correction to a finals
 result reuses the same "new reason-carrying official-result version,
 previous version protected by trigger" mechanism ordinary rounds already
-have (`docs/competition-lifecycle.md`). **A correction that changes who
+have (`docs/competition-lifecycle.md`) **while the season remains active**.
+Every finals correction and cascading re-derivation must first lock the
+owning `bbbffl_season` row and reject `lifecycle_state = 'completed'`; see the
+shared completed-season write fence below. **A correction that changes who
 advanced after the bracket has already progressed is a genuinely hard case**
 (see "Historical gaps" below) and must not be silently resolved by this
 design — it needs an explicit Scorer-facing decision path (recompute
@@ -840,33 +849,32 @@ choice**: under the parallel-storage path, a finals matchup is never a
 
 ### Grand Final/season winner recording and end-of-season completion
 
-New: an explicit `season.premiership.recorded` (or similar) audit event and
-a small persisted record (premier `season_entry_id`, runner-up, Grand Final
-official-result reference) once the Grand Final is published — this is the
-"season winner" fact the 2027 season model's "Historical records" section
-expects to exist. The wooden spoon (last place, 10th on the home-and-away
-ladder — **not** finals-related) should be recorded the same way at the
-same time, since both are facts available as soon as Round 20's ladder is
-locked, independent of finals: no design tension there, just a small
-addition. See "End-of-season completion" in the shared audit section below
-for how this interacts with `Season.lifecycle_state`.
+New: explicit `season.premiership.recorded` and `season.wooden_spoon.recorded`
+(or one equivalent awards event) audit provenance plus persisted, versioned
+records. The premiership record contains the premier `season_entry_id`,
+runner-up, exact effective Grand Final official-result version, and its frozen
+bracket/finals-seeding provenance. The wooden-spoon record contains the last-
+placed `season_entry_id` and the frozen Round 20 mathematical-ladder snapshot/
+effective-result references used to establish that fact — it is an H&A fact,
+not derived from the finals bracket or historical finals-seeding order.
 
-**Unresolved: what happens to these two records if the result they were
-derived from is later corrected — flagged (Codex review, PR #196, tenth
-round), not resolved by this document.** The ordinary competition supports
-a post-final result correction (a new reason-carrying official-result
-version, per `docs/competition-lifecycle.md`). If a Grand Final correction
-changes the winner, or a Round 20 home-and-away correction changes who
-finished last, the separately persisted premiership/wooden-spoon record
-would keep naming the original entry unless something re-derives it — and
-unlike a mid-bracket finals result, the Grand Final has no downstream
-pairing to cascade through, so this is a distinct question from historical-
-gap #4 above, not the same one restated. #195 must decide: (a) derive these
-facts live from effective results on every read rather than persisting a
-frozen record at all, or (b) persist a frozen record but give it its own
-audited re-recording path triggered by a relevant correction. Confirm with
-Steve which is intended, or propose one explicitly with tradeoffs, before
-#195 implements either.
+**#195 materialises both canonical award records inside the completion
+transaction, before establishing the completed-state fence.** After taking the
+season lock and locking/re-verifying the prerequisite effective result and
+snapshot rows, it derives both awards. If an identical current award version
+already exists, this step is idempotent; if an active-season correction made an
+existing award stale, it appends an audited superseding version in the same
+transaction. It must fail closed rather than complete if either award cannot be
+derived, its referenced result/snapshot version is no longer effective, or the
+two persisted current records do not exactly match those locked inputs. This
+removes any crash window in which the season could become completed before its
+required historical awards exist.
+
+Before completion, an ordinary Round 20 or Grand Final correction that changes
+an award may use this same reason-carrying re-recording boundary. After
+completion, premiership/wooden-spoon correction or re-recording is rejected by
+the completed-season fence unless a separately designed audited reopen pathway
+has first returned the season to a writable state.
 
 ## SuperScore design
 
@@ -1076,6 +1084,17 @@ matchups" official-result gap already identified below; both stem from the
 same root cause (SuperScore has entries, not matchup pairs) and belong to
 the same follow-up issue (#193).
 
+The calculation is not the durable coordination record. During setup of each
+SuperScore round, its lifecycle transaction must create an always-present
+`superscore_entry_review_state` (name illustrative) row for every eligible
+entry, uniquely keyed by round and `season_entry_id`, with
+`review_version = 0`. Setup is incomplete, and the round must not open, if the
+complete set of ten state rows cannot be created or verified. These rows exist before lineups,
+rulings, or calculation rows do and remain the shared lock/CAS target for the
+round's lifetime. Calculation rows are derived mutable data and may be absent;
+no operation may use their existence or revision as a substitute for review
+state.
+
 ### A genuine SuperScore-specific abstraction: leaderboard results, not matchups
 
 Unlike an ordinary or finals round, a SuperScore round has **no head-to-head
@@ -1143,8 +1162,8 @@ round_review.py`'s existing ordinary-result machinery:**
   SuperScore result unexplainable, exactly the gap `input_snapshot` exists
   to close for the ordinary case.
 - **A third correction (Codex review, PR #196, eighteenth round): the
-  publish/correction command must also re-verify the ten captured
-  calculation revisions inside the same transaction that writes the new
+  publish/correction command must also re-verify the ten captured review
+  versions inside the same transaction that writes the new
   leaderboard revision, or the same read-then-write race already fixed for
   bracket creation and advance-bracket recurs here.** If a lineup
   correction, ruling, or recalculation commits after the ten entry
@@ -1170,19 +1189,24 @@ round_review.py`'s existing ordinary-result machinery:**
   comparing only that calculation revision leaves exactly the same
   race open through the ruling/correction path: either can still commit,
   unnoticed by this check, after the ten snapshots are assembled but before
-  the leaderboard-revision `INSERT` commits. SuperScore needs its own
-  equivalent of `review_version`: a single per-entry counter that *every*
-  mutation affecting that entry's SuperScore result — lineup
-  correction, DNP/Interchange/override ruling, and recalculation alike —
-  advances (coordinate the exact shape with #192, which owns the
-  entry-scoped ruling boundary that must also bump it). The SuperScore
-  publisher and correction command must do the same: `SELECT ... FOR
-  UPDATE` the ten entries' entry-scoped calculation rows, in a
-  deterministic order (e.g. sorted by `season_entry_id`), and compare
-  each one's current entry review-revision counter — not merely its
-  calculation revision — against the value captured when the snapshots
-  were assembled, aborting for the caller to retry if any has changed,
-  before inserting the new revision.
+  the leaderboard-revision `INSERT` commits. SuperScore therefore uses the
+  always-present per-round/per-entry review-state row created during lifecycle
+  setup above, not a field on an optional calculation row. A lineup correction
+  (including its stale-ruling invalidation), DNP/Interchange/override ruling,
+  and calculation persistence must lock that entry's review-state row and
+  advance its `review_version` in the **same transaction** as the mutation. A
+  failed mutation advances nothing. This gives #192's lifecycle/ruling/
+  correction work and #193's calculation/publication work one durable
+  serialization point even before a first calculation exists.
+
+  The SuperScore publisher and correction command must `SELECT ... FOR
+  UPDATE` all ten review-state rows in deterministic `season_entry_id` order,
+  verify that all ten exist, and compare each current `review_version` with
+  the value captured when its scoring snapshot was assembled. It aborts for
+  the caller to rebuild/retry if any row is missing or changed; only then may
+  it insert the atomic leaderboard revision and advance the round toward
+  `final`. It may additionally validate calculation revisions/fingerprints as
+  snapshot provenance, but calculation rows are never the lock/CAS authority.
 
 ### Publication; public/coach/Scorer views
 
@@ -1224,6 +1248,8 @@ rules above.
 | Participation evidence assessment | yes | yes | yes | `app.participation.assess_participation` unchanged (matchup-independent) |
 | Scoring formulas | yes | yes | yes | `app.scoring` unchanged |
 | Calculated-vs-official separation *implementation* | yes | conditional on #197 | **no** (entry-scoped regardless of #197) | `app.calculations.MatchupCalculationService` for ordinary, and for finals only if #197 loosens the schema; new entry-scoped calculation path for SuperScore always |
+| Review/CAS serialization record | matchup row | matchup or #197 equivalent | **always-present round/entry review-state row** | SuperScore lifecycle setup creates all ten before open; calculations, rulings, corrections and publication lock/version it |
+| Completed-season result write fence | required | required, including cascades | required | every result-changing transaction locks the owning season row and rejects `completed`; #195 supplies the shared guard/coverage |
 | Player ownership/eligibility | yes | yes | yes | `app.player_pool` unchanged |
 | Same-stream carry-forward | yes | yes | yes (SS2+) | `app.carry_forward` unchanged |
 | Cross-stream carry-forward (most recent ordinary lineup) | n/a | **Week 1 and seed 1's Week 2** (confirmed rule) | **SS1 only** (confirmed rule) | one shared narrow function for both, see above |
@@ -1247,18 +1273,56 @@ new needs inventing here, only applying:
   `finals.result.published`, `finals.result.corrected`,
   `finals.elimination.recorded`, `superscore.round.opened`,
   `superscore.result.published`, `superscore.result.corrected`,
-  `season.premiership.recorded`) — never repurposing an existing action.
+  `season.premiership.recorded`, `season.wooden_spoon.recorded`,
+  `season.completed`) — never repurposing an existing action.
 - **Append-only, immutable published results**: finals and SuperScore
   official results follow the same "new version on correction, prior
   version protected by a database trigger" pattern as ordinary results and
   as `finals_seeding_snapshot`/`midseason_ladder_snapshot`.
+- **Completed-season write fence**: `bbbffl_season.lifecycle_state =
+  'completed'` is the durable boundary, not merely descriptive metadata. Every
+  operation that can change official historical results or facts derived from
+  them must, in its write transaction and before mutation, lock the owning
+  season row and fail closed if it is completed. This includes ordinary result
+  correction, finals correction and any cascade of pairings/eliminations,
+  SuperScore correction/republication, and premiership/wooden-spoon
+  re-recording. The completion command takes the **same season-row lock**,
+  verifies the full round predicate, atomically materialises and verifies the
+  two award records against their locked provenance, records the completion
+  audit event, and changes the lifecycle state to `completed`. A correction
+  already holding the lock finishes before completion can verify; a correction
+  waiting behind completion acquires the lock afterward, observes `completed`,
+  and writes nothing. Checking lifecycle state outside that transaction, or
+  only at the route layer, is insufficient.
+
+  There is no implicit administrative bypass. Reopening is outside this
+  focused implementation; until a separate audited `reopen completed season`
+  command is deliberately designed, completed-to-writable remains illegal. A
+  future reopen pathway must itself take the season lock, require actor/reason
+  audit provenance, and supersede/invalidate the prior final-checkpoint marker
+  before any result-changing operation can proceed.
 - **Checkpoint timing**: the same discipline as
   `docs/2026-second-half-replay-playbook.md` sections G/I/K — a paired
   database/checkpoint backup after the finals-seeding snapshot is applied
   (already done, see the provenance manifest's "Round 20 / home-and-away
   boundary"), then after each finals week finalises and after each
-  SuperScore round finalises, and a final end-of-season checkpoint once the
-  Grand Final and SS4 are both published.
+  SuperScore round finalises. Final archival evidence follows this strict
+  order: (1) lock the owning season row; (2) fail-closed verification that
+  **every required finals round** is in lifecycle state `final` and that **all four
+  named SuperScore rounds, SS1-SS4,** exist and are `final`; (3) lock the
+  effective Grand Final result and frozen Round 20 ladder/bracket provenance,
+  then idempotently create or supersede the premiership and wooden-spoon
+  records so both exactly reference those effective versions; (4) record the
+  completion audit event; (5) transition the season to `completed`; (6) commit
+  that single transaction; then (7), only afterward, create the final
+  database/checkpoint evidence from the now-fenced completed state and bind it
+  to the completion event/version. Grand Final + SS4 alone must never imply
+  completeness while an earlier finals or SuperScore round remains missing,
+  `review`, or otherwise unfinished. The archival step must also assert it is
+  reading the completed season version established by step 5 and identified by
+  the completion event. **#195 owns steps 1-6 and ends by exposing that stable
+  completed-season version/completion-event identifier. #194 alone owns step 7
+  and its backup/recovery verification.**
 - **Backup/recovery**: identical `pg_dump`/`pg_restore` procedure as the
   rest of the second-half playbook; a not-yet-written finals/SuperScore
   playbook (already anticipated by section L of the current playbook)
@@ -1305,10 +1369,23 @@ new needs inventing here, only applying:
   already sound (distinct `season_id`, `docs/season-competition-schema.md`'s
   documented invariant that nothing resolves an implicit "current" season),
   but nothing today would *prevent* an accidental write against the
-  "completed" 2026 season once 2027 exists. Whether this needs to become an
-  enforced gate (and, if so, whether it belongs to this decomposition or a
-  separate platform-hardening issue) is listed as a follow-up decision
-  below rather than resolved here.
+  "completed" 2026 season once 2027 exists. **#195 must close that gap for all
+  official-result-changing paths; the gate is no longer an optional follow-up
+  decision.** Its completion command must take the same season-row lock those
+  writers take, then lock/CAS-protect the relevant round lifecycle rows and
+  fail closed unless every configured, required finals round is `final` and
+  SS1, SS2, SS3 and SS4 are each `final`.
+  Checking only the terminal labels (Grand Final and SS4), or merely checking
+  that their results were published, is not valid evidence that the preceding
+  rounds completed. The same full-set predicate gates the final archival
+  checkpoint. The predicate and both provenance-bound award records are
+  rechecked/materialised in the transaction that marks the season completed;
+  the resulting lifecycle state is then enforced by every
+  result-changing transaction, so a waiting correction cannot commit after
+  the locks release and silently stale the checkpoint. Only after that durable
+  fence commits may #194 create the final archival/checkpoint evidence; #195's
+  completion acceptance ends at the committed, externally consumable completed
+  version/event identifier and does not include archive creation.
 
 ## Historical gaps requiring Steve's confirmation
 
@@ -1432,7 +1509,9 @@ order (each row's "Depends on" names the prerequisite rows):
    finals round lifecycle (built on #197's chosen storage shape), and a
    CLI-first operator tool mirroring `scripts/finals_seeding_2026.py`'s
    preview/apply shape. Resolves historical-gap questions 3 and 4 above as
-   an explicit design step before writing code. Depends on: #197.
+   an explicit design step before writing code. Any correction-triggered
+   cascade it owns must take the shared season-row lock and reject a completed
+   season before changing pairings or elimination history. Depends on: #197.
 3. **[#191 — Finals lineup, scoring and publication](https://github.com/JustPlausible/BBBFFL_Scoring/issues/191)**
    — weekly lineup submission and lockout wired to the `finals` competition
    stream once #197 has landed (including the shared cross-stream fallback
@@ -1454,7 +1533,10 @@ order (each row's "Depends on" names the prerequisite rows):
    `_freeze_matchup_inputs` belongs to `attempt_signoff`, not to
    `publish_results` itself) **and lock the same prerequisite matchup
    row(s) #190's "advance bracket" step locks**; public/coach/Scorer views
-   covering all six finals matches. Depends on: #190.
+   covering all six finals matches. **Acceptance requires every finals result
+   correction/cascade entry point to take the owning season-row lock in its
+   write transaction and fail closed once the season is completed.** Depends
+   on: #190.
 4. **[#192 — SuperScore roster, eligibility and lifecycle setup](https://github.com/JustPlausible/BBBFFL_Scoring/issues/192)**
    — the `superscore` competition-stream round lifecycle (built on #197's
    chosen storage shape), weekly lineup submission/lockout wired to it
@@ -1465,6 +1547,11 @@ order (each row's "Depends on" names the prerequisite rows):
    mechanism), and the new **entry-scoped** DNP/Interchange/override ruling
    boundary (not a reuse of `app.round_review`'s matchup-keyed methods —
    see "DNP, Interchange and loophole rulings" under "SuperScore design").
+   **Acceptance requires lifecycle setup to atomically create and verify all
+   ten durable round/entry review-state rows before open**, and requires every
+   ruling, override, lineup correction and its stale-ruling invalidation to
+   lock the affected state row and advance its `review_version` in the same
+   transaction. The state must exist independently of any calculation row.
    Resolves historical-gap question 6 (round mapping) for the SuperScore
    rounds as part of setup. Depends on: #197 (no longer independent of the
    finals track at the schema level, though its bracket-specific work
@@ -1479,28 +1566,61 @@ order (each row's "Depends on" names the prerequisite rows):
    with each revision **freezing every entry's scoring inputs** the same
    way `bbbffl_official_result.input_snapshot` does for the ordinary case,
    ranking/joint-winner computation, a publish/correction command that
-   **locks and re-verifies, per entry, a shared review-revision counter
+   **locks and re-verifies, per entry, the always-present review-state row and
+   its shared review-revision counter
    that every lineup correction, ruling, and recalculation advances** —
    not merely the calculation revision, which a ruling/correction need not
    touch — inside the same transaction that writes the new revision (the
    same race already fixed for bracket creation and advance-bracket,
    applied here, coordinated with #192's entry-scoped ruling boundary which
-   must also advance this counter), and public/coach/Scorer views.
+   must also advance this counter), and public/coach/Scorer views. **Acceptance
+   requires calculation persistence to lock/advance that durable state in its
+   own transaction and publication to lock all ten state rows in deterministic
+   order, reject a missing or changed row, and never depend on a calculation
+   row as the CAS/locking record. Every SuperScore correction/republication
+   must also take the owning season-row lock and reject a completed season in
+   that same write transaction.**
    Depends on: #192.
-6. **[#194 — Operator audit/correction/recovery support for finals and SuperScore](https://github.com/JustPlausible/BBBFFL_Scoring/issues/194)**
+6. **[#195 — End-of-season completion, premiership/wooden-spoon recording and 2026/2027 archival isolation](https://github.com/JustPlausible/BBBFFL_Scoring/issues/195)**
+   — the premiership/wooden-spoon audit event and record, the
+   season-completion lifecycle transition, and the focused implementation of
+   `Season.lifecycle_state == "completed"` as a durable write fence for
+   official historical results. **Acceptance requires:** (a) inventorying and
+   guarding every existing and new result-changing repository boundary,
+   including ordinary corrections, finals corrections/cascades, SuperScore
+   corrections/republication, and derived premiership/wooden-spoon changes;
+   each takes the owning season-row lock in its write transaction and rejects
+   `completed`; (b) the completion command takes that same lock and rechecks
+   under lock/CAS that every required finals round and SS1-SS4 are all `final`—
+   Grand Final + SS4 is explicitly insufficient; (c) while still in that
+   transaction, it locks the effective Grand Final result and frozen Round 20
+   ladder/bracket provenance, then idempotently creates or appends superseding
+   premiership and wooden-spoon versions whose references exactly match those
+   locked inputs, failing closed if either award cannot be derived/persisted or
+   remains missing or inconsistent; (d) only after the awards are valid does it
+   record the completion audit event and mark the season completed, then commit;
+   (e) a correction queued behind completion observes `completed` and mutates
+   nothing; and (f) the committed command exposes a stable completed-season
+   version and completion-event identifier for downstream consumers. Award
+   re-recording is available only while active. No reopen bypass is included;
+   any future reopen requires a separately designed, reason-carrying audited
+   path that invalidates/supersedes the previous checkpoint marker. **Archive
+   creation is explicitly not part of #195's acceptance criteria.** Depends
+   on: #191 and #193 (needs every finals and SuperScore round to be
+   finalisable).
+7. **[#194 — Operator audit/correction/recovery support for finals and SuperScore](https://github.com/JustPlausible/BBBFFL_Scoring/issues/194)**
    — the finals/SuperScore-specific audit action catalogue, checkpoint
    procedure extending the second-half playbook (or a new
-   `2026-finals-replay` evidence directory), and the operator playbook
-   itself (the "not-yet-written" document section L of the second-half
-   playbook already anticipates). Depends on: #191 and #193 (needs real
-   operations to document).
-7. **[#195 — End-of-season completion, premiership/wooden-spoon recording and 2026/2027 archival isolation](https://github.com/JustPlausible/BBBFFL_Scoring/issues/195)**
-   — the premiership/wooden-spoon audit event and record, the
-   season-completion lifecycle transition, and a decision (with
-   implementation if warranted) on whether `Season.lifecycle_state ==
-   "completed"` should become an enforced write-blocking gate before 2027
-   begins. Depends on: #191 and #193 (needs the Grand Final and SS4 to
-   actually be publishable), and generally follows #194.
+   `2026-finals-replay` evidence directory), and the operator playbook itself
+   (the "not-yet-written" document section L of the second-half playbook already
+   anticipates). **#194 exclusively owns final archive/checkpoint creation.**
+   Its acceptance criteria must document and test consuming #195's committed
+   completed-season version/completion-event identifier, creating the archive
+   only afterward, and verifying that the evidence is bound to that exact
+   version/event and contains or identifies both award versions. It must never
+   checkpoint Grand Final + SS4 alone, omit either award, or capture the final
+   archive from an unfenced active season. Depends on: #191, #193 and #195
+   (needs the real operations and #195's stable completed boundary).
 
 Each issue should carry: the relevant confirmed-rule excerpts
 from this document (not a re-derivation), the specific historical-gap

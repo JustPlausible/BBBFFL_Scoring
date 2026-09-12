@@ -5,20 +5,27 @@ the reconstructed mid-season boundary, and Rounds 11–20 completed without
 resetting or replacing the first-half history. Every ordinary round reached
 `final` and was published through the normal weekly lifecycle.
 
-| BBBFFL round | AFL round | Outcome |
-|---:|---:|---|
-| 10 | 1353 | Pass; pre-mid-season squads, review/publication and ladder verified |
-| Mid-season draft | — | Pass; 28 delistings, 28 selections, historical post-draft trade restored, all squads 22 |
-| 11 | 1354 | Pass; first normal post-draft weekly lifecycle completed from reconstructed squads |
-| 12 | 1355 | Pass with finding; historical bye-player selections reproduced through audited Scorer correction; issue #185 / PR #186 improved pre-lock correction UX |
-| 13 | 1356 | Pass; routine lifecycle completed; one historical winner differs from mathematical replay and is recorded below |
-| 14 | 1357 | Pass; routine weekly lifecycle completed |
-| 15 | 1358 | Pass; routine weekly lifecycle completed |
-| 16 | 1359 | Pass; routine weekly lifecycle completed; verified paired recovery point retained privately |
-| 17 | 1360 | Pass; routine weekly lifecycle completed |
-| 18 | 1361 | Pass; routine weekly lifecycle completed |
-| 19 | 1362 | Pass; routine weekly lifecycle completed |
-| 20 | 1363 | Pass; home-and-away replay completed and mathematical ladder preserved for finals handoff |
+| BBBFFL round | AFL round | Authoritative lineups | Outcome |
+|---:|---:|---:|---|
+| 10 | 1353 | 10/10 | Pass; pre-mid-season squads, review/publication and ladder verified |
+| Mid-season draft | — | — | Pass; 28 delistings, 28 selections, historical post-draft trade restored, all squads 22 |
+| 11 | 1354 | 10/10 | Pass; first normal post-draft weekly lifecycle completed from reconstructed squads |
+| 12 | 1355 | 10/10 | Pass with finding; historical bye-player selections reproduced through audited Scorer correction; issue #185 / PR #186 improved pre-lock correction UX |
+| 13 | 1356 | 10/10 | Pass; routine lifecycle completed; one historical winner differs from mathematical replay and is recorded below |
+| 14 | 1357 | 10/10 | Pass; routine weekly lifecycle completed |
+| 15 | 1358 | 10/10 | Pass; routine weekly lifecycle completed |
+| 16 | 1359 | 10/10 | Pass; routine weekly lifecycle completed; verified paired recovery point retained privately |
+| 17 | 1360 | 10/10 | Pass; routine weekly lifecycle completed |
+| 18 | 1361 | 10/10 | Pass; routine weekly lifecycle completed |
+| 19 | 1362 | 10/10 | Pass; routine weekly lifecycle completed |
+| 20 | 1363 | 10/10 | Pass; home-and-away replay completed and mathematical ladder preserved for finals handoff |
+
+The Round 11–20 authoritative-lineup counts above were re-verified directly
+against `weekly_lineup.effective_submission_version` after Round 20: each round
+contained exactly ten weekly-lineup rows and all ten had a non-null effective
+submission version. This verifies the hard exit criterion independently of
+whether a lineup reached its effective version through ordinary submission,
+correction or adjudication.
 
 The second-half rounds exercised staged selective/main lockouts, delegated
 lineup entry, scoring, DNP/interchange review where required, Scorer sign-off,
@@ -59,6 +66,18 @@ continued.
   the authorised Scorer lineup-correction workflow with substantive replay
   reasons. Public lineup state reflected the resulting authoritative corrected
   versions.
+
+  The two correction records are:
+
+  | Team | Position | Corrected player | Versions | Actor role | Correction id | Audit event id | Substantive reason |
+  |---|---|---|---|---|---|---|---|
+  | Running Hots | M3 | Zak Butters | `2 -> 3` | `replay_operator` | `d0d7fd55-ad21-404f-9111-6e973dd73f97` | `ad70b929-6941-493a-b219-899ecb5cd6b6` | `2026 historical replay: restore recorded Round 12 lineup. Zac Butters was historically named at M3 despite Port Adelaide having a bye.` |
+  | Pommy Rules | Interchange | Alex Neal-Bullen | `1 -> 2` | `replay_operator` | `0c0ac0c6-3ff9-4d89-a01d-6e50ad74dfe2` | `27ef4401-6df2-4406-83c7-7a8fe038d853` | `2026 historical replay: restore recorded Round 12 lineup. Alex Neal-Bullen was historically named at Interchange despite Adelaide having a bye.` |
+
+  In both cases the correction-slot audit records show the historical player
+  being inserted into the affected position; the correction is represented by
+  a new immutable submission version and matching `lineup.correction.recorded`
+  audit event rather than by mutating the prior submission.
 - **Finals seeding:** the mathematical Round 20 ladder was deliberately left
   untouched. Issue #187 / PR #188 created a separate immutable replay-only
   historical finals-seeding snapshot after the two known historical

@@ -598,7 +598,17 @@ class FinalsBracketRepository:
         for pairing in pairings:
             if pairing.slot == "bye" or pairing.matchup_id is not None:
                 continue
-            self._materialise_pairing(round_id, pairing, actor=actor, reason=default_reason)
+            if not self._materialise_pairing(round_id, pairing, actor=actor, reason=default_reason):
+                # Codex review, PR #201: the pairing this method read above
+                # was superseded by a concurrent rewind before its own lock
+                # was acquired -- materialising it would attach a matchup to
+                # stale (no longer active) participants. Never proceed on
+                # stale data; the caller retries, which re-lists *active*
+                # pairings fresh and correctly materialises the replacement.
+                raise FinalsBracketAdvanceStateError(
+                    f"finals week {week_number} slot {pairing.slot!r} was superseded by a concurrent rewind "
+                    "while opening this week; reload and retry"
+                )
         current = lifecycle.get_round(round_id)
         if current.state != "upcoming":
             return {"round": current, "already_open": True}
@@ -607,16 +617,26 @@ class FinalsBracketRepository:
         )
         return {"round": opened, "already_open": False}
 
-    def _materialise_pairing(self, round_id: str, pairing: FinalsPairing, *, actor: ActorContext, reason: str) -> None:
+    def _materialise_pairing(self, round_id: str, pairing: FinalsPairing, *, actor: ActorContext, reason: str) -> bool:
+        """Returns `True` once the pairing is materialised (including
+        idempotently, if a concurrent caller already did it), or `False` if
+        this exact pairing was superseded by a concurrent rewind before this
+        lock was acquired -- in which case nothing is written, and the
+        caller must reload/retry against the now-current active pairing
+        rather than materialise stale, no-longer-active participants
+        (Codex review, PR #201)."""
         with transaction(self.database) as conn:
             current = conn.execute(
-                "SELECT matchup_id FROM finals_bracket_pairing WHERE pairing_id=?" + _for_update_suffix(self.database),
+                "SELECT matchup_id, status FROM finals_bracket_pairing WHERE pairing_id=?"
+                + _for_update_suffix(self.database),
                 (pairing.pairing_id,),
             ).fetchone()
             if current is None:
                 raise KeyError(pairing.pairing_id)
+            if current["status"] != "active":
+                return False
             if current["matchup_id"] is not None:
-                return  # already materialised by a concurrent caller -- idempotent no-op
+                return True  # already materialised by a concurrent caller -- idempotent no-op
             round_row = conn.execute(
                 "SELECT l.*, c.stream_type FROM bbbffl_round_lifecycle l "
                 "JOIN competition_stream c ON c.competition_id = l.competition_id "
@@ -656,6 +676,7 @@ class FinalsBracketRepository:
                 },
                 payload={"finals_pairing_id": pairing.pairing_id},
             )
+        return True
 
     # -- Advancing the bracket ------------------------------------------------
 

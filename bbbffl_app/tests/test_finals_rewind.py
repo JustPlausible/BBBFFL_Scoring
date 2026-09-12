@@ -19,7 +19,7 @@ and reports the affected artifacts -- it never invalidates/replays them."""
 import pytest
 
 from app.audit import ActorContext
-from app.finals import DownstreamPlayStateError, FinalsBracketRepository
+from app.finals import DownstreamPlayStateError, FinalsBracketAdvanceStateError, FinalsBracketRepository
 from app.finals_preflight import open_finals_week
 from tests.finals_helpers import (
     accept_week_mapping,
@@ -355,3 +355,100 @@ def test_rewind_reconciles_an_already_materialised_matchup_when_unblocked():
         .fetchone()
     )
     assert matchup_count["n"] == 2  # no orphaned extra matchup rows were created
+
+
+def test_open_finals_week_never_materialises_a_pairing_superseded_mid_open():
+    """Codex review, PR #201: `open_finals_week` first reads a week's
+    *active* pairings, then materialises each one under its own lock. If a
+    concurrent rewind supersedes one of those exact pairings in between --
+    unrealistic in a single-threaded test, but reproduced directly here by
+    calling the internal `_materialise_pairing` step against a pairing
+    object captured *before* a rewind superseded it -- the stale object's
+    (now-incorrect) participants must never be attached to a fresh
+    `bbbffl_matchup`, and the caller must be told to reload and retry
+    against the current active pairing instead."""
+    built, bracket, repo = _bracket_with_mappings(2409)
+    week1_pairings = _week1_to_week2(built, repo, bracket, qf_result=(100, 50), ef_result=(50, 100))
+    stale_second_semi = next(
+        p for p in repo.list_pairings(bracket.bracket_id, week_number=2) if p.slot == "second_semi"
+    )
+
+    # Supersede 'second_semi' (still unmaterialised) via a QF correction,
+    # *after* capturing the pairing object above but before it is ever
+    # passed to `_materialise_pairing` -- exactly the race window Codex
+    # identified between `open_finals_week`'s read and its per-pairing lock.
+    correct_official_result(
+        built["database"], week1_pairings["qf"].matchup_id, 70, 100, reason="races open_finals_week's own read"
+    )
+    repo.rewind_bracket(bracket.bracket_id, 1, actor=ACTOR, reason="supersede before materialisation", apply=True)
+
+    round_id = repo.get_week_round_id(bracket.bracket_id, 2)
+    materialised = repo._materialise_pairing(round_id, stale_second_semi, actor=ACTOR, reason="stale attempt")
+    assert materialised is False
+
+    # Nothing was written for the stale (superseded) pairing or its old
+    # participants -- no matchup exists for this round at all yet.
+    matchup_count = (
+        built["database"]
+        .execute("SELECT COUNT(*) AS n FROM bbbffl_matchup WHERE bbbffl_round_id=?", (round_id,))
+        .fetchone()
+    )
+    assert matchup_count["n"] == 0
+    still_null = repo.list_pairings(bracket.bracket_id, week_number=2, include_superseded=True)
+    assert all(p.matchup_id is None for p in still_null)
+
+    # A fresh open_finals_week call, unaffected by the artificial staleness
+    # above (its own read is always current), correctly materialises the
+    # *replacement* active pairing.
+    reopened = open_finals_week(built["database"], bracket.bracket_id, 2, actor=ACTOR)
+    assert reopened["round"].state == "open"
+    new_second_semi = next(p for p in repo.list_pairings(bracket.bracket_id, week_number=2) if p.slot == "second_semi")
+    assert new_second_semi.matchup_id is not None
+    assert new_second_semi.away_season_entry_id != stale_second_semi.away_season_entry_id
+
+
+def test_open_finals_week_fails_closed_when_its_own_read_races_a_rewind(monkeypatch):
+    """The end-to-end shape of the same race: `open_finals_week` reads a
+    week's active pairings, then a concurrent rewind supersedes one before
+    materialisation reaches it. Monkeypatching `list_pairings` to return
+    that now-stale snapshot (exactly what a real interleaving would hand
+    `open_finals_week`) proves it fails closed instead of silently
+    materialising stale participants."""
+    built, bracket, repo = _bracket_with_mappings(2410)
+    week1_pairings = _week1_to_week2(built, repo, bracket, qf_result=(100, 50), ef_result=(50, 100))
+    stale_pairings = repo.list_pairings(bracket.bracket_id, week_number=2)
+
+    correct_official_result(
+        built["database"], week1_pairings["qf"].matchup_id, 70, 100, reason="races open_finals_week's own read"
+    )
+    repo.rewind_bracket(bracket.bracket_id, 1, actor=ACTOR, reason="supersede before materialisation", apply=True)
+
+    real_list_pairings = FinalsBracketRepository.list_pairings
+    call_count = {"n": 0}
+
+    def stale_once(self, bracket_id, *, week_number=None, include_superseded=False):
+        # The first call is `build_finals_week_preflight`'s own readiness
+        # check; the second is the repository's `open_finals_week` reading
+        # what it will actually materialise -- exactly the read a real
+        # concurrent rewind would race.
+        if week_number == 2 and not include_superseded:
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                return stale_pairings
+        return real_list_pairings(self, bracket_id, week_number=week_number, include_superseded=include_superseded)
+
+    monkeypatch.setattr(FinalsBracketRepository, "list_pairings", stale_once)
+
+    with pytest.raises(FinalsBracketAdvanceStateError, match="superseded by a concurrent rewind"):
+        open_finals_week(built["database"], bracket.bracket_id, 2, actor=ACTOR)
+
+    round_id = repo.get_week_round_id(bracket.bracket_id, 2)
+    assert (
+        built["database"]
+        .execute("SELECT COUNT(*) AS n FROM bbbffl_matchup WHERE bbbffl_round_id=?", (round_id,))
+        .fetchone()["n"]
+        == 0
+    )
+
+    reopened = open_finals_week(built["database"], bracket.bracket_id, 2, actor=ACTOR)
+    assert reopened["round"].state == "open"

@@ -125,3 +125,23 @@ operator CLI in this repository.
 - Public/coach/Scorer views for the six finals matches.
 - Wiring the completed-season write fence (issue #195) into bracket
   creation/advance/elimination writes, once #195 lands.
+- **Bracket-participant eligibility enforcement inside the lineup
+  submission path itself** (see `docs/2026-finals-superscore-design.md`'s
+  "Coach lineup/submission behaviour": "Eligibility is not enforced by
+  `WeeklyLineupRepository` itself and must be enforced by the finals
+  module"). `rewind_bracket`'s downstream-play-state lock closes the race
+  where a *committed* submission is invisible to a concurrent rewind (see
+  "Locking" above), but it cannot close the narrower race where `rewind_
+  bracket` wins the `bbbffl_round_lifecycle` row-lock race against a
+  submission that is already in flight (queued behind that same lock, or
+  about to start): that submission still commits normally afterwards,
+  since nothing in `app.lineups.WeeklyLineupRepository._finalize_
+  submission` today checks whether its target `season_entry_id` is still
+  the pairing's own participant. #190 does not modify `app.lineups` (an
+  explicit safety boundary of this issue) and does not implement the
+  bracket-participant eligibility check itself (explicitly #191's job, per
+  the design doc). #191 must therefore perform that eligibility check
+  *inside* the same locked `_finalize_submission` transaction (after
+  acquiring the `bbbffl_round_lifecycle` lock, not before), not merely at
+  the route/service layer above it, or this exact race remains open even
+  after #191 lands.

@@ -213,7 +213,71 @@ unchanged" for finals or SuperScore lineup submission/lockout should be
 read as "reusable unchanged once #197 lands" — restated here once rather
 than qualified at every occurrence.
 
-## Main finals design
+### A wider pattern: `stream_type='ordinary'` is hard-coded across the application, not just in the modules already named
+
+**Added after the ninth and tenth Codex review rounds each found another
+independent call site with the identical shape (`LineupAdjudicationService.
+_eligibility`; `app/routes/lineup_adjudication.py` and `app/routes/
+lineup_correction.py`'s shared `_authorise_round`), and confirmed directly
+by grepping the repository rather than waiting for an eleventh.** This
+document's earlier framing — "#197 resolves the schema fork, then #190-
+#193 build on top of it" — understated how many *existing* call sites
+assume "ordinary" is the only real stream and will need their own
+adaptation regardless of #197's schema choice, because they filter or
+branch on `stream_type` themselves rather than merely relying on the
+schema constraints #197 touches. A repository-wide search
+(`grep -rn "stream_type.*ordinary"` under `bbbffl_app/app/`) found, at
+minimum:
+
+- `app/round_preflight.py` — `open_preflight_round` calls `create_
+  ordinary_round` directly, and `build_round_preflight` adds a hard
+  `fixture_invalid` blocker unless it finds exactly five frozen fixture
+  matchups. **The operator preflight/open-round workflow itself cannot
+  open a finals or SuperScore round**, independent of #197's storage
+  choice — #190/#192 need a stream-aware preflight/open adapter (and
+  `app/routes/round_preflight.py`'s own `stream_type='ordinary'` filter
+  needs the same treatment).
+- `app/coach_lineup.py` — `CoachLineupService.list_rounds` and `resolve`
+  both filter `stream_type='ordinary'` explicitly, and `_opponent` reads
+  the fixed fixture draw. **The authenticated coach-facing lineup
+  submission route 404s for both new streams even once #197 lands** —
+  #191/#192 need a stream-aware coach service/route, including bracket-
+  derived finals opponents and matchup-free SuperScore presentation
+  (this may reasonably be the same views work #193 already owns for
+  SuperScore's public/coach/Scorer surfaces, rather than a fourth
+  implementation).
+- `app/scorer_dashboard.py` and `app/admin_dashboard.py` similarly select
+  "the ordinary competition" for their round listings/dashboard displays —
+  a finals/SuperScore round would not appear in the Scorer's or admin's
+  dashboard without an equivalent addition.
+- `app/public_rounds.py`'s `_ordinary_competition_id` scopes the public
+  round/ladder view the same way — expected, since #191/#193 already plan
+  their own public finals/SuperScore views separately; noted here only so
+  it isn't mistaken for a gap to "fix" in `app/public_rounds.py` itself.
+- `app/routes/delegated_operations.py` has the identical `_authorise_
+  round`-shaped `stream_type='ordinary'` filter as the adjudication/
+  correction routes above, for delegated-scorer operations — the same
+  adaptation-or-sibling-route treatment applies if delegated operators need
+  to act on finals/SuperScore rounds.
+- **Not gaps, checked and excluded deliberately:** `app/round_mapping.py`'s
+  `bbbffl_stream_type != "ordinary"` guard only disables *automatic* AFL-
+  round-mapping recommendation for non-ordinary streams — manual mapping
+  (which #190/#192 already require) is unaffected, so this is a correctly-
+  scoped guard, not a gap. `app/replay_bootstrap.py`/`app/replay_
+  continuation.py`'s ordinary-only scoping is correct too: those modules
+  bootstrap/continue specifically the *ordinary* competition's history,
+  which is exactly their job; finals/SuperScore get their own separate
+  bootstrap through #190/#192, not through these modules.
+
+**This list is not guaranteed exhaustive — it is what a repository-wide
+grep found as of this document's tenth-round revision, not a formally
+verified closed set.** Rather than let an eleventh, twelfth, and
+thirteenth Codex review round each surface one more independent site one
+at a time, **#190, #191, #192 and #193 must each re-run an equivalent
+search scoped to their own domain at the start of their own work** (coach-
+facing surfaces for #191/#192; Scorer/operator/admin surfaces for #190-
+#193; public views for #191/#193) and adapt every relevant call site they
+find, rather than treating the list above as complete.
 
 ### Confirmed bracket structure
 

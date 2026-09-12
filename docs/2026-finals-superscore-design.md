@@ -781,6 +781,32 @@ correction commands must therefore assemble and pass the same kind of
 per-matchup input snapshot `_freeze_matchup_inputs` does, adapted to
 whichever matchup representation #197/#190 produced.
 
+**Assembling that snapshot is not itself sufficient — the finals publish
+and correction transaction must also lock and revalidate it before
+inserting the official result, or the same read-then-write race already
+fixed for bracket creation, advance-bracket, and SuperScore's publisher
+recurs here — Codex review, PR #196, twenty-second round, verified
+directly against `app/calculations.py`'s `_persist`.** `_persist` writes
+only to `bbbffl_matchup_calculation`; it never touches `bbbffl_matchup.
+review_version` at all — recalculation and review-version-bumping rulings
+are, exactly as established for SuperScore, two independent counters. If a
+finals calculation reruns (e.g. a later AFL evidence correction) after the
+publish adapter assembles its input snapshots but before the result
+transaction commits, simply copying the ordinary `expected_review_versions`
+check would not catch it either, since recalculation never advances
+`review_version` — the new official result could freeze the old score and
+the now-stale snapshot as if nothing had changed. The finals publish/
+correction transaction must therefore `SELECT ... FOR UPDATE` every
+captured matchup's calculation row (or whichever shared serialization
+record #197's chosen path exposes) alongside its `bbbffl_matchup.
+review_version`, in a deterministic order, and compare each against the
+value captured when its snapshot was assembled — aborting for the caller to
+rebuild/retry if either has changed — before inserting the official result.
+This mirrors the identical discipline already required of bracket creation,
+advance-bracket, and SuperScore's publisher; finals' publish/correction
+command is new code, not reused `attempt_signoff`, so it must not silently
+inherit the narrower guarantee the ordinary path happens to get away with.
+
 This new command is not optional polish on top of otherwise-reusable
 review machinery — per "Scoring" above, `app.round_review.
 build_round_review`/`attempt_signoff` themselves hard-code "exactly five
@@ -1592,10 +1618,15 @@ order (each row's "Depends on" names the prerequisite rows):
    boundary (not a reuse of `app.round_review`'s matchup-keyed methods —
    see "DNP, Interchange and loophole rulings" under "SuperScore design").
    **Acceptance requires lifecycle setup to atomically create and verify all
-   ten durable round/entry review-state rows before open**, and requires every
-   ruling, override, lineup correction and its stale-ruling invalidation to
-   lock the affected state row and advance its `review_version` in the same
-   transaction. The state must exist independently of any calculation row.
+   ten durable round/entry review-state rows before open**, and requires
+   *every* write that changes an entry's effective submitted lineup — the
+   initial submission, any unlocked pre-lockout resubmission through the
+   ordinary `submit`/`submit_positions` path, a post-lockout correction and
+   its stale-ruling invalidation, and every ruling/override — to lock the
+   affected state row and advance its `review_version` in the same
+   transaction. Scoping this to "correction" alone leaves an ordinary
+   unlocked resubmission invisible to #193's publish-time CAS check. The
+   state must exist independently of any calculation row.
    Resolves historical-gap question 6 (round mapping) for the SuperScore
    rounds as part of setup. Depends on: #197 (no longer independent of the
    finals track at the schema level, though its bracket-specific work
@@ -1611,9 +1642,10 @@ order (each row's "Depends on" names the prerequisite rows):
    way `bbbffl_official_result.input_snapshot` does for the ordinary case,
    ranking/joint-winner computation, a publish/correction command that
    **locks and re-verifies, per entry, the always-present review-state row and
-   its shared review-revision counter
-   that every lineup correction, ruling, and recalculation advances** —
-   not merely the calculation revision, which a ruling/correction need not
+   its shared review-revision counter that *every* effective lineup write
+   (initial submission, unlocked resubmission, and correction alike),
+   ruling, and recalculation advances** —
+   not merely the calculation revision, which none of those need
    touch — inside the same transaction that writes the new revision (the
    same race already fixed for bracket creation and advance-bracket,
    applied here, coordinated with #192's entry-scoped ruling boundary which

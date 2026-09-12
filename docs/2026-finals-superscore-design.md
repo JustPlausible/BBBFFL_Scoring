@@ -849,6 +849,37 @@ first has finished, making "persisted last" and "reflects the newest
 evidence" the same statement again without requiring any ordering field
 the real evidence client does not provide.
 
+**A third correction closes a gap the per-matchup lock above does not, on
+its own, cover for the bulk recompute-before-publish path specifically —
+Codex review, PR #196, thirty-second round, verified directly against
+`app/calculations.py`'s `_RoundFacts`.** `MatchupCalculationService.
+calculate_round` constructs a *single* `_RoundFacts` object before
+iterating the round's matchups, and that object caches each distinct AFL
+round's matches/player-stats the first time any matchup asks for them,
+reusing the cached copy for every subsequent matchup in the same bulk
+call — deliberately, to avoid redundant AFL-API calls. If the finals
+publish command's fresh-evidence-batch bulk recompute (the first
+correction above) populates that shared cache while processing one
+matchup, and a *separate*, single-matchup calculation acquires the lock
+for a *different* matchup in the same round and persists a corrected
+result using genuinely fresher facts in the meantime, the bulk job later
+reaches that same matchup, acquires its lock exactly as required, but
+recomputes from its own already-stale cached facts and overwrites the
+corrected calculation — the lock correctly serializes *access to the row*,
+but does not by itself guarantee the facts used were fetched after the
+lock was acquired. **The bulk recompute path must therefore acquire every
+matchup lock it will need, in deterministic order, before constructing or
+populating any shared facts cache for that batch** — mirroring the
+deterministic-order multi-row locking this design already requires
+elsewhere (SuperScore's ten `superscore_entry_review_state` rows, the
+per-matchup calculation-row/`review_version` revalidation above) — rather
+than locking each matchup individually as the bulk loop reaches it. This
+applies equally to SuperScore's own fresh-evidence-batch bulk recompute
+(the twenty-ninth round's requirement, "Scoring" below): if its
+implementation uses an analogous shared per-round facts cache across the
+ten entries, it must acquire all ten entry locks up front, before
+populating that cache, for the identical reason.
+
 This new command is not optional polish on top of otherwise-reusable
 review machinery — per "Scoring" above, `app.round_review.
 build_round_review`/`attempt_signoff` themselves hard-code "exactly five
@@ -1463,6 +1494,29 @@ round_review.py`'s existing ordinary-result machinery:**
   often the lock is contended at all, since the recompute-before-publish
   discipline already limits how many calculations for the same entry are
   in flight at once.
+- **A further correction (Codex review, PR #196, thirty-second round,
+  verified directly against `app/calculations.py`'s `_RoundFacts`): if the
+  publish/correction command's fresh-evidence-batch bulk recompute (the
+  twenty-ninth round's requirement above) implements its per-round
+  AFL-facts fetch the same way `MatchupCalculationService.calculate_round`
+  does — one shared facts cache built before iterating the ten entries,
+  reused for every entry rather than re-fetched each time — the per-entry
+  lock above does not by itself close the gap.** A lock correctly
+  serializes *access to an entry's row*, but not *when its facts were
+  fetched*: the shared cache could be populated while processing entry A,
+  a separate single-entry recalculation could lock and persist entry B
+  using genuinely fresher facts in the meantime, and the bulk job could
+  then reach entry B, acquire its lock exactly as required, but recompute
+  from its own already-stale cached facts and overwrite the corrected
+  calculation anyway. **The bulk recompute path must therefore acquire
+  every entry lock it will need, in deterministic order, before
+  constructing or populating any shared facts cache for that batch** —
+  the same discipline this section already requires SuperScore's publisher
+  to apply when locking all ten `superscore_entry_review_state` rows, now
+  applied one step earlier, before the batch even reads AFL facts. The
+  identical requirement applies to #191's finals publish/correction bulk
+  recompute (see "Handling of corrections" under "Main finals design"),
+  since it faces the same `_RoundFacts` sharing risk directly.
 
 ### Publication; public/coach/Scorer views
 
@@ -1850,7 +1904,13 @@ order (each row's "Depends on" names the prerequisite rows):
    committing) rather than comparing an `upstream_revision` value no live
    call site actually populates with an ordered marker** — so a matchup
    calculation using older AFL evidence can never overwrite one already
-   computed from newer evidence. Depends on: #190.
+   computed from newer evidence. **If the bulk recompute's AFL-facts fetch
+   uses a shared per-round cache (as `MatchupCalculationService.
+   calculate_round`'s `_RoundFacts` does), acceptance requires locking
+   every matchup the batch will touch, in deterministic order, before
+   constructing or populating that cache** — a per-matchup lock alone does
+   not guarantee the facts used were fetched after the lock was acquired.
+   Depends on: #190.
 4. **[#192 — SuperScore roster, eligibility and lifecycle setup](https://github.com/JustPlausible/BBBFFL_Scoring/issues/192)**
    — the `superscore` competition-stream round lifecycle (built on #197's
    chosen storage shape), weekly lineup submission/lockout wired to it
@@ -1929,7 +1989,13 @@ order (each row's "Depends on" names the prerequisite rows):
    calculation (and the newer evidence it read) can never be overwritten by
    an earlier one that is still finishing — so a stale or out-of-order
    calculation can never become the entry's latest row and the leaderboard
-   can never publish evidence older than current AFL facts.** Every
+   can never publish evidence older than current AFL facts.** **If the
+   fresh-evidence-batch bulk recompute's AFL-facts fetch uses a shared
+   per-round cache (as `MatchupCalculationService.calculate_round`'s
+   `_RoundFacts` does), acceptance requires locking all ten entries, in
+   deterministic order, before constructing or populating that cache** — a
+   per-entry lock alone does not guarantee the facts used were fetched
+   after the lock was acquired. Every
    SuperScore correction/republication must also take the
    owning season-row lock and reject a completed season in that same write
    transaction.**

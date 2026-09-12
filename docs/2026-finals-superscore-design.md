@@ -1153,13 +1153,34 @@ round_review.py`'s existing ordinary-result machinery:**
   `expected_review_versions` against them inside `publish_results`'s own
   transaction — the check and the write can never race specifically
   because both happen against the same locked rows, not because the check
-  merely runs inside a transaction. The SuperScore publisher and
-  correction command must do the same: `SELECT ... FOR UPDATE` the ten
-  entries' entry-scoped calculation rows, in a deterministic order (e.g.
-  sorted by `season_entry_id`), and compare each one's current calculation
-  revision against the value captured when the snapshots were assembled,
-  aborting for the caller to retry if any has changed, before inserting the
-  new revision.
+  merely runs inside a transaction.
+- **A fourth correction (Codex review, PR #196, nineteenth round):
+  comparing only the calculation revision above is not sufficient on its
+  own — verified directly against `app/round_review.py`'s actual CAS key.**
+  `publish_results`'s `expected_review_versions` checks `bbbffl_matchup.
+  review_version`, a single counter every DNP/Interchange/override ruling
+  bumps (`record_dnp_ruling`/`record_interchange_ruling`/`record_override`
+  each `UPDATE bbbffl_matchup SET review_version=review_version+1`) — **a
+  separate counter from `bbbffl_matchup_calculation.revision`, which only
+  the calculation service itself advances.** A lineup correction or a
+  ruling/override recorded through #192's entry-scoped ruling boundary need
+  not touch the entry-scoped calculation row's own revision at all, so
+  comparing only that calculation revision leaves exactly the same
+  race open through the ruling/correction path: either can still commit,
+  unnoticed by this check, after the ten snapshots are assembled but before
+  the leaderboard-revision `INSERT` commits. SuperScore needs its own
+  equivalent of `review_version`: a single per-entry counter that *every*
+  mutation affecting that entry's SuperScore result — lineup
+  correction, DNP/Interchange/override ruling, and recalculation alike —
+  advances (coordinate the exact shape with #192, which owns the
+  entry-scoped ruling boundary that must also bump it). The SuperScore
+  publisher and correction command must do the same: `SELECT ... FOR
+  UPDATE` the ten entries' entry-scoped calculation rows, in a
+  deterministic order (e.g. sorted by `season_entry_id`), and compare
+  each one's current entry review-revision counter — not merely its
+  calculation revision — against the value captured when the snapshots
+  were assembled, aborting for the caller to retry if any has changed,
+  before inserting the new revision.
 
 ### Publication; public/coach/Scorer views
 
@@ -1473,10 +1494,14 @@ order (each row's "Depends on" names the prerequisite rows):
    with each revision **freezing every entry's scoring inputs** the same
    way `bbbffl_official_result.input_snapshot` does for the ordinary case,
    ranking/joint-winner computation, a publish/correction command that
-   **locks and re-verifies the ten entries' calculation revisions inside
-   the same transaction that writes the new revision** (the same race
-   already fixed for bracket creation and advance-bracket, applied here),
-   and public/coach/Scorer views. Depends on: #192.
+   **locks and re-verifies, per entry, a shared review-revision counter
+   that every lineup correction, ruling, and recalculation advances** —
+   not merely the calculation revision, which a ruling/correction need not
+   touch — inside the same transaction that writes the new revision (the
+   same race already fixed for bracket creation and advance-bracket,
+   applied here, coordinated with #192's entry-scoped ruling boundary which
+   must also advance this counter), and public/coach/Scorer views.
+   Depends on: #192.
 6. **[#194 — Operator audit/correction/recovery support for finals and SuperScore](https://github.com/JustPlausible/BBBFFL_Scoring/issues/194)**
    — the finals/SuperScore-specific audit action catalogue, checkpoint
    procedure extending the second-half playbook (or a new

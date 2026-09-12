@@ -1411,16 +1411,27 @@ round_review.py`'s existing ordinary-result machinery:**
   table already carries for exactly this purpose (verified directly against
   `MatchupCalculationService._persist`) — and, at persist time inside the
   same locked transaction, refuse to persist (treat as superseded, discard)
-  if the entry's currently-stored calculation already carries an
-  equal-or-newer `upstream_revision` than the one this calculation used.**
-  A calculation may only ever advance the row's `upstream_revision`
-  forward, never backward — "highest upstream revision wins," not
-  "whoever's transaction commits last wins." Coordinated with (but distinct
-  from) the twenty-ninth round's other correction above: the fresh-recompute
-  discipline sharply narrows how often overlapping calculations for the
-  same entry can occur at all, but does not make this guard unnecessary,
-  since other triggers (e.g. live recalculation as AFL facts stream in
-  during a match) can still race independently of a publish attempt.
+  if the entry's currently-stored calculation already carries a strictly
+  newer `upstream_revision` than the one this calculation used.** Reject
+  only strictly *older* evidence; a calculation that used the *same*
+  `upstream_revision` as the stored row must still be allowed to persist —
+  that is the ordinary case of recomputing after a lineup submission,
+  resubmission, correction, or ruling advances `review_version` without
+  any AFL evidence changing at all. Rejecting equal-evidence calculations
+  would leave the entry's `computed_as_of_review_version` permanently
+  stale (and publication permanently failing its round-26 freshness check)
+  until unrelated upstream evidence next changes. Ordering among two
+  calculations that share the same `upstream_revision` for the same entry
+  is decided by the existing round-25/26 review-version CAS, not by this
+  guard. A calculation may only ever advance the row's `upstream_revision`
+  forward, never backward — "highest upstream revision wins, ties broken
+  by review-version CAS," not "whoever's transaction commits last wins."
+  Coordinated with (but distinct from) the twenty-ninth round's other
+  correction above: the fresh-recompute discipline sharply narrows how
+  often overlapping calculations for the same entry can occur at all, but
+  does not make this guard unnecessary, since other triggers (e.g. live
+  recalculation as AFL facts stream in during a match) can still race
+  independently of a publish attempt.
 
 ### Publication; public/coach/Scorer views
 
@@ -1859,7 +1870,20 @@ order (each row's "Depends on" names the prerequisite rows):
    assembly, since a same-`review_version` recalculation (e.g. an
    upstream AFL-evidence correction) changes the calculation without
    changing `review_version` at all, and the review-state check alone
-   cannot see it.** Every SuperScore correction/republication must also take the
+   cannot see it.** **Acceptance also requires the publish/correction
+   command to recompute all ten entries under one fresh `evidence_batch()`
+   scope immediately before assembling the snapshot and fail closed if not
+   `evidence_fresh` (mirroring `round_review.py`'s existing `signoff`
+   route), and requires calculation persistence to capture a monotonic
+   `upstream_revision`/`upstream_observed_at` marker (the existing
+   `bbbffl_matchup_calculation` columns) and refuse to persist if the
+   entry's currently-stored calculation already carries a strictly newer
+   `upstream_revision` — rejecting only strictly older evidence, never an
+   equal-evidence recomputation, with ties among equal-`upstream_revision`
+   calculations broken by the review-version CAS above — so a stale or
+   out-of-order calculation can never become the entry's latest row and
+   the leaderboard can never publish evidence older than current AFL
+   facts.** Every SuperScore correction/republication must also take the
    owning season-row lock and reject a completed season in that same write
    transaction.**
    Depends on: #192.

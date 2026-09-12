@@ -1078,6 +1078,50 @@ means:
   even though its underlying JSON-config/legacy-table storage is not
   reused (see "Architecture" above).
 
+**Two further corrections (Codex review, PR #196, seventeenth round), both
+verified directly against `app/competition_lifecycle.py` and `app/
+round_review.py`'s existing ordinary-result machinery:**
+
+- **A correction must version and republish the whole leaderboard, not
+  just the corrected entry's row.** `rank` and `is_joint_winner` are
+  properties of the *entire* ten-entry set, not of any one entry in
+  isolation: correcting one entry's score can move it above or below
+  others, or push it into or out of a tie for first, which changes the
+  persisted `rank`/`is_joint_winner` of entries whose own score never
+  changed. If corrections version and persist only the one row that was
+  actually corrected, the official leaderboard becomes a mix of rows from
+  different revisions — internally inconsistent (e.g. two entries both
+  recorded as rank 3, or a stale `is_joint_winner` on an entry the
+  correction actually separated from the tie). The SuperScore official-
+  result representation must therefore be a **round-level revision**: one
+  version number shared by all ten entries' rows for that round (mirroring
+  how ordinary publication versions and republishes the whole round's set
+  of matchups together, per `app.competition_lifecycle.publish_results`,
+  rather than one matchup at a time). Every correction recomputes rank and
+  `is_joint_winner` for all ten entries from their (possibly-unchanged)
+  scores and atomically persists a brand-new revision covering all ten —
+  never a partial update to a subset.
+- **Each revision must also freeze the exact scoring inputs that produced
+  it, per entry — the entry-scoped counterpart of `bbbffl_official_
+  result.input_snapshot`.** Ordinary publication does not persist only the
+  derived `home_score`/`away_score`; `app.round_review._freeze_matchup_
+  inputs` also captures `rules_version_id`, `calculation_revision`,
+  `calculation_fingerprint`, both sides' lineup/DNP/interchange/override
+  state, and who/when finalised it, precisely so a later recalculation or
+  ruling correction can never change what an already-published version
+  meant (`app/round_review.py`'s own docstring: "never re-derived from live
+  lineup/rule/recommendation state"). The new entry-scoped calculation path
+  above is the mutable layer this applies to for SuperScore — analogous to
+  `bbbffl_matchup_calculation`, and just as mutable after recalculation or a
+  ruling/lineup correction. Each SuperScore result revision must therefore
+  freeze the equivalent entry-scoped snapshot (lineup version, calculation
+  revision/fingerprint, and any DNP/Interchange/override rulings in effect)
+  for every one of the ten entries at the moment that revision is
+  published, not merely the derived score/rank/`is_joint_winner` fields —
+  otherwise a later recalculation could leave an already-published
+  SuperScore result unexplainable, exactly the gap `input_snapshot` exists
+  to close for the ordinary case.
+
 ### Publication; public/coach/Scorer views
 
 - **Public:** a SuperScore leaderboard for the current round (and,
@@ -1262,6 +1306,18 @@ consistent with confirmed rules but not itself a league rule), and
    manual Scorer/quorum ruling recorded through the ordinary correction
    pathway with no automatic cascade? This should be settled before the
    finals-lifecycle follow-up issue is implemented, not discovered mid-PR.
+   **Whichever answer Steve gives must also cover the separately-persisted
+   `finals_bracket_elimination` record, not only downstream pairings —
+   verified directly against "Progression and elimination" above (Codex
+   review, PR #196, seventeenth round).** A correction that flips who won
+   the Elimination Final, First Semi-Final, or Preliminary Final also flips
+   who should be recorded as eliminated by it. Options (a)/(b)/(c) above
+   were framed only in terms of blocking or re-deriving the *next week's
+   pairing*; even under (b)'s cascading re-derivation, the elimination
+   record itself must be included in that same cascade (a new elimination
+   revision superseding the old one, audited the same way), or the
+   explicit elimination history keeps naming the original, now-incorrect
+   loser even after the pairing downstream of it has been fixed.
 5. **Unresolved: SuperScore prize amounts/configuration for the 2026
    replay.** `2027-season-model.md` confirms a monetary prize exists per
    SuperScore round but this investigation found no specific 2026 amount

@@ -4,6 +4,7 @@ through the CLI's own command handlers -- mirrors
 tests/test_finals_seeding_cli.py's shape for scripts/finals_seeding_2026.py."""
 
 import argparse
+import json
 
 import pytest
 
@@ -151,7 +152,17 @@ def test_cli_preview_apply_round_trip_and_full_lifecycle_against_a_real_database
     advance_preview_ns = argparse.Namespace(bracket_id=bracket.bracket_id, from_week=1)
     assert cmd_advance_preview(database, advance_preview_ns) == 0
 
-    advance_apply_ns = argparse.Namespace(bracket_id=bracket.bracket_id, from_week=1, reason="CLI advance")
+    # Exercises the --expected-versions round trip: what preview reports is
+    # exactly what a real operator would paste into the apply call below.
+    expected_versions = FinalsBracketRepository(database).preview_advance_bracket(bracket.bracket_id, 1)[
+        "expected_versions"
+    ]
+    advance_apply_ns = argparse.Namespace(
+        bracket_id=bracket.bracket_id,
+        from_week=1,
+        reason="CLI advance",
+        expected_versions=json.dumps(expected_versions),
+    )
     assert cmd_advance_apply(database, advance_apply_ns) == 0
 
     week2 = FinalsBracketRepository(database).list_pairings(bracket.bracket_id, week_number=2)

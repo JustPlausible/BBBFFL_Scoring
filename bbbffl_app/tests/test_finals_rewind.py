@@ -277,3 +277,81 @@ def test_rewind_apply_is_idempotent_against_an_already_current_derivation():
     assert second["no_change_needed"]
     all_pairings = repo.list_pairings(bracket.bracket_id, week_number=2, include_superseded=True)
     assert len(all_pairings) == 2  # no superseded rows were created by the no-op applies
+
+
+def test_rewind_reconciles_an_already_materialised_matchup_when_unblocked():
+    """Codex review, PR #201: superseding a pairing that has already been
+    opened into a real `bbbffl_matchup` (but has no downstream play state
+    yet) must reconcile that same matchup's participants in place, not
+    leave the new pairing's `matchup_id` NULL -- otherwise the round keeps
+    exposing the old, now-incorrect participants, and the slot can never be
+    re-materialised (`uq_round_matchup_order`/`uq_finals_bracket_pairing_
+    matchup` would both block it)."""
+    built, bracket, repo = _bracket_with_mappings(2408)
+    week1_pairings = _week1_to_week2(built, repo, bracket, qf_result=(100, 50), ef_result=(50, 100))
+    open_finals_week(built["database"], bracket.bracket_id, 2, actor=ACTOR)
+    old_ss2 = next(p for p in repo.list_pairings(bracket.bracket_id, week_number=2) if p.slot == "second_semi")
+    old_fs = next(p for p in repo.list_pairings(bracket.bracket_id, week_number=2) if p.slot == "first_semi")
+    assert old_ss2.matchup_id is not None
+    assert old_fs.matchup_id is not None
+
+    correct_official_result(
+        built["database"], week1_pairings["qf"].matchup_id, 70, 100, reason="scorer correction: QF result flipped"
+    )
+    applied = repo.rewind_bracket(
+        bracket.bracket_id, 1, actor=ACTOR, reason="reconcile materialised matchups", apply=True
+    )
+    assert not applied["blocked"]
+
+    new_ss2 = next(p for p in repo.list_pairings(bracket.bracket_id, week_number=2) if p.slot == "second_semi")
+    new_fs = next(p for p in repo.list_pairings(bracket.bracket_id, week_number=2) if p.slot == "first_semi")
+    # The same underlying matchup rows are reused, not left NULL/orphaned.
+    assert new_ss2.matchup_id == old_ss2.matchup_id
+    assert new_fs.matchup_id == old_fs.matchup_id
+
+    ss2_matchup = (
+        built["database"]
+        .execute(
+            "SELECT home_season_entry_id, away_season_entry_id FROM bbbffl_matchup WHERE matchup_id=?",
+            (new_ss2.matchup_id,),
+        )
+        .fetchone()
+    )
+    assert ss2_matchup["home_season_entry_id"] == new_ss2.home_season_entry_id
+    assert ss2_matchup["away_season_entry_id"] == new_ss2.away_season_entry_id
+    fs_matchup = (
+        built["database"]
+        .execute(
+            "SELECT home_season_entry_id, away_season_entry_id FROM bbbffl_matchup WHERE matchup_id=?",
+            (new_fs.matchup_id,),
+        )
+        .fetchone()
+    )
+    assert fs_matchup["home_season_entry_id"] == new_fs.home_season_entry_id
+    assert fs_matchup["away_season_entry_id"] == new_fs.away_season_entry_id
+
+    # The old (superseded) pairing rows no longer reference the matchup --
+    # a plain UNIQUE constraint on matchup_id would otherwise be violated by
+    # the new pairing pointing at the same row.
+    old_rows = repo.list_pairings(bracket.bracket_id, week_number=2, include_superseded=True)
+    superseded_ss2 = next(p for p in old_rows if p.pairing_id == old_ss2.pairing_id)
+    superseded_fs = next(p for p in old_rows if p.pairing_id == old_fs.pairing_id)
+    assert superseded_ss2.status == "superseded"
+    assert superseded_ss2.matchup_id is None
+    assert superseded_fs.status == "superseded"
+    assert superseded_fs.matchup_id is None
+
+    # The round remains genuinely playable afterwards: re-running the
+    # preflight/open-round adapter is a safe idempotent no-op (nothing left
+    # to materialise), never a constraint violation.
+    reopened = repo.open_finals_week(bracket.bracket_id, 2, actor=ACTOR)
+    assert reopened["already_open"]
+    matchup_count = (
+        built["database"]
+        .execute(
+            "SELECT COUNT(*) AS n FROM bbbffl_matchup WHERE bbbffl_round_id=?",
+            (repo.get_week_round_id(bracket.bracket_id, 2),),
+        )
+        .fetchone()
+    )
+    assert matchup_count["n"] == 2  # no orphaned extra matchup rows were created

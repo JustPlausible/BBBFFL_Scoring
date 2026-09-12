@@ -33,7 +33,7 @@ import pytest
 import app.competition_lifecycle as competition_lifecycle_module
 from app.audit import ActorContext
 from app.db import connect
-from app.finals import FinalsBracketRepository, StaleFinalsResultError, StaleSeedOrderError
+from app.finals import DownstreamPlayStateError, FinalsBracketRepository, StaleFinalsResultError, StaleSeedOrderError
 from app.finals_preflight import open_finals_week
 from app.migrations import migrate
 from app.season import SeasonRepository
@@ -246,6 +246,86 @@ def test_concurrent_correction_racing_an_in_flight_advance_is_detected_via_row_l
 
     # No stale Week 2 pairing was persisted -- the advance aborted entirely.
     assert repo.list_pairings(bracket.bracket_id, week_number=2) == ()
+
+
+def test_rewind_genuinely_blocks_on_the_same_lifecycle_row_a_lineup_submission_holds(postgres_database, monkeypatch):
+    """Codex review, PR #201: an unlocked read of `weekly_lineup` inside
+    `rewind_bracket`'s downstream-play-state check can miss an authoritative
+    submission that commits immediately afterward. `_downstream_play_state`
+    now locks the identical `bbbffl_round_lifecycle` row `app.lineups.
+    WeeklyLineupRepository._finalize_submission` locks before it commits a
+    submission -- proven here by having a submission genuinely hold that
+    row lock open while `rewind_bracket`'s own transaction demonstrably
+    blocks trying to acquire it, before observing the submission and
+    correctly failing closed."""
+    import app.lineups as lineups_module
+    from app.lineups import WeeklyLineupRepository
+    from app.player_pool import OwnershipRepository, PlayerPoolRepository
+
+    built, bracket, repo, pairings = _bracket_at_week1_played(postgres_database, 2904)
+    repo.advance_bracket(bracket.bracket_id, 1, actor=ACTOR, reason="advance to week 2")
+    open_finals_week(postgres_database, bracket.bracket_id, 2, actor=ACTOR)
+    first_semi = next(p for p in repo.list_pairings(bracket.bracket_id, week_number=2) if p.slot == "first_semi")
+    round_id = repo.get_week_round_id(bracket.bracket_id, 2)
+
+    scope = postgres_database.execute(
+        "SELECT c.season_id, c.competition_id FROM bbbffl_round r "
+        "JOIN competition_stream c ON c.competition_id = r.competition_id WHERE r.bbbffl_round_id=?",
+        (round_id,),
+    ).fetchone()
+    OwnershipRepository(postgres_database).configure_squad_limit(scope["season_id"], 5)
+    player = PlayerPoolRepository(postgres_database).refresh_player(scope["season_id"], 970001, "Rewind Race Player")
+    OwnershipRepository(postgres_database).acquire(player.season_player_id, first_semi.home_season_entry_id)
+    lineups = WeeklyLineupRepository(postgres_database)
+    draft = lineups.save_draft(
+        scope["season_id"],
+        scope["competition_id"],
+        round_id,
+        first_semi.home_season_entry_id,
+        {"F1": player.season_player_id},
+        expected_revision=0,
+    )
+
+    submission_holds_lock = threading.Event()
+    allow_submission_to_commit = threading.Event()
+    real_append = lineups_module.append_event
+
+    def pause_submission(*args, **kwargs):
+        submission_holds_lock.set()
+        assert allow_submission_to_commit.wait(timeout=5)
+        return real_append(*args, **kwargs)
+
+    monkeypatch.setattr(lineups_module, "append_event", pause_submission)
+
+    correct_official_result(
+        postgres_database, pairings["qf"].matchup_id, 10, 90, reason="concurrent QF correction races a submission"
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        submission = executor.submit(
+            lineups.submit, draft.lineup_id, expected_draft_revision=1, expected_submission_version=0
+        )
+        assert submission_holds_lock.wait(timeout=5)
+
+        rewind = executor.submit(
+            repo.rewind_bracket,
+            bracket.bracket_id,
+            1,
+            actor=ACTOR,
+            reason="must block on the same lifecycle row lock",
+            apply=True,
+        )
+        time.sleep(0.2)
+        assert not rewind.done(), "rewind_bracket did not wait for the round lifecycle row lock"
+
+        allow_submission_to_commit.set()
+        submission.result(timeout=5)
+        with pytest.raises(DownstreamPlayStateError) as excinfo:
+            rewind.result(timeout=5)
+
+    blocked = next(c for c in excinfo.value.report["pairing_changes"] if c["blocked"])
+    assert blocked["slot"] == "first_semi"
+    assert any(a["type"] == "lineup_submission" for a in blocked["artifacts"])
 
 
 def test_advance_bracket_locks_both_prerequisite_matchups_in_deterministic_order(postgres_database, monkeypatch):

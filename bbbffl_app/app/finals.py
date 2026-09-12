@@ -835,6 +835,7 @@ class FinalsBracketRepository:
                             "new_away_season_entry_id": away,
                             "source1": source1,
                             "source2": source2,
+                            "matchup_id": existing["matchup_id"],
                         }
                     )
 
@@ -895,10 +896,34 @@ class FinalsBracketRepository:
             now = _now()
             for change in pairing_changes:
                 new_pairing_id = _id()
+                # `finals_bracket_pairing.matchup_id` is uniquely
+                # constrained, so handing an already-materialised matchup
+                # off to its replacement pairing (below) requires clearing
+                # the old pairing's own reference to it in this same
+                # statement -- never leaving both rows pointing at the one
+                # matchup at once, even transiently within the transaction.
                 conn.execute(
-                    "UPDATE finals_bracket_pairing SET status='superseded' WHERE pairing_id=?",
+                    "UPDATE finals_bracket_pairing SET status='superseded', matchup_id=NULL WHERE pairing_id=?",
                     (change["pairing_id"],),
                 )
+                # If this pairing was already materialised into a real
+                # `bbbffl_matchup` (the week was opened before the
+                # correction landed), `_downstream_play_state` has already
+                # proven -- under lock -- that no lineup, ruling,
+                # calculation, or result is attached to it yet. Reusing
+                # that same matchup row (updating its participants in
+                # place) rather than leaving the new pairing's matchup_id
+                # NULL keeps the bracket and the round's actual scoring
+                # matchup consistent: `uq_round_matchup_order` would
+                # otherwise make the slot un-re-materialisable (the old,
+                # now-orphaned row would still occupy it), and the round
+                # would keep exposing the old, now-incorrect participants
+                # (Codex review, PR #201).
+                if change["matchup_id"] is not None:
+                    conn.execute(
+                        "UPDATE bbbffl_matchup SET home_season_entry_id=?, away_season_entry_id=? WHERE matchup_id=?",
+                        (change["new_home_season_entry_id"], change["new_away_season_entry_id"], change["matchup_id"]),
+                    )
                 self._insert_pairing(
                     conn,
                     pairing_id=new_pairing_id,
@@ -911,6 +936,7 @@ class FinalsBracketRepository:
                     source2=change["source2"],
                     reason=reason,
                     created_at=now,
+                    matchup_id=change["matchup_id"],
                 )
                 conn.execute(
                     "UPDATE finals_bracket_pairing SET superseded_by_pairing_id=? WHERE pairing_id=?",
@@ -1116,15 +1142,34 @@ class FinalsBracketRepository:
         )
 
     def _insert_pairing(
-        self, conn, *, pairing_id, bracket_id, week_number, slot, home, away, source1, source2, reason, created_at=None
+        self,
+        conn,
+        *,
+        pairing_id,
+        bracket_id,
+        week_number,
+        slot,
+        home,
+        away,
+        source1,
+        source2,
+        reason,
+        created_at=None,
+        matchup_id=None,
     ) -> None:
+        """`matchup_id` is only ever non-`None` when a rewind is reconciling
+        an already-materialised pairing (see `rewind_bracket`) -- a freshly
+        `advance_bracket`-derived pairing is never yet attached to a real
+        matchup, so it is left `NULL` for `open_finals_week`/
+        `_materialise_pairing` to fill in later, exactly as before."""
         conn.execute(
-            "INSERT INTO finals_bracket_pairing VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 'active', NULL, ?, ?)",
+            "INSERT INTO finals_bracket_pairing VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL, ?, ?)",
             (
                 pairing_id,
                 bracket_id,
                 week_number,
                 slot,
+                matchup_id,
                 home,
                 away,
                 source1[0],
@@ -1157,6 +1202,25 @@ class FinalsBracketRepository:
             (pairing_row["pairing_id"],),
         ).fetchone()
         round_id = round_row["bbbffl_round_id"] if round_row else None
+        if round_id:
+            # `app.lineups.WeeklyLineupRepository._finalize_submission`
+            # locks this identical `bbbffl_round_lifecycle` row (`FOR
+            # UPDATE`) inside its own submission transaction before
+            # committing. Locking it here too, before reading
+            # `weekly_lineup` below, closes the race an unlocked read would
+            # leave open: a concurrent submission that has not yet
+            # committed cannot slip in between this check and the
+            # supersede that follows it -- either this transaction
+            # acquires the lock first (and the submission then waits and
+            # is correctly caught by an already-superseded pairing, per
+            # `WeeklyLineupRepository._validate_scope`'s bracket-
+            # eligibility check once #191 adds it), or the submission
+            # commits first and this read observes it (Codex review, PR
+            # #201).
+            conn.execute(
+                "SELECT state FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?" + _for_update_suffix(self.database),
+                (round_id,),
+            )
         if round_id and entries:
             placeholders = ",".join("?" for _ in entries)
             lineup_rows = conn.execute(

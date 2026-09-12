@@ -22,10 +22,20 @@ subcommand name:
             --ordinary-competition-id ... --reason "2026 finals replay: bracket creation per issue #190"
     python -m scripts.finals_bracket_2026 --database-url ... open-week --bracket-id <id> --week 1 --reason "..."
     python -m scripts.finals_bracket_2026 --database-url ... advance preview --bracket-id <id> --from-week 1
-    python -m scripts.finals_bracket_2026 --database-url ... advance apply --bracket-id <id> --from-week 1 --reason "..."
+    python -m scripts.finals_bracket_2026 --database-url ... advance apply --bracket-id <id> --from-week 1 \\
+        --reason "..." --expected-versions '{"<matchup_id>": 1, "<matchup_id>": 1}'
     python -m scripts.finals_bracket_2026 --database-url ... rewind --bracket-id <id> --from-week 1 --reason "..." [--apply]
 
 `preview` subcommands and `rewind` without `--apply` never mutate.
+
+`advance apply --expected-versions` is optional but strongly recommended:
+paste in the `expected_versions` object `advance preview` printed. Without
+it, `advance apply` derives from whatever the prerequisite matchups'
+official results happen to be *right now* -- if a correction landed between
+your `preview` and `apply` calls, it silently advances from the corrected
+result rather than rejecting your now-stale preview. With it, a correction
+in that gap is detected under lock and `advance apply` aborts
+(`StaleFinalsResultError`) instead.
 """
 
 from __future__ import annotations
@@ -37,7 +47,13 @@ import sys
 
 from app.audit import ActorContext
 from app.db import connect
-from app.finals import DownstreamPlayStateError, FinalsBracketError, FinalsBracketRepository
+from app.finals import (
+    DownstreamPlayStateError,
+    FinalsBracketError,
+    FinalsBracketRepository,
+    StaleFinalsResultError,
+    StaleSeedOrderError,
+)
 from app.finals_preflight import build_finals_week_preflight, open_finals_week
 from app.migrations import migrate
 
@@ -83,8 +99,9 @@ def cmd_advance_preview(database, args: argparse.Namespace) -> int:
 
 
 def cmd_advance_apply(database, args: argparse.Namespace) -> int:
+    expected_versions = json.loads(args.expected_versions) if args.expected_versions else None
     result = FinalsBracketRepository(database).advance_bracket(
-        args.bracket_id, args.from_week, actor=ACTOR, reason=args.reason
+        args.bracket_id, args.from_week, actor=ACTOR, reason=args.reason, expected_versions=expected_versions
     )
     _print(result)
     return 0
@@ -141,6 +158,12 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--from-week", type=int, required=True, choices=(1, 2, 3))
         if mode == "apply":
             p.add_argument("--reason", required=True)
+            p.add_argument(
+                "--expected-versions",
+                help="JSON object of {matchup_id: official_version}, copied from 'advance preview''s own output -- "
+                "when supplied, a version that changed since your preview aborts the apply instead of silently "
+                "advancing from the corrected result",
+            )
 
     rewind = top.add_parser("rewind", help="preview or apply a correction-triggered pairing/elimination rewind")
     rewind.add_argument("--bracket-id", required=True)
@@ -170,7 +193,7 @@ def main() -> int:
     database = connect(args.database_url)
     try:
         return handler(database, args)
-    except FinalsBracketError as exc:
+    except (FinalsBracketError, StaleSeedOrderError, StaleFinalsResultError) as exc:
         print(f"finals bracket operation refused: {exc}", file=sys.stderr)
         return 1
     finally:

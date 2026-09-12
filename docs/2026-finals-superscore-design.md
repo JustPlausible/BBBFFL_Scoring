@@ -1288,10 +1288,14 @@ round_review.py`'s existing ordinary-result machinery:**
   the leaderboard-revision `INSERT` commits. SuperScore therefore uses the
   always-present per-round/per-entry review-state row created during lifecycle
   setup above, not a field on an optional calculation row. A lineup correction
-  (including its stale-ruling invalidation), DNP/Interchange/override ruling,
-  and calculation persistence must lock that entry's review-state row and
-  advance its `review_version` in the **same transaction** as the mutation. A
-  failed mutation advances nothing. This gives #192's lifecycle/ruling/
+  (including its stale-ruling invalidation) and a DNP/Interchange/override
+  ruling must lock that entry's review-state row and advance its
+  `review_version` in the **same transaction** as the mutation. A
+  failed mutation advances nothing. **Calculation persistence is deliberately
+  not in this list — see the twenty-sixth-round correction below, under
+  "Scoring": a calculation locks and compares the row at persist time but
+  never advances it, recording the version it was computed against instead.**
+  This gives #192's lifecycle/ruling/
   correction work and #193's calculation/publication work one durable
   serialization point even before a first calculation exists.
 

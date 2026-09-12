@@ -1130,7 +1130,35 @@ entry, uniquely keyed by round and `season_entry_id`, with
 `review_version = 0`. Setup is incomplete, and the round must not open, if the
 complete set of ten state rows cannot be created or verified. These rows exist before lineups,
 rulings, or calculation rows do and remain the shared lock/CAS target for the
-round's lifetime. Calculation rows are derived mutable data and may be absent;
+round's lifetime.
+
+**Locking and advancing the review-state row when a calculation is
+persisted is not itself sufficient — the calculation service must also
+verify its own inputs were not superseded while it was computing, or a
+stale calculation can acquire a fresh `review_version` and sail through
+the publisher's check undetected — Codex review, PR #196, twenty-fifth
+round.** The calculation service reads an entry's scoring inputs
+(lineup, rulings) at the start of computation, then some time later locks
+the review-state row to persist its result and advance `review_version`.
+If a lineup correction or ruling lands *during* that computation window —
+after the inputs were read, but before the calculation's own persistence
+transaction locks the row — the calculation still computes from the
+now-stale inputs, and its persistence still advances `review_version` to
+a new value (since advancing is unconditional on "a mutation happened,"
+not on "the inputs used are still current"). A publisher assembling its
+snapshot after this point captures that *new* `review_version` as current
+— its later CAS recheck passes, because nothing changes after that point,
+even though the calculation itself was already computed from obsolete
+inputs. Locking at persistence time closes the calculation-vs-publish
+race; it does not close the read-inputs-vs-persist-calculation race
+inside the calculation service itself. The calculation service must
+therefore capture the entry's `review_version` at the moment it reads its
+scoring inputs (before computing), then, inside the same transaction that
+locks the review-state row to persist the calculation, compare the row's
+current `review_version` against that captured value — aborting the
+persist (and requiring the caller to re-read inputs and recompute) if it
+has changed. Only a calculation whose inputs were never invalidated
+during computation may advance the row when it persists. Calculation rows are derived mutable data and may be absent;
 no operation may use their existence or revision as a substitute for review
 state.
 
@@ -1668,8 +1696,11 @@ order (each row's "Depends on" names the prerequisite rows):
    same race already fixed for bracket creation and advance-bracket,
    applied here, coordinated with #192's entry-scoped ruling boundary which
    must also advance this counter), and public/coach/Scorer views. **Acceptance
-   requires calculation persistence to lock/advance that durable state in its
-   own transaction and publication to lock all ten state rows in deterministic
+   requires calculation persistence to capture the entry's `review_version`
+   before reading scoring inputs, then compare it against the row's current
+   value under lock at persist time — aborting rather than advancing if it
+   changed while computing — not merely to lock/advance that durable state
+   unconditionally; publication must lock all ten state rows in deterministic
    order, reject a missing or changed row, and never depend on a calculation
    row as the CAS/locking record. Every SuperScore correction/republication
    must also take the owning season-row lock and reject a completed season in

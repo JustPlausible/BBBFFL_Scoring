@@ -80,8 +80,32 @@ own new files -- consistent with the issue's own safety boundary ("this
 issue documents and operationally exercises #190-#193/#195's actual
 behaviour... If running this phase's real operator procedure surfaces a
 genuine defect... determine whether a small, necessary fix is appropriate").
-No other defect was found in #190-#193/#195 while preparing this phase's
-tooling.
+
+## Finding 3: `app.superscore_review` had no completed-season write fence
+
+**Severity:** blocking — would have let the new SuperScore review-ruling
+CLI (finding 1) silently mutate review state after issue #195's completion
+transaction, undermining #194's own step-7 archival guard.
+
+Found by Codex review (P1) on PR #207. `app.superscore_review.
+SuperScoreReviewRepository.record_dnp_ruling`/`record_interchange_ruling`/
+`record_override` had no `app.season.SeasonRepository.guard_writable` call
+at all, unlike `app.superscore_results`/`app.finals_review`/`app.
+calculations`, which all take that lock first in their own write
+transactions (issue #195's shared completed-season write fence). This was
+a genuine, pre-existing gap in `app.superscore_review` (issue #192) that
+had no consequence in practice only because nothing outside test code
+could reach these methods before this issue's new
+`scripts/superscore_review_2026.py` CLI existed.
+
+Fixed directly in `app.superscore_review` (a `_guard_season_writable`
+helper, called first in each of the three write transactions, resolving
+`season_id` via `bbbffl_round_lifecycle`) — the same small, necessary,
+already-established pattern, not a new mechanism. Regression tests in
+`tests/test_superscore_round.py` and `tests/test_superscore_review_cli.py`
+prove all three methods now raise `SeasonCompletedError` once
+`complete_season` has run. No other defect was found in #190-#193/#195
+while preparing this phase's tooling.
 
 ## Not yet found: any finding from actually running the phase
 

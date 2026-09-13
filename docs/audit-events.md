@@ -270,9 +270,14 @@ recorded`, never `finals.premier.recorded` alone.
 
 | Action | `entity_type` / `entity_id` | When |
 |---|---|---|
-| `superscore.review.slot_ruling` | slot-ruling-scoped id | A DNP ruling for one entry's one slot (`record_dnp_ruling`), the entry-scoped counterpart of ordinary/finals' matchup-keyed `scoring.dnp.changed`. |
-| `superscore.review.interchange_ruling` | interchange-ruling-scoped id | An interchange target-position ruling for one entry (`record_interchange_ruling`). |
-| `superscore.review.override` | override-scoped id | A manual score override for one entry's one slot (`record_override`). |
+| `superscore.review.dnp_ruling.recorded` | `superscore.review.slot_ruling` / slot-ruling-scoped id | A DNP ruling for one entry's one slot (`record_dnp_ruling`), the entry-scoped counterpart of ordinary/finals' matchup-keyed `scoring.dnp.changed`. |
+| `superscore.review.interchange_ruling.recorded` | `superscore.review.interchange_ruling` / interchange-ruling-scoped id | An interchange target-position ruling for one entry (`record_interchange_ruling`). |
+| `superscore.review.override.recorded` | `superscore.review.override` / override-scoped id | A manual score override for one entry's one slot (`record_override`). |
+
+An operator filtering `AuditEventRepository.list_events(action=...)` must
+use the `Action` column above (the literal string `app.superscore_review`
+passes as `append_event`'s `action=`) -- the `entity_type` values are a
+separate field on the same event, not a substitute for it.
 
 ### SuperScore leaderboard publication/correction (`app.superscore_results`)
 

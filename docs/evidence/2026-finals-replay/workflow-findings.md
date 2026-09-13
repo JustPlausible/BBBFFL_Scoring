@@ -104,8 +104,39 @@ helper, called first in each of the three write transactions, resolving
 already-established pattern, not a new mechanism. Regression tests in
 `tests/test_superscore_round.py` and `tests/test_superscore_review_cli.py`
 prove all three methods now raise `SeasonCompletedError` once
-`complete_season` has run. No other defect was found in #190-#193/#195
-while preparing this phase's tooling.
+`complete_season` has run.
+
+## Finding 4: the SuperScore/finals AFL-round-mapping CLI trusted an operator-suppliable identifier
+
+**Severity:** correctness/replay-integrity — could have let a SuperScore
+round score against the wrong real AFL round despite the confirmed
+SS1-SS4/finals-week concurrency invariant, with nothing catching it.
+
+Found by Codex review across two further rounds on PR #207, each
+deepening the previous fix. `scripts/superscore_round_2026.py`'s original
+`confirm-mapping` accepted raw `--afl-season-id`/`--afl-round-id` from the
+operator with only `AflApiReferenceValidator.round_exists` (proves the
+pair exists *somewhere* in afl-api evidence, not that it's the *correct*
+pair) checking it. The first fix added `--finals-round-id` to derive/
+cross-check against a named finals round's own accepted mapping — but
+that identifier was itself still operator-suppliable and unverified: an
+operator could name a real finals round for the *wrong* week (or a
+different season entirely) and the CLI would accept it.
+
+The only fix that actually closes this is removing every operator-
+suppliable "which finals round" parameter from the recommended path.
+`app.superscore_round.resolve_concurrent_finals_afl_mapping` (new)
+derives both the owning season and the exact required week number
+directly from the SuperScore round's own `round_key`/season — nothing
+left for an operator to get wrong, because nothing is asked. This lives
+in `app.superscore_round` itself (not just the CLI), so any future caller
+gets the same guarantee. 5 new domain-level tests
+(`tests/test_superscore_round.py`) cover the derivation and every failure
+mode, including the exact "SS1 given week 2's round" scenario the review
+named.
+
+No other defect was found in #190-#193/#195 while preparing this phase's
+tooling.
 
 ## Not yet found: any finding from actually running the phase
 

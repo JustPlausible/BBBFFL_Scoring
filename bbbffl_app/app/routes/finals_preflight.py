@@ -13,6 +13,7 @@ from app.authorization import Principal, require_capability, require_role_covers
 from app.csrf import verify_token
 from app.finals import DownstreamPlayStateError, FinalsBracketError, FinalsBracketRepository, StaleFinalsResultError
 from app.finals_preflight import build_finals_week_preflight, open_finals_week
+from app.finals_review import publish_finals_round
 
 router = APIRouter(prefix="/api/admin/finals")
 require_finals_operator = require_capability("roundsetup.manage")
@@ -95,6 +96,38 @@ def open_week(
     except KeyError as exc:
         raise HTTPException(404, "Unknown finals week") from exc
     return build_finals_week_preflight(request.app.state.database, bracket_id, week_number)
+
+
+@router.post("/{bracket_id}/weeks/{week_number}/publish")
+def publish_week(
+    bracket_id: str,
+    week_number: int,
+    request: Request,
+    reason: str | None = None,
+    principal: Principal = Depends(require_finals_operator),
+):
+    bracket = _authorise_bracket(request, principal, bracket_id)
+    _csrf(request, principal)
+    week = request.app.state.database.execute(
+        "SELECT bbbffl_round_id FROM finals_bracket_week WHERE bracket_id=? AND week_number=?",
+        (bracket.bracket_id, week_number),
+    ).fetchone()
+    if week is None:
+        raise HTTPException(404, "Unknown finals week")
+    try:
+        published = publish_finals_round(
+            request.app.state.database,
+            request.app.state.afl_client,
+            request.app.state.lifecycle,
+            request.app.state.round_review,
+            request.app.state.identities,
+            week["bbbffl_round_id"],
+            actor=_actor(principal),
+            reason=reason,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"round_id": published.bbbffl_round_id, "state": published.state, "week_number": week_number}
 
 
 @router.post("/{bracket_id}/advance/{from_week}")

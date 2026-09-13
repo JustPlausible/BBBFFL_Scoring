@@ -190,6 +190,9 @@ class LineupCorrectionService:
         very first lineup operation since a trigger activated.
         """
         _ensure_correction_actor(actor)
+        from app.finals_participation import require_round_participant
+
+        require_round_participant(self.database, competition_id, bbbffl_round_id, season_entry_id)
         unknown = set(position_changes) - set(POSITIONS)
         if unknown:
             raise LineupIntegrityError(f"unknown scoring positions: {sorted(unknown)}")

@@ -68,11 +68,11 @@ def _authorise_round(request: Request, principal: Principal, round_id: str) -> d
         "JOIN competition_stream c ON c.competition_id=r.competition_id "
         "JOIN bbbffl_season s ON s.season_id=c.season_id "
         "LEFT JOIN bbbffl_round_lifecycle l ON l.bbbffl_round_id=r.bbbffl_round_id "
-        "WHERE r.bbbffl_round_id=? AND c.stream_type='ordinary'",
+        "WHERE r.bbbffl_round_id=? AND c.stream_type IN ('ordinary','finals')",
         (round_id,),
     ).fetchone()
     if row is None:
-        raise HTTPException(status_code=404, detail="Unknown ordinary BBBFFL round")
+        raise HTTPException(status_code=404, detail="Unknown BBBFFL round")
     require_role_covers_season(request, principal, row["season_id"])
     return dict(row)
 

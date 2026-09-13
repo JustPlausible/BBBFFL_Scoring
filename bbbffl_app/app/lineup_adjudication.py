@@ -262,6 +262,8 @@ class LineupAdjudicationService:
         return row["lineup_id"], row["effective_submission_version"] or 0
 
     def _eligibility(self, season_id, competition_id, bbbffl_round_id, season_entry_id, *, evaluation_at=None):
+        from app.finals_participation import FinalsParticipantError, require_round_participant
+
         """Non-transactional pre-check, for a fast/clear refusal and for the
         preview UI. Every fact this also depends on is re-validated
         atomically, inside the adjudication's own transaction, by
@@ -284,6 +286,10 @@ class LineupAdjudicationService:
         ).fetchone()
         round_state = round_row["state"] if round_row else "unknown"
         reasons = []
+        try:
+            require_round_participant(self.database, competition_id, bbbffl_round_id, season_entry_id)
+        except FinalsParticipantError as exc:
+            reasons.append(str(exc))
         if round_state not in ("live", "review"):
             reasons.append(f"round is {round_state!r}; adjudication requires the round to be live or review")
         if effective_version:
@@ -298,6 +304,32 @@ class LineupAdjudicationService:
         if not activated:
             reasons.append("no lockout trigger has activated for this round yet")
         return lineup_id, effective_version, round_state, activated, reasons
+
+    def _carry_forward_source(self, season_id, competition_id, round_id, entry_id):
+        """Resolve same-stream first, then the specified finals->ordinary edge."""
+        source = self._carry_forward.resolve_source(season_id, competition_id, round_id, entry_id)
+        if source is not None:
+            return source
+        from app.carry_forward import CarryForwardSource
+        from app.finals_participation import resolve_cross_stream_fallback_source, stream_type
+
+        if stream_type(self.database, competition_id) != "finals":
+            return None
+        bracket = self.database.execute(
+            "SELECT ordinary_competition_id FROM finals_bracket WHERE season_id=? AND competition_id=?",
+            (season_id, competition_id),
+        ).fetchone()
+        if bracket is None:
+            return None
+        row = resolve_cross_stream_fallback_source(
+            self.database, season_id, bracket["ordinary_competition_id"], entry_id
+        )
+        if row is None:
+            return None
+        submission = self.lineups.get_submission(row["lineup_id"], row["effective_submission_version"])
+        return CarryForwardSource(
+            row["bbbffl_round_id"], row["lineup_id"], submission.version, dict(submission.positions)
+        )
 
     # -- Read model ------------------------------------------------------
 
@@ -331,7 +363,7 @@ class LineupAdjudicationService:
             evidenced_preview = tuple(slots)
         carry_forward_preview = None
         try:
-            source = self._carry_forward.resolve_source(season_id, competition_id, bbbffl_round_id, season_entry_id)
+            source = self._carry_forward_source(season_id, competition_id, bbbffl_round_id, season_entry_id)
         except LineupIntegrityError:
             source = None
         if source is not None:
@@ -693,7 +725,7 @@ class LineupAdjudicationService:
         )
         if reasons:
             raise RoundNotEligibleForAdjudicationError("; ".join(reasons))
-        source = self._carry_forward.resolve_source(season_id, competition_id, bbbffl_round_id, season_entry_id)
+        source = self._carry_forward_source(season_id, competition_id, bbbffl_round_id, season_entry_id)
         if source is None:
             # Issue #151: same team-name-first, id-diagnostic convention as
             # app.carry_forward.CarryForwardService.carry_forward's own

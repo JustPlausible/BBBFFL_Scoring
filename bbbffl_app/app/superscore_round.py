@@ -209,6 +209,59 @@ def confirm_afl_mapping(
     return repo.correct(bbbffl_round_id, afl_season_id, afl_round_id, validator, actor=actor, reason=reason)
 
 
+_ROUND_KEY_TO_WEEK = {label.lower(): number for number, label in ROUND_LABELS.items()}
+
+
+def resolve_concurrent_finals_afl_mapping(database, bbbffl_round_id: str) -> RoundMapping:
+    """Resolve the accepted AFL-round mapping of the *exact* finals week that
+    must run concurrently with the given SuperScore round (SS1 <-> finals
+    week 1, ..., SS4 <-> finals week 4), per `confirm_afl_mapping`'s own
+    documented rule -- verifying the finals week actually belongs to the
+    same season *and* is the matching week number, not merely that some
+    finals round happens to carry an accepted mapping (Codex review, PR
+    #207, round 2: an operator-suppliable "which finals round" parameter
+    cannot be trusted to be the *correct* one -- deriving both the season
+    and the week number from `bbbffl_round_id` itself, with no
+    operator-suppliable substitute, closes that off by construction).
+
+    Raises `SuperScoreRoundError` if `bbbffl_round_id` is not one of
+    SS1-SS4, its season has no finals bracket yet, that bracket has no
+    matching week yet, or that week has no accepted AFL-round mapping yet."""
+    round_row = database.execute(
+        "SELECT r.round_key, c.season_id FROM bbbffl_round r "
+        "JOIN competition_stream c ON c.competition_id=r.competition_id "
+        "WHERE r.bbbffl_round_id=?",
+        (bbbffl_round_id,),
+    ).fetchone()
+    if round_row is None:
+        raise SuperScoreRoundError(f"unknown round {bbbffl_round_id}")
+    week_number = _ROUND_KEY_TO_WEEK.get(round_row["round_key"])
+    if week_number is None:
+        raise SuperScoreRoundError(f"round {bbbffl_round_id} (round_key={round_row['round_key']!r}) is not SS1-SS4")
+    season_id = round_row["season_id"]
+
+    bracket = database.execute("SELECT bracket_id FROM finals_bracket WHERE season_id=?", (season_id,)).fetchone()
+    if bracket is None:
+        raise SuperScoreRoundError(
+            f"season {season_id} has no finals bracket yet; cannot derive "
+            f"{ROUND_LABELS[week_number]}'s concurrent AFL-round mapping"
+        )
+    week = database.execute(
+        "SELECT bbbffl_round_id FROM finals_bracket_week WHERE bracket_id=? AND week_number=?",
+        (bracket["bracket_id"], week_number),
+    ).fetchone()
+    if week is None:
+        raise SuperScoreRoundError(f"finals bracket {bracket['bracket_id']} has no week {week_number} round yet")
+
+    mapping = RoundMappingRepository(database).resolve(week["bbbffl_round_id"])
+    if mapping is None or mapping.afl_season_id is None or mapping.afl_round_id is None:
+        raise SuperScoreRoundError(
+            f"finals week {week_number} (round {week['bbbffl_round_id']}) has no accepted AFL-round mapping yet; "
+            "confirm it first"
+        )
+    return mapping
+
+
 def _create_review_state_rows(database, season_id: str, bbbffl_round_id: str, *, actor: ActorContext, reason):
     """The core of gap #4: create an always-present `superscore_entry_
     review_state` row (`review_version=0`) for every one of the ten

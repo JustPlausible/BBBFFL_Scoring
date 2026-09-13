@@ -198,9 +198,15 @@ Codex review PR #196 twenty-first round).
 ## E. Run the four SuperScore rounds (SS1-SS4)
 
 SS1-SS4 run across the *same* four AFL rounds as finals weeks 1-4
-(`docs/2026-finals-superscore-design.md`'s confirmed rule) and can be set up
-concurrently with the finals bracket above, in any order relative to it,
-since neither stream depends on the other's lifecycle.
+(`docs/2026-finals-superscore-design.md`'s confirmed rule). The stream and
+round-creation steps below (1-2) can run at any point relative to section
+D, since neither stream's lifecycle depends on the other's -- but **each
+round's `confirm-mapping` step (2b) requires that its exact concurrent
+finals week already exists and already has its own accepted AFL-round
+mapping** (section D.2.a-b for that week), since `--afl-season-id`/
+`--afl-round-id` are derived from it, never typed independently. Run
+section D's steps for finals week `<N>` through its own mapping
+acceptance before running SS`<N>`'s `confirm-mapping`.
 
 1. **Create the SuperScore stream once** (idempotent):
 
@@ -220,17 +226,20 @@ since neither stream depends on the other's lifecycle.
         --database-url <url> ensure-round --competition-id <superscore_competition_id> --round-number <N>
       ```
 
-   b. **Confirm its AFL-round mapping**, derived directly from the
-      *corresponding finals week's own accepted mapping* via
-      `--finals-round-id` -- never typed independently (Codex review, PR
-      #207: `AflApiReferenceValidator.round_exists` alone cannot catch an
-      operator typo naming a real but wrong AFL round; only comparing
-      against the finals week's own accepted mapping can):
+   b. **Confirm its AFL-round mapping.** Omit `--afl-season-id`/
+      `--afl-round-id` entirely -- they are derived automatically from the
+      round's own exact concurrent finals week (`app.superscore_round.
+      resolve_concurrent_finals_afl_mapping`), never typed independently
+      (Codex review, PR #207, two rounds: `AflApiReferenceValidator.
+      round_exists` alone cannot catch an operator typo naming a real but
+      wrong AFL round, and an operator-suppliable "which finals round"
+      identifier is itself exactly as untrustworthy -- only deriving the
+      season and week number from `--round-id` itself closes both off by
+      construction):
 
       ```bash
       $FINALS run --rm -v "$PWD/bbbffl_app:/app" app python -m scripts.superscore_round_2026 \
         --database-url <url> confirm-mapping --round-id <ss_round_id> \
-        --finals-round-id <the_concurrent_finals_week_N_round_id> \
         --evidence-path /replay/evidence/2026-second-half.json \
         --checkpoint-path /replay/state/checkpoint.json \
         --reason "2026 finals replay: SS<N> mapping, concurrent with finals week <N>"

@@ -10,6 +10,7 @@ import argparse
 
 import pytest
 
+from app.audit import ActorContext
 from app.superscore_round import ensure_round, ensure_stream, get_review_state
 from scripts.superscore_round_2026 import (
     COMMANDS,
@@ -118,7 +119,6 @@ def test_cli_round_trip_creates_and_opens_a_superscore_round(monkeypatch):
     )
     mapping_ns = argparse.Namespace(
         round_id=round_id,
-        finals_round_id=None,
         afl_season_id=season.year,
         afl_round_id=21,
         evidence_path="unused-under-stub.json",
@@ -142,18 +142,62 @@ def test_cli_round_trip_creates_and_opens_a_superscore_round(monkeypatch):
         assert get_review_state(database, round_id, entry.season_entry_id) == 0
 
 
-# -- confirm-mapping: --finals-round-id derives/cross-checks (Codex review, P1) --
+# -- confirm-mapping: auto-derivation from --round-id itself (Codex review, P1, two rounds) --
 
 
-def _fresh_ss_round_and_finals_stand_in(monkeypatch, year):
-    """A fresh (unmapped) SS1 round, plus a second round (standing in for a
-    finals week -- this is a pure CLI-wiring test, so it doesn't need a real
-    finals bracket) already carrying its own accepted AFL-round mapping
-    (every ordinary round in a fully-built replay season already does, as
-    part of being finalised), to derive/cross-check against."""
+def test_confirm_mapping_derives_automatically_when_neither_afl_id_is_given(monkeypatch):
+    """The CLI-wiring counterpart of `tests/test_superscore_round.py::
+    test_resolves_the_matching_finals_week_s_accepted_mapping` -- the actual
+    derivation logic is tested there; this only proves `cmd_confirm_mapping`
+    reaches it correctly when both --afl-season-id/--afl-round-id are
+    omitted."""
+    from app.finals import FinalsBracketRepository
     from app.round_mapping import RoundMappingRepository
+    from tests.finals_helpers import accept_week_mapping, build_finals_ready_season
+    from tests.superscore_helpers import FINALS_AFL_ROUNDS
 
-    built = build_2026_replay_season(year=year)
+    built = build_finals_ready_season(year=6005)
+    database, season = built["database"], built["season"]
+    bracket = FinalsBracketRepository(database).create_bracket(
+        season.season_id,
+        built["finals_competition"].competition_id,
+        built["ordinary_competition_id"],
+        actor=ActorContext.anonymous_operator("test"),
+        reason="confirm-mapping CLI auto-derive regression test setup",
+    )["bracket"]
+    week1_round_id = database.execute(
+        "SELECT bbbffl_round_id FROM finals_bracket_week WHERE bracket_id=? AND week_number=1", (bracket.bracket_id,)
+    ).fetchone()["bbbffl_round_id"]
+    accept_week_mapping(database, week1_round_id, year=season.year, afl_round_id=FINALS_AFL_ROUNDS[1])
+
+    rules_row = database.execute(
+        "SELECT rules_version_id FROM season_rules_version WHERE season_id=?", (season.season_id,)
+    ).fetchone()
+    stream = ensure_stream(database, season.season_id, rules_row["rules_version_id"], built["ordinary_competition_id"])
+    ss1_round_id = ensure_round(database, stream.competition_id, 1, 1)
+
+    monkeypatch.setattr(
+        "scripts.superscore_round_2026.ReplayAflDataSource",
+        lambda *_a, **_k: _StubAflClient({(season.year, FINALS_AFL_ROUNDS[1])}),
+    )
+    ns = argparse.Namespace(
+        round_id=ss1_round_id,
+        afl_season_id=None,
+        afl_round_id=None,
+        evidence_path="unused-under-stub.json",
+        checkpoint_path=None,
+        reason="CLI regression test: auto-derive from round-id itself",
+    )
+    assert cmd_confirm_mapping(database, ns) == 0
+    mapping = RoundMappingRepository(database).resolve(ss1_round_id)
+    assert (mapping.afl_season_id, mapping.afl_round_id) == (season.year, FINALS_AFL_ROUNDS[1])
+
+
+def test_confirm_mapping_still_supports_explicit_afl_ids_with_no_finals_bracket(monkeypatch):
+    """The explicit-override path remains available for a context with no
+    finals-concurrency invariant to derive from -- and, unlike the old
+    `--finals-round-id` path, needs no finals bracket to exist at all."""
+    built = build_2026_replay_season(year=6006)
     database, season = built["database"], built["season"]
     rules_row = database.execute(
         "SELECT rules_version_id FROM season_rules_version WHERE season_id=?", (season.season_id,)
@@ -163,67 +207,37 @@ def _fresh_ss_round_and_finals_stand_in(monkeypatch, year):
     )
     round_id = ensure_round(database, stream.competition_id, 1, 1)
 
-    finals_round_id = database.execute(
-        "SELECT bbbffl_round_id FROM bbbffl_round WHERE competition_id=? ORDER BY sequence LIMIT 1",
-        (built["competition"].competition_id,),
-    ).fetchone()["bbbffl_round_id"]
-    finals_mapping = RoundMappingRepository(database).resolve(finals_round_id)
-    assert finals_mapping is not None and finals_mapping.afl_round_id is not None, (
-        "test fixture assumption: a fully-built replay season's ordinary rounds are already accepted-mapped"
-    )
-
     monkeypatch.setattr(
         "scripts.superscore_round_2026.ReplayAflDataSource",
-        lambda *_a, **_k: _StubAflClient({(finals_mapping.afl_season_id, finals_mapping.afl_round_id)}),
-    )
-    return database, season, round_id, finals_round_id, finals_mapping
-
-
-def test_confirm_mapping_derives_from_finals_round_id(monkeypatch):
-    database, _season, round_id, finals_round_id, finals_mapping = _fresh_ss_round_and_finals_stand_in(
-        monkeypatch, 6002
+        lambda *_a, **_k: _StubAflClient({(season.year, 21)}),
     )
     ns = argparse.Namespace(
         round_id=round_id,
-        finals_round_id=finals_round_id,
-        afl_season_id=None,
-        afl_round_id=None,
+        afl_season_id=season.year,
+        afl_round_id=21,
         evidence_path="unused-under-stub.json",
         checkpoint_path=None,
-        reason="CLI regression test: derive from finals round",
+        reason="CLI regression test: explicit override, no finals bracket needed",
     )
     assert cmd_confirm_mapping(database, ns) == 0
-    from app.round_mapping import RoundMappingRepository
-
-    mapping = RoundMappingRepository(database).resolve(round_id)
-    assert (mapping.afl_season_id, mapping.afl_round_id) == (finals_mapping.afl_season_id, finals_mapping.afl_round_id)
 
 
-def test_confirm_mapping_refuses_mismatch_against_finals_round_id(monkeypatch):
-    database, season, round_id, finals_round_id, finals_mapping = _fresh_ss_round_and_finals_stand_in(monkeypatch, 6003)
+def test_confirm_mapping_requires_both_or_neither_afl_id(monkeypatch):
+    built = build_2026_replay_season(year=6007)
+    database, season = built["database"], built["season"]
+    rules_row = database.execute(
+        "SELECT rules_version_id FROM season_rules_version WHERE season_id=?", (season.season_id,)
+    ).fetchone()
+    stream = ensure_stream(
+        database, season.season_id, rules_row["rules_version_id"], built["competition"].competition_id
+    )
+    round_id = ensure_round(database, stream.competition_id, 1, 1)
     ns = argparse.Namespace(
         round_id=round_id,
-        finals_round_id=finals_round_id,
         afl_season_id=season.year,
-        afl_round_id=finals_mapping.afl_round_id + 1000,  # deliberately wrong
-        evidence_path="unused-under-stub.json",
-        checkpoint_path=None,
-        reason="CLI regression test: mismatch must refuse",
-    )
-    assert cmd_confirm_mapping(database, ns) == 1
-
-
-def test_confirm_mapping_requires_finals_round_id_or_explicit_afl_ids(monkeypatch):
-    database, _season, round_id, _finals_round_id, _finals_mapping = _fresh_ss_round_and_finals_stand_in(
-        monkeypatch, 6004
-    )
-    ns = argparse.Namespace(
-        round_id=round_id,
-        finals_round_id=None,
-        afl_season_id=None,
         afl_round_id=None,
         evidence_path="unused-under-stub.json",
         checkpoint_path=None,
-        reason="CLI regression test: neither given",
+        reason="CLI regression test: only one given",
     )
     assert cmd_confirm_mapping(database, ns) == 1

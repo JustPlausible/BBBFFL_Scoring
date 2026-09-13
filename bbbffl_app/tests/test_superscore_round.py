@@ -27,15 +27,17 @@ from app.superscore_review import (
 from app.superscore_round import (
     EXPECTED_ENTRY_COUNT,
     IncompleteReviewStateError,
+    SuperScoreRoundError,
     eligible_entries,
     ensure_round,
     ensure_stream,
     get_review_state,
     open_round,
+    resolve_concurrent_finals_afl_mapping,
     review_state_complete,
     setup_round,
 )
-from tests.finals_helpers import KnownRound
+from tests.finals_helpers import KnownRound, accept_week_mapping, build_finals_ready_season
 from tests.finals_seeding_helpers import build_2026_replay_season
 from tests.superscore_helpers import FINALS_AFL_ROUNDS, build_superscore_ready_season
 
@@ -689,3 +691,83 @@ def test_review_rulings_refuse_once_the_season_is_completed():
         reviews.record_override(
             round_id, entry_id, "F2", 12.5, 4.0, "must refuse", expected_review_version=0, actor=scorer
         )
+
+
+# -- resolve_concurrent_finals_afl_mapping (issue #194, Codex review, round 2 P1) --
+
+
+def _built_with_bracket_and_superscore_stream(year):
+    from app.finals import FinalsBracketRepository
+
+    built = build_finals_ready_season(year=year)
+    database, season = built["database"], built["season"]
+    repo = FinalsBracketRepository(database)
+    bracket = repo.create_bracket(
+        season.season_id,
+        built["finals_competition"].competition_id,
+        built["ordinary_competition_id"],
+        actor=ACTOR,
+        reason="resolve_concurrent_finals_afl_mapping regression test setup",
+    )["bracket"]
+    built["bracket"] = bracket
+    rules_row = database.execute(
+        "SELECT rules_version_id FROM season_rules_version WHERE season_id=?", (season.season_id,)
+    ).fetchone()
+    stream = ensure_stream(database, season.season_id, rules_row["rules_version_id"], built["ordinary_competition_id"])
+    built["superscore_stream"] = stream
+    return built
+
+
+def test_resolves_the_matching_finals_week_s_accepted_mapping():
+    built = _built_with_bracket_and_superscore_stream(6501)
+    database, season, bracket = built["database"], built["season"], built["bracket"]
+    week1_round_id = database.execute(
+        "SELECT bbbffl_round_id FROM finals_bracket_week WHERE bracket_id=? AND week_number=1", (bracket.bracket_id,)
+    ).fetchone()["bbbffl_round_id"]
+    accept_week_mapping(database, week1_round_id, year=season.year, afl_round_id=FINALS_AFL_ROUNDS[1])
+
+    ss1_round_id = ensure_round(database, built["superscore_stream"].competition_id, 1, 1)
+    mapping = resolve_concurrent_finals_afl_mapping(database, ss1_round_id)
+    assert (mapping.afl_season_id, mapping.afl_round_id) == (season.year, FINALS_AFL_ROUNDS[1])
+
+
+def test_refuses_a_non_superscore_round():
+    built = _built_with_bracket_and_superscore_stream(6502)
+    database = built["database"]
+    ordinary_round_id = database.execute(
+        "SELECT bbbffl_round_id FROM bbbffl_round WHERE competition_id=? LIMIT 1", (built["ordinary_competition_id"],)
+    ).fetchone()["bbbffl_round_id"]
+    with pytest.raises(SuperScoreRoundError, match="not SS1-SS4"):
+        resolve_concurrent_finals_afl_mapping(database, ordinary_round_id)
+
+
+def test_refuses_when_the_season_has_no_finals_bracket_yet():
+    built = build_2026_replay_season(year=6503)
+    database, season = built["database"], built["season"]
+    rules_row = database.execute(
+        "SELECT rules_version_id FROM season_rules_version WHERE season_id=?", (season.season_id,)
+    ).fetchone()
+    stream = ensure_stream(
+        database, season.season_id, rules_row["rules_version_id"], built["competition"].competition_id
+    )
+    ss1_round_id = ensure_round(database, stream.competition_id, 1, 1)
+    with pytest.raises(SuperScoreRoundError, match="no finals bracket yet"):
+        resolve_concurrent_finals_afl_mapping(database, ss1_round_id)
+
+
+def test_refuses_when_the_matching_finals_week_does_not_exist_yet():
+    """Weeks 2-4 don't exist in `finals_bracket_week` until `advance_bracket`
+    runs -- SS2 must refuse rather than silently matching a different week."""
+    built = _built_with_bracket_and_superscore_stream(6504)
+    database = built["database"]
+    ss2_round_id = ensure_round(database, built["superscore_stream"].competition_id, 2, 2)
+    with pytest.raises(SuperScoreRoundError, match="week 2"):
+        resolve_concurrent_finals_afl_mapping(database, ss2_round_id)
+
+
+def test_refuses_when_the_finals_week_has_no_accepted_mapping_yet():
+    built = _built_with_bracket_and_superscore_stream(6505)
+    database = built["database"]
+    ss1_round_id = ensure_round(database, built["superscore_stream"].competition_id, 1, 1)
+    with pytest.raises(SuperScoreRoundError, match="no accepted AFL-round mapping"):
+        resolve_concurrent_finals_afl_mapping(database, ss1_round_id)

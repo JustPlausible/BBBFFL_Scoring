@@ -25,7 +25,7 @@ subcommand name, exactly like `scripts/finals_bracket_2026.py`:
     python -m scripts.superscore_round_2026 --database-url ... \\
         ensure-round --competition-id <superscore_competition_id> --round-number 1
     python -m scripts.superscore_round_2026 --database-url ... \\
-        confirm-mapping --round-id <id> --finals-round-id <the_concurrent_finals_week_round_id> --reason "..."
+        confirm-mapping --round-id <id> --reason "..."
     python -m scripts.superscore_round_2026 --database-url ... \\
         setup-round --round-id <id> --reason "..."
     python -m scripts.superscore_round_2026 --database-url ... \\
@@ -34,19 +34,22 @@ subcommand name, exactly like `scripts/finals_bracket_2026.py`:
         status --round-id <id>
 
 Per docs/2026-finals-superscore-design.md's confirmed rule, SS1-SS4 run
-across the *same* four AFL rounds as the four finals weeks -- `confirm-
-mapping`'s `--finals-round-id` derives `afl_season_id`/`afl_round_id`
-directly from that finals week's own accepted mapping
-(`app.round_mapping.RoundMappingRepository.resolve`), the identical
+across the *same* four AFL rounds as the four finals weeks -- omitting
+`--afl-season-id`/`--afl-round-id` entirely (the recommended path)
+derives them automatically from `--round-id`'s own exact concurrent
+finals week (`app.superscore_round.resolve_concurrent_finals_afl_mapping`
+-- SS1 <-> finals week 1, etc., verified against `--round-id`'s own season
+and round number, not an operator-suppliable identifier), the identical
 accepted AFL-round reference, never a re-derived or independently-typed
-one (Codex review, PR #207: `AflApiReferenceValidator.round_exists` alone
-cannot catch an operator typo that names a real but wrong AFL round --
-only comparing against the finals week's own mapping can). Passing
-`--afl-season-id`/`--afl-round-id` explicitly alongside `--finals-round-id`
-cross-checks them against that derived value and refuses on any mismatch;
-passing them without `--finals-round-id` is still supported for a context
-with no finals-concurrency invariant to check against, but is not the
-recommended 2026 replay path. `ensure-stream`/`ensure-round`/`confirm-
+one. This is deliberately not an operator-suppliable "which finals round"
+parameter (Codex review, PR #207, two rounds: `AflApiReferenceValidator.
+round_exists` alone cannot catch an operator typo naming a real but wrong
+AFL round, and an operator-suppliable "which finals round" identifier is
+itself exactly as untrustworthy -- only deriving the season and week
+number from `--round-id` closes both off by construction). Passing both
+`--afl-season-id` and `--afl-round-id` explicitly is still supported for a
+context with no finals-concurrency invariant to derive from, but is not
+the recommended 2026 replay path. `ensure-stream`/`ensure-round`/`confirm-
 mapping` are idempotent; `setup-round` is idempotent against an already-
 complete review-state set; `open-round` refuses (no mutation) unless
 `setup-round` has already produced the complete ten-row review-state set
@@ -64,7 +67,7 @@ from app.audit import ActorContext
 from app.db import connect
 from app.migrations import migrate
 from app.replay import ReplayAflDataSource
-from app.round_mapping import AflApiReferenceValidator, RoundMappingRepository
+from app.round_mapping import AflApiReferenceValidator
 from app.superscore_round import (
     SuperScoreRoundError,
     confirm_afl_mapping,
@@ -72,6 +75,7 @@ from app.superscore_round import (
     ensure_stream,
     get_stream,
     open_round,
+    resolve_concurrent_finals_afl_mapping,
     review_state_complete,
     setup_round,
 )
@@ -109,41 +113,27 @@ def cmd_ensure_round(database, args: argparse.Namespace) -> int:
 
 
 def cmd_confirm_mapping(database, args: argparse.Namespace) -> int:
-    # Codex review (P1): `AflApiReferenceValidator.round_exists` only proves
-    # the supplied (season, round) pair exists somewhere in afl-api evidence
-    # -- it cannot catch an operator typo that names a real, but wrong, AFL
-    # round. Per `app.superscore_round.confirm_afl_mapping`'s own docstring,
-    # SS1-SS4 must be confirmed against the *identical* accepted AFL-round
-    # reference the corresponding finals week already used, not merely an
-    # assumption of equal round numbers. `--finals-round-id` derives
-    # afl_season_id/afl_round_id directly from that week's own accepted
-    # mapping (`RoundMappingRepository.resolve`) when no explicit values are
-    # given, or cross-checks and refuses on mismatch when they are.
+    # Codex review (P1, two rounds): `AflApiReferenceValidator.round_exists`
+    # only proves the supplied (season, round) pair exists somewhere in
+    # afl-api evidence -- it cannot catch an operator typo that names a
+    # real, but wrong, AFL round. The first fix (an operator-suppliable
+    # `--finals-round-id` to derive/cross-check against) was itself still
+    # trustable to name the *wrong* finals round -- a different week, or a
+    # different season entirely -- with nothing to catch that either. The
+    # only way to close this by construction is to derive both the season
+    # and the exact matching week number from `--round-id` itself, with no
+    # operator-suppliable substitute for "which finals round":
+    # `app.superscore_round.resolve_concurrent_finals_afl_mapping` does
+    # exactly that (SS1 <-> finals week 1, ..., keyed off `--round-id`'s own
+    # `round_key` and season).
     afl_season_id, afl_round_id = args.afl_season_id, args.afl_round_id
-    if args.finals_round_id is not None:
-        finals_mapping = RoundMappingRepository(database).resolve(args.finals_round_id)
-        if finals_mapping is None or finals_mapping.afl_season_id is None or finals_mapping.afl_round_id is None:
-            print(
-                f"finals round {args.finals_round_id} has no accepted AFL-round mapping yet; confirm it first "
-                "(e.g. via the finals preflight surface) before deriving SS1-SS4's mapping from it.",
-                file=sys.stderr,
-            )
-            return 1
-        derived = (finals_mapping.afl_season_id, finals_mapping.afl_round_id)
-        if afl_season_id is not None or afl_round_id is not None:
-            if (afl_season_id, afl_round_id) != derived:
-                print(
-                    f"--afl-season-id/--afl-round-id ({afl_season_id}, {afl_round_id}) do not match finals round "
-                    f"{args.finals_round_id}'s own accepted mapping {derived} -- SS1-SS4 must use the identical "
-                    "accepted AFL-round reference as the concurrent finals week, not merely an equal round number.",
-                    file=sys.stderr,
-                )
-                return 1
-        afl_season_id, afl_round_id = derived
+    if afl_season_id is None and afl_round_id is None:
+        mapping = resolve_concurrent_finals_afl_mapping(database, args.round_id)
+        afl_season_id, afl_round_id = mapping.afl_season_id, mapping.afl_round_id
     elif afl_season_id is None or afl_round_id is None:
         print(
-            "confirm-mapping requires either --finals-round-id (to derive the mapping from the corresponding "
-            "finals week's own accepted mapping) or both --afl-season-id and --afl-round-id.",
+            "confirm-mapping requires either neither of --afl-season-id/--afl-round-id (to derive the mapping "
+            "from the corresponding finals week's own accepted mapping) or both of them explicitly.",
             file=sys.stderr,
         )
         return 1
@@ -235,18 +225,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     confirm_mapping_p.add_argument("--round-id", required=True)
     confirm_mapping_p.add_argument(
-        "--finals-round-id",
+        "--afl-season-id",
+        type=int,
         default=None,
-        help="the concurrent finals week's bbbffl_round_id -- derives afl-season-id/afl-round-id from its own "
-        "accepted mapping, or cross-checks them if also given explicitly (required unless both "
-        "--afl-season-id/--afl-round-id are given)",
+        help="omit both this and --afl-round-id to derive the mapping automatically from the exact concurrent "
+        "finals week's own accepted mapping (recommended); give both explicitly only for a context with no "
+        "finals-concurrency invariant to derive from",
     )
-    confirm_mapping_p.add_argument(
-        "--afl-season-id", type=int, default=None, help="required unless --finals-round-id is given"
-    )
-    confirm_mapping_p.add_argument(
-        "--afl-round-id", type=int, default=None, help="required unless --finals-round-id is given"
-    )
+    confirm_mapping_p.add_argument("--afl-round-id", type=int, default=None, help="see --afl-season-id")
     confirm_mapping_p.add_argument(
         "--evidence-path", required=True, help="the replay evidence JSON, e.g. 2026-second-half.json"
     )

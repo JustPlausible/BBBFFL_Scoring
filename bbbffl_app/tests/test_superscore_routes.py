@@ -330,6 +330,39 @@ def test_ss2_same_stream_fallback_still_uses_ordinary_carry_forward_unchanged(su
     assert adjudication.source_bbbffl_round_id == ss1_round_id  # same-stream, not ordinary Round 20
 
 
+def test_ss2_never_falls_back_to_ordinary_even_with_no_same_stream_predecessor(superscore_client):
+    """Codex review, PR #204 (P1): a coach who missed *both* SS1 and SS2
+    must not have SS2's cross-stream fallback silently reach past SS1 to
+    the ordinary competition -- only SS1 itself may cross streams. SS2's
+    same-stream lookup genuinely finds nothing here (no SS1 submission
+    exists either), which must surface as "no source available", never a
+    phantom ordinary-sourced SS2 submission."""
+    client = superscore_client
+    built = _build_with_open_round_20(5109, database=client.app.state.database)
+    database = built["database"]
+    entry = built["entries"][0]
+    _submit_ordinary_round20(built, entry)  # a real ordinary source exists
+
+    ss2_round_id = built["superscore_rounds"][2]
+    _activate_a_trigger_and_go_live(database, ss2_round_id)
+    service = LineupAdjudicationService(database, client.app.state.afl_client)
+    with pytest.raises(Exception, match="no previous submitted lineup exists"):
+        service.apply_carry_forward_fallback(
+            built["season"].season_id,
+            built["superscore_stream"].competition_id,
+            ss2_round_id,
+            entry.season_entry_id,
+            actor=ActorContext.anonymous_operator("scorer"),
+            reason="SS2: no SS1 submission either -- must not reach ordinary Round 20",
+        )
+    # No phantom submission was created for SS2.
+    lineup_row = database.execute(
+        "SELECT effective_submission_version FROM weekly_lineup WHERE bbbffl_round_id=? AND season_entry_id=?",
+        (ss2_round_id, entry.season_entry_id),
+    ).fetchone()
+    assert lineup_row is None or lineup_row["effective_submission_version"] is None
+
+
 # -- Entry/round authorization, and no matchup_id required ------------------
 
 

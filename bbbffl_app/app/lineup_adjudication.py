@@ -314,10 +314,18 @@ class LineupAdjudicationService:
         """Resolve same-stream first, then the specified cross-stream edge:
         finals Week 1/seed-1's Week 2 -> ordinary (#191), or SuperScore's
         SS1 -> ordinary (#192, the confirmed "SS1 falls back to the coach's
-        most recent ordinary lineup" rule -- SS2-SS4 never reach this
-        branch, since each always has an SS1..SS3 same-stream predecessor
-        once submitted, exactly mirroring how finals' identical branch is
-        reached only when no same-stream predecessor exists)."""
+        most recent ordinary lineup" rule).
+
+        Codex review, PR #204: SS2-SS4 must never reach the cross-stream
+        branch, even if their own same-stream lookup finds nothing (e.g. a
+        coach who also missed the round(s) before this one) -- unlike
+        finals, where the bracket-participant check alone already scopes
+        Week 1 correctly, SuperScore's same-stream lookup can genuinely
+        return `None` for SS2-SS4 too. The SuperScore branch below is
+        therefore explicitly gated on this being the stream's first round
+        (`sequence == 1`, i.e. SS1), not merely on the same-stream lookup
+        having failed.
+        """
         source = self._carry_forward.resolve_source(season_id, competition_id, round_id, entry_id)
         if source is not None:
             return source
@@ -332,6 +340,11 @@ class LineupAdjudicationService:
             ).fetchone()
             ordinary_competition_id = bracket["ordinary_competition_id"] if bracket else None
         elif current_stream_type == "superscore":
+            round_row = self.database.execute(
+                "SELECT sequence FROM bbbffl_round WHERE bbbffl_round_id=?", (round_id,)
+            ).fetchone()
+            if round_row is None or round_row["sequence"] != 1:
+                return None
             stream = self.database.execute(
                 "SELECT ordinary_competition_id FROM superscore_stream WHERE season_id=? AND competition_id=?",
                 (season_id, competition_id),

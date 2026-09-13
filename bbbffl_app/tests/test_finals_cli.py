@@ -11,6 +11,7 @@ import pytest
 from app.finals import FinalsBracketRepository
 from app.finals_preflight import build_finals_week_preflight
 from scripts.finals_bracket_2026 import (
+    _parse_expected_versions,
     build_parser,
     cmd_advance_apply,
     cmd_advance_preview,
@@ -125,6 +126,40 @@ def test_main_refuses_to_run_in_production(monkeypatch):
     monkeypatch.setattr("scripts.finals_bracket_2026.connect", _fail)
     monkeypatch.setattr("scripts.finals_bracket_2026.migrate", _fail)
 
+    assert main() == 1
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["null", "[]", "42", '{"matchup-1": "1"}', '{"matchup-1": true}', '{"required-matchup": null}'],
+)
+def test_expected_versions_rejects_non_object_or_non_integer_values(raw):
+    with pytest.raises(ValueError, match="JSON object whose keys are strings and values are integers"):
+        _parse_expected_versions(raw)
+
+
+def test_expected_versions_accepts_a_string_keyed_integer_object():
+    assert _parse_expected_versions('{"matchup-1": 1, "matchup-2": 3}') == {"matchup-1": 1, "matchup-2": 3}
+
+
+@pytest.mark.parametrize(
+    ("command", "tail"),
+    [
+        ("advance", ["advance", "apply", "--bracket-id", "b1", "--from-week", "1", "--reason", "test"]),
+        ("rewind", ["rewind", "--apply", "--bracket-id", "b1", "--from-week", "1", "--reason", "test"]),
+    ],
+)
+def test_main_rejects_invalid_expected_versions_before_migration_or_connection(monkeypatch, command, tail):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["finals_bracket_2026", "--database-url", "sqlite:///unused.db", *tail, "--expected-versions", "null"],
+    )
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError(f"{command} invalid JSON reached a database mutation boundary")
+
+    monkeypatch.setattr("scripts.finals_bracket_2026.migrate", fail)
+    monkeypatch.setattr("scripts.finals_bracket_2026.connect", fail)
     assert main() == 1
 
 

@@ -1542,11 +1542,15 @@ class FinalsBracketRepository:
             trigger_ids = sorted(
                 r["trigger_id"]
                 for r in conn.execute(
-                    "SELECT trigger_id FROM bbbffl_round_lockout_trigger WHERE bbbffl_round_id=?"
-                    + _for_update_suffix(self.database),
+                    "SELECT trigger_id FROM bbbffl_round_lockout_trigger WHERE bbbffl_round_id=?",
                     (round_id,),
                 ).fetchall()
             )
+            for trigger_id in trigger_ids:
+                conn.execute(
+                    "SELECT 1 FROM bbbffl_round_lockout_trigger WHERE trigger_id=?" + _for_update_suffix(self.database),
+                    (trigger_id,),
+                ).fetchone()
             activation = None
             if trigger_ids:
                 placeholders = ",".join("?" for _ in trigger_ids)

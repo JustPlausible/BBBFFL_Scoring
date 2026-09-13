@@ -51,13 +51,33 @@ def _operator_actor(principal: Principal) -> ActorContext:
     return ActorContext("anonymous_operator", principal.coach_id, principal.role.value)
 
 
+def serialize_public_leaderboard(leaderboard: dict) -> dict:
+    """Explicit public contract; publication/audit provenance is private."""
+    return {
+        "kind": leaderboard["kind"],
+        "bbbffl_round_id": leaderboard["bbbffl_round_id"],
+        "version": leaderboard["version"],
+        "published_at": leaderboard["published_at"],
+        "entries": [
+            {
+                "season_entry_id": entry["season_entry_id"],
+                "team_name": entry["team_name"],
+                "total_score": entry["total_score"],
+                "rank": entry["rank"],
+                "is_joint_winner": entry["is_joint_winner"],
+            }
+            for entry in leaderboard["entries"]
+        ],
+    }
+
+
 @router.get("/rounds/{round_id}/leaderboard")
 def public_leaderboard(round_id: str, request: Request):
     _round(request, round_id)
     result = request.app.state.superscore_results.leaderboard(round_id)
     if result is None:
         raise HTTPException(404, "No published SuperScore leaderboard")
-    return result
+    return serialize_public_leaderboard(result)
 
 
 @router.get("/coach/rounds/{round_id}/leaderboard")

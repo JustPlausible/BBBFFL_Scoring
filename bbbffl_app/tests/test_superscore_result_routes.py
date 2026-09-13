@@ -47,6 +47,30 @@ class _Service:
             raise self.error
         return {"reason": reason}
 
+    def leaderboard(self, _round_id, include_inputs=False):
+        return {
+            "kind": "superscore_leaderboard",
+            "bbbffl_round_id": "round",
+            "version": 2,
+            "published_at": "2026-09-13T00:00:00Z",
+            "published_by_type": "anonymous_operator",
+            "published_by": "private-operator-id",
+            "published_by_role": "scorer",
+            "reason": "private correction details",
+            "entries": [
+                {
+                    "season_entry_id": "entry",
+                    "team_name": "Team",
+                    "total_score": 123.0,
+                    "rank": 1,
+                    "is_joint_winner": False,
+                }
+            ],
+        }
+
+    def history(self, _round_id, include_inputs=False):
+        return [self.leaderboard(_round_id, include_inputs)]
+
 
 def _request(service, token=None):
     return SimpleNamespace(
@@ -83,6 +107,34 @@ def test_header_token_operator_calculate_does_not_require_csrf():
     service = _Service()
     principal = Principal(Role.ADMIN)  # no session_id: established header-token path
     assert routes.calculate("round", _request(service), principal) == ["calculated"]
+
+
+def test_public_leaderboard_allowlist_excludes_publication_audit_fields():
+    result = routes.public_leaderboard("round", _request(_Service()))
+    assert result == {
+        "kind": "superscore_leaderboard",
+        "bbbffl_round_id": "round",
+        "version": 2,
+        "published_at": "2026-09-13T00:00:00Z",
+        "entries": [
+            {
+                "season_entry_id": "entry",
+                "team_name": "Team",
+                "total_score": 123.0,
+                "rank": 1,
+                "is_joint_winner": False,
+            }
+        ],
+    }
+    assert {"published_by", "published_by_role", "reason"}.isdisjoint(result)
+
+
+def test_scorer_leaderboard_retains_publication_audit_fields():
+    result = routes.scorer_leaderboard("round", _request(_Service()), Principal(Role.SCORER))
+    assert result["current"]["published_by"] == "private-operator-id"
+    assert result["current"]["published_by_role"] == "scorer"
+    assert result["current"]["reason"] == "private correction details"
+    assert result["history"][0]["reason"] == "private correction details"
 
 
 def test_publication_is_a_privileged_operator_action_not_a_coach_action():

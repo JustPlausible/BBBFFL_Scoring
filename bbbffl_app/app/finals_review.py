@@ -13,7 +13,7 @@ from app.finals import (
     _StaleMatchupDuringDownstreamCheck,
 )
 from app.round_review import SignoffValidationError, _freeze_matchup_inputs, build_matchup_review
-from app.season import _now
+from app.season import SeasonRepository, _now
 
 EXPECTED_MATCH_COUNTS = {1: 2, 2: 2, 3: 1, 4: 1}
 
@@ -146,6 +146,16 @@ def publish_finals_round(database, afl_client, lifecycle, review_repo, identitie
     snapshots = {m.matchup_id: _freeze_matchup_inputs(m, actor) for m in review["matchups"]}
     results = {m.matchup_id: (m.home.effective_score, m.away.effective_score) for m in review["matchups"]}
     with transaction(database) as conn:
+        # Issue #195's shared completed-season write fence: lock the owning
+        # season row first, ahead of the round/matchup locks below, so this
+        # transaction and `app.season_completion.complete_season` can only
+        # ever serialize through that one lock.
+        season_row = conn.execute(
+            "SELECT season_id FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?", (round_id,)
+        ).fetchone()
+        if season_row is None:
+            raise KeyError(round_id)
+        SeasonRepository(database).guard_writable(conn, season_row["season_id"])
         round_row = conn.execute(
             "SELECT * FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?" + _for_update_suffix(database),
             (round_id,),
@@ -284,6 +294,10 @@ def _correct_finals_result_transaction(database, context, review, snapshot, acto
         else {matchup_id}
     )
     with transaction(database) as conn:
+        # Issue #195's shared completed-season write fence -- locked first,
+        # ahead of every matchup row below (see `publish_finals_round`'s
+        # identical rationale).
+        SeasonRepository(database).guard_writable(conn, context["season_id"])
         locked_matchups = {}
         for source_id in sorted(source_ids):
             locked_matchups[source_id] = conn.execute(

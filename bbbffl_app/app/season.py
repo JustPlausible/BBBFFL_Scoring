@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from sqlalchemy import inspect
 
-from app.audit import ActorContext, append_event
+from app.audit import ActorContext, ConnectionLike, append_event
 from app.db import DatabaseConnection, _for_update_suffix, transaction
 
 SEASON_LIFECYCLE_CHANGED = "season.lifecycle.changed"
@@ -19,6 +19,29 @@ LEGAL_TRANSITIONS = {
     "active": {"completed"},
     "completed": set(),
 }
+
+
+class SeasonCompletedError(RuntimeError):
+    """Issue #195's shared completed-season write fence: raised by
+    `SeasonRepository.guard_writable` when a result-changing operation is
+    attempted against a season whose `lifecycle_state` is `completed`.
+
+    Every repository boundary that can change official historical results
+    or facts derived from them (ordinary result correction, finals
+    correction and any cascade of pairings/eliminations, SuperScore
+    correction/republication, and premiership/wooden-spoon re-recording)
+    must call `guard_writable` -- locking the owning season row and
+    checking this -- inside its own write transaction, before mutating
+    anything. A route-level check alone is insufficient (see
+    docs/2026-finals-superscore-design.md's "Completed-season write
+    fence"). There is deliberately no bypass: once raised, the caller's
+    transaction still rolls back and nothing is written."""
+
+
+class SeasonNotFoundError(KeyError):
+    """`guard_writable` was asked to lock a `season_id` that does not
+    exist. Distinct from a bare `KeyError` so callers can `except` it
+    specifically without also swallowing an unrelated dict lookup."""
 
 
 def _id() -> str:
@@ -248,54 +271,112 @@ class SeasonRepository:
         reason: str | None = None,
     ) -> Season:
         with transaction(self.database) as connection:
-            row = connection.execute(
-                "SELECT * FROM bbbffl_season WHERE season_id = ?" + _for_update_suffix(self.database),
-                (season_id,),
-            ).fetchone()
-            if not row:
-                raise KeyError(season_id)
+            return self._transition_lifecycle_in_transaction(connection, season_id, target, actor=actor, reason=reason)
 
-            old_state = row["lifecycle_state"]
-            if target not in LEGAL_TRANSITIONS[old_state]:
-                raise ValueError(f"illegal lifecycle transition: {old_state} -> {target}")
+    def _transition_lifecycle_in_transaction(
+        self,
+        connection: ConnectionLike,
+        season_id: str,
+        target: str,
+        *,
+        actor: ActorContext,
+        reason: str | None,
+    ) -> Season:
+        """The `transition_lifecycle` command body, usable from a
+        caller-owned transaction -- issue #195's atomic season-completion
+        command (`app.season_completion.complete_season`) transitions
+        `active -> completed` as step 5 of its own single transaction
+        (after locking the season row, verifying readiness, and
+        materialising the premiership/wooden-spoon awards), and must not
+        open a second, nested transaction to do it."""
+        row = connection.execute(
+            "SELECT * FROM bbbffl_season WHERE season_id = ?" + _for_update_suffix(self.database),
+            (season_id,),
+        ).fetchone()
+        if not row:
+            raise KeyError(season_id)
 
-            updated_at = _now()
-            version = row["version"] + 1
-            connection.execute(
-                "UPDATE bbbffl_season SET lifecycle_state=?, updated_at=?, version=? WHERE season_id=?",
-                (target, updated_at, version, season_id),
-            )
-            append_event(
-                connection,
-                actor=actor,
-                action=SEASON_LIFECYCLE_CHANGED,
-                entity_type="season",
-                entity_id=season_id,
-                entity_version=str(version),
-                reason=reason,
-                before_state={"lifecycle_state": old_state},
-                after_state={"lifecycle_state": target},
-            )
+        old_state = row["lifecycle_state"]
+        if target not in LEGAL_TRANSITIONS[old_state]:
+            raise ValueError(f"illegal lifecycle transition: {old_state} -> {target}")
 
-            # Construct the command result from the locked row and exact values
-            # written above.  An unlocked post-commit read could observe a later
-            # transition by another PostgreSQL transaction.
-            result = Season(
-                season_id=season_id,
-                year=row["year"],
-                label=row["label"],
-                lifecycle_state=target,
-                created_at=row["created_at"],
-                updated_at=updated_at,
-                version=version,
-                regular_season_round_count=(
-                    row["regular_season_round_count"] if "regular_season_round_count" in row.keys() else 20
-                ),
-                midseason_draft_trigger_round=(
-                    row["midseason_draft_trigger_round"] if "midseason_draft_trigger_round" in row.keys() else None
-                ),
+        updated_at = _now()
+        version = row["version"] + 1
+        connection.execute(
+            "UPDATE bbbffl_season SET lifecycle_state=?, updated_at=?, version=? WHERE season_id=?",
+            (target, updated_at, version, season_id),
+        )
+        append_event(
+            connection,
+            actor=actor,
+            action=SEASON_LIFECYCLE_CHANGED,
+            entity_type="season",
+            entity_id=season_id,
+            entity_version=str(version),
+            reason=reason,
+            before_state={"lifecycle_state": old_state},
+            after_state={"lifecycle_state": target},
+        )
+
+        # Construct the command result from the locked row and exact values
+        # written above.  An unlocked post-commit read could observe a later
+        # transition by another PostgreSQL transaction.
+        return Season(
+            season_id=season_id,
+            year=row["year"],
+            label=row["label"],
+            lifecycle_state=target,
+            created_at=row["created_at"],
+            updated_at=updated_at,
+            version=version,
+            regular_season_round_count=(
+                row["regular_season_round_count"] if "regular_season_round_count" in row.keys() else 20
+            ),
+            midseason_draft_trigger_round=(
+                row["midseason_draft_trigger_round"] if "midseason_draft_trigger_round" in row.keys() else None
+            ),
+        )
+
+    def guard_writable(self, conn: ConnectionLike, season_id: str) -> Season:
+        """Issue #195's shared completed-season write fence.
+
+        Locks the owning `bbbffl_season` row (`SELECT ... FOR UPDATE`) on
+        `conn` -- the caller's own open write transaction (from
+        `app.db.transaction()`) -- and raises `SeasonCompletedError` if its
+        `lifecycle_state` is `completed`, *before* the caller performs its
+        own mutation. This must be the first substantive statement in every
+        result-changing write transaction across the whole application
+        (ordinary result correction, finals correction and any cascade of
+        pairings/eliminations, SuperScore correction/republication,
+        premiership/wooden-spoon re-recording, and the season-completion
+        command itself) -- calling it first, before any other row lock,
+        establishes one consistent global lock order (season row always
+        locked first) so a correction and the season-completion transaction
+        can only ever serialize through this single lock, never deadlock
+        against each other.
+
+        Never call this from a read path: reads against a completed season
+        must keep working (see the module-level `SeasonCompletedError`
+        docstring) -- this is a write-path guard only, and it is the
+        caller's responsibility to call it only when about to mutate.
+
+        Raises `SeasonNotFoundError` if `season_id` does not exist, and
+        `SeasonCompletedError` if it does but is already `completed`.
+        Returns the locked `Season` otherwise, so a caller that also needs
+        e.g. `regular_season_round_count` does not have to read it again.
+        """
+        row = conn.execute(
+            "SELECT * FROM bbbffl_season WHERE season_id=?" + _for_update_suffix(self.database),
+            (season_id,),
+        ).fetchone()
+        if row is None:
+            raise SeasonNotFoundError(season_id)
+        if row["lifecycle_state"] == "completed":
+            raise SeasonCompletedError(
+                f"season {season_id} is completed; result-changing operations are permanently refused "
+                "(see docs/2026-finals-superscore-design.md's Completed-season write fence)"
             )
-        return result
+        return self._season_from_row(row)
 
     def create_rules_version(
         self,

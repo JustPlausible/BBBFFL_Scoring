@@ -17,7 +17,7 @@ from app.calculations import ENGINE_VERSION, MatchupCalculationService, _RoundFa
 from app.db import _for_update_suffix, transaction
 from app.round_review import _side_review
 from app.scoring import ScoringRules
-from app.season import _now
+from app.season import SeasonCompletedError, SeasonRepository, _now
 
 
 class SuperScoreResultError(RuntimeError):
@@ -36,8 +36,15 @@ class StaleSuperScoreEvidenceError(SuperScoreResultError):
     pass
 
 
-class CompletedSeasonError(SuperScoreResultError):
-    pass
+# Issue #195: this used to be a bespoke, locally-defined check (`if
+# season["lifecycle_state"] == "completed": raise CompletedSeasonError(...)`,
+# a `SELECT ... FOR UPDATE` on `bbbffl_season` with no shared contract with
+# any other module). It is now a plain alias for the one shared completed-
+# season write-fence error every other result-changing path raises
+# (`app.season.SeasonRepository.guard_writable`) -- kept under this name so
+# `app/routes/superscore_results.py`'s existing `except CompletedSeasonError`
+# -> HTTP 423 mapping, and any other importer of this name, need no change.
+CompletedSeasonError = SeasonCompletedError
 
 
 class MissingCorrectionReasonError(SuperScoreResultError):
@@ -229,6 +236,21 @@ class SuperScoreLeaderboardService:
 
     def _persist(self, round_id, assembled, actor, reason):
         with transaction(self.database) as conn:
+            # Issue #195's shared completed-season write fence: resolve the
+            # owning season with an unlocked read (the round/competition/
+            # season relationship is immutable) and lock/guard it *before*
+            # this transaction locks the round/review-state rows below --
+            # locking the season row first, ahead of every other lock here,
+            # is what lets this transaction and `app.season_completion.
+            # complete_season` serialize purely through that one lock.
+            season_lookup = conn.execute(
+                "SELECT c.season_id FROM bbbffl_round r JOIN competition_stream c ON c.competition_id=r.competition_id "
+                "WHERE r.bbbffl_round_id=? AND c.stream_type='superscore'",
+                (round_id,),
+            ).fetchone()
+            if season_lookup is None:
+                raise SuperScoreResultError("round is not a SuperScore round")
+            SeasonRepository(self.database).guard_writable(conn, season_lookup["season_id"])
             context = conn.execute(
                 "SELECT r.competition_id,c.season_id,l.state FROM bbbffl_round r "
                 "JOIN competition_stream c ON c.competition_id=r.competition_id "
@@ -238,12 +260,6 @@ class SuperScoreLeaderboardService:
             ).fetchone()
             if context is None or context["state"] not in ("review", "final"):
                 raise SuperScoreResultError("SuperScore round must be in review or final state")
-            season = conn.execute(
-                "SELECT lifecycle_state FROM bbbffl_season WHERE season_id=?" + _for_update_suffix(self.database),
-                (context["season_id"],),
-            ).fetchone()
-            if season["lifecycle_state"] == "completed":
-                raise CompletedSeasonError("completed seasons are immutable")
             locked_states = {}
             for item in sorted(assembled, key=lambda i: i["entry_id"]):
                 entry_id = item["entry_id"]

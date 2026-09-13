@@ -31,6 +31,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 import app.competition_lifecycle as competition_lifecycle_module
+import app.db as db_module
 import app.finals as finals_module
 import app.lockouts as lockouts_module
 from app.audit import ActorContext
@@ -628,3 +629,38 @@ def test_rewind_genuinely_blocks_on_the_same_round_row_a_first_trigger_configura
 
     assert not rewind_result["blocked"]  # the new trigger was never activated, so nothing to block on
     assert len(triggers.list_triggers(round_id)) == 1
+
+
+def test_rewind_acquires_each_trigger_header_lock_in_sorted_id_order(postgres_database, monkeypatch):
+    """Observe the actual per-row FOR UPDATE statements. A sorted Python
+    result from one bulk FOR UPDATE would not prove PostgreSQL locked rows
+    in that order and must not satisfy this regression."""
+    from app.lockouts import LockoutTriggerRepository
+
+    built, bracket, repo, pairings = _bracket_at_week1_played(postgres_database, 2909)
+    repo.advance_bracket(bracket.bracket_id, 1, actor=ACTOR, reason="advance to week 2")
+    round_id = repo.get_week_round_id(bracket.bracket_id, 2)
+    triggers = LockoutTriggerRepository(postgres_database)
+    created = [
+        triggers.create(round_id, "early", "selective", 1, [12345], actor=ACTOR, reason="order test"),
+        triggers.create(round_id, "main", "main", 2, [12346], actor=ACTOR, reason="order test"),
+    ]
+    expected = sorted(trigger.trigger_id for trigger in created)
+    correct_official_result(postgres_database, pairings["ef"].matchup_id, 90, 10, reason="force rewind")
+
+    acquired = []
+    real_execute = db_module._TransactionConnection.execute
+
+    def recording_execute(self, statement, parameters=()):
+        if (
+            statement.startswith("SELECT 1 FROM bbbffl_round_lockout_trigger WHERE trigger_id=?")
+            and statement.endswith("FOR UPDATE")
+        ):
+            acquired.append(parameters[0])
+        return real_execute(self, statement, parameters)
+
+    monkeypatch.setattr(db_module._TransactionConnection, "execute", recording_execute)
+    result = repo.rewind_bracket(bracket.bracket_id, 1, actor=ACTOR, reason="ordered trigger scan", apply=True)
+
+    assert not result["blocked"]
+    assert acquired == expected

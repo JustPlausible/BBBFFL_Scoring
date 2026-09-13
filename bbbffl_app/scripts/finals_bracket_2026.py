@@ -77,6 +77,21 @@ def _print(payload) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True, default=str))
 
 
+def _parse_expected_versions(raw: str | None) -> dict[str, int] | None:
+    """Parse the optional stale-preview guard at the CLI trust boundary."""
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"--expected-versions must be valid JSON: {exc.msg}") from exc
+    if not isinstance(value, dict):
+        raise ValueError("--expected-versions must be a JSON object whose keys are strings and values are integers")
+    if any(not isinstance(key, str) or type(version) is not int for key, version in value.items()):
+        raise ValueError("--expected-versions must be a JSON object whose keys are strings and values are integers")
+    return value
+
+
 def cmd_create_bracket_preview(database, args: argparse.Namespace) -> int:
     report = FinalsBracketRepository(database).preview_create_bracket(
         args.season_id, args.competition_id, args.ordinary_competition_id
@@ -133,7 +148,7 @@ def cmd_advance_preview(database, args: argparse.Namespace) -> int:
 
 
 def cmd_advance_apply(database, args: argparse.Namespace) -> int:
-    expected_versions = json.loads(args.expected_versions) if args.expected_versions else None
+    expected_versions = _parse_expected_versions(args.expected_versions)
     result = FinalsBracketRepository(database).advance_bracket(
         args.bracket_id, args.from_week, actor=ACTOR, reason=args.reason, expected_versions=expected_versions
     )
@@ -143,7 +158,7 @@ def cmd_advance_apply(database, args: argparse.Namespace) -> int:
 
 def cmd_rewind(database, args: argparse.Namespace) -> int:
     repo = FinalsBracketRepository(database)
-    expected_versions = json.loads(args.expected_versions) if args.expected_versions else None
+    expected_versions = _parse_expected_versions(args.expected_versions)
     try:
         report = repo.rewind_bracket(
             args.bracket_id,
@@ -237,12 +252,20 @@ def main() -> int:
     # invocation must never upgrade the schema of a database it is only
     # meant to inspect, exactly like scripts/finals_seeding_2026.py.
     mutating = mode == "apply" or args.command == "open-week" or (args.command == "rewind" and args.apply)
+    # Validate operator-supplied JSON before even running migrations: an
+    # invalid stale-preview guard must fail before *any* database mutation.
+    if mutating and hasattr(args, "expected_versions"):
+        try:
+            _parse_expected_versions(args.expected_versions)
+        except ValueError as exc:
+            print(f"finals bracket operation refused: {exc}", file=sys.stderr)
+            return 1
     if mutating:
         migrate(args.database_url)
     database = connect(args.database_url)
     try:
         return handler(database, args)
-    except (FinalsBracketError, StaleSeedOrderError, StaleFinalsResultError) as exc:
+    except (FinalsBracketError, StaleSeedOrderError, StaleFinalsResultError, ValueError) as exc:
         print(f"finals bracket operation refused: {exc}", file=sys.stderr)
         return 1
     finally:

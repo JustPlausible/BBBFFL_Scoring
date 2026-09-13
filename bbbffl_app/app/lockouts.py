@@ -1461,12 +1461,23 @@ class LockoutRepository:
         `_insert_trigger_activation`); a round with no configured triggers
         is a safe no-op."""
         with transaction(self.database) as conn:
-            trigger_ids = [
+            # Take the stable parent lock first. Besides preserving the
+            # zero-trigger/configure serialization, this gives every
+            # round-wide trigger operation the same outer lock order.
+            conn.execute(
+                "SELECT 1 FROM bbbffl_round WHERE bbbffl_round_id=?" + _for_update_suffix(self.database),
+                (bbbffl_round_id,),
+            )
+            # A bulk SELECT ... FOR UPDATE may acquire locks in query-plan
+            # order; sorting its returned rows afterwards is too late. Read
+            # identifiers unlocked, then acquire each header lock in the
+            # same deterministic order used by finals rewind.
+            trigger_ids = sorted(
                 r["trigger_id"]
                 for r in conn.execute(
                     "SELECT trigger_id FROM bbbffl_round_lockout_trigger WHERE bbbffl_round_id=?", (bbbffl_round_id,)
                 ).fetchall()
-            ]
+            )
             if not trigger_ids:
                 return
             matches_by_id = {match.match_id: match for match in match_facts.matches_for(bbbffl_round_id)}

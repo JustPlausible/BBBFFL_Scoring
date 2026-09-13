@@ -1,9 +1,12 @@
 """Focused finals publication/correction provenance tests (issue #191)."""
 
+from contextlib import contextmanager
+from types import SimpleNamespace
+
 from app.audit import ActorContext
 from app.db import transaction
-from app.finals import FinalsBracketRepository
-from app.finals_review import _mathematical_wooden_spoon
+from app.finals import FinalsBracketRepository, _StaleMatchupDuringDownstreamCheck
+from app.finals_review import _mathematical_wooden_spoon, correct_finals_result
 from tests.finals_helpers import build_finals_ready_season, seed_finals_seeding_snapshot_row
 
 
@@ -70,3 +73,50 @@ def test_snapshot_seeded_bracket_uses_mathematical_rank_not_historical_seed_ten(
         "finals_seeding_snapshot_id": snapshot["snapshot_id"],
         "through_round": 20,
     }
+
+
+def test_correction_retries_the_whole_transaction_after_stale_materialisation(monkeypatch):
+    """The private stale-materialisation signal never escapes as a 500."""
+    import app.finals_review as module
+
+    context = {
+        "matchup_id": "finals-match",
+        "bbbffl_round_id": "finals-round",
+        "effective_official_version": 1,
+    }
+    review = SimpleNamespace(blockers=[], matchup_id="finals-match")
+    attempts = []
+
+    monkeypatch.setattr(module, "_finals_matchup_context", lambda *_: context)
+    monkeypatch.setattr(module.MatchupCalculationService, "calculate_round", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(module, "build_matchup_review", lambda *_args, **_kwargs: review)
+    monkeypatch.setattr(module, "_freeze_matchup_inputs", lambda *_: {"calculation_revision": 1})
+
+    def attempt(*_args):
+        attempts.append(len(attempts) + 1)
+        if len(attempts) == 1:
+            raise _StaleMatchupDuringDownstreamCheck
+
+    monkeypatch.setattr(module, "_correct_finals_result_transaction", attempt)
+
+    @contextmanager
+    def evidence_batch():
+        yield SimpleNamespace(is_evidence_fresh=lambda: True)
+
+    afl_client = SimpleNamespace(evidence_batch=evidence_batch)
+    lifecycle = SimpleNamespace(
+        get_matchup=lambda _mid: object(),
+        effective_result=lambda mid: SimpleNamespace(matchup_id=mid, version=2),
+    )
+    result = correct_finals_result(
+        object(),
+        afl_client,
+        lifecycle,
+        object(),
+        object(),
+        "finals-match",
+        actor=ActorContext.anonymous_operator("test"),
+        reason="materialisation retry",
+    )
+    assert attempts == [1, 2]
+    assert result.version == 2

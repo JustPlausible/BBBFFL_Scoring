@@ -6,7 +6,12 @@ from contextlib import nullcontext
 from app.audit import append_event, new_correlation_id
 from app.calculations import MatchupCalculationService
 from app.db import _for_update_suffix, transaction
-from app.finals import FinalsBracketRepository
+from app.finals import (
+    _MAX_REWIND_RETRIES,
+    FinalsBracketAdvanceStateError,
+    FinalsBracketRepository,
+    _StaleMatchupDuringDownstreamCheck,
+)
 from app.round_review import SignoffValidationError, _freeze_matchup_inputs, build_matchup_review
 from app.season import _now
 
@@ -253,6 +258,25 @@ def correct_finals_result(database, afl_client, lifecycle, review_repo, identiti
     if review.blockers:
         raise SignoffValidationError({matchup_id: review.blockers})
     snapshot = _freeze_matchup_inputs(review, actor)
+    for _attempt in range(_MAX_REWIND_RETRIES):
+        try:
+            _correct_finals_result_transaction(database, context, review, snapshot, actor, reason)
+            return lifecycle.effective_result(matchup_id)
+        except _StaleMatchupDuringDownstreamCheck:
+            # The transaction context has already rolled back the inserted
+            # result version and audit event. Restart the *whole* correction
+            # transaction so downstream pairing/matchup IDs and the complete
+            # deterministic lock set are discovered again.
+            continue
+    raise FinalsBracketAdvanceStateError(
+        f"finals correction could not complete after {_MAX_REWIND_RETRIES} attempts, each racing a concurrent "
+        "downstream matchup materialisation; reload and retry"
+    )
+
+
+def _correct_finals_result_transaction(database, context, review, snapshot, actor, reason):
+    matchup_id = context["matchup_id"]
+    old_version = context["effective_official_version"]
     bracket_repo = FinalsBracketRepository(database)
     source_ids = (
         bracket_repo._source_matchup_ids(context["bracket_id"], context["week_number"])
@@ -348,4 +372,3 @@ def correct_finals_result(database, afl_client, lifecycle, review_repo, identiti
                 after_state={"season_entry_id": new_premier, "official_version": version},
                 payload={"grand_final_matchup_id": matchup_id, "supersedes_official_version": old_version},
             )
-    return lifecycle.effective_result(matchup_id)

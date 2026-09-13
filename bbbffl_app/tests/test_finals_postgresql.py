@@ -32,6 +32,7 @@ import pytest
 
 import app.competition_lifecycle as competition_lifecycle_module
 import app.finals as finals_module
+import app.lockouts as lockouts_module
 from app.audit import ActorContext
 from app.db import connect
 from app.finals import (
@@ -569,3 +570,61 @@ def test_submission_in_flight_behind_a_rewinds_lifecycle_lock_fails_closed_for_a
         "SELECT effective_submission_version FROM weekly_lineup WHERE lineup_id=?", (draft.lineup_id,)
     ).fetchone()
     assert reloaded["effective_submission_version"] is None, "the displaced entry's submission must never commit"
+
+
+def test_rewind_genuinely_blocks_on_the_same_round_row_a_first_trigger_configuration_holds(
+    postgres_database, monkeypatch
+):
+    """Codex review, PR #201: a round with zero triggers configured yet has
+    no `bbbffl_round_lockout_trigger` row for the position-lock scan's own
+    header lock to catch -- `LockoutTriggerRepository.configure`'s own
+    docstring notes exactly this gap for *its* purposes and closes it by
+    locking the stable `bbbffl_round` parent row before reading the
+    trigger set, serializing every configure() call (including a round's
+    very first trigger) through that lock regardless of how many trigger
+    rows currently exist. `_downstream_play_state`'s position-lock scan
+    now locks that identical parent row first too. Proven here by having
+    a concurrent `configure()` call -- creating this round's first ever
+    trigger -- hold that row lock open while rewind's own transaction
+    demonstrably blocks trying to acquire it."""
+    from app.lockouts import LockoutTriggerRepository
+
+    built, bracket, repo, pairings = _bracket_at_week1_played(postgres_database, 2908)
+    repo.advance_bracket(bracket.bracket_id, 1, actor=ACTOR, reason="advance to week 2")
+    round_id = repo.get_week_round_id(bracket.bracket_id, 2)
+    triggers = LockoutTriggerRepository(postgres_database)
+    assert triggers.list_triggers(round_id) == []  # no triggers configured yet
+
+    correct_official_result(
+        postgres_database, pairings["ef"].matchup_id, 90, 10, reason="gives rewind a real change to check"
+    )
+
+    configure_holds_lock = threading.Event()
+    allow_configure_to_commit = threading.Event()
+    real_append = lockouts_module.append_event
+
+    def pause_configure(*args, **kwargs):
+        configure_holds_lock.set()
+        assert allow_configure_to_commit.wait(timeout=5)
+        return real_append(*args, **kwargs)
+
+    monkeypatch.setattr(lockouts_module, "append_event", pause_configure)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        configure = executor.submit(
+            triggers.configure, round_id, "main", "main", 1, [12345], actor=ACTOR, reason="round's first trigger"
+        )
+        assert configure_holds_lock.wait(timeout=5)
+
+        rewind = executor.submit(
+            repo.rewind_bracket, bracket.bracket_id, 1, actor=ACTOR, reason="races the first configure()", apply=True
+        )
+        time.sleep(0.2)
+        assert not rewind.done(), "rewind_bracket did not wait for the same bbbffl_round row lock configure() holds"
+
+        allow_configure_to_commit.set()
+        configure.result(timeout=5)
+        rewind_result = rewind.result(timeout=5)
+
+    assert not rewind_result["blocked"]  # the new trigger was never activated, so nothing to block on
+    assert len(triggers.list_triggers(round_id)) == 1

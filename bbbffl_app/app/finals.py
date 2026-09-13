@@ -958,8 +958,28 @@ class FinalsBracketRepository:
             locked = {mid: self._lock_matchup_version(conn, mid, expected_versions) for mid in sorted(source_ids)}
             derivation = self._derive(conn, bracket_id, from_week, seed_rank, locked)
 
-            pairing_changes: list[dict] = []
-            blocked_slots: set[str] = set()
+            # Codex review, PR #201: `_downstream_play_state` locks a
+            # pairing's own matchup row before it locks the round's shared
+            # lifecycle row, matching `correct_matchup_result`'s own
+            # matchup-then-lifecycle order -- but lifecycle is acquired at
+            # most once per transaction and then stays held for the rest of
+            # it. A target week with two changed slots (e.g. both Week 2
+            # pairings, when a Week 1 correction affects both) calls
+            # `_downstream_play_state` twice; the second call's own
+            # matchup-locking step then runs *after* lifecycle is already
+            # held by the first call, reopening the exact deadlock cycle
+            # for that second matchup. Determine every changed pairing
+            # up front and lock all of their already-materialised matchups
+            # (deterministic order) before lifecycle is ever touched, so
+            # every one of them is locked in the correct order regardless
+            # of how many slots this rewind touches. A pairing that is not
+            # yet materialised (matchup_id still None here) has nothing to
+            # pre-lock -- if a concurrent materialisation lands before this
+            # transaction's own lifecycle lock succeeds, `_downstream_play_
+            # state`'s stale-matchup-id check aborts and restarts the whole
+            # transaction, which re-runs this exact pre-lock pass fresh.
+            candidates: list[tuple] = []
+            changed_matchup_ids: set[str] = set()
             for slot, home, away, source1, source2 in derivation.new_pairings:
                 existing = self._active_pairing_row(conn, bracket_id, target_week, slot)
                 if existing is None:
@@ -972,6 +992,18 @@ class FinalsBracketRepository:
                 )
                 if unchanged:
                     continue
+                candidates.append((slot, home, away, source1, source2, existing))
+                if existing["matchup_id"] is not None:
+                    changed_matchup_ids.add(existing["matchup_id"])
+            for matchup_id in sorted(changed_matchup_ids):
+                conn.execute(
+                    "SELECT 1 FROM bbbffl_matchup WHERE matchup_id=?" + _for_update_suffix(self.database),
+                    (matchup_id,),
+                )
+
+            pairing_changes: list[dict] = []
+            blocked_slots: set[str] = set()
+            for slot, home, away, source1, source2, existing in candidates:
                 artifacts = self._downstream_play_state(conn, existing)
                 if artifacts:
                     blocked_slots.add(slot)
@@ -1492,6 +1524,21 @@ class FinalsBracketRepository:
             # committed and visible, or its writer is still queued behind
             # this same lock and cannot land before the supersede that
             # follows this check.
+            #
+            # A round with zero triggers configured yet has no trigger row
+            # for the above to lock at all -- `LockoutTriggerRepository.
+            # configure`'s own docstring notes exactly this gap and closes
+            # it by locking the stable `bbbffl_round` parent row before
+            # reading the trigger set, serializing every `configure()` call
+            # (including the round's very first trigger) through that lock
+            # regardless of how many trigger rows currently exist. Lock
+            # that identical parent row here first, so a concurrent first
+            # `configure()` (and the activation `_materialize_round_
+            # triggers` could then immediately record) can never land
+            # between this method's unlocked emptiness and its conclusion.
+            conn.execute(
+                "SELECT 1 FROM bbbffl_round WHERE bbbffl_round_id=?" + _for_update_suffix(self.database), (round_id,)
+            )
             trigger_ids = sorted(
                 r["trigger_id"]
                 for r in conn.execute(

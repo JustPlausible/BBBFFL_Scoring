@@ -645,3 +645,52 @@ def test_rewind_bracket_restarts_the_whole_transaction_when_downstream_check_fin
     new_first_semi = next(p for p in repo.list_pairings(bracket.bracket_id, week_number=2) if p.slot == "first_semi")
     assert new_first_semi.matchup_id is not None
     assert new_first_semi.away_season_entry_id != first_semi.away_season_entry_id
+
+
+def test_rewind_pre_locks_every_changed_matchup_before_the_shared_lifecycle_row(monkeypatch):
+    """Codex review, PR #201: `_downstream_play_state` locks a pairing's
+    own matchup row before the round's shared lifecycle row -- but
+    lifecycle is acquired at most once per transaction and then stays held
+    for the rest of it. A rewind that changes *two* slots in the same
+    target week (e.g. both Week 2 pairings, when a Week 1 QF correction
+    changes both the QF winner feeding `second_semi` and the QF loser
+    feeding `first_semi`) used to call `_downstream_play_state` twice, so
+    the second call's own matchup lock ran *after* lifecycle was already
+    held by the first -- reopening the deadlock cycle for that second
+    matchup. Pins the fix: every changed pairing's matchup must now be
+    locked, in one upfront pass, before lifecycle is ever touched."""
+    from app.db import _TransactionConnection
+
+    built, bracket, repo = _bracket_with_mappings(2415)
+    _week1_to_week2(built, repo, bracket, qf_result=(100, 50), ef_result=(50, 100))
+    open_finals_week(built["database"], bracket.bracket_id, 2, actor=ACTOR)
+    week1_qf_matchup_id = next(
+        p for p in repo.list_pairings(bracket.bracket_id, week_number=1) if p.slot == "qf"
+    ).matchup_id
+
+    # Flips the QF winner: both second_semi's away entry and first_semi's
+    # home entry change.
+    correct_official_result(built["database"], week1_qf_matchup_id, 10, 90, reason="flips both week 2 slots")
+
+    events: list[str] = []
+    real_execute = _TransactionConnection.execute
+
+    def recording_execute(self, statement, parameters=()):
+        if statement.startswith("SELECT 1 FROM bbbffl_matchup WHERE matchup_id="):
+            events.append(f"matchup:{parameters[0]}")
+        elif "FROM bbbffl_round_lifecycle" in statement:
+            events.append("lifecycle")
+        return real_execute(self, statement, parameters)
+
+    monkeypatch.setattr(_TransactionConnection, "execute", recording_execute)
+
+    applied = repo.rewind_bracket(bracket.bracket_id, 1, actor=ACTOR, reason="two-slot rewind", apply=True)
+    assert not applied["blocked"]
+
+    lifecycle_indexes = [i for i, e in enumerate(events) if e == "lifecycle"]
+    matchup_indexes = [i for i, e in enumerate(events) if e.startswith("matchup:")]
+    assert len(matchup_indexes) >= 2, f"expected both changed matchups pre-locked, got {events}"
+    assert lifecycle_indexes, f"expected at least one lifecycle lock, got {events}"
+    assert max(matchup_indexes[:2]) < lifecycle_indexes[0], (
+        f"both pre-lock matchup locks must occur before the first lifecycle lock; got {events}"
+    )

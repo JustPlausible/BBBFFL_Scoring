@@ -3,6 +3,7 @@
 FastAPI app, mirroring tests/test_round_preflight.py's `preflight_client`
 fixture shape for the ordinary equivalent."""
 
+import json
 import tempfile
 from pathlib import Path
 
@@ -152,3 +153,39 @@ def test_rewind_route_returns_409_with_report_when_blocked(finals_client):
     )
     assert rewind.status_code == 409
     assert rewind.json()["detail"]["report"]["blocked"]
+
+
+@pytest.mark.parametrize("bad_value", ["[]", "null", "42", '{"a": "not-an-int"}', '{"a": true}'])
+def test_expected_versions_rejects_anything_that_is_not_a_json_object_of_integer_versions(finals_client, bad_value):
+    """Codex review, PR #201: a JSON array/scalar previously reached
+    `_lock_matchup_version` and produced an uncaught 500 on `.get()`, and
+    JSON `null` silently decoded to `None`, disabling the staleness guard
+    the caller explicitly asked for -- both must be a clear 400 instead."""
+    _built, bracket = _seed_bracket(finals_client, year=2605)
+    response = finals_client.post(
+        f"/api/admin/finals/{bracket.bracket_id}/advance/1",
+        params={"reason": "malformed expected_versions", "expected_versions": bad_value},
+    )
+    assert response.status_code == 400
+
+
+def test_advance_apply_with_a_stale_expected_versions_returns_409_not_500(finals_client):
+    """Codex review, PR #201: `StaleFinalsResultError` inherits from
+    `RuntimeError`, not `FinalsBracketError` -- without an explicit except
+    clause at the route this produced an uncaught 500 despite the
+    transaction safely rolling back."""
+    _built, bracket = _seed_bracket(finals_client, year=2606)
+    database = finals_client.app.state.database
+    finals_client.post(f"/api/admin/finals/{bracket.bracket_id}/weeks/1/open")
+    repo = FinalsBracketRepository(database)
+    pairings = {p.slot: p for p in repo.list_pairings(bracket.bracket_id, week_number=1)}
+    seed_official_result(database, pairings["qf"].matchup_id, 100, 50)
+    seed_official_result(database, pairings["ef"].matchup_id, 50, 100)
+
+    stale_versions = json.dumps({pairings["qf"].matchup_id: 999, pairings["ef"].matchup_id: 999})
+    response = finals_client.post(
+        f"/api/admin/finals/{bracket.bracket_id}/advance/1",
+        params={"reason": "stale preview", "expected_versions": stale_versions},
+    )
+    assert response.status_code == 409
+    assert len(repo.list_pairings(bracket.bracket_id, week_number=2)) == 0

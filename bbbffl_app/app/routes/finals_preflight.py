@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from app.audit import ActorContext
 from app.authorization import Principal, require_capability, require_role_covers_season
 from app.csrf import verify_token
-from app.finals import DownstreamPlayStateError, FinalsBracketError, FinalsBracketRepository
+from app.finals import DownstreamPlayStateError, FinalsBracketError, FinalsBracketRepository, StaleFinalsResultError
 from app.finals_preflight import build_finals_week_preflight, open_finals_week
 
 router = APIRouter(prefix="/api/admin/finals")
@@ -45,13 +45,24 @@ def _parse_expected_versions(expected_versions: str | None) -> dict[str, int] | 
     call returned, to be re-checked under lock so a correction landing
     between an operator's preview and apply request is detected
     (`StaleFinalsResultError`) instead of silently authorising a derivation
-    different from the one they reviewed (Codex review, PR #201)."""
+    different from the one they reviewed (Codex review, PR #201). Rejects
+    (400) anything that isn't a JSON object of {string: integer} -- a JSON
+    array or scalar would otherwise reach `_lock_matchup_version` and raise
+    an uncaught `AttributeError` on `.get()`, and JSON `null` would
+    silently decode to `None` and disable the staleness guard the caller
+    explicitly asked for, rather than reporting the malformed input
+    (Codex review, PR #201)."""
     if not expected_versions:
         return None
     try:
-        return json.loads(expected_versions)
+        parsed = json.loads(expected_versions)
     except json.JSONDecodeError as exc:
-        raise HTTPException(400, "expected_versions must be a JSON object") from exc
+        raise HTTPException(400, "expected_versions must be a JSON object of {matchup_id: integer_version}") from exc
+    if not isinstance(parsed, dict) or not all(
+        isinstance(key, str) and isinstance(value, int) and not isinstance(value, bool) for key, value in parsed.items()
+    ):
+        raise HTTPException(400, "expected_versions must be a JSON object of {matchup_id: integer_version}")
+    return parsed
 
 
 @router.get("/{bracket_id}")
@@ -106,7 +117,12 @@ def advance_week(
             reason=reason,
             expected_versions=_parse_expected_versions(expected_versions),
         )
-    except FinalsBracketError as exc:
+    except (FinalsBracketError, StaleFinalsResultError) as exc:
+        # Codex review, PR #201: `StaleFinalsResultError` inherits from
+        # `RuntimeError`, not `FinalsBracketError` -- without catching it
+        # explicitly here, a correction landing between an operator's
+        # preview and apply request produced an uncaught 500 instead of the
+        # advertised 409, despite the transaction having safely rolled back.
         raise HTTPException(409, str(exc)) from exc
     return {"bracket_id": bracket_id, **{k: v for k, v in result.items() if k != "bracket_id"}}
 
@@ -135,5 +151,7 @@ def rewind_week(
         )
     except DownstreamPlayStateError as exc:
         raise HTTPException(409, {"message": str(exc), "report": exc.report}) from exc
-    except FinalsBracketError as exc:
+    except (FinalsBracketError, StaleFinalsResultError) as exc:
+        # See advance_week's identical except clause: StaleFinalsResultError
+        # inherits from RuntimeError, not FinalsBracketError.
         raise HTTPException(409, str(exc)) from exc

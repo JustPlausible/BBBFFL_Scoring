@@ -1362,6 +1362,36 @@ class FinalsBracketRepository:
                 "SELECT state FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?" + _for_update_suffix(self.database),
                 (round_id,),
             )
+            # Codex review, PR #201: if `matchup_id` was None above (not yet
+            # materialised), the matchup-locking branch above skipped
+            # entirely -- but a concurrent `_materialise_pairing` could have
+            # attached a real matchup to this exact pairing, and released
+            # this identical lifecycle lock, in the gap between the
+            # pairing_row this check was called with and this lock actually
+            # being acquired. Every check below that depends on `matchup_id`
+            # (ruling/calculation/official-result) would then silently run
+            # against a stale None, missing a ruling or result a concurrent
+            # caller (e.g. `RoundReviewRepository`, which doesn't need this
+            # lifecycle lock at all to record one) attached to the new
+            # matchup after materialisation but before this lock succeeded.
+            # Re-read the pairing's current matchup_id now that lifecycle is
+            # held -- it cannot change again for the rest of this
+            # transaction -- and retry this whole check once against the
+            # correct id if it changed, so the matchup-first lock/scan above
+            # actually runs against it.
+            current_matchup_id = conn.execute(
+                "SELECT matchup_id FROM finals_bracket_pairing WHERE pairing_id=?", (pairing_row["pairing_id"],)
+            ).fetchone()["matchup_id"]
+            if current_matchup_id != matchup_id:
+                return self._downstream_play_state(
+                    conn,
+                    {
+                        "pairing_id": pairing_row["pairing_id"],
+                        "home_season_entry_id": pairing_row["home_season_entry_id"],
+                        "away_season_entry_id": pairing_row["away_season_entry_id"],
+                        "matchup_id": current_matchup_id,
+                    },
+                )
         if round_id and entries:
             placeholders = ",".join("?" for _ in entries)
             lineup_rows = conn.execute(

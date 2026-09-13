@@ -20,6 +20,7 @@ import pytest
 
 from app.audit import ActorContext
 from app.competition_lifecycle import CompetitionLifecycleRepository
+from app.db import transaction
 from app.finals import (
     DownstreamPlayStateError,
     FinalsBracketAdvanceStateError,
@@ -573,3 +574,40 @@ def test_materialise_pairing_locks_the_round_lifecycle_row_before_the_pairing_ro
     # materialised via its own `_materialise_pairing` transaction -- every
     # one of them must lock lifecycle strictly before pairing.
     assert locked_order == ["lifecycle", "pairing", "lifecycle", "pairing"]
+
+
+def test_downstream_play_state_retries_against_the_pairings_current_matchup_id():
+    """Codex review, PR #201 (fresh evidence beyond the earlier stale-
+    matchup-id fix): `_downstream_play_state`'s own artifact scan ran
+    against the *given* pairing_row's matchup_id, which could be stale
+    (None) if a concurrent `_materialise_pairing` attached a real matchup
+    -- and released this identical lifecycle lock -- in the gap between an
+    unlocked caller read and this function's own lifecycle lock being
+    acquired. Every matchup-gated check (ruling/calculation/official-
+    result) would then silently run against the stale None instead of the
+    real matchup, missing whatever a concurrent caller (e.g. a Scorer
+    ruling, which doesn't need this lifecycle lock at all) attached to it
+    in that window. This proves the fix by calling the method directly
+    with a deliberately stale pairing_row (matchup_id=None) against a
+    pairing whose *real*, current matchup already has a published official
+    result -- exactly the kind of artifact the stale path would have
+    missed entirely."""
+    built, bracket, repo = _bracket_with_mappings(2413)
+    _week1_to_week2(built, repo, bracket, qf_result=(100, 50), ef_result=(50, 100))
+    open_finals_week(built["database"], bracket.bracket_id, 2, actor=ACTOR)
+    first_semi = next(p for p in repo.list_pairings(bracket.bracket_id, week_number=2) if p.slot == "first_semi")
+    assert first_semi.matchup_id is not None
+    seed_official_result(built["database"], first_semi.matchup_id, 80, 40)
+
+    stale_pairing_row = {
+        "pairing_id": first_semi.pairing_id,
+        "home_season_entry_id": first_semi.home_season_entry_id,
+        "away_season_entry_id": first_semi.away_season_entry_id,
+        "matchup_id": None,  # stale: captured before materialisation
+    }
+    with transaction(built["database"]) as conn:
+        artifacts = repo._downstream_play_state(conn, stale_pairing_row)
+
+    assert any(a["type"] == "official_result" and a["matchup_id"] == first_semi.matchup_id for a in artifacts), (
+        f"expected an official_result artifact for the real (not stale-None) matchup, got {artifacts}"
+    )

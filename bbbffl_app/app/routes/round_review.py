@@ -76,6 +76,29 @@ def _authorise_matchup(request: Request, principal: Principal, matchup_id: str) 
     _authorise_round(request, principal, row["bbbffl_round_id"])
 
 
+def _require_ordinary_stream(request: Request, competition_id: str, *, action: str) -> None:
+    """Fence a generic lifecycle mutation to `ordinary` rounds (issue #192
+    review comment): `CompetitionLifecycleRepository.transition` itself is
+    stream-agnostic (it has to be -- `app.finals.open_finals_week` and
+    `app.superscore_round.open_round` both call it directly to advance
+    their own rounds), but the *generic* HTTP surface here must not become
+    a second, ungated way to reach it. A finals/superscore round has its
+    own stream-aware opening path -- pairing materialisation for finals,
+    the all-ten-entry `superscore_entry_review_state` completeness gate
+    for SuperScore (`IncompleteReviewStateError`) -- that this route knows
+    nothing about and would otherwise silently bypass, exactly as `/matchup/
+    {matchup_id}/correct` already fences finals corrections away from this
+    router's generic `correct_matchup_result` path below."""
+    stream = request.app.state.database.execute(
+        "SELECT stream_type FROM competition_stream WHERE competition_id=?", (competition_id,)
+    ).fetchone()
+    if stream is not None and stream["stream_type"] != "ordinary":
+        raise HTTPException(
+            status_code=409,
+            detail=f"{action} for a {stream['stream_type']} round must use its stream-specific lifecycle boundary",
+        )
+
+
 class DnpRulingRequest(BaseModel):
     matchup_id: str
     season_entry_id: str
@@ -224,8 +247,12 @@ def transition_round_review(
     lifecycle.LEGAL_TRANSITIONS`: upcoming -> open -> live -> review).
     `attempt_signoff` already requires `state == "review"`, but nothing
     else exposed a way to reach it -- this is the scorer-facing wiring for
-    that existing, otherwise-unreachable transition."""
-    _authorise_round(request, principal, round_id)
+    that existing, otherwise-unreachable transition. Restricted to
+    `ordinary` rounds (see `_require_ordinary_stream`) -- a finals/
+    SuperScore round must advance through its own stream-aware lifecycle
+    module, never this generic one."""
+    round_ = _authorise_round(request, principal, round_id)
+    _require_ordinary_stream(request, round_.competition_id, action="Advancing a round")
     request.app.state.lifecycle.transition(
         round_id, payload.target, actor=_actor(principal, payload.scorer_name), reason=payload.reason
     )

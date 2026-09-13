@@ -106,7 +106,17 @@ def ensure_stream(
     competition its SS1 cross-stream carry-forward fallback resolves
     against (`app.superscore_participation.resolve_cross_stream_fallback_
     source`) -- the SuperScore-stream counterpart of `finals_bracket.
-    ordinary_competition_id`."""
+    ordinary_competition_id`.
+
+    Validates `ordinary_competition_id` up front, mirroring `app.finals.
+    FinalsBracketRepository._resolve_seed`'s identical check for
+    `finals_bracket.ordinary_competition_id`: `superscore_stream.
+    ordinary_competition_id` carries the same foreign key, so an unchecked
+    bogus id would otherwise only fail *after* `create_competition` below
+    has already committed its own `competition_stream` row in its own
+    transaction (`app.db.transaction` never nests), leaving an orphan that
+    then blocks a retry on `(season_id, stream_key)` uniqueness. Failing
+    here instead means nothing is created at all on bad input."""
     existing = get_stream(database, season_id)
     if existing is not None:
         if existing.ordinary_competition_id != ordinary_competition_id:
@@ -115,6 +125,15 @@ def ensure_stream(
                 f"{existing.ordinary_competition_id!r}, not {ordinary_competition_id!r}"
             )
         return existing
+    ordinary = database.execute(
+        "SELECT season_id, stream_type FROM competition_stream WHERE competition_id=?",
+        (ordinary_competition_id,),
+    ).fetchone()
+    if ordinary is None or ordinary["season_id"] != season_id or ordinary["stream_type"] != "ordinary":
+        raise SuperScoreRoundError(
+            f"ordinary_competition_id {ordinary_competition_id!r} must name this season's own ordinary "
+            "home-and-away competition"
+        )
     season_repo = SeasonRepository(database)
     created = season_repo.create_competition(season_id, rules_version_id, stream_key, label, STREAM_TYPE)
     now = _now()

@@ -446,3 +446,40 @@ def test_correction_route_authorization_for_superscore(superscore_client):
         (round_id, entry.season_entry_id),
     ).fetchone()
     assert review_row["review_version"] == 2
+
+
+# -- Generic round-review lifecycle fencing ---------------------------------
+
+
+def test_generic_round_review_transition_cannot_open_a_superscore_round(superscore_client):
+    """Issue #192 review comment: `app.superscore_round.open_round` is the
+    only way a SuperScore round may reach `open`, because it refuses
+    (`IncompleteReviewStateError`) unless all ten `superscore_entry_review_
+    state` rows exist first. The generic scorer Round Centre transition
+    endpoint (`/api/admin/round-review/{round_id}/transition`) is a second,
+    ungated path to the exact same `CompetitionLifecycleRepository.
+    transition` call -- it must refuse a non-ordinary round outright rather
+    than silently open one with no review-state gate at all."""
+    client = superscore_client
+    database = client.app.state.database
+    built = build_superscore_ready_season(database=database, year=5109)
+    round_id = built["superscore_rounds"][1]
+    _operator, cookies, headers = _authenticate_scorer(client, built["season"].season_id)
+
+    response = client.post(
+        f"/api/admin/round-review/{round_id}/transition",
+        json={"target": "open"},
+        cookies=cookies,
+        headers=headers,
+    )
+    assert response.status_code == 409
+    assert "stream-specific lifecycle boundary" in response.json()["detail"]
+
+    lifecycle_row = database.execute(
+        "SELECT state FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?", (round_id,)
+    ).fetchone()
+    assert lifecycle_row["state"] == "upcoming"
+
+    # The real, stream-aware path still works unchanged.
+    opened = open_round(database, round_id, actor=ADMIN, reason="open via the real gate")
+    assert opened.state == "open"

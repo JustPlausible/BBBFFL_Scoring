@@ -102,6 +102,55 @@ def test_ensure_stream_rejects_a_conflicting_ordinary_competition_id():
         ensure_stream(database, season.season_id, rules_row["rules_version_id"], other["competition_id"])
 
 
+def test_ensure_stream_rejects_an_unknown_ordinary_competition_id_without_orphaning_anything():
+    """Regression (PR #204 review, P2): `superscore_stream.ordinary_
+    competition_id` carries a foreign key to `competition_stream`, but
+    `create_competition` commits the new SuperScore `competition_stream`
+    row in its own transaction (`app.db.transaction` never nests) before
+    that FK is ever checked -- so a bogus id used to fail only *after* an
+    orphaned `competition_stream` row was already committed, permanently
+    blocking a retry on the `(season_id, stream_key)` uniqueness
+    constraint. `ensure_stream` now validates the id up front, so nothing
+    is created at all on bad input and a retry with the real id succeeds."""
+    built = build_2026_replay_season(year=4009)
+    database, season = built["database"], built["season"]
+    rules_row = database.execute(
+        "SELECT rules_version_id FROM season_rules_version WHERE season_id=?", (season.season_id,)
+    ).fetchone()
+
+    with pytest.raises(Exception, match="ordinary_competition_id"):
+        ensure_stream(database, season.season_id, rules_row["rules_version_id"], "not-a-real-competition-id")
+
+    orphan = database.execute(
+        "SELECT 1 FROM competition_stream WHERE season_id=? AND stream_key='superscore'", (season.season_id,)
+    ).fetchone()
+    assert orphan is None
+
+    stream = ensure_stream(
+        database, season.season_id, rules_row["rules_version_id"], built["competition"].competition_id
+    )
+    assert stream.ordinary_competition_id == built["competition"].competition_id
+
+
+def test_ensure_stream_rejects_an_ordinary_competition_id_from_a_different_season():
+    """`ordinary_competition_id` must be *this* season's own ordinary
+    competition, exactly as `app.finals`'s identical `_resolve_seed` check
+    requires for `finals_bracket.ordinary_competition_id` -- a real
+    `competition_stream` row from another season passes the foreign key
+    but must still be rejected."""
+    built = build_2026_replay_season(year=4010)
+    other_season = build_2026_replay_season(database=built["database"], year=4011)
+    database, season = built["database"], built["season"]
+    rules_row = database.execute(
+        "SELECT rules_version_id FROM season_rules_version WHERE season_id=?", (season.season_id,)
+    ).fetchone()
+
+    with pytest.raises(Exception, match="ordinary_competition_id"):
+        ensure_stream(
+            database, season.season_id, rules_row["rules_version_id"], other_season["competition"].competition_id
+        )
+
+
 # -- Atomic ten-row review-state setup ------------------------------------
 
 

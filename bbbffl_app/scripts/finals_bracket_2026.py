@@ -21,6 +21,8 @@ subcommand name:
         --database-url ... create-bracket apply --season-id ... --competition-id ... \\
             --ordinary-competition-id ... --reason "2026 finals replay: bracket creation per issue #190"
     python -m scripts.finals_bracket_2026 --database-url ... open-week --bracket-id <id> --week 1 --reason "..."
+    python -m scripts.finals_bracket_2026 --database-url ... advance-week-to-review --bracket-id <id> --week 1 \\
+        --reason "..."
     python -m scripts.finals_bracket_2026 --database-url ... advance preview --bracket-id <id> --from-week 1
     python -m scripts.finals_bracket_2026 --database-url ... advance apply --bracket-id <id> --from-week 1 \\
         --reason "..." --expected-versions '{"<matchup_id>": 1, "<matchup_id>": 1}'
@@ -142,6 +144,14 @@ def cmd_open_week(database, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_advance_week_to_review(database, args: argparse.Namespace) -> int:
+    result = FinalsBracketRepository(database).advance_week_to_review(
+        args.bracket_id, args.week, actor=ACTOR, reason=args.reason
+    )
+    _print(result)
+    return 0
+
+
 def cmd_advance_preview(database, args: argparse.Namespace) -> int:
     _print(FinalsBracketRepository(database).preview_advance_bracket(args.bracket_id, args.from_week))
     return 0
@@ -182,6 +192,7 @@ COMMANDS = {
     ("create-bracket", "preview"): cmd_create_bracket_preview,
     ("create-bracket", "apply"): cmd_create_bracket_apply,
     ("open-week", None): cmd_open_week,
+    ("advance-week-to-review", None): cmd_advance_week_to_review,
     ("advance", "preview"): cmd_advance_preview,
     ("advance", "apply"): cmd_advance_apply,
     ("rewind", None): cmd_rewind,
@@ -207,6 +218,14 @@ def build_parser() -> argparse.ArgumentParser:
     open_week.add_argument("--bracket-id", required=True)
     open_week.add_argument("--week", type=int, required=True, choices=(1, 2, 3, 4))
     open_week.add_argument("--reason", required=True)
+
+    advance_to_review = top.add_parser(
+        "advance-week-to-review",
+        help="advance one finals week's round from open to review, after lineups are submitted and before publish",
+    )
+    advance_to_review.add_argument("--bracket-id", required=True)
+    advance_to_review.add_argument("--week", type=int, required=True, choices=(1, 2, 3, 4))
+    advance_to_review.add_argument("--reason", required=True)
 
     advance = top.add_parser("advance", help="derive and persist the next week's pairing/elimination")
     advance_sub = advance.add_subparsers(dest="mode", required=True)
@@ -251,7 +270,11 @@ def main() -> int:
     # Only a mutating call needs the migrator run first -- a preview-only
     # invocation must never upgrade the schema of a database it is only
     # meant to inspect, exactly like scripts/finals_seeding_2026.py.
-    mutating = mode == "apply" or args.command == "open-week" or (args.command == "rewind" and args.apply)
+    mutating = (
+        mode == "apply"
+        or args.command in ("open-week", "advance-week-to-review")
+        or (args.command == "rewind" and args.apply)
+    )
     # Validate operator-supplied JSON before even running migrations: an
     # invalid stale-preview guard must fail before *any* database mutation.
     if mutating and hasattr(args, "expected_versions"):

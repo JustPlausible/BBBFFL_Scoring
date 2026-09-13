@@ -28,6 +28,7 @@ from app.superscore_round import (
     EXPECTED_ENTRY_COUNT,
     IncompleteReviewStateError,
     SuperScoreRoundError,
+    advance_round_to_review,
     eligible_entries,
     ensure_round,
     ensure_stream,
@@ -848,3 +849,43 @@ def test_resolve_concurrent_finals_afl_mapping_refuses_a_round_planted_under_the
     bogus_round = SeasonRepository(database).create_round(built["ordinary_competition_id"], "ss1", "Bogus SS1", 99)
     with pytest.raises(SuperScoreRoundError, match="not 'superscore'"):
         resolve_concurrent_finals_afl_mapping(database, bogus_round.bbbffl_round_id)
+
+
+# -- advance_round_to_review: the missing open -> live -> review transition
+# (Codex review, PR #207, round 6, P1): nothing before this exposed a way
+# to move a SuperScore round past `open`, but `SuperScoreLeaderboardService.
+# _persist` requires `review`/`final`, and the generic ordinary-only
+# `/rounds/{id}/transition` route explicitly refuses non-ordinary streams.
+
+
+def test_advance_round_to_review_moves_an_open_round_through_live_to_review():
+    built = _built(6511)
+    database = built["database"]
+    round_id = built["superscore_rounds"][1]
+    open_round(database, round_id, actor=ACTOR, reason="open for advance-to-review test")
+
+    advanced = advance_round_to_review(database, round_id, actor=ACTOR, reason="advance SS1 to review")
+    assert advanced.state == "review"
+
+    # Idempotent: calling again against an already-`review` round is a
+    # no-op, not a `ValueError: illegal lifecycle transition`.
+    again = advance_round_to_review(database, round_id, actor=ACTOR, reason="repeat call")
+    assert again.state == "review"
+
+
+def test_advance_round_to_review_refuses_a_round_that_is_not_open_yet():
+    built = _built(6512)
+    database = built["database"]
+    round_id = built["superscore_rounds"][1]
+    with pytest.raises(SuperScoreRoundError, match="not open yet"):
+        advance_round_to_review(database, round_id, actor=ACTOR, reason="must refuse: still upcoming")
+
+
+def test_advance_round_to_review_refuses_a_finals_round():
+    built = _built_with_bracket_and_superscore_stream(6513)
+    database, bracket = built["database"], built["bracket"]
+    week1_round_id = database.execute(
+        "SELECT bbbffl_round_id FROM finals_bracket_week WHERE bracket_id=? AND week_number=1", (bracket.bracket_id,)
+    ).fetchone()["bbbffl_round_id"]
+    with pytest.raises(SuperScoreRoundError, match="not 'superscore'"):
+        advance_round_to_review(database, week1_round_id, actor=ACTOR, reason="must refuse")

@@ -15,6 +15,7 @@ from app.superscore_round import ensure_round, ensure_stream, get_review_state
 from scripts.superscore_round_2026 import (
     COMMANDS,
     build_parser,
+    cmd_advance_to_review,
     cmd_confirm_mapping,
     cmd_ensure_round,
     cmd_ensure_stream,
@@ -165,6 +166,12 @@ def test_cli_round_trip_creates_and_opens_a_superscore_round(monkeypatch):
 
     for entry in built["entries"]:
         assert get_review_state(database, round_id, entry.season_entry_id) == 0
+
+    advance_ns = argparse.Namespace(round_id=round_id, reason="CLI regression test: advance to review")
+    assert cmd_advance_to_review(database, advance_ns) == 0
+    from app.competition_lifecycle import CompetitionLifecycleRepository
+
+    assert CompetitionLifecycleRepository(database).get_round(round_id).state == "review"
 
 
 # -- confirm-mapping always derives from --round-id itself (Codex review, P1, three rounds) --

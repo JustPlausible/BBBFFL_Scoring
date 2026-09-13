@@ -427,6 +427,39 @@ def open_round(
     return CompetitionLifecycleRepository(database).transition(bbbffl_round_id, "open", actor=actor, reason=reason)
 
 
+def advance_round_to_review(
+    database,
+    bbbffl_round_id: str,
+    *,
+    actor: ActorContext = ActorContext.anonymous_operator("scorer"),
+    reason: str | None = None,
+):
+    """Stream-aware equivalent of the generic `/rounds/{id}/transition`
+    route (`app/routes/round_review.py`'s `transition_round_review`, which
+    explicitly refuses a non-`ordinary` round and directs it to "its own
+    stream-aware lifecycle module") -- this is that module's SuperScore
+    half, the sibling of `app.finals.FinalsBracketRepository.
+    advance_week_to_review`. `SuperScoreLeaderboardService._persist`
+    requires the round to already be `review` or `final`
+    (`app/superscore_results.py`), but nothing before this ever moved a
+    SuperScore round past `open`; every SS round must pass through here
+    (open -> live -> review) after lineups are submitted and before
+    calculation/publication. Uses the same `CompetitionLifecycleRepository.
+    transition`/`LEGAL_TRANSITIONS` every ordinary round already uses -- no
+    new lifecycle mechanism. Idempotent against a round already at
+    `review` or `final`."""
+    _require_superscore_round(database, bbbffl_round_id)
+    lifecycle = CompetitionLifecycleRepository(database)
+    current = lifecycle.get_round(bbbffl_round_id)
+    if current is None or current.state == "upcoming":
+        raise SuperScoreRoundError(f"round {bbbffl_round_id} is not open yet; run open_round first")
+    if current.state in ("review", "final"):
+        return current
+    if current.state == "open":
+        current = lifecycle.transition(bbbffl_round_id, "live", actor=actor, reason=reason)
+    return lifecycle.transition(bbbffl_round_id, "review", actor=actor, reason=reason)
+
+
 def get_review_state(database, bbbffl_round_id: str, season_entry_id: str) -> int | None:
     row = database.execute(
         "SELECT review_version FROM superscore_entry_review_state WHERE bbbffl_round_id=? AND season_entry_id=?",

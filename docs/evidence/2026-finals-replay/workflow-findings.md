@@ -161,6 +161,100 @@ called first in both functions — refuses (`SuperScoreRoundError`, no
 mutation) a round that isn't `superscore`-typed. Fixed at the domain
 layer, not just the CLI, so any future caller gets the same guarantee.
 
+## Finding 6: `ensure_round`/`resolve_concurrent_finals_afl_mapping` still accepted a non-SuperScore competition/round
+
+**Severity:** operator-safety — the same class of defect as finding 5, one
+step earlier in the pipeline: could have let a bogus `ss1`-`ss4`-labelled
+round be created and mapped under a finals competition before finding 5's
+guard (in `setup_round`/`open_round`) ever ran.
+
+Found by a fifth Codex review round on PR #207. Finding 5's guard fenced
+`setup_round`/`open_round`, but `ensure_round` itself still accepted any
+`--competition-id`, including a finals one — `resolve_concurrent_finals_
+afl_mapping` likewise selected only `round_key`/season, not
+`c.stream_type`, so a round planted under the wrong stream (via `ensure_
+round`'s bug, or by going directly through `SeasonRepository.create_round`)
+would still have its mapping happily derived and accepted. Fixed with
+`_require_superscore_competition` in `ensure_round` (refuses before any
+round row is created) and the same `stream_type` check added to `resolve_
+concurrent_finals_afl_mapping`'s own initial query (refuses even a round
+planted directly, bypassing `ensure_round` entirely) — closing the gap at
+creation time, not only at `setup_round`/`open_round`. Domain-level tests:
+`tests/test_superscore_round.py::test_ensure_round_refuses_a_non_
+superscore_competition_id`, `::test_resolve_concurrent_finals_afl_mapping_
+refuses_a_round_planted_under_the_wrong_stream`.
+
+## Finding 7: the playbook ran each finals week to full publication before that round's SuperScore lineups were ever submitted
+
+**Severity:** correctness — SuperScore could never have been legitimately
+played at all, since the lockout guard would reject every SS lineup for a
+round whose shared AFL checkpoint had already advanced to final results.
+
+Found by the same fifth Codex review round. An earlier playbook draft ran
+all four finals weeks to full publication (section D, as it then read)
+before ever asking coaches to submit SuperScore lineups (section E, as it
+then read) — but finals and SuperScore share AFL rounds 21-24
+(`docs/2026-finals-superscore-design.md`'s confirmed rule), and publishing
+a finals week requires its shared AFL round's replay checkpoint to have
+advanced to final results. Once that has happened, `CoachLineupService.
+submit`'s lockout guard treats the round as already played, and a first
+SuperScore submission filling previously empty positions is rejected as
+locked. This is a finding about the playbook's own procedure, not the
+underlying domain code (nothing in `app.lineups`/`app.lockouts` needed to
+change — the lockout guard is doing exactly its job). Fixed by merging
+the old sections D and E into one interleaved per-round procedure: both
+streams' round `N` are created/opened together, both streams' lineups for
+round `N` are submitted while the shared AFL round is still open, and only
+then does either stream finalise.
+
+## Finding 8: nothing exposed the SuperScore/finals lifecycle's `open -> review` transition, and the playbook never released final AFL evidence before publishing
+
+**Severity:** blocking — walking the (now-fixed, finding 7) interleaved
+per-round procedure against the real merged code showed both finals
+publication and SuperScore calculation would fail at the first round: two
+distinct, compounding gaps, both found by a sixth Codex review round on
+PR #207.
+
+1. **No stream-aware `open -> live -> review` transition existed.**
+   `publish_finals_round` requires a finals round to already be in
+   `review` (`app/finals_review.py`); `SuperScoreLeaderboardService.
+   _persist` requires `review` or `final` (`app/superscore_results.py`).
+   But `open_finals_week`/`open_round` only ever transition a round to
+   `open`, and the one HTTP route that can advance further
+   (`/rounds/{id}/transition` in `app/routes/round_review.py`) explicitly
+   refuses any non-`ordinary` round, directing it to "its own
+   stream-aware lifecycle module" — which, until this finding, did not
+   exist for finals or SuperScore. Fixed with `app.finals.
+   FinalsBracketRepository.advance_week_to_review` and `app.
+   superscore_round.advance_round_to_review`, both thin, stream-guarded
+   wrappers around the same, already-tested `CompetitionLifecycleRepository.
+   transition`/`LEGAL_TRANSITIONS` every ordinary round already uses — no
+   new lifecycle mechanism — exposed via new `advance-week-to-review`/
+   `advance-to-review` CLI subcommands. Domain tests: `tests/test_finals.py`
+   (`test_advance_week_to_review_moves_an_open_week_through_live_to_review`,
+   `test_advance_week_to_review_refuses_a_week_that_is_not_open_yet`),
+   `tests/test_superscore_round.py`
+   (`test_advance_round_to_review_moves_an_open_round_through_live_to_review`,
+   `test_advance_round_to_review_refuses_a_round_that_is_not_open_yet`,
+   `test_advance_round_to_review_refuses_a_finals_round`); CLI wiring
+   covered in `tests/test_finals_cli.py`/`tests/test_superscore_round_cli.py`.
+2. **The playbook's interleaved procedure (finding 7) never released the
+   shared AFL round's final evidence.** `ReplayAflDataSource.
+   get_match_player_stats` reports a round's final statistics only once
+   the replay checkpoint has been advanced past it (`--stage
+   final-results --round-id <id>`, the same mechanism
+   `2026-first-half-replay-playbook.md` section G step 9 already
+   documents and this replay already reuses for the ordinary Rounds
+   10-20 loop) — the finals/SuperScore draft simply never called it. This
+   is a playbook-only omission, not a code defect: the checkpoint
+   mechanism itself is unchanged and reused, exactly per this issue's own
+   safety boundary against inventing a new backup/checkpoint mechanism.
+
+Both are fixed together in the playbook's per-round loop (section D.3):
+step (e) releases the shared round's final evidence and restarts the app;
+step (f) advances both streams' round `N` to `review`; publication (steps
+g-h) follows only after both.
+
 No other defect was found in #190-#193/#195 while preparing this phase's
 tooling.
 

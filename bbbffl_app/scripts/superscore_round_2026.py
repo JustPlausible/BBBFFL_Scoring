@@ -31,6 +31,8 @@ subcommand name, exactly like `scripts/finals_bracket_2026.py`:
     python -m scripts.superscore_round_2026 --database-url ... \\
         open-round --round-id <id> --reason "..."
     python -m scripts.superscore_round_2026 --database-url ... \\
+        advance-to-review --round-id <id> --reason "..."
+    python -m scripts.superscore_round_2026 --database-url ... \\
         status --round-id <id>
 
 Per docs/2026-finals-superscore-design.md's confirmed rule, SS1-SS4 run
@@ -60,7 +62,13 @@ against a round that does not belong to a `superscore`-typed
 `competition_stream` (Codex review, PR #207, round 4: `create_non_ordinary_
 round` permits both finals and SuperScore streams, so nothing previously
 stopped these commands from being run against a finals week's round by
-mistake). `status` never mutates.
+mistake). `advance-to-review` (issue #194, Codex review, PR #207, round 6)
+is the stream-aware `open -> live -> review` transition SuperScore rounds
+need before `SuperScoreLeaderboardService._persist` will accept a
+calculation/publish -- the generic `/rounds/{id}/transition` HTTP route
+explicitly refuses non-`ordinary` streams, and nothing before this
+exposed the SuperScore-specific equivalent; idempotent against a round
+already at `review` or `final`. `status` never mutates.
 """
 
 from __future__ import annotations
@@ -77,6 +85,7 @@ from app.replay import ReplayAflDataSource
 from app.round_mapping import AflApiReferenceValidator
 from app.superscore_round import (
     SuperScoreRoundError,
+    advance_round_to_review,
     confirm_afl_mapping,
     ensure_round,
     ensure_stream,
@@ -175,6 +184,12 @@ def cmd_open_round(database, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_advance_to_review(database, args: argparse.Namespace) -> int:
+    round_row = advance_round_to_review(database, args.round_id, actor=ACTOR, reason=args.reason)
+    _print({"bbbffl_round_id": round_row.bbbffl_round_id, "state": round_row.state})
+    return 0
+
+
 def cmd_status(database, args: argparse.Namespace) -> int:
     stream = get_stream(database, args.season_id) if args.season_id else None
     report = {
@@ -201,11 +216,12 @@ COMMANDS = {
     "confirm-mapping": cmd_confirm_mapping,
     "setup-round": cmd_setup_round,
     "open-round": cmd_open_round,
+    "advance-to-review": cmd_advance_to_review,
     "status": cmd_status,
 }
 
 # Every subcommand except `status` performs a real mutation.
-_MUTATING = {"ensure-stream", "ensure-round", "confirm-mapping", "setup-round", "open-round"}
+_MUTATING = {"ensure-stream", "ensure-round", "confirm-mapping", "setup-round", "open-round", "advance-to-review"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -242,6 +258,12 @@ def build_parser() -> argparse.ArgumentParser:
     open_round_p = top.add_parser("open-round", help="upcoming -> open, refusing unless review-state setup is complete")
     open_round_p.add_argument("--round-id", required=True)
     open_round_p.add_argument("--reason", required=True)
+
+    advance_to_review_p = top.add_parser(
+        "advance-to-review", help="open -> live -> review, after lineups are submitted and before calculation/publish"
+    )
+    advance_to_review_p.add_argument("--round-id", required=True)
+    advance_to_review_p.add_argument("--reason", required=True)
 
     status_p = top.add_parser("status", help="read-only report; never mutates")
     status_p.add_argument("--season-id", default=None)

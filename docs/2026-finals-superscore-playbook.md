@@ -43,11 +43,11 @@ function (mirroring section D's `$SECOND`) and the working database's own
 | Domain | Surface | Module |
 |---|---|---|
 | Finals-seeding snapshot | CLI: `scripts.finals_seeding_2026` (`preview`, `apply`) | `app.finals_seeding` (issue #187) |
-| Finals bracket creation/lifecycle | CLI: `scripts.finals_bracket_2026` (`create-bracket preview\|apply`, `open-week`, `advance preview\|apply`, `rewind`) | `app.finals`, `app.finals_preflight` (issue #190) |
+| Finals bracket creation/lifecycle | CLI: `scripts.finals_bracket_2026` (`create-bracket preview\|apply`, `open-week`, `advance-week-to-review` -- **added by issue #194**, see below, `advance preview\|apply`, `rewind`) | `app.finals`, `app.finals_preflight` (issue #190) |
 | Finals result publish/correct | HTTP: `/api/admin/finals/{bracket_id}/weeks/{week_number}/publish`, `/api/admin/finals/{bracket_id}/matchups/{matchup_id}/correct` | `app.finals_review` (issue #191) |
 | Finals DNP/Interchange/override rulings | HTTP: `/api/admin/round-review/{round_id}/dnp`\|`/interchange`\|`/override` (the same matchup-keyed routes ordinary rounds use -- reusable unchanged because issue #197 chose Path 1) | `app.round_review` |
 | Coach finals lineup submission | HTTP: `/coach/seasons/{season_id}/rounds/{round_id}/lineup` (the same generic route ordinary rounds use) | `app.lineups`, `app.coach_lineup` |
-| SuperScore stream/round setup | CLI: `scripts.superscore_round_2026` (`ensure-stream`, `ensure-round`, `confirm-mapping`, `setup-round`, `open-round`, `status`) -- **added by issue #194**, see below | `app.superscore_round` (issue #192) |
+| SuperScore stream/round setup | CLI: `scripts.superscore_round_2026` (`ensure-stream`, `ensure-round`, `confirm-mapping`, `setup-round`, `open-round`, `advance-to-review`, `status`) -- **added by issue #194**, see below | `app.superscore_round` (issue #192) |
 | SuperScore entry-scoped rulings | CLI: `scripts.superscore_review_2026` (`dnp`, `interchange`, `override`, `status`) -- **added by issue #194**, see below | `app.superscore_review` (issue #192) |
 | SuperScore leaderboard publish/correct | HTTP: `/api/season-superscore/scorer/rounds/{round_id}/calculate`, `/publish` | `app.superscore_results` (issue #193) |
 | Coach SuperScore lineup submission | HTTP: `/coach/seasons/{season_id}/rounds/{round_id}/lineup` (identical route; SuperScore rounds carry no matchup, only a round) | `app.lineups`, `app.coach_lineup` |
@@ -60,10 +60,17 @@ fully implemented and tested, but callable only from test code
 (`docs/evidence/2026-finals-replay/workflow-findings.md`'s finding 1). The
 three CLI scripts marked "added by issue #194" above close that gap,
 mirroring `scripts/finals_bracket_2026.py`/`scripts/finals_seeding_2026.py`'s
-established preview/apply, `--reason`-required, production-guarded shape,
-and change no domain logic beyond one PostgreSQL correctness fix (finding 2,
-same document) needed to make the SuperScore round-setup CLI actually work
-against real PostgreSQL.
+established preview/apply, `--reason`-required, production-guarded shape.
+Preparing and then actually walking this playbook's own procedure surfaced
+two further genuine gaps in the domain layer, both closed the same way --
+reusing an existing, already-tested mechanism rather than inventing a new
+one, documented in full in `workflow-findings.md`: one PostgreSQL
+correctness fix (finding 2) needed to make the SuperScore round-setup CLI
+actually work against real PostgreSQL, and `advance-week-to-review`/
+`advance-to-review` (finding 6) -- the stream-aware `open -> live -> review`
+transition finals/SuperScore rounds need before publication, which nothing
+before this exposed, reusing the same `CompetitionLifecycleRepository.
+transition` the generic ordinary-only route already wraps.
 
 ## C. Post-finals-seeding-apply recovery point (do this first, independent of everything else)
 
@@ -242,9 +249,52 @@ Codex review PR #196 twenty-first round).
       silently applied.
 
    e. **Only once every lineup for round `N` in both streams is
-      submitted**, finalise finals week `N`. Publish its result(s) (a
-      variable match count -- two in weeks 1-2, one in weeks 3-4; week 1's
-      bye publishes nothing for seed 1):
+      submitted, release this shared AFL round's final evidence and
+      restart the app** -- exactly `2026-first-half-replay-playbook.md`
+      section G step 9's own per-round boundary, reused unchanged (the
+      same `2026-second-half.json` evidence package finals/SuperScore's
+      `confirm-mapping` step already reads from):
+
+      ```bash
+      $FINALS run --rm -v "$PWD/bbbffl_app:/app" -v "$PWD/replay/2026-finals/state:/replay/state" app \
+        python -m scripts.second_half_replay checkpoint --state /replay/state/checkpoint.json \
+        --effective-at <after-final-UTC-for-this-AFL-round> --stage final-results \
+        --round-id <this round's mapped AFL round id, from step (a)>
+      $FINALS restart app
+      ```
+
+      Until this runs, `ReplayAflDataSource.get_match_player_stats` still
+      reports this AFL round as not yet released, and both finals
+      calculation (step g) and SuperScore calculation (step h) fail
+      closed rather than score against incomplete evidence (Codex review,
+      PR #207, round 6).
+
+   f. **Advance both streams' round `N` to `review`** -- neither stream's
+      round has anywhere else to acquire this transition: the generic
+      `/rounds/{id}/transition` route explicitly refuses a non-`ordinary`
+      round (`app/routes/round_review.py`'s `_require_ordinary_stream`),
+      and finals/SuperScore's own `open-week`/`open-round` only ever
+      reach `open`. `publish_finals_round` requires exactly `review`
+      (`app/finals_review.py`); `SuperScoreLeaderboardService._persist`
+      requires `review` or `final` (`app/superscore_results.py`). Both
+      commands below reuse the same, already-tested
+      `CompetitionLifecycleRepository.transition`/`LEGAL_TRANSITIONS`
+      every ordinary round already uses (Codex review, PR #207, round 6)
+      -- no new lifecycle mechanism, and idempotent against a round
+      already at `review` or `final`:
+
+      ```bash
+      $FINALS run --rm -v "$PWD/bbbffl_app:/app" app python -m scripts.finals_bracket_2026 \
+        --database-url <url> advance-week-to-review --bracket-id <bracket_id> --week <N> \
+        --reason "2026 finals replay: week <N> to review before publish"
+      $FINALS run --rm -v "$PWD/bbbffl_app:/app" app python -m scripts.superscore_round_2026 \
+        --database-url <url> advance-to-review --round-id <ss_round_id> \
+        --reason "2026 finals replay: SS<N> to review before publish"
+      ```
+
+   g. **Finalise finals week `N`.** Publish its result(s) (a variable match
+      count -- two in weeks 1-2, one in weeks 3-4; week 1's bye publishes
+      nothing for seed 1):
 
       ```
       POST /api/admin/finals/{bracket_id}/weeks/{N}/publish?reason=...
@@ -255,7 +305,7 @@ Codex review PR #196 twenty-first round).
       catalogue addendum for why these are **not** the official season
       awards) -- record both event ids in `provenance-manifest.md`.
 
-   f. **Calculate and publish SuperScore round `N`'s leaderboard:**
+   h. **Calculate and publish SuperScore round `N`'s leaderboard:**
 
       ```
       POST /api/season-superscore/scorer/rounds/{ss_round_id}/calculate
@@ -265,7 +315,7 @@ Codex review PR #196 twenty-first round).
       The same `publish` call also handles correction on a later
       re-publish (versioned, append-only -- see `docs/audit-events.md`).
 
-   g. **Advance the finals bracket** to derive weeks 2-4's pairing (skip
+   i. **Advance the finals bracket** to derive weeks 2-4's pairing (skip
       for week 4, which has no downstream week):
 
       ```bash
@@ -277,7 +327,7 @@ Codex review PR #196 twenty-first round).
         --expected-versions '<paste from the preview output above>'
       ```
 
-   h. **Checkpoint both streams' boundary for round `N`** (the same paired
+   j. **Checkpoint both streams' boundary for round `N`** (the same paired
       backup pattern as every other checkpoint in this replay):
 
       ```bash
@@ -410,7 +460,7 @@ At minimum, this playbook takes a paired `pg_dump` + checkpoint JSON at:
 - **Post-finals-seeding-apply** (section C) -- before any finals/SuperScore
   work relies on it as a recovery point.
 - **After each round `N`'s finals week and SuperScore round both
-  finalise, together** (section D.3.h) -- one paired checkpoint per round
+  finalise, together** (section D.3.j) -- one paired checkpoint per round
   covering both streams, taken only once both streams' results for round
   `N` are published and the finals bracket has advanced -- four boundaries
   (rounds 1-4).
@@ -464,7 +514,7 @@ to this phase's own failure modes.
 - **A bracket-advance step needs to be redone** (e.g. run against a
   wrong/incomplete official result by operator error, with no downstream
   play state yet). Prefer restoring the most recent finals-week checkpoint
-  taken before the advance (section D.3.h, from the prior round) and
+  taken before the advance (section D.3.j, from the prior round) and
   redoing `advance` correctly
   from there, rather than attempting to hand-edit the persisted pairing.
 - **A SuperScore published leaderboard requires correction.** Re-run

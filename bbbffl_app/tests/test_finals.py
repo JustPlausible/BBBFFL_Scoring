@@ -263,6 +263,37 @@ def test_open_finals_week_opens_round_and_materialises_matchups_end_to_end():
     assert all(row["fixture_matchup_id"] is None for row in matchups)
 
 
+# -- advance_week_to_review: the missing open -> live -> review transition
+# (Codex review, PR #207, round 6, P1): nothing before this exposed a way
+# to move a finals week's round past `open`, but `publish_finals_round`
+# requires the round to already be exactly `review`, and the generic
+# ordinary-only `/rounds/{id}/transition` route explicitly refuses
+# non-ordinary streams.
+
+
+def test_advance_week_to_review_moves_an_open_week_through_live_to_review():
+    built, bracket = _bracket_with_mappings(year=2214)
+    repo = _repo(built)
+    open_finals_week(built["database"], bracket.bracket_id, 1, actor=ACTOR)
+
+    result = repo.advance_week_to_review(bracket.bracket_id, 1, actor=ACTOR, reason="advance week 1 to review")
+    assert result["round"].state == "review"
+    assert result["already_advanced"] is False
+
+    # Idempotent: calling again against an already-`review` round is a
+    # no-op, not a `ValueError: illegal lifecycle transition`.
+    again = repo.advance_week_to_review(bracket.bracket_id, 1, actor=ACTOR, reason="repeat call")
+    assert again["round"].state == "review"
+    assert again["already_advanced"] is True
+
+
+def test_advance_week_to_review_refuses_a_week_that_is_not_open_yet():
+    built, bracket = _bracket_with_mappings(year=2215)
+    repo = _repo(built)
+    with pytest.raises(FinalsBracketAdvanceStateError, match="not open yet"):
+        repo.advance_week_to_review(bracket.bracket_id, 1, actor=ACTOR, reason="must refuse: never opened")
+
+
 def test_open_finals_week_is_reachable_only_after_preflight_blockers_clear():
     built = build_finals_ready_season(year=2214)
     bracket = _create(built)["bracket"]

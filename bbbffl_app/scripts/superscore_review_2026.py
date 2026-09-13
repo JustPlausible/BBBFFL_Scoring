@@ -33,6 +33,20 @@ this entry (`app.superscore_round.get_review_state`, or this script's own
 than silently applied against a ruling/lineup state the operator has not
 actually seen, exactly like every other CAS-protected write in this
 replay's operator tooling.
+
+`interchange --no-coverage` and `override --clear` (in place of
+`--target-position`/`--override-score` respectively) record the domain's
+own explicit "no coverage"/"remove this override" states
+(`target_position=None`/`override_score=None`) -- both genuinely supported
+by `app.superscore_review.SuperScoreReviewRepository` itself, not merely
+omissions this CLI happens not to expose (Codex review, P2).
+
+Every mutating subcommand also refuses once the owning season is
+`completed` (`SeasonCompletedError`) -- the same completed-season write
+fence `app.superscore_results`/`app.finals_review`/`app.calculations`
+already enforce, added to `app.superscore_review` directly by issue #194
+after Codex review (P1) found review state remained writable through this
+CLI even after `scripts.season_completion_2026 complete` had run.
 """
 
 from __future__ import annotations
@@ -45,6 +59,7 @@ import sys
 from app.audit import ActorContext
 from app.db import connect
 from app.migrations import migrate
+from app.season import SeasonCompletedError
 from app.superscore_review import SuperScoreReviewError, SuperScoreReviewRepository
 from app.superscore_round import get_review_state
 
@@ -80,32 +95,59 @@ def cmd_dnp(database, args: argparse.Namespace) -> int:
 
 
 def cmd_interchange(database, args: argparse.Namespace) -> int:
+    # `--no-coverage` is the CLI spelling of the domain's own
+    # `target_position=None` -- an explicit "this vacant/DNP slot is not
+    # covered by an interchange" ruling, required to clear the otherwise
+    # unresolved-interchange publication blocker (Codex review, P2).
+    target_position = None if args.no_coverage else args.target_position
     reviews = SuperScoreReviewRepository(database)
     new_version = reviews.record_interchange_ruling(
         args.round_id,
         args.season_entry_id,
-        args.target_position,
+        target_position,
         expected_review_version=args.expected_review_version,
         actor=ACTOR,
         reason=args.reason,
     )
-    _print({"round_id": args.round_id, "season_entry_id": args.season_entry_id, "review_version": new_version})
+    _print(
+        {
+            "round_id": args.round_id,
+            "season_entry_id": args.season_entry_id,
+            "target_position": target_position,
+            "review_version": new_version,
+        }
+    )
     return 0
 
 
 def cmd_override(database, args: argparse.Namespace) -> int:
+    # `--clear` is the CLI spelling of the domain's own `override_score=
+    # None` -- the supported correction for an override later found
+    # unnecessary, restoring calculated scoring (Codex review, P2).
+    # `--reason` is still passed through either way (the domain layer only
+    # requires it when *setting* an override, via `MissingOverrideReasonError`
+    # -- it remains a legitimate, recorded audit reason for a clear too).
+    override_score = None if args.clear else args.override_score
+    calculated_score = None if args.clear else args.calculated_score
     reviews = SuperScoreReviewRepository(database)
     new_version = reviews.record_override(
         args.round_id,
         args.season_entry_id,
         args.position,
-        args.override_score,
-        args.calculated_score,
+        override_score,
+        calculated_score,
         args.reason,
         expected_review_version=args.expected_review_version,
         actor=ACTOR,
     )
-    _print({"round_id": args.round_id, "season_entry_id": args.season_entry_id, "review_version": new_version})
+    _print(
+        {
+            "round_id": args.round_id,
+            "season_entry_id": args.season_entry_id,
+            "override_score": override_score,
+            "review_version": new_version,
+        }
+    )
     return 0
 
 
@@ -154,18 +196,35 @@ def build_parser() -> argparse.ArgumentParser:
     interchange = top.add_parser("interchange", help="record an interchange target-position ruling")
     interchange.add_argument("--round-id", required=True)
     interchange.add_argument("--season-entry-id", required=True)
-    interchange.add_argument("--target-position", required=True)
+    interchange_target = interchange.add_mutually_exclusive_group(required=True)
+    interchange_target.add_argument("--target-position", default=None)
+    interchange_target.add_argument(
+        "--no-coverage", action="store_true", help="explicit 'this slot is not covered' ruling (target_position=None)"
+    )
     interchange.add_argument("--expected-review-version", type=int, required=True)
     interchange.add_argument("--reason", required=True)
 
-    override = top.add_parser("override", help="record a manual score override for one slot")
+    override = top.add_parser("override", help="record or clear a manual score override for one slot")
     override.add_argument("--round-id", required=True)
     override.add_argument("--season-entry-id", required=True)
     override.add_argument("--position", required=True)
-    override.add_argument("--override-score", type=float, required=True)
-    override.add_argument("--calculated-score", type=float, required=True)
+    override_value = override.add_mutually_exclusive_group(required=True)
+    override_value.add_argument("--override-score", type=float, default=None)
+    override_value.add_argument(
+        "--clear", action="store_true", help="remove an existing override, restoring calculated scoring"
+    )
+    override.add_argument(
+        "--calculated-score",
+        type=float,
+        default=None,
+        help="the calculated score at the time of override, for provenance (recommended with --override-score); unused with --clear",
+    )
     override.add_argument("--expected-review-version", type=int, required=True)
-    override.add_argument("--reason", required=True)
+    override.add_argument(
+        "--reason",
+        default=None,
+        help="required when setting an override (enforced by app.superscore_review); optional but still recorded with --clear",
+    )
 
     status = top.add_parser("status", help="read-only report of one entry's current review state; never mutates")
     status.add_argument("--round-id", required=True)
@@ -190,7 +249,7 @@ def main() -> int:
     database = connect(args.database_url)
     try:
         return COMMANDS[args.command](database, args)
-    except (SuperScoreReviewError, ValueError) as exc:
+    except (SuperScoreReviewError, ValueError, SeasonCompletedError) as exc:
         print(f"superscore review operation refused: {exc}", file=sys.stderr)
         return 1
     finally:

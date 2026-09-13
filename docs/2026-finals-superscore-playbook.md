@@ -229,8 +229,17 @@ since neither stream depends on the other's lifecycle.
         --database-url <url> confirm-mapping --round-id <ss_round_id> \
         --afl-season-id <year> --afl-round-id <afl_round_id_from_finals_week_N> \
         --evidence-path /replay/evidence/2026-second-half.json \
+        --checkpoint-path /replay/state/checkpoint.json \
         --reason "2026 finals replay: SS<N> mapping, concurrent with finals week <N>"
       ```
+
+      **`--checkpoint-path` is required here, not optional** (Codex
+      review): `2026-second-half.json`'s manifest declares
+      `lifecycle_semantics: "scheduled-start-plus-final-results-checkpoint"`
+      (`app.replay_acquisition`), and `ReplayAflDataSource` fails closed
+      (`ReplayEvidenceError`) loading any such package without an explicit
+      persisted replay checkpoint (`app/replay.py`'s `_load`). Every
+      `confirm-mapping` invocation in this section needs it.
 
    c. **Set up the round** (creates the lifecycle row and the complete
       ten-entry review-state row set atomically):

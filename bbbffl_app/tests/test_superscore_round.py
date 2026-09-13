@@ -652,3 +652,40 @@ def test_require_superscore_entry_eligible_is_a_no_op_for_ordinary_streams():
     require_superscore_entry_eligible(
         built["database"], built["ordinary_competition_id"], other["entries"][0].season_entry_id
     )
+
+
+# -- Completed-season write fence (issue #194, Codex review P1) -----------
+
+
+def test_review_rulings_refuse_once_the_season_is_completed():
+    """A DNP/interchange/override ruling must never remain writable after
+    `app.season_completion.complete_season` -- otherwise the archival guard
+    (`app.season_archival`) would be verifying a completion identifier that
+    review state could still change underneath, after the fact."""
+    from app.audit import ActorContext
+    from app.season import SeasonCompletedError
+    from tests.season_completion_helpers import build_completable_season
+
+    built = build_completable_season(year=4023)
+    database = built["database"]
+    from app.season_completion import complete_season
+
+    complete_season(database, built["season"].season_id, actor=ACTOR, reason="issue #194 write-fence regression test")
+
+    round_id = built["superscore_rounds"][1]
+    entry_id = built["entries"][0].season_entry_id
+    reviews = SuperScoreReviewRepository(database)
+    scorer = ActorContext.anonymous_operator("scorer")
+
+    with pytest.raises(SeasonCompletedError):
+        reviews.record_dnp_ruling(
+            round_id, entry_id, "F1", True, expected_review_version=0, actor=scorer, reason="must refuse"
+        )
+    with pytest.raises(SeasonCompletedError):
+        reviews.record_interchange_ruling(
+            round_id, entry_id, "F1", expected_review_version=0, actor=scorer, reason="must refuse"
+        )
+    with pytest.raises(SeasonCompletedError):
+        reviews.record_override(
+            round_id, entry_id, "F2", 12.5, 4.0, "must refuse", expected_review_version=0, actor=scorer
+        )

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from app.afl_client import AflApiError
 from app.audit import ActorContext
+from app.finals_participation import require_round_participant
 from app.lineup_validation import LineupValidationService, ValidatedLineupSubmissionService
 from app.lineups import POSITIONS, LineupConflictError, LineupIntegrityError, WeeklyLineupRepository
 from app.lockouts import (
@@ -287,7 +288,12 @@ class CoachLineupService:
             "FROM season_entry e JOIN season_entry_coach_history a ON a.season_entry_id=e.season_entry_id "
             "AND a.ended_at IS NULL JOIN competition_stream c ON c.season_id=e.season_id "
             "JOIN bbbffl_round r ON r.competition_id=c.competition_id "
-            "WHERE a.coach_id=? AND c.stream_type='ordinary' ORDER BY e.season_id DESC, r.sequence",
+            "WHERE a.coach_id=? AND c.stream_type IN ('ordinary','finals') "
+            "AND (c.stream_type='ordinary' OR EXISTS (SELECT 1 FROM finals_bracket_pairing fp "
+            "JOIN finals_bracket_week fw ON fw.bracket_id=fp.bracket_id AND fw.week_number=fp.week_number "
+            "WHERE fw.bbbffl_round_id=r.bbbffl_round_id AND fp.status='active' AND fp.matchup_id IS NOT NULL "
+            "AND e.season_entry_id IN (fp.home_season_entry_id,fp.away_season_entry_id))) "
+            "ORDER BY e.season_id DESC, r.sequence",
             (coach_id,),
         ).fetchall()
         return [self._round_summary(dict(row)) for row in rows]
@@ -333,19 +339,24 @@ class CoachLineupService:
     def resolve(self, coach_id, season_id, round_id):
         row = self.database.execute(
             "SELECT e.season_entry_id, n.team_name, s.label season_label, "
-            "r.sequence round_number, r.label round_label, r.competition_id "
+            "r.sequence round_number, r.label round_label, r.competition_id, c.stream_type "
             "FROM season_entry e JOIN season_entry_coach_history a ON a.season_entry_id=e.season_entry_id "
             "AND a.ended_at IS NULL JOIN season_entry_team_name_history n ON n.season_entry_id=e.season_entry_id "
             "AND n.ended_at IS NULL JOIN bbbffl_season s ON s.season_id=e.season_id "
-            "JOIN bbbffl_round r ON r.competition_id IN "
-            "(SELECT competition_id FROM competition_stream WHERE season_id=e.season_id) "
+            "JOIN competition_stream c ON c.season_id=e.season_id "
+            "JOIN bbbffl_round r ON r.competition_id=c.competition_id "
             "WHERE a.coach_id=? AND e.season_id=? AND r.bbbffl_round_id=? "
-            "AND r.competition_id IN (SELECT competition_id FROM competition_stream WHERE stream_type='ordinary')",
+            "AND c.stream_type IN ('ordinary','finals')",
             (coach_id, season_id, round_id),
         ).fetchone()
         if row is None:
             return None
-        return dict(row)
+        resolved = dict(row)
+        try:
+            require_round_participant(self.database, resolved["competition_id"], round_id, resolved["season_entry_id"])
+        except ValueError:
+            return None
+        return resolved
 
     def ensure_draft(self, season_id, round_id, entry):
         draft = self.lineups.get_draft(season_id, entry["competition_id"], round_id, entry["season_entry_id"])
@@ -373,6 +384,7 @@ class CoachLineupService:
         )
 
     def submit(self, draft, submission_version, coach_id):
+        require_round_participant(self.database, draft.competition_id, draft.bbbffl_round_id, draft.season_entry_id)
         guard = OpeningRoundSelectionGuard(self.nominations, self.lockouts.guard(match_facts=self.match_facts))
         return ValidatedLineupSubmissionService(self.database, self.afl_client).submit(
             draft.lineup_id,
@@ -466,7 +478,13 @@ class CoachLineupService:
             validation = LineupValidationService(self.database, self.afl_client).validate_submission(
                 draft.lineup_id, draft.positions
             )
-        opponent = self._opponent(season_id, entry["round_number"], entry["season_entry_id"])
+        opponent = self._opponent(
+            season_id,
+            entry["round_number"],
+            entry["season_entry_id"],
+            round_id=round_id,
+            stream_type=entry.get("stream_type", "ordinary"),
+        )
         return CoachLineupContext(
             {"id": season_id, "label": entry["season_label"]},
             {"id": round_id, "number": entry["round_number"], "label": entry["round_label"]},
@@ -481,13 +499,22 @@ class CoachLineupService:
             validation,
         )
 
-    def _opponent(self, season_id, number, entry_id):
-        row = self.database.execute(
-            "SELECT CASE WHEN m.home_season_entry_id=? THEN m.away_season_entry_id ELSE m.home_season_entry_id END opponent "
-            "FROM season_fixture_matchup m JOIN season_fixture_draw d ON d.fixture_draw_id=m.fixture_draw_id "
-            "WHERE d.season_id=? AND m.bbbffl_round_number=? AND (? IN (m.home_season_entry_id,m.away_season_entry_id))",
-            (entry_id, season_id, number, entry_id),
-        ).fetchone()
+    def _opponent(self, season_id, number, entry_id, *, round_id=None, stream_type="ordinary"):
+        if stream_type == "finals":
+            row = self.database.execute(
+                "SELECT CASE WHEN p.home_season_entry_id=? THEN p.away_season_entry_id ELSE p.home_season_entry_id END opponent "
+                "FROM finals_bracket_pairing p JOIN finals_bracket_week w ON w.bracket_id=p.bracket_id "
+                "AND w.week_number=p.week_number WHERE w.bbbffl_round_id=? AND p.status='active' "
+                "AND p.matchup_id IS NOT NULL AND (? IN (p.home_season_entry_id,p.away_season_entry_id))",
+                (entry_id, round_id, entry_id),
+            ).fetchone()
+        else:
+            row = self.database.execute(
+                "SELECT CASE WHEN m.home_season_entry_id=? THEN m.away_season_entry_id ELSE m.home_season_entry_id END opponent "
+                "FROM season_fixture_matchup m JOIN season_fixture_draw d ON d.fixture_draw_id=m.fixture_draw_id "
+                "WHERE d.season_id=? AND m.bbbffl_round_number=? AND (? IN (m.home_season_entry_id,m.away_season_entry_id))",
+                (entry_id, season_id, number, entry_id),
+            ).fetchone()
         if not row:
             return None
         team = self.database.execute(

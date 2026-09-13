@@ -63,6 +63,7 @@ published official result is always read via the exact same
 and #191's eventual finals publish command both use.
 """
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -953,8 +954,13 @@ class FinalsBracketRepository:
         actor: ActorContext,
         reason: str,
         apply: bool,
+        conn=None,
     ) -> dict:
-        with transaction(self.database) as conn:
+        # Finals result correction already holds the prerequisite matchup
+        # locks and must reconcile the bracket in that *same* transaction.
+        # Public rewind calls retain the normal self-owned transaction.
+        scope = transaction(self.database) if conn is None else nullcontext(conn)
+        with scope as conn:
             locked = {mid: self._lock_matchup_version(conn, mid, expected_versions) for mid in sorted(source_ids)}
             derivation = self._derive(conn, bracket_id, from_week, seed_rank, locked)
 
@@ -1182,6 +1188,42 @@ class FinalsBracketRepository:
             )
             report["audit_event_id"] = event.event_id
             return report
+
+    def rewind_bracket_in_transaction(
+        self,
+        conn,
+        bracket_id: str,
+        from_week: int,
+        *,
+        actor: ActorContext,
+        reason: str,
+        expected_versions: dict[str, int],
+    ) -> dict:
+        """Apply #190 reconciliation using a caller-owned transaction.
+
+        This is intentionally a narrow internal orchestration seam for the
+        finals correction command. It uses the identical derivation,
+        downstream-play checks, lock ordering and mutations as
+        ``rewind_bracket``; it merely avoids opening a second transaction.
+        Any refusal therefore rolls back the caller's corrected result too.
+        """
+        if from_week not in (1, 2, 3):
+            raise ValueError("from_week must be 1, 2, or 3")
+        seed_rank = self._seed_rank(bracket_id)
+        source_ids = self._source_matchup_ids(bracket_id, from_week)
+        self._require_complete_expected_versions(source_ids, expected_versions)
+        return self._rewind_bracket_transaction(
+            bracket_id,
+            from_week,
+            from_week + 1,
+            seed_rank,
+            source_ids,
+            expected_versions,
+            actor=actor,
+            reason=reason,
+            apply=True,
+            conn=conn,
+        )
 
     # -- Internal derivation helpers -------------------------------------------
 

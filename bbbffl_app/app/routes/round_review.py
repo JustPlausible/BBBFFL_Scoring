@@ -334,6 +334,13 @@ def correct_matchup(
     matchup_id: str, payload: CorrectionRequest, request: Request, principal: Principal = Depends(require_admin)
 ):
     _authorise_matchup(request, principal, matchup_id)
+    stream = request.app.state.database.execute(
+        "SELECT c.stream_type FROM bbbffl_matchup m JOIN bbbffl_round r ON r.bbbffl_round_id=m.bbbffl_round_id "
+        "JOIN competition_stream c ON c.competition_id=r.competition_id WHERE m.matchup_id=?",
+        (matchup_id,),
+    ).fetchone()
+    if stream and stream["stream_type"] == "finals":
+        raise HTTPException(409, "Finals matchups must use the finals-specific correction boundary")
     state = request.app.state
     afl_client = state.afl_client
     # Same fresh-evidence discipline as /signoff above: a correction must

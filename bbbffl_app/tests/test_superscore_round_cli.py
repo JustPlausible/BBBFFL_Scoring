@@ -23,7 +23,6 @@ from scripts.superscore_round_2026 import (
     cmd_status,
     main,
 )
-from tests.finals_seeding_helpers import build_2026_replay_season
 
 
 class _StubAflClient:
@@ -85,42 +84,68 @@ def test_main_refuses_to_run_in_production(monkeypatch):
     assert main() == 1
 
 
-def test_cli_round_trip_creates_and_opens_a_superscore_round(monkeypatch):
-    built = build_2026_replay_season(year=6001)
+def _ready_superscore_stream_with_mapped_finals_week_1(year):
+    """A finals bracket (week 1 already accepted-mapped) plus a sibling
+    SuperScore stream under the same season -- the minimum
+    `confirm-mapping` now requires, since it always derives the AFL
+    mapping from the round's own exact concurrent finals week."""
+    from app.finals import FinalsBracketRepository
+    from tests.finals_helpers import accept_week_mapping, build_finals_ready_season
+    from tests.superscore_helpers import FINALS_AFL_ROUNDS
+
+    built = build_finals_ready_season(year=year)
     database, season = built["database"], built["season"]
+    bracket = FinalsBracketRepository(database).create_bracket(
+        season.season_id,
+        built["finals_competition"].competition_id,
+        built["ordinary_competition_id"],
+        actor=ActorContext.anonymous_operator("test"),
+        reason="confirm-mapping CLI regression test setup",
+    )["bracket"]
+    week1_round_id = database.execute(
+        "SELECT bbbffl_round_id FROM finals_bracket_week WHERE bracket_id=? AND week_number=1", (bracket.bracket_id,)
+    ).fetchone()["bbbffl_round_id"]
+    accept_week_mapping(database, week1_round_id, year=season.year, afl_round_id=FINALS_AFL_ROUNDS[1])
+
     rules_row = database.execute(
         "SELECT rules_version_id FROM season_rules_version WHERE season_id=?", (season.season_id,)
     ).fetchone()
+    stream = ensure_stream(database, season.season_id, rules_row["rules_version_id"], built["ordinary_competition_id"])
+    built["superscore_stream"] = stream
+    return built
 
+
+def test_cli_round_trip_creates_and_opens_a_superscore_round(monkeypatch):
+    built = _ready_superscore_stream_with_mapped_finals_week_1(6001)
+    database, season = built["database"], built["season"]
+    stream = built["superscore_stream"]
+
+    # ensure-stream is idempotent through the same CLI handler.
     stream_ns = argparse.Namespace(
         season_id=season.season_id,
-        rules_version_id=rules_row["rules_version_id"],
-        ordinary_competition_id=built["competition"].competition_id,
+        rules_version_id=database.execute(
+            "SELECT rules_version_id FROM season_rules_version WHERE season_id=?", (season.season_id,)
+        ).fetchone()["rules_version_id"],
+        ordinary_competition_id=built["ordinary_competition_id"],
         reason="CLI regression test: stream setup",
     )
     assert cmd_ensure_stream(database, stream_ns) == 0
-    # Idempotent repeat through the same CLI handler.
-    assert cmd_ensure_stream(database, stream_ns) == 0
 
-    stream = database.execute(
-        "SELECT competition_id FROM superscore_stream WHERE season_id=?", (season.season_id,)
-    ).fetchone()
-    competition_id = stream["competition_id"]
-
-    round_ns = argparse.Namespace(competition_id=competition_id, round_number=1)
+    round_ns = argparse.Namespace(competition_id=stream.competition_id, round_number=1)
     assert cmd_ensure_round(database, round_ns) == 0
     round_id = database.execute(
-        "SELECT bbbffl_round_id FROM bbbffl_round WHERE competition_id=? AND round_key='ss1'", (competition_id,)
+        "SELECT bbbffl_round_id FROM bbbffl_round WHERE competition_id=? AND round_key='ss1'",
+        (stream.competition_id,),
     ).fetchone()["bbbffl_round_id"]
+
+    from tests.superscore_helpers import FINALS_AFL_ROUNDS
 
     monkeypatch.setattr(
         "scripts.superscore_round_2026.ReplayAflDataSource",
-        lambda *_a, **_k: _StubAflClient({(season.year, 21)}),
+        lambda *_a, **_k: _StubAflClient({(season.year, FINALS_AFL_ROUNDS[1])}),
     )
     mapping_ns = argparse.Namespace(
         round_id=round_id,
-        afl_season_id=season.year,
-        afl_round_id=21,
         evidence_path="unused-under-stub.json",
         checkpoint_path=None,
         reason="CLI regression test: SS1 mapping",
@@ -142,39 +167,20 @@ def test_cli_round_trip_creates_and_opens_a_superscore_round(monkeypatch):
         assert get_review_state(database, round_id, entry.season_entry_id) == 0
 
 
-# -- confirm-mapping: auto-derivation from --round-id itself (Codex review, P1, two rounds) --
+# -- confirm-mapping always derives from --round-id itself (Codex review, P1, three rounds) --
 
 
-def test_confirm_mapping_derives_automatically_when_neither_afl_id_is_given(monkeypatch):
+def test_confirm_mapping_derives_automatically_from_round_id(monkeypatch):
     """The CLI-wiring counterpart of `tests/test_superscore_round.py::
     test_resolves_the_matching_finals_week_s_accepted_mapping` -- the actual
     derivation logic is tested there; this only proves `cmd_confirm_mapping`
-    reaches it correctly when both --afl-season-id/--afl-round-id are
-    omitted."""
-    from app.finals import FinalsBracketRepository
+    reaches it correctly."""
     from app.round_mapping import RoundMappingRepository
-    from tests.finals_helpers import accept_week_mapping, build_finals_ready_season
     from tests.superscore_helpers import FINALS_AFL_ROUNDS
 
-    built = build_finals_ready_season(year=6005)
+    built = _ready_superscore_stream_with_mapped_finals_week_1(6005)
     database, season = built["database"], built["season"]
-    bracket = FinalsBracketRepository(database).create_bracket(
-        season.season_id,
-        built["finals_competition"].competition_id,
-        built["ordinary_competition_id"],
-        actor=ActorContext.anonymous_operator("test"),
-        reason="confirm-mapping CLI auto-derive regression test setup",
-    )["bracket"]
-    week1_round_id = database.execute(
-        "SELECT bbbffl_round_id FROM finals_bracket_week WHERE bracket_id=? AND week_number=1", (bracket.bracket_id,)
-    ).fetchone()["bbbffl_round_id"]
-    accept_week_mapping(database, week1_round_id, year=season.year, afl_round_id=FINALS_AFL_ROUNDS[1])
-
-    rules_row = database.execute(
-        "SELECT rules_version_id FROM season_rules_version WHERE season_id=?", (season.season_id,)
-    ).fetchone()
-    stream = ensure_stream(database, season.season_id, rules_row["rules_version_id"], built["ordinary_competition_id"])
-    ss1_round_id = ensure_round(database, stream.competition_id, 1, 1)
+    ss1_round_id = ensure_round(database, built["superscore_stream"].competition_id, 1, 1)
 
     monkeypatch.setattr(
         "scripts.superscore_round_2026.ReplayAflDataSource",
@@ -182,8 +188,6 @@ def test_confirm_mapping_derives_automatically_when_neither_afl_id_is_given(monk
     )
     ns = argparse.Namespace(
         round_id=ss1_round_id,
-        afl_season_id=None,
-        afl_round_id=None,
         evidence_path="unused-under-stub.json",
         checkpoint_path=None,
         reason="CLI regression test: auto-derive from round-id itself",
@@ -193,51 +197,52 @@ def test_confirm_mapping_derives_automatically_when_neither_afl_id_is_given(monk
     assert (mapping.afl_season_id, mapping.afl_round_id) == (season.year, FINALS_AFL_ROUNDS[1])
 
 
-def test_confirm_mapping_still_supports_explicit_afl_ids_with_no_finals_bracket(monkeypatch):
-    """The explicit-override path remains available for a context with no
-    finals-concurrency invariant to derive from -- and, unlike the old
-    `--finals-round-id` path, needs no finals bracket to exist at all."""
-    built = build_2026_replay_season(year=6006)
+def test_confirm_mapping_has_no_explicit_override_option():
+    """Codex review, P1, round 3: a derived-but-overridable mapping left
+    the override itself unchecked. Since every round this 2026-specific
+    CLI handles genuinely has the finals-concurrency invariant, the fix is
+    that there is no such option to misuse at all."""
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "--database-url",
+                "sqlite:///x.db",
+                "confirm-mapping",
+                "--round-id",
+                "r1",
+                "--afl-season-id",
+                "2026",
+                "--afl-round-id",
+                "21",
+                "--evidence-path",
+                "x.json",
+                "--reason",
+                "x",
+            ]
+        )
+
+
+# -- setup-round/open-round refuse a non-SuperScore round (Codex review, P2, round 4) --
+
+
+def test_setup_round_refuses_a_finals_round(monkeypatch):
+    from app.finals import FinalsBracketRepository
+    from tests.finals_helpers import build_finals_ready_season
+
+    built = build_finals_ready_season(year=6008)
     database, season = built["database"], built["season"]
-    rules_row = database.execute(
-        "SELECT rules_version_id FROM season_rules_version WHERE season_id=?", (season.season_id,)
-    ).fetchone()
-    stream = ensure_stream(
-        database, season.season_id, rules_row["rules_version_id"], built["competition"].competition_id
-    )
-    round_id = ensure_round(database, stream.competition_id, 1, 1)
+    bracket = FinalsBracketRepository(database).create_bracket(
+        season.season_id,
+        built["finals_competition"].competition_id,
+        built["ordinary_competition_id"],
+        actor=ActorContext.anonymous_operator("test"),
+        reason="setup-round-refuses-finals-round regression test setup",
+    )["bracket"]
+    week1_round_id = database.execute(
+        "SELECT bbbffl_round_id FROM finals_bracket_week WHERE bracket_id=? AND week_number=1", (bracket.bracket_id,)
+    ).fetchone()["bbbffl_round_id"]
 
-    monkeypatch.setattr(
-        "scripts.superscore_round_2026.ReplayAflDataSource",
-        lambda *_a, **_k: _StubAflClient({(season.year, 21)}),
-    )
-    ns = argparse.Namespace(
-        round_id=round_id,
-        afl_season_id=season.year,
-        afl_round_id=21,
-        evidence_path="unused-under-stub.json",
-        checkpoint_path=None,
-        reason="CLI regression test: explicit override, no finals bracket needed",
-    )
-    assert cmd_confirm_mapping(database, ns) == 0
-
-
-def test_confirm_mapping_requires_both_or_neither_afl_id(monkeypatch):
-    built = build_2026_replay_season(year=6007)
-    database, season = built["database"], built["season"]
-    rules_row = database.execute(
-        "SELECT rules_version_id FROM season_rules_version WHERE season_id=?", (season.season_id,)
-    ).fetchone()
-    stream = ensure_stream(
-        database, season.season_id, rules_row["rules_version_id"], built["competition"].competition_id
-    )
-    round_id = ensure_round(database, stream.competition_id, 1, 1)
-    ns = argparse.Namespace(
-        round_id=round_id,
-        afl_season_id=season.year,
-        afl_round_id=None,
-        evidence_path="unused-under-stub.json",
-        checkpoint_path=None,
-        reason="CLI regression test: only one given",
-    )
-    assert cmd_confirm_mapping(database, ns) == 1
+    ns = argparse.Namespace(round_id=week1_round_id, reason="must refuse: not a SuperScore round")
+    with pytest.raises(Exception, match="superscore"):
+        cmd_setup_round(database, ns)

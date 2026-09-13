@@ -771,3 +771,41 @@ def test_refuses_when_the_finals_week_has_no_accepted_mapping_yet():
     ss1_round_id = ensure_round(database, built["superscore_stream"].competition_id, 1, 1)
     with pytest.raises(SuperScoreRoundError, match="no accepted AFL-round mapping"):
         resolve_concurrent_finals_afl_mapping(database, ss1_round_id)
+
+
+# -- setup_round/open_round refuse a non-SuperScore round (Codex review, round 4, P2) --
+
+
+def test_setup_round_refuses_a_finals_round():
+    built = _built_with_bracket_and_superscore_stream(6506)
+    database, bracket = built["database"], built["bracket"]
+    week1_round_id = database.execute(
+        "SELECT bbbffl_round_id FROM finals_bracket_week WHERE bracket_id=? AND week_number=1", (bracket.bracket_id,)
+    ).fetchone()["bbbffl_round_id"]
+    with pytest.raises(SuperScoreRoundError, match="not.*'superscore'"):
+        setup_round(database, week1_round_id, actor=ACTOR, reason="must refuse")
+
+
+def test_open_round_refuses_a_finals_round():
+    built = _built_with_bracket_and_superscore_stream(6507)
+    database, bracket = built["database"], built["bracket"]
+    week1_round_id = database.execute(
+        "SELECT bbbffl_round_id FROM finals_bracket_week WHERE bracket_id=? AND week_number=1", (bracket.bracket_id,)
+    ).fetchone()["bbbffl_round_id"]
+    with pytest.raises(SuperScoreRoundError, match="not.*'superscore'"):
+        open_round(database, week1_round_id, actor=ACTOR, reason="must refuse")
+
+
+def test_setup_round_and_open_round_still_accept_a_genuine_superscore_round():
+    """Defence-in-depth check: the new stream-type guard must not become a
+    false positive against the ordinary, legitimate SuperScore path."""
+    built = _built_with_bracket_and_superscore_stream(6508)
+    database = built["database"]
+    ss1_round_id = ensure_round(database, built["superscore_stream"].competition_id, 1, 1)
+    from app.round_mapping import RoundMappingRepository
+
+    RoundMappingRepository(database).accept(
+        ss1_round_id, built["season"].year, 21, KnownRound({(built["season"].year, 21)})
+    )
+    setup_round(database, ss1_round_id, actor=ACTOR, reason="genuine SS1 setup")
+    assert open_round(database, ss1_round_id, actor=ACTOR, reason="genuine SS1 open").state == "open"

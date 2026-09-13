@@ -34,26 +34,33 @@ subcommand name, exactly like `scripts/finals_bracket_2026.py`:
         status --round-id <id>
 
 Per docs/2026-finals-superscore-design.md's confirmed rule, SS1-SS4 run
-across the *same* four AFL rounds as the four finals weeks -- omitting
-`--afl-season-id`/`--afl-round-id` entirely (the recommended path)
-derives them automatically from `--round-id`'s own exact concurrent
-finals week (`app.superscore_round.resolve_concurrent_finals_afl_mapping`
--- SS1 <-> finals week 1, etc., verified against `--round-id`'s own season
-and round number, not an operator-suppliable identifier), the identical
-accepted AFL-round reference, never a re-derived or independently-typed
-one. This is deliberately not an operator-suppliable "which finals round"
-parameter (Codex review, PR #207, two rounds: `AflApiReferenceValidator.
-round_exists` alone cannot catch an operator typo naming a real but wrong
-AFL round, and an operator-suppliable "which finals round" identifier is
-itself exactly as untrustworthy -- only deriving the season and week
-number from `--round-id` closes both off by construction). Passing both
-`--afl-season-id` and `--afl-round-id` explicitly is still supported for a
-context with no finals-concurrency invariant to derive from, but is not
-the recommended 2026 replay path. `ensure-stream`/`ensure-round`/`confirm-
-mapping` are idempotent; `setup-round` is idempotent against an already-
-complete review-state set; `open-round` refuses (no mutation) unless
-`setup-round` has already produced the complete ten-row review-state set
-for that round. `status` never mutates.
+across the *same* four AFL rounds as the four finals weeks --
+`confirm-mapping` always derives `afl_season_id`/`afl_round_id`
+automatically from `--round-id`'s own exact concurrent finals week
+(`app.superscore_round.resolve_concurrent_finals_afl_mapping` -- SS1 <->
+finals week 1, etc., verified against `--round-id`'s own season and round
+number), the identical accepted AFL-round reference, never a re-derived or
+independently-typed one. There is deliberately no `--afl-season-id`/
+`--afl-round-id` override on this 2026-specific CLI at all (Codex review,
+PR #207, three rounds: `AflApiReferenceValidator.round_exists` alone
+cannot catch an operator typo naming a real but wrong AFL round; an
+operator-suppliable "which finals round" identifier is itself exactly as
+untrustworthy; and even a *derived-but-overridable* mapping left the
+override unchecked -- since every round this CLI ever handles genuinely
+has the finals-concurrency invariant, removing the override entirely,
+rather than trying to validate it, is what actually closes this). A
+caller with a genuine need to bypass that invariant (none exists for this
+2026 replay) can call `app.superscore_round.confirm_afl_mapping` directly
+instead of this CLI. `ensure-stream`/`ensure-round`/`confirm-mapping` are
+idempotent; `setup-round` is idempotent against an already-complete
+review-state set; `open-round` refuses (no mutation) unless `setup-round`
+has already produced the complete ten-row review-state set for that
+round; both `setup-round` and `open-round` also refuse (no mutation)
+against a round that does not belong to a `superscore`-typed
+`competition_stream` (Codex review, PR #207, round 4: `create_non_ordinary_
+round` permits both finals and SuperScore streams, so nothing previously
+stopped these commands from being run against a finals week's round by
+mistake). `status` never mutates.
 """
 
 from __future__ import annotations
@@ -113,30 +120,26 @@ def cmd_ensure_round(database, args: argparse.Namespace) -> int:
 
 
 def cmd_confirm_mapping(database, args: argparse.Namespace) -> int:
-    # Codex review (P1, two rounds): `AflApiReferenceValidator.round_exists`
+    # Codex review (P1, three rounds): `AflApiReferenceValidator.round_exists`
     # only proves the supplied (season, round) pair exists somewhere in
     # afl-api evidence -- it cannot catch an operator typo that names a
-    # real, but wrong, AFL round. The first fix (an operator-suppliable
-    # `--finals-round-id` to derive/cross-check against) was itself still
-    # trustable to name the *wrong* finals round -- a different week, or a
-    # different season entirely -- with nothing to catch that either. The
-    # only way to close this by construction is to derive both the season
-    # and the exact matching week number from `--round-id` itself, with no
-    # operator-suppliable substitute for "which finals round":
-    # `app.superscore_round.resolve_concurrent_finals_afl_mapping` does
-    # exactly that (SS1 <-> finals week 1, ..., keyed off `--round-id`'s own
-    # `round_key` and season).
-    afl_season_id, afl_round_id = args.afl_season_id, args.afl_round_id
-    if afl_season_id is None and afl_round_id is None:
-        mapping = resolve_concurrent_finals_afl_mapping(database, args.round_id)
-        afl_season_id, afl_round_id = mapping.afl_season_id, mapping.afl_round_id
-    elif afl_season_id is None or afl_round_id is None:
-        print(
-            "confirm-mapping requires either neither of --afl-season-id/--afl-round-id (to derive the mapping "
-            "from the corresponding finals week's own accepted mapping) or both of them explicitly.",
-            file=sys.stderr,
-        )
-        return 1
+    # real, but wrong, AFL round. Two successive fixes (an operator-
+    # suppliable `--finals-round-id` to derive/cross-check against, then
+    # deriving it correctly via `resolve_concurrent_finals_afl_mapping` but
+    # still leaving an *unchecked* explicit-override escape hatch) each
+    # left a way for a mistyped-but-real AFL round to be accepted. Every
+    # round this 2026-specific CLI ever handles has the finals-concurrency
+    # invariant (docs/2026-finals-superscore-design.md's confirmed rule),
+    # so there is no legitimate reason for it to accept an independently
+    # supplied AFL-round pair at all: the mapping is now *always* derived
+    # from `--round-id` itself via `resolve_concurrent_finals_afl_mapping`
+    # (SS1 <-> finals week 1, ..., keyed off `--round-id`'s own `round_key`
+    # and season) -- there is no operator-suppliable substitute for "which
+    # finals round" left in this CLI at all. A caller with a genuine need
+    # to bypass the concurrency invariant (none exists for this 2026 replay)
+    # can still call `app.superscore_round.confirm_afl_mapping` directly.
+    mapping = resolve_concurrent_finals_afl_mapping(database, args.round_id)
+    afl_season_id, afl_round_id = mapping.afl_season_id, mapping.afl_round_id
 
     # The same `app.round_mapping.AflApiReferenceValidator` boundary every
     # stream uses, built over a `ReplayAflDataSource` reading the same
@@ -224,15 +227,6 @@ def build_parser() -> argparse.ArgumentParser:
         "confirm-mapping", help="accept or correct one SuperScore round's AFL-round mapping against afl-api evidence"
     )
     confirm_mapping_p.add_argument("--round-id", required=True)
-    confirm_mapping_p.add_argument(
-        "--afl-season-id",
-        type=int,
-        default=None,
-        help="omit both this and --afl-round-id to derive the mapping automatically from the exact concurrent "
-        "finals week's own accepted mapping (recommended); give both explicitly only for a context with no "
-        "finals-concurrency invariant to derive from",
-    )
-    confirm_mapping_p.add_argument("--afl-round-id", type=int, default=None, help="see --afl-season-id")
     confirm_mapping_p.add_argument(
         "--evidence-path", required=True, help="the replay evidence JSON, e.g. 2026-second-half.json"
     )

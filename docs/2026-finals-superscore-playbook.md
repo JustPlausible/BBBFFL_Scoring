@@ -226,16 +226,19 @@ acceptance before running SS`<N>`'s `confirm-mapping`.
         --database-url <url> ensure-round --competition-id <superscore_competition_id> --round-number <N>
       ```
 
-   b. **Confirm its AFL-round mapping.** Omit `--afl-season-id`/
-      `--afl-round-id` entirely -- they are derived automatically from the
-      round's own exact concurrent finals week (`app.superscore_round.
+   b. **Confirm its AFL-round mapping.** This CLI has no
+      `--afl-season-id`/`--afl-round-id` flags at all -- the mapping is
+      always derived automatically from the round's own exact concurrent
+      finals week (`app.superscore_round.
       resolve_concurrent_finals_afl_mapping`), never typed independently
-      (Codex review, PR #207, two rounds: `AflApiReferenceValidator.
+      (Codex review, PR #207, three rounds: `AflApiReferenceValidator.
       round_exists` alone cannot catch an operator typo naming a real but
-      wrong AFL round, and an operator-suppliable "which finals round"
-      identifier is itself exactly as untrustworthy -- only deriving the
-      season and week number from `--round-id` itself closes both off by
-      construction):
+      wrong AFL round; an operator-suppliable "which finals round"
+      identifier is itself exactly as untrustworthy; and even a
+      derived-but-overridable mapping left the override unchecked -- since
+      every round this CLI handles genuinely has the finals-concurrency
+      invariant, removing the override entirely is what actually closes
+      this):
 
       ```bash
       $FINALS run --rm -v "$PWD/bbbffl_app:/app" app python -m scripts.superscore_round_2026 \

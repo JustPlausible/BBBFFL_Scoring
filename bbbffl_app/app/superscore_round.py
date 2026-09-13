@@ -322,6 +322,29 @@ def _create_review_state_rows(database, season_id: str, bbbffl_round_id: str, *,
         )
 
 
+def _require_superscore_round(database, bbbffl_round_id: str) -> None:
+    """Refuse a round that does not belong to a `superscore`-typed
+    `competition_stream`. `CompetitionLifecycleRepository.
+    create_non_ordinary_round` (#197) permits both finals and SuperScore
+    streams, so nothing before this stopped an operator mistake from
+    running SuperScore's own round-setup/open lifecycle against a finals
+    week's round, corrupting it outside its own proper
+    `app.finals_preflight.open_finals_week` pathway (Codex review, PR
+    #207, round 4)."""
+    row = database.execute(
+        "SELECT c.stream_type FROM bbbffl_round r JOIN competition_stream c ON c.competition_id=r.competition_id "
+        "WHERE r.bbbffl_round_id=?",
+        (bbbffl_round_id,),
+    ).fetchone()
+    if row is None:
+        raise SuperScoreRoundError(f"unknown round {bbbffl_round_id}")
+    if row["stream_type"] != STREAM_TYPE:
+        raise SuperScoreRoundError(
+            f"round {bbbffl_round_id} belongs to a {row['stream_type']!r}-typed stream, not {STREAM_TYPE!r}; "
+            "use that stream's own lifecycle boundary instead"
+        )
+
+
 def setup_round(
     database,
     bbbffl_round_id: str,
@@ -334,6 +357,7 @@ def setup_round(
     round) and then create/verify its complete ten-row `superscore_entry_
     review_state` set (gap #4) -- the round must not open until both steps
     have succeeded (see `open_round`)."""
+    _require_superscore_round(database, bbbffl_round_id)
     lifecycle = CompetitionLifecycleRepository(database)
     round_row = lifecycle.get_round(bbbffl_round_id)
     if round_row is None:
@@ -367,6 +391,7 @@ def open_round(
     `_validate_frozen_context`/mapping-revision check is duplicated or
     weakened here; this is purely an additive precondition in front of the
     existing, unmodified `CompetitionLifecycleRepository.transition`."""
+    _require_superscore_round(database, bbbffl_round_id)
     if not review_state_complete(database, bbbffl_round_id):
         raise IncompleteReviewStateError(
             f"round {bbbffl_round_id} does not have a complete superscore_entry_review_state row set; "

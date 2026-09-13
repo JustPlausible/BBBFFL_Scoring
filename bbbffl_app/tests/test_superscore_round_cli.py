@@ -86,11 +86,15 @@ def test_main_refuses_to_run_in_production(monkeypatch):
 
 
 def _ready_superscore_stream_with_mapped_finals_week_1(year):
-    """A finals bracket (week 1 already accepted-mapped) plus a sibling
-    SuperScore stream under the same season -- the minimum
-    `confirm-mapping` now requires, since it always derives the AFL
-    mapping from the round's own exact concurrent finals week."""
+    """A finals bracket (week 1 accepted-mapped and opened) plus a sibling
+    SuperScore stream under the same season -- the minimum `confirm-mapping`
+    now requires, since it always derives the AFL mapping from the frozen
+    `bbbffl_round_lifecycle` row `open_finals_week` creates for the round's
+    own exact concurrent finals week (Codex review, PR #207, round 7: the
+    mapping's own current head is not enough -- it must already be frozen
+    onto that week's round)."""
     from app.finals import FinalsBracketRepository
+    from app.finals_preflight import open_finals_week
     from tests.finals_helpers import accept_week_mapping, build_finals_ready_season
     from tests.superscore_helpers import FINALS_AFL_ROUNDS
 
@@ -107,6 +111,7 @@ def _ready_superscore_stream_with_mapped_finals_week_1(year):
         "SELECT bbbffl_round_id FROM finals_bracket_week WHERE bracket_id=? AND week_number=1", (bracket.bracket_id,)
     ).fetchone()["bbbffl_round_id"]
     accept_week_mapping(database, week1_round_id, year=season.year, afl_round_id=FINALS_AFL_ROUNDS[1])
+    open_finals_week(database, bracket.bracket_id, 1, actor=ActorContext.anonymous_operator("test"))
 
     rules_row = database.execute(
         "SELECT rules_version_id FROM season_rules_version WHERE season_id=?", (season.season_id,)

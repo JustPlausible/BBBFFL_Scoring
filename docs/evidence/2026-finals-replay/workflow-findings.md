@@ -255,6 +255,55 @@ step (e) releases the shared round's final evidence and restarts the app;
 step (f) advances both streams' round `N` to `review`; publication (steps
 g-h) follows only after both.
 
+## Finding 9: SuperScore's mapping derivation read the mapping's mutable current head, not the finals week's frozen mapping
+
+**Severity:** correctness/replay-integrity — a genuine, if narrow, race
+between SuperScore's `confirm-mapping` and an out-of-band correction to
+the concurrent finals week's mapping could still have violated the
+shared-round invariant findings 4/6 otherwise closed off.
+
+Found by a seventh Codex review round on PR #207, after the playbook's
+per-round procedure (finding 7) and lifecycle-transition fix (finding 8)
+made walking a full round genuinely possible for the first time.
+`app.competition_lifecycle.CompetitionLifecycleRepository.
+create_non_ordinary_round` freezes `mapping_id`/`mapping_revision`/
+`afl_season_id`/`afl_round_id` onto a round's own `bbbffl_round_lifecycle`
+row at *round-creation* time (called by `open_finals_week` the first time
+a finals week opens); every later read of that round for calculation
+(`app.calculations._round_context`) reads that frozen snapshot, never a
+fresh lookup. But `app.superscore_round.resolve_concurrent_finals_afl_
+mapping` (finding 4's fix) called `RoundMappingRepository.resolve()`,
+which returns the mapping's *current* accepted revision — and `app.
+round_mapping.RoundMappingRepository.correct` has no dependency on
+lifecycle state at all, so a correction to a finals week's mapping after
+that week has already opened succeeds without updating its
+already-frozen lifecycle row. A SuperScore `confirm-mapping` running
+between such a correction and any awareness of it would derive the
+*corrected* mapping, while the concurrent finals week's own calculations
+kept using the *original, frozen* one — the two streams silently scoring
+against different real AFL rounds despite the confirmed concurrency
+invariant.
+
+Fixed by reading the finals week's own frozen `bbbffl_round_lifecycle`
+row directly instead of `RoundMappingRepository.resolve()`'s mutable
+head, and refusing (`SuperScoreRoundError`) if that week has not been
+opened yet (nothing is frozen to derive from before then) — the same
+"derive from an immutable fact, not a value that can change out from
+under you" principle findings 4 and 6 already established, applied to
+which *source* of the mapping is authoritative rather than which
+identifier names the round. No new mechanism: `bbbffl_round_lifecycle`
+already carried these columns for exactly this purpose (`_validate_
+frozen_context`'s own equivalent check at the `upcoming -> open`
+transition). Regression test: `tests/test_superscore_round.py::
+test_resolves_the_frozen_lifecycle_mapping_not_a_later_correction`
+(corrects a finals week's mapping after opening it, then proves
+SuperScore still derives the original, frozen AFL round). This also
+tightened `resolve_concurrent_finals_afl_mapping`'s precondition: it now
+requires the finals week to have been *opened* (not merely mapped), which
+was already the playbook's own step order (open finals week `N` before
+SS`N`'s `confirm-mapping`, per finding 7's interleaved procedure) — no
+playbook step reordering was needed, only its explanatory note.
+
 No other defect was found in #190-#193/#195 while preparing this phase's
 tooling.
 

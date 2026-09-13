@@ -14,6 +14,7 @@ import pytest
 
 from app.audit import ActorContext
 from app.competition_lifecycle import CompetitionLifecycleRepository
+from app.finals_preflight import open_finals_week
 from app.lineup_correction import LineupCorrectionService
 from app.lineups import LineupConflictError, WeeklyLineupRepository
 from app.participation import ParticipationState, assess_participation
@@ -726,6 +727,40 @@ def test_resolves_the_matching_finals_week_s_accepted_mapping():
         "SELECT bbbffl_round_id FROM finals_bracket_week WHERE bracket_id=? AND week_number=1", (bracket.bracket_id,)
     ).fetchone()["bbbffl_round_id"]
     accept_week_mapping(database, week1_round_id, year=season.year, afl_round_id=FINALS_AFL_ROUNDS[1])
+    open_finals_week(database, bracket.bracket_id, 1, actor=ACTOR)
+
+    ss1_round_id = ensure_round(database, built["superscore_stream"].competition_id, 1, 1)
+    mapping = resolve_concurrent_finals_afl_mapping(database, ss1_round_id)
+    assert (mapping.afl_season_id, mapping.afl_round_id) == (season.year, FINALS_AFL_ROUNDS[1])
+
+
+def test_resolves_the_frozen_lifecycle_mapping_not_a_later_correction():
+    """Codex review, PR #207, round 7, P1: once finals week 1 is open, its
+    `bbbffl_round_lifecycle` row freezes the exact AFL mapping finals
+    calculations will actually use. A correction to the mapping afterwards
+    (e.g. an operator fixing an earlier typo) must not be picked up by
+    SuperScore's derivation -- SS1 must keep deriving the SAME AFL round
+    finals week 1 actually calculates against, not whatever the mapping's
+    current head says, or the two streams could silently score against
+    different real AFL rounds despite the required concurrency invariant."""
+    built = _built_with_bracket_and_superscore_stream(6514)
+    database, season, bracket = built["database"], built["season"], built["bracket"]
+    week1_round_id = database.execute(
+        "SELECT bbbffl_round_id FROM finals_bracket_week WHERE bracket_id=? AND week_number=1", (bracket.bracket_id,)
+    ).fetchone()["bbbffl_round_id"]
+    accept_week_mapping(database, week1_round_id, year=season.year, afl_round_id=FINALS_AFL_ROUNDS[1])
+    open_finals_week(database, bracket.bracket_id, 1, actor=ACTOR)
+
+    from app.round_mapping import RoundMappingRepository
+
+    corrected_afl_round_id = FINALS_AFL_ROUNDS[1] + 1000
+    RoundMappingRepository(database).correct(
+        week1_round_id,
+        season.year,
+        corrected_afl_round_id,
+        KnownRound({(season.year, corrected_afl_round_id)}),
+        reason="regression test: correct the mapping after the week already opened",
+    )
 
     ss1_round_id = ensure_round(database, built["superscore_stream"].competition_id, 1, 1)
     mapping = resolve_concurrent_finals_afl_mapping(database, ss1_round_id)
@@ -766,11 +801,16 @@ def test_refuses_when_the_matching_finals_week_does_not_exist_yet():
         resolve_concurrent_finals_afl_mapping(database, ss2_round_id)
 
 
-def test_refuses_when_the_finals_week_has_no_accepted_mapping_yet():
+def test_refuses_when_the_finals_week_has_not_been_opened_yet():
+    """Covers both an unaccepted mapping (the week can't be opened at all
+    without one -- `create_non_ordinary_round` requires it) and an
+    accepted-but-not-yet-opened week: either way, nothing has frozen an
+    AFL mapping onto that week's `bbbffl_round_lifecycle` row yet for
+    SuperScore to derive from (Codex review, PR #207, round 7)."""
     built = _built_with_bracket_and_superscore_stream(6505)
     database = built["database"]
     ss1_round_id = ensure_round(database, built["superscore_stream"].competition_id, 1, 1)
-    with pytest.raises(SuperScoreRoundError, match="no accepted AFL-round mapping"):
+    with pytest.raises(SuperScoreRoundError, match="not been opened yet"):
         resolve_concurrent_finals_afl_mapping(database, ss1_round_id)
 
 

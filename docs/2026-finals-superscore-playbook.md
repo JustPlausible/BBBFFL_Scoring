@@ -218,7 +218,14 @@ Codex review PR #196 twenty-first round).
       derived-but-overridable mapping left the override unchecked -- since
       every round this CLI handles genuinely has the finals-concurrency
       invariant, removing the override entirely is what actually closes
-      this). `--checkpoint-path` is required, not optional:
+      this). This is why step (b) (opening finals week `N`) must already
+      have happened before this step: the derivation reads the exact AFL
+      mapping frozen onto finals week `N`'s own round at that moment
+      (`bbbffl_round_lifecycle`), not the mapping's current, possibly
+      later-corrected head -- so SS`N` always matches the real AFL round
+      finals week `N` itself calculates against, even if an operator
+      corrects that mapping afterward (Codex review, PR #207, round 7).
+      `--checkpoint-path` is required, not optional:
       `2026-second-half.json`'s manifest declares `lifecycle_semantics:
       "scheduled-start-plus-final-results-checkpoint"`
       (`app.replay_acquisition`), and `ReplayAflDataSource` fails closed

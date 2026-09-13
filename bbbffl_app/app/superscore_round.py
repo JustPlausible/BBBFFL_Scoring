@@ -249,7 +249,10 @@ def resolve_concurrent_finals_afl_mapping(database, bbbffl_round_id: str) -> Rou
     Raises `SuperScoreRoundError` if `bbbffl_round_id` does not belong to a
     `superscore`-typed stream, is not one of SS1-SS4, its season has no
     finals bracket yet, that bracket has no matching week yet, or that
-    week has no accepted AFL-round mapping yet."""
+    week's round has not been opened yet (its AFL-round mapping is frozen
+    onto `bbbffl_round_lifecycle` only once `open_finals_week` creates that
+    row -- see the note below on why this reads the frozen row rather than
+    the mapping's own current head)."""
     round_row = database.execute(
         "SELECT r.round_key, c.season_id, c.stream_type FROM bbbffl_round r "
         "JOIN competition_stream c ON c.competition_id=r.competition_id "
@@ -280,13 +283,48 @@ def resolve_concurrent_finals_afl_mapping(database, bbbffl_round_id: str) -> Rou
     if week is None:
         raise SuperScoreRoundError(f"finals bracket {bracket['bracket_id']} has no week {week_number} round yet")
 
-    mapping = RoundMappingRepository(database).resolve(week["bbbffl_round_id"])
-    if mapping is None or mapping.afl_season_id is None or mapping.afl_round_id is None:
+    # Codex review, PR #207, round 7: reading `RoundMappingRepository.
+    # resolve()` here returns the finals week's *current* accepted mapping
+    # head, not necessarily what that week's own round is actually using.
+    # `app.competition_lifecycle.CompetitionLifecycleRepository.
+    # create_non_ordinary_round` freezes `mapping_id`/`mapping_revision`/
+    # `afl_season_id`/`afl_round_id` onto the finals round's own
+    # `bbbffl_round_lifecycle` row at *round-creation* time (when
+    # `open_finals_week` first creates it), and every later read of that
+    # round (`app.calculations._round_context`'s `l.afl_round_id`, `l.*`)
+    # uses that frozen snapshot, never a fresh `resolve()`. A correction
+    # to the finals week's mapping after its round was created (e.g. via
+    # `app.round_mapping.RoundMappingRepository.correct`, which has no
+    # dependency on lifecycle state at all) advances the mapping head
+    # without updating that already-frozen lifecycle row -- so deriving
+    # SuperScore's mapping from the live head, as this function used to,
+    # could accept SS1-SS4 against a *different* real AFL round than the
+    # one finals week actually calculates against, silently violating the
+    # shared-round invariant. Reading the finals week's own frozen
+    # lifecycle row instead guarantees SuperScore always derives the
+    # exact same AFL round finals calculations already committed to.
+    lifecycle_row = database.execute(
+        "SELECT mapping_id, mapping_revision, provider, afl_season_id, afl_round_id, created_at "
+        "FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?",
+        (week["bbbffl_round_id"],),
+    ).fetchone()
+    if lifecycle_row is None:
         raise SuperScoreRoundError(
-            f"finals week {week_number} (round {week['bbbffl_round_id']}) has no accepted AFL-round mapping yet; "
-            "confirm it first"
+            f"finals week {week_number} (round {week['bbbffl_round_id']}) has not been opened yet; "
+            "open it first so its AFL-round mapping is frozen"
         )
-    return mapping
+    return RoundMapping(
+        mapping_id=lifecycle_row["mapping_id"],
+        bbbffl_round_id=week["bbbffl_round_id"],
+        revision=lifecycle_row["mapping_revision"],
+        state="accepted",
+        provider=lifecycle_row["provider"],
+        afl_season_id=lifecycle_row["afl_season_id"],
+        afl_round_id=lifecycle_row["afl_round_id"],
+        created_at=lifecycle_row["created_at"],
+        created_by=None,
+        reason=None,
+    )
 
 
 def _create_review_state_rows(database, season_id: str, bbbffl_round_id: str, *, actor: ActorContext, reason):

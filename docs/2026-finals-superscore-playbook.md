@@ -137,78 +137,8 @@ Codex review PR #196 twenty-first round).
    Record `bracket_id` and the printed seed order in
    `provenance-manifest.md`.
 
-2. **For each week in turn (1 through 4):**
-
-   a. Confirm the week's AFL-round mapping is accepted (the normal
-      `app.round_mapping` flow, via the finals preflight surface or
-      `app/routes/round_preflight.py`'s mapping-acceptance route, exactly
-      as an ordinary round's mapping is confirmed).
-
-   b. **Open the week:**
-
-      ```bash
-      $FINALS run --rm -v "$PWD/bbbffl_app:/app" app python -m scripts.finals_bracket_2026 \
-        --database-url <url> open-week --bracket-id <bracket_id> --week <N> \
-        --reason "2026 finals replay: open week <N>"
-      ```
-
-   c. Run lineup submission, lockout, calculation, and Scorer DNP/
-      Interchange/override rulings exactly as an ordinary round -- the
-      coach lineup route and the matchup-keyed round-review routes are
-      reused unchanged (see section B's table).
-
-   d. **Publish the week's result(s)** (a variable match count -- two in
-      weeks 1-2, one in weeks 3-4; week 1's bye publishes nothing for seed
-      1):
-
-      ```
-      POST /api/admin/finals/{bracket_id}/weeks/{N}/publish?reason=...
-      ```
-
-   e. **Advance the bracket** to derive weeks 2-4's pairing (skip for week
-      4, which has no downstream week):
-
-      ```bash
-      $FINALS run --rm -v "$PWD/bbbffl_app:/app" app python -m scripts.finals_bracket_2026 \
-        --database-url <url> advance preview --bracket-id <bracket_id> --from-week <N>
-      $FINALS run --rm -v "$PWD/bbbffl_app:/app" app python -m scripts.finals_bracket_2026 \
-        --database-url <url> advance apply --bracket-id <bracket_id> --from-week <N> \
-        --reason "2026 finals replay: advance from week <N>" \
-        --expected-versions '<paste from the preview output above>'
-      ```
-
-   f. **Checkpoint this week's boundary** (the same paired backup pattern
-      as every other checkpoint in this replay):
-
-      ```bash
-      $FINALS exec -T database pg_dump -U bbbffl -Fc bbbffl_2026_finals \
-        > replay/2026-finals/backups/after-finals-week-<N>.dump
-      cp replay/2026-finals/state/checkpoint.json \
-         replay/2026-finals/backups/checkpoint-after-finals-week-<N>.json
-      ```
-
-      Record it in `provenance-manifest.md`'s "Finals week checkpoints"
-      table before opening the next week.
-
-3. Week 4's publish (the Grand Final) also records `finals.premier.
-   recorded`/`finals.wooden_spoon.recorded` (see `docs/audit-events.md`'s
-   catalogue addendum for why these are **not** the official season
-   awards) -- record both event ids in `provenance-manifest.md`.
-
-## E. Run the four SuperScore rounds (SS1-SS4)
-
-SS1-SS4 run across the *same* four AFL rounds as finals weeks 1-4
-(`docs/2026-finals-superscore-design.md`'s confirmed rule). The stream and
-round-creation steps below (1-2) can run at any point relative to section
-D, since neither stream's lifecycle depends on the other's -- but **each
-round's `confirm-mapping` step (2b) requires that its exact concurrent
-finals week already exists and already has its own accepted AFL-round
-mapping** (section D.2.a-b for that week), since `--afl-season-id`/
-`--afl-round-id` are derived from it, never typed independently. Run
-section D's steps for finals week `<N>` through its own mapping
-acceptance before running SS`<N>`'s `confirm-mapping`.
-
-1. **Create the SuperScore stream once** (idempotent):
+2. **Create the SuperScore stream once** (idempotent -- can run any time
+   before step 3 below first needs it):
 
    ```bash
    $FINALS run --rm -v "$PWD/bbbffl_app:/app" app python -m scripts.superscore_round_2026 \
@@ -217,19 +147,62 @@ acceptance before running SS`<N>`'s `confirm-mapping`.
      --reason "2026 finals replay: SuperScore stream setup per issue #192"
    ```
 
-2. **For each of SS1-SS4 in turn:**
+3. **For each week/round `N` in turn (1 through 4), run finals week `N`
+   and SuperScore round `N` together, in this exact order.** SS1-SS4 run
+   across the *same* four AFL rounds as finals weeks 1-4
+   (`docs/2026-finals-superscore-design.md`'s confirmed rule) -- the two
+   streams' rounds share one underlying AFL round's replay checkpoint.
 
-   a. **Create the round's logical row:**
+   **This interleaving is mandatory, not a convenience (Codex review, PR
+   #207, round 5): an earlier draft of this playbook ran finals week `N`
+   to completion -- including publishing its result(s), which requires
+   the shared AFL round's replay checkpoint to have advanced to final
+   results -- before ever asking coaches to submit SuperScore round `N`'s
+   lineups. Once that shared checkpoint has advanced, `CoachLineupService.
+   submit`'s lockout guard treats the AFL round as already played, and a
+   first SuperScore submission that fills previously empty positions is
+   rejected as locked -- SS`N` can never be legitimately played at all if
+   its lineups are attempted after finals week `N` already finalised.
+   Both streams' lineups for round `N` must be submitted while the shared
+   AFL round is still open, before either stream's finalisation advances
+   it.**
+
+   a. Confirm finals week `N`'s AFL-round mapping is accepted (the normal
+      `app.round_mapping` flow, via the finals preflight surface or
+      `app/routes/round_preflight.py`'s mapping-acceptance route, exactly
+      as an ordinary round's mapping is confirmed).
+
+   b. **Open finals week `N`:**
+
+      ```bash
+      $FINALS run --rm -v "$PWD/bbbffl_app:/app" app python -m scripts.finals_bracket_2026 \
+        --database-url <url> open-week --bracket-id <bracket_id> --week <N> \
+        --reason "2026 finals replay: open week <N>"
+      ```
+
+   c. **Create, map, set up and open SuperScore round `N`** -- its mapping
+      is derived automatically from finals week `N`'s mapping just
+      accepted in step (a), so step (a) must have already happened:
 
       ```bash
       $FINALS run --rm -v "$PWD/bbbffl_app:/app" app python -m scripts.superscore_round_2026 \
         --database-url <url> ensure-round --competition-id <superscore_competition_id> --round-number <N>
+      $FINALS run --rm -v "$PWD/bbbffl_app:/app" app python -m scripts.superscore_round_2026 \
+        --database-url <url> confirm-mapping --round-id <ss_round_id> \
+        --evidence-path /replay/evidence/2026-second-half.json \
+        --checkpoint-path /replay/state/checkpoint.json \
+        --reason "2026 finals replay: SS<N> mapping, concurrent with finals week <N>"
+      $FINALS run --rm -v "$PWD/bbbffl_app:/app" app python -m scripts.superscore_round_2026 \
+        --database-url <url> setup-round --round-id <ss_round_id> \
+        --reason "2026 finals replay: SS<N> round setup"
+      $FINALS run --rm -v "$PWD/bbbffl_app:/app" app python -m scripts.superscore_round_2026 \
+        --database-url <url> open-round --round-id <ss_round_id> \
+        --reason "2026 finals replay: SS<N> open"
       ```
 
-   b. **Confirm its AFL-round mapping.** This CLI has no
-      `--afl-season-id`/`--afl-round-id` flags at all -- the mapping is
-      always derived automatically from the round's own exact concurrent
-      finals week (`app.superscore_round.
+      This CLI has no `--afl-season-id`/`--afl-round-id` flags at all --
+      the mapping is always derived automatically from the round's own
+      exact concurrent finals week (`app.superscore_round.
       resolve_concurrent_finals_afl_mapping`), never typed independently
       (Codex review, PR #207, three rounds: `AflApiReferenceValidator.
       round_exists` alone cannot catch an operator typo naming a real but
@@ -238,48 +211,22 @@ acceptance before running SS`<N>`'s `confirm-mapping`.
       derived-but-overridable mapping left the override unchecked -- since
       every round this CLI handles genuinely has the finals-concurrency
       invariant, removing the override entirely is what actually closes
-      this):
-
-      ```bash
-      $FINALS run --rm -v "$PWD/bbbffl_app:/app" app python -m scripts.superscore_round_2026 \
-        --database-url <url> confirm-mapping --round-id <ss_round_id> \
-        --evidence-path /replay/evidence/2026-second-half.json \
-        --checkpoint-path /replay/state/checkpoint.json \
-        --reason "2026 finals replay: SS<N> mapping, concurrent with finals week <N>"
-      ```
-
-      **`--checkpoint-path` is required here, not optional** (Codex
-      review): `2026-second-half.json`'s manifest declares
-      `lifecycle_semantics: "scheduled-start-plus-final-results-checkpoint"`
+      this). `--checkpoint-path` is required, not optional:
+      `2026-second-half.json`'s manifest declares `lifecycle_semantics:
+      "scheduled-start-plus-final-results-checkpoint"`
       (`app.replay_acquisition`), and `ReplayAflDataSource` fails closed
-      (`ReplayEvidenceError`) loading any such package without an explicit
-      persisted replay checkpoint (`app/replay.py`'s `_load`). Every
-      `confirm-mapping` invocation in this section needs it.
+      (`ReplayEvidenceError`) without an explicit persisted checkpoint
+      (`app/replay.py`'s `_load`).
 
-   c. **Set up the round** (creates the lifecycle row and the complete
-      ten-entry review-state row set atomically):
-
-      ```bash
-      $FINALS run --rm -v "$PWD/bbbffl_app:/app" app python -m scripts.superscore_round_2026 \
-        --database-url <url> setup-round --round-id <ss_round_id> \
-        --reason "2026 finals replay: SS<N> round setup"
-      ```
-
-   d. **Open the round** (refuses unless setup succeeded):
-
-      ```bash
-      $FINALS run --rm -v "$PWD/bbbffl_app:/app" app python -m scripts.superscore_round_2026 \
-        --database-url <url> open-round --round-id <ss_round_id> \
-        --reason "2026 finals replay: SS<N> open"
-      ```
-
-   e. Run lineup submission (via the coach lineup route -- all ten entries
-      participate in every SuperScore round, including eliminated finals
-      seeds) and lockout exactly as an ordinary round.
-
-   f. Record any DNP/Interchange/override ruling for an entry with the
-      **entry-scoped** CLI (not the matchup-keyed round-review routes,
-      which do not apply -- SuperScore has no matchups):
+   d. **Now, before finalising either stream, submit lineups for BOTH
+      streams for this shared AFL round:** finals week `N`'s two entries
+      (or one, or zero for seed 1's Week 1 bye) via the coach lineup
+      route, and all ten SuperScore entries (including eliminated finals
+      seeds -- every entry plays every SuperScore round) via the same
+      route scoped to SS`N`'s round id. Record any matchup-keyed
+      DNP/Interchange/override ruling for finals via the round-review
+      routes (see section B's table); record any entry-scoped ruling for
+      SuperScore via its own CLI:
 
       ```bash
       $FINALS run --rm -v "$PWD/bbbffl_app:/app" app python -m scripts.superscore_review_2026 \
@@ -294,7 +241,21 @@ acceptance before running SS`<N>`'s `confirm-mapping`.
       `--expected-review-version` -- a stale value is rejected rather than
       silently applied.
 
-   g. **Calculate and publish the leaderboard:**
+   e. **Only once every lineup for round `N` in both streams is
+      submitted**, finalise finals week `N`. Publish its result(s) (a
+      variable match count -- two in weeks 1-2, one in weeks 3-4; week 1's
+      bye publishes nothing for seed 1):
+
+      ```
+      POST /api/admin/finals/{bracket_id}/weeks/{N}/publish?reason=...
+      ```
+
+      Week 4's publish (the Grand Final) also records `finals.premier.
+      recorded`/`finals.wooden_spoon.recorded` (see `docs/audit-events.md`'s
+      catalogue addendum for why these are **not** the official season
+      awards) -- record both event ids in `provenance-manifest.md`.
+
+   f. **Calculate and publish SuperScore round `N`'s leaderboard:**
 
       ```
       POST /api/season-superscore/scorer/rounds/{ss_round_id}/calculate
@@ -304,17 +265,30 @@ acceptance before running SS`<N>`'s `confirm-mapping`.
       The same `publish` call also handles correction on a later
       re-publish (versioned, append-only -- see `docs/audit-events.md`).
 
-   h. **Checkpoint this round's boundary:**
+   g. **Advance the finals bracket** to derive weeks 2-4's pairing (skip
+      for week 4, which has no downstream week):
+
+      ```bash
+      $FINALS run --rm -v "$PWD/bbbffl_app:/app" app python -m scripts.finals_bracket_2026 \
+        --database-url <url> advance preview --bracket-id <bracket_id> --from-week <N>
+      $FINALS run --rm -v "$PWD/bbbffl_app:/app" app python -m scripts.finals_bracket_2026 \
+        --database-url <url> advance apply --bracket-id <bracket_id> --from-week <N> \
+        --reason "2026 finals replay: advance from week <N>" \
+        --expected-versions '<paste from the preview output above>'
+      ```
+
+   h. **Checkpoint both streams' boundary for round `N`** (the same paired
+      backup pattern as every other checkpoint in this replay):
 
       ```bash
       $FINALS exec -T database pg_dump -U bbbffl -Fc bbbffl_2026_finals \
-        > replay/2026-finals/backups/after-superscore-ss<N>.dump
+        > replay/2026-finals/backups/after-round-<N>.dump
       cp replay/2026-finals/state/checkpoint.json \
-         replay/2026-finals/backups/checkpoint-after-superscore-ss<N>.json
+         replay/2026-finals/backups/checkpoint-after-round-<N>.json
       ```
 
-      Record it in `provenance-manifest.md`'s "SuperScore stream/round
-      checkpoints" table before opening the next round.
+      Record it in `provenance-manifest.md`'s finals-week and
+      SuperScore-round checkpoint tables before opening round `N+1`.
 
 ## F. Finals corrections and bracket rewind
 
@@ -435,9 +409,11 @@ At minimum, this playbook takes a paired `pg_dump` + checkpoint JSON at:
 
 - **Post-finals-seeding-apply** (section C) -- before any finals/SuperScore
   work relies on it as a recovery point.
-- **After each finals week finalises** (section D.2.f) -- four boundaries.
-- **After each SuperScore round finalises** (section E.2.h) -- four
-  boundaries.
+- **After each round `N`'s finals week and SuperScore round both
+  finalise, together** (section D.3.h) -- one paired checkpoint per round
+  covering both streams, taken only once both streams' results for round
+  `N` are published and the finals bracket has advanced -- four boundaries
+  (rounds 1-4).
 - **The final end-of-season archival checkpoint** (section G.4) -- taken
   **only** after `scripts.season_archival_checkpoint_2026 verify` passes,
   never before, never on a whim between finals/SuperScore boundaries.
@@ -488,7 +464,8 @@ to this phase's own failure modes.
 - **A bracket-advance step needs to be redone** (e.g. run against a
   wrong/incomplete official result by operator error, with no downstream
   play state yet). Prefer restoring the most recent finals-week checkpoint
-  taken before the advance (section D.2.f) and redoing `advance` correctly
+  taken before the advance (section D.3.h, from the prior round) and
+  redoing `advance` correctly
   from there, rather than attempting to hand-edit the persisted pairing.
 - **A SuperScore published leaderboard requires correction.** Re-run
   `POST /api/season-superscore/scorer/rounds/{round_id}/publish` -- the
@@ -615,7 +592,7 @@ checked:
       any correction's audit trail (including any rewind) recorded
       (section D/F).
 - [ ] All four SuperScore rounds (SS1-SS4) are `final`, with every
-      leaderboard published and any correction recorded (section E).
+      leaderboard published and any correction recorded (section D).
 - [ ] Every audited correction (finals result, bracket rewind, SuperScore
       leaderboard correction, DNP/Interchange/override ruling) across the
       phase is reconciled and recorded with actor/reason/audit-event

@@ -123,8 +123,8 @@ that identifier was itself still operator-suppliable and unverified: an
 operator could name a real finals round for the *wrong* week (or a
 different season entirely) and the CLI would accept it.
 
-The only fix that actually closes this is removing every operator-
-suppliable "which finals round" parameter from the recommended path.
+The fix that actually closes this is removing every operator-suppliable
+"which finals round" parameter from the recommended path.
 `app.superscore_round.resolve_concurrent_finals_afl_mapping` (new)
 derives both the owning season and the exact required week number
 directly from the SuperScore round's own `round_key`/season — nothing
@@ -134,6 +134,32 @@ gets the same guarantee. 5 new domain-level tests
 (`tests/test_superscore_round.py`) cover the derivation and every failure
 mode, including the exact "SS1 given week 2's round" scenario the review
 named.
+
+**A fourth review round found this still wasn't quite enough**: the CLI
+still let an operator supply `--afl-season-id`/`--afl-round-id` explicitly,
+bypassing the new derivation entirely and reopening the identical
+mistyped-but-real-AFL-round risk. Since every round this 2026-specific
+CLI ever handles genuinely has the finals-concurrency invariant, there is
+no legitimate use for an override — it was removed from
+`scripts/superscore_round_2026.py` entirely rather than validated, closing
+this by construction (no flag left to misuse) instead of by another check.
+
+## Finding 5: `setup-round`/`open-round` accepted any round, including a finals week's
+
+**Severity:** operator-safety — could have let `setup-round`/`open-round`
+run SuperScore's own lifecycle transitions against a finals-week round,
+bypassing its proper `open_finals_week` pairing-materialisation/preflight
+pathway entirely.
+
+Found by the same fourth Codex review round on PR #207.
+`CompetitionLifecycleRepository.create_non_ordinary_round` (#197) permits
+both finals and SuperScore streams, so nothing stopped `app.
+superscore_round.setup_round`/`open_round` from being called against a
+finals round by an operator mistake (e.g. a copy-pasted round id). Fixed
+with a new `_require_superscore_round` guard in `app.superscore_round`,
+called first in both functions — refuses (`SuperScoreRoundError`, no
+mutation) a round that isn't `superscore`-typed. Fixed at the domain
+layer, not just the CLI, so any future caller gets the same guarantee.
 
 No other defect was found in #190-#193/#195 while preparing this phase's
 tooling.

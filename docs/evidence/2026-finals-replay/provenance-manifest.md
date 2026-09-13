@@ -59,6 +59,12 @@ fields below from real command output.
 
 ## Finals week checkpoints (one row per week, 1-4)
 
+Each week `N`'s paired backup is the same `after-round-<N>.dump`/
+`checkpoint-after-round-<N>.json` pair recorded in the SuperScore table
+below -- the playbook takes one checkpoint per round covering both streams
+(`2026-finals-superscore-playbook.md` section D.3.h), not a separate file
+per stream.
+
 | Week | Round id | Lifecycle final | `finals.round.finalized` event id | Paired backup taken | Backup/checkpoint filenames (private) |
 |---|---|---|---|---|---|
 | 1 | `<...>` | `<...>` | `<...>` | `<...>` | `<...>` |
@@ -70,6 +76,11 @@ Record any `finals.result.corrected`/`finals.bracket.rewound` event here
 too, with its reason and the affected week(s), when one occurs.
 
 ## SuperScore stream/round checkpoints
+
+SS`N`'s "Paired backup taken" is the same `after-round-<N>.dump`/
+`checkpoint-after-round-<N>.json` pair as finals week `N`'s row above --
+one checkpoint per round, taken once both streams' round `N` results are
+published and the bracket has advanced.
 
 | Field | Value |
 |---|---|

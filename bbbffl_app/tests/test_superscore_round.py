@@ -737,7 +737,7 @@ def test_refuses_a_non_superscore_round():
     ordinary_round_id = database.execute(
         "SELECT bbbffl_round_id FROM bbbffl_round WHERE competition_id=? LIMIT 1", (built["ordinary_competition_id"],)
     ).fetchone()["bbbffl_round_id"]
-    with pytest.raises(SuperScoreRoundError, match="not SS1-SS4"):
+    with pytest.raises(SuperScoreRoundError, match="not 'superscore'"):
         resolve_concurrent_finals_afl_mapping(database, ordinary_round_id)
 
 
@@ -809,3 +809,42 @@ def test_setup_round_and_open_round_still_accept_a_genuine_superscore_round():
     )
     setup_round(database, ss1_round_id, actor=ACTOR, reason="genuine SS1 setup")
     assert open_round(database, ss1_round_id, actor=ACTOR, reason="genuine SS1 open").state == "open"
+
+
+# -- ensure_round/resolve_concurrent_finals_afl_mapping refuse a non-SuperScore
+# competition/round too, not just setup_round/open_round (Codex review, round 5, P2) --
+
+
+def test_ensure_round_refuses_a_non_superscore_competition_id():
+    """The earlier fix (`_require_superscore_round` in `setup_round`/
+    `open_round`) ran too late: `ensure_round` given a finals
+    `competition_id` by mistake would already have created a bogus
+    `ss1`-labelled round under it before that guard ever ran."""
+    built = build_finals_ready_season(year=6509)
+    database = built["database"]
+    with pytest.raises(SuperScoreRoundError, match="not 'superscore'"):
+        ensure_round(database, built["finals_competition"].competition_id, 1, 1)
+    # Nothing was created.
+    assert (
+        database.execute(
+            "SELECT 1 FROM bbbffl_round WHERE competition_id=? AND round_key='ss1'",
+            (built["finals_competition"].competition_id,),
+        ).fetchone()
+        is None
+    )
+
+
+def test_resolve_concurrent_finals_afl_mapping_refuses_a_round_planted_under_the_wrong_stream():
+    """Defence in depth: even if an `ss1`-labelled round existed under a
+    non-superscore stream (bypassing `ensure_round`'s own new guard, by
+    going through the generic `SeasonRepository.create_round` primitive
+    directly instead), the resolver itself must still refuse rather than
+    happily deriving and returning the concurrent finals week's mapping
+    for it."""
+    from app.season import SeasonRepository
+
+    built = _built_with_bracket_and_superscore_stream(6510)
+    database = built["database"]
+    bogus_round = SeasonRepository(database).create_round(built["ordinary_competition_id"], "ss1", "Bogus SS1", 99)
+    with pytest.raises(SuperScoreRoundError, match="not 'superscore'"):
+        resolve_concurrent_finals_afl_mapping(database, bogus_round.bbbffl_round_id)

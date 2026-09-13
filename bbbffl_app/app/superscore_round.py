@@ -155,11 +155,33 @@ def ensure_stream(
     return SuperScoreStream(created.competition_id, season_id, ordinary_competition_id)
 
 
+def _require_superscore_competition(database, competition_id: str) -> None:
+    """The `ensure_round`/`resolve_concurrent_finals_afl_mapping` sibling of
+    `_require_superscore_round`: refuses a `competition_id` that does not
+    belong to a `superscore`-typed `competition_stream`, *before* a
+    round/mapping is created against it (Codex review, PR #207, round 5:
+    `_require_superscore_round` alone runs too late -- `ensure_round` given
+    a finals `competition_id` by mistake would already have created a
+    bogus `ss1`-labelled round under it, and `resolve_concurrent_finals_
+    afl_mapping` would then happily persist a mapping against it, before
+    either ever reached `setup_round`/`open_round`)."""
+    row = database.execute(
+        "SELECT stream_type FROM competition_stream WHERE competition_id=?", (competition_id,)
+    ).fetchone()
+    if row is None:
+        raise SuperScoreRoundError(f"unknown competition {competition_id}")
+    if row["stream_type"] != STREAM_TYPE:
+        raise SuperScoreRoundError(
+            f"competition {competition_id} is a {row['stream_type']!r}-typed stream, not {STREAM_TYPE!r}"
+        )
+
+
 def ensure_round(database, competition_id: str, round_number: int, sequence: int) -> str:
     """Idempotently create (or return the already-created) logical
     `bbbffl_round` row (`app.season.SeasonRepository.create_round`'s generic
     primitive -- unchanged, no SuperScore-specific schema) for one of
     SS1-SS4. Returns `bbbffl_round_id`."""
+    _require_superscore_competition(database, competition_id)
     if round_number not in ROUND_LABELS:
         raise SuperScoreRoundError(f"unknown SuperScore round number: {round_number}")
     label = ROUND_LABELS[round_number]
@@ -224,17 +246,22 @@ def resolve_concurrent_finals_afl_mapping(database, bbbffl_round_id: str) -> Rou
     and the week number from `bbbffl_round_id` itself, with no
     operator-suppliable substitute, closes that off by construction).
 
-    Raises `SuperScoreRoundError` if `bbbffl_round_id` is not one of
-    SS1-SS4, its season has no finals bracket yet, that bracket has no
-    matching week yet, or that week has no accepted AFL-round mapping yet."""
+    Raises `SuperScoreRoundError` if `bbbffl_round_id` does not belong to a
+    `superscore`-typed stream, is not one of SS1-SS4, its season has no
+    finals bracket yet, that bracket has no matching week yet, or that
+    week has no accepted AFL-round mapping yet."""
     round_row = database.execute(
-        "SELECT r.round_key, c.season_id FROM bbbffl_round r "
+        "SELECT r.round_key, c.season_id, c.stream_type FROM bbbffl_round r "
         "JOIN competition_stream c ON c.competition_id=r.competition_id "
         "WHERE r.bbbffl_round_id=?",
         (bbbffl_round_id,),
     ).fetchone()
     if round_row is None:
         raise SuperScoreRoundError(f"unknown round {bbbffl_round_id}")
+    if round_row["stream_type"] != STREAM_TYPE:
+        raise SuperScoreRoundError(
+            f"round {bbbffl_round_id} belongs to a {round_row['stream_type']!r}-typed stream, not {STREAM_TYPE!r}"
+        )
     week_number = _ROUND_KEY_TO_WEEK.get(round_row["round_key"])
     if week_number is None:
         raise SuperScoreRoundError(f"round {bbbffl_round_id} (round_key={round_row['round_key']!r}) is not SS1-SS4")

@@ -93,6 +93,7 @@ from app.routes import round_review as round_review_routes
 from app.routes import scorer_dashboard as scorer_dashboard_routes
 from app.routes import season_centre as season_centre_routes
 from app.routes import superscore as superscore_routes
+from app.routes import superscore_results as superscore_result_routes
 from app.scorer_decisions import (
     CompetitionFinalizedError,
     InvalidPositionError,
@@ -105,6 +106,7 @@ from app.season import SeasonRepository
 from app.service import PlayerIdentityCache
 from app.superscore import competition_key as superscore_competition_key
 from app.superscore import get_superscore_config
+from app.superscore_results import SuperScoreLeaderboardService
 from app.teams import TeamConfigError, get_teams
 
 logger = logging.getLogger("bbbffl.startup")
@@ -215,6 +217,7 @@ async def lifespan(app: FastAPI):
     app.state.ladder = LadderRepository(database)
     app.state.round_review = RoundReviewRepository(database)
     app.state.calculations = MatchupCalculationService(database, afl_client)
+    app.state.superscore_results = SuperScoreLeaderboardService(database, afl_client, app.state.identities)
     app.state.afl_client = afl_client
     app.state.identity_cache = PlayerIdentityCache(afl_client)
     app.state.teams = teams
@@ -277,6 +280,7 @@ app.include_router(admin.router)
 app.include_router(admin.page_router)
 app.include_router(superscore_routes.router)
 app.include_router(superscore_routes.page_router)
+app.include_router(superscore_result_routes.router)
 app.include_router(draft_routes.router)
 app.include_router(draft_routes.page_router)
 app.include_router(preseason_routes.router)

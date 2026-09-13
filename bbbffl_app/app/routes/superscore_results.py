@@ -106,7 +106,10 @@ def calculate(round_id: str, request: Request, principal: Principal = Depends(re
     row = _round(request, round_id)
     require_role_covers_season(request, principal, row["season_id"])
     _csrf(request, principal)
-    return request.app.state.superscore_results.calculations.calculate_round(round_id)
+    try:
+        return request.app.state.superscore_results.calculations.calculate_round(round_id)
+    except CompletedSeasonError as exc:
+        raise HTTPException(423, str(exc)) from exc
 
 
 @router.post("/scorer/rounds/{round_id}/publish")

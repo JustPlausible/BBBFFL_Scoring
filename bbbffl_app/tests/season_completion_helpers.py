@@ -11,6 +11,7 @@ from sqlalchemy import text
 
 from app.afl_client import Match, PlayerStatLine, Team
 from app.audit import ActorContext
+from app.calculations import MatchupCalculationService
 from app.competition_lifecycle import CompetitionLifecycleRepository
 from app.db import transaction
 from app.finals import FinalsBracketRepository
@@ -95,6 +96,78 @@ def _play_out_finals(built, year):
     built["grand_final_pairing"] = gf
     built["grand_final_matchup_id"] = gf.matchup_id
     return bracket
+
+
+def seed_real_finals_grand_final_calculation(built, year):
+    """Seed real lineups for the Grand Final's two entries and run a
+    genuine, evidence-backed `MatchupCalculationService.calculate_round(
+    ..., guard_season=True)` call while the season is still active,
+    producing a real `bbbffl_matchup_calculation` row.
+
+    `build_completable_season`'s own Grand Final setup seeds its official
+    result directly (`seed_official_result`, bypassing lineups/calculation
+    entirely -- the same shortcut `tests/test_finals.py` itself uses for
+    speed), so no calculation row exists to prove immutable without this.
+    Mirrors `tests/test_superscore_results.py::_ready()`'s lineup-seeding
+    shape, adapted to finals' two-entry matchup instead of SuperScore's
+    ten-entry, matchup-free round. Returns the `_Facts` AFL-client stand-in
+    used, so a caller can attempt the *identical* recomputation again later
+    (e.g. after completion) and prove it changes nothing."""
+    database = built["database"]
+    gf_matchup_id = built["grand_final_matchup_id"]
+    matchup = database.execute(
+        "SELECT home_season_entry_id, away_season_entry_id, bbbffl_round_id FROM bbbffl_matchup WHERE matchup_id=?",
+        (gf_matchup_id,),
+    ).fetchone()
+    round_id = matchup["bbbffl_round_id"]
+    entry_ids = [matchup["home_season_entry_id"], matchup["away_season_entry_id"]]
+    stats = {}
+    now = _now()
+    with database.engine.begin() as conn:
+        for index, entry_id in enumerate(entry_ids):
+            lineup_id = f"gf-lineup-{year}-{index}"
+            canonical = 9_500_000 + year * 10 + index
+            player_id = f"gf-player-{year}-{index}"
+            conn.execute(
+                text(
+                    "INSERT INTO season_player_pool (season_player_id,season_id,canonical_player_id,display_name,"
+                    "afl_team_id,eligible,source_provider,source_fetched_at,created_at,updated_at) "
+                    "VALUES (:p,:s,:c,:n,1,TRUE,'test',:now,:now,:now)"
+                ),
+                {"p": player_id, "s": built["season"].season_id, "c": canonical, "n": f"GF Player {index}", "now": now},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO weekly_lineup (lineup_id,season_id,competition_id,bbbffl_round_id,season_entry_id,"
+                    "draft_revision,effective_submission_version,created_at,updated_at) "
+                    "VALUES (:l,:s,:c,:r,:e,1,1,:now,:now)"
+                ),
+                {
+                    "l": lineup_id,
+                    "s": built["season"].season_id,
+                    "c": built["finals_competition"].competition_id,
+                    "r": round_id,
+                    "e": entry_id,
+                    "now": now,
+                },
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO weekly_lineup_submission (lineup_id,version,based_on_draft_revision,submitted_at,"
+                    "actor_type,actor_role,source_type) VALUES (:l,1,1,:now,'coach','coach','coach')"
+                ),
+                {"l": lineup_id, "now": now},
+            )
+            for position in POSITIONS:
+                selected = player_id if position == "F1" else None
+                conn.execute(
+                    text("INSERT INTO weekly_lineup_submission_slot VALUES (:l,1,:pos,:p)"),
+                    {"l": lineup_id, "pos": position, "p": selected},
+                )
+            stats[canonical] = PlayerStatLine(canonical, goals=index + 1)
+    facts = _Facts(stats)
+    MatchupCalculationService(database, facts).calculate_round(round_id, guard_season=True)
+    return facts
 
 
 def _setup_round_without_the_pre_existing_postgres_count_for_update_bug(database, bbbffl_round_id, entries, *, reason):

@@ -135,7 +135,11 @@ def publish_finals_round(database, afl_client, lifecycle, review_repo, identitie
     batch_factory = getattr(afl_client, "evidence_batch", None)
     scope = batch_factory() if callable(batch_factory) else nullcontext(afl_client)
     with scope as evidence:
-        MatchupCalculationService(database, afl_client).calculate_round(round_id)
+        # Issue #195 (Codex review, PR #206): `guard_season=True` makes this
+        # recomputation's own transaction refuse (and write nothing) if the
+        # season is already completed, closing the gap where a rejected
+        # publish attempt could still mutate `bbbffl_matchup_calculation`.
+        MatchupCalculationService(database, afl_client).calculate_round(round_id, guard_season=True)
         fresh_fn = getattr(evidence, "is_evidence_fresh", None)
         fresh = fresh_fn() if callable(fresh_fn) else True
         review = build_finals_round_review(lifecycle, review_repo, identities, round_id, evidence_fresh=fresh)
@@ -259,8 +263,11 @@ def correct_finals_result(database, afl_client, lifecycle, review_repo, identiti
         # One shared facts cache and every round matchup lock, matching
         # publication's freshness/serialization boundary. A correction may
         # drive both downstream Week-2 pairings, so a partial stale round
-        # must never be reconciled from mixed evidence.
-        MatchupCalculationService(database, afl_client).calculate_round(context["bbbffl_round_id"])
+        # must never be reconciled from mixed evidence. `guard_season=True`
+        # (issue #195, Codex review, PR #206): see `publish_finals_round`'s
+        # identical rationale -- refuses and writes nothing if the season
+        # is already completed, before any calculation is persisted.
+        MatchupCalculationService(database, afl_client).calculate_round(context["bbbffl_round_id"], guard_season=True)
         fresh_fn = getattr(evidence, "is_evidence_fresh", None)
         fresh = fresh_fn() if callable(fresh_fn) else True
         matchup = lifecycle.get_matchup(matchup_id)

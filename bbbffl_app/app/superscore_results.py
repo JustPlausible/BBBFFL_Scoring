@@ -122,6 +122,20 @@ class SuperScoreCalculationService(MatchupCalculationService):
     def _calculate_entries(self, round_id, entry_ids):
         ordered = sorted(entry_ids)
         with transaction(self.database) as conn:
+            # Issue #195's shared completed-season write fence (Codex
+            # review, PR #206): locked/guarded first, ahead of the
+            # review-state locks below, so a completed season's SuperScore
+            # calculation refuses and writes nothing to `superscore_entry_
+            # calculation` -- whether reached via `SuperScoreLeaderboardService.
+            # publish` or the standalone `/calculate` preview route. Never an
+            # unlocked pre-check: this call and `app.season_completion.
+            # complete_season` only ever serialize through this one lock.
+            season_lookup = conn.execute(
+                "SELECT season_id FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?", (round_id,)
+            ).fetchone()
+            if season_lookup is None:
+                raise SuperScoreResultError(f"missing SuperScore round lifecycle for round {round_id}")
+            SeasonRepository(self.database).guard_writable(conn, season_lookup["season_id"])
             states = {}
             # All locks precede context, lineup, ruling, or AFL evidence reads.
             for entry_id in ordered:

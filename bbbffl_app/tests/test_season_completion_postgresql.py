@@ -23,6 +23,7 @@ import pytest
 import app.competition_lifecycle as competition_lifecycle_module
 import app.season_completion as season_completion_module
 from app.audit import ActorContext
+from app.calculations import MatchupCalculationService
 from app.competition_lifecycle import CompetitionLifecycleRepository
 from app.db import connect
 from app.migrations import migrate
@@ -30,7 +31,7 @@ from app.season import SeasonCompletedError, SeasonRepository
 from app.season_awards import PREMIERSHIP, SeasonAwardRepository
 from app.season_completion import complete_season
 from tests.finals_helpers import correct_official_result
-from tests.season_completion_helpers import build_completable_season
+from tests.season_completion_helpers import build_completable_season, seed_real_finals_grand_final_calculation
 
 ACTOR = ActorContext.anonymous_operator("test")
 
@@ -170,3 +171,69 @@ def test_completion_holding_the_lock_first_commits_and_correction_then_observes_
     assert award is not None
     effective = CompetitionLifecycleRepository(postgres_database).effective_result(ordinary_matchup_id)
     assert effective.version == before_version
+
+
+def test_finals_recalculation_blocks_on_the_season_lock_completion_holds_and_writes_nothing(
+    postgres_database, monkeypatch
+):
+    """Codex review (PR #206, P2): `MatchupCalculationService.calculate_
+    round(..., guard_season=True)` -- the fix for the gap where a finals
+    correction/publication's own recalculation could mutate `bbbffl_
+    matchup_calculation` for an already-completed season -- must genuinely
+    block on the *same* `bbbffl_season` row lock `complete_season` holds,
+    not merely observe `completed` via an unlocked re-read. Proven the same
+    way every other race in this module is: the recalculation call must
+    not be `done()` while `complete_season` still holds the lock open, and
+    once released, the recalculation observes `completed` and persists no
+    new calculation revision at all."""
+    built = build_completable_season(database=postgres_database, year=5303)
+    facts = seed_real_finals_grand_final_calculation(built, 5303)
+    season_id = built["season"].season_id
+    gf_matchup_id = built["grand_final_matchup_id"]
+    gf_round_id = postgres_database.execute(
+        "SELECT bbbffl_round_id FROM bbbffl_matchup WHERE matchup_id=?", (gf_matchup_id,)
+    ).fetchone()["bbbffl_round_id"]
+    before = dict(
+        postgres_database.execute(
+            "SELECT revision, input_fingerprint, updated_at FROM bbbffl_matchup_calculation WHERE matchup_id=?",
+            (gf_matchup_id,),
+        ).fetchone()
+    )
+
+    completion_holds_lock = threading.Event()
+    allow_completion_to_commit = threading.Event()
+    real_append = season_completion_module.append_event
+
+    def pause_completion(*args, **kwargs):
+        completion_holds_lock.set()
+        assert allow_completion_to_commit.wait(timeout=5)
+        return real_append(*args, **kwargs)
+
+    monkeypatch.setattr(season_completion_module, "append_event", pause_completion)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        completion = executor.submit(
+            complete_season, postgres_database, season_id, actor=ACTOR, reason="holds the season-row lock open"
+        )
+        assert completion_holds_lock.wait(timeout=5)
+
+        recompute = executor.submit(
+            MatchupCalculationService(postgres_database, facts).calculate_round,
+            gf_round_id,
+            guard_season=True,
+        )
+        time.sleep(0.2)
+        assert not recompute.done(), "recalculation did not wait for the season row lock completion holds"
+
+        allow_completion_to_commit.set()
+        completion.result(timeout=5)
+        with pytest.raises(SeasonCompletedError):
+            recompute.result(timeout=5)
+
+    after = dict(
+        postgres_database.execute(
+            "SELECT revision, input_fingerprint, updated_at FROM bbbffl_matchup_calculation WHERE matchup_id=?",
+            (gf_matchup_id,),
+        ).fetchone()
+    )
+    assert after == before  # no torn state: the queued recalculation wrote nothing

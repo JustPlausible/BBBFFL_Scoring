@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 
 from app.audit import ActorContext
+from app.calculations import MatchupCalculationService
 from app.competition_lifecycle import CompetitionLifecycleRepository
 from app.finals import FinalsBracketRepository
 from app.finals_review import correct_finals_result
@@ -19,7 +20,7 @@ from app.season import SeasonCompletedError
 from app.season_awards import PREMIERSHIP, SeasonAwardRepository, reconcile_premiership, reconcile_wooden_spoon
 from app.season_completion import complete_season
 from app.superscore_results import SuperScoreLeaderboardService
-from tests.season_completion_helpers import _Facts, build_completable_season
+from tests.season_completion_helpers import _Facts, build_completable_season, seed_real_finals_grand_final_calculation
 
 ACTOR = ActorContext.anonymous_operator("test")
 
@@ -156,6 +157,90 @@ def test_finals_grand_final_correction_refused_after_completion(monkeypatch):
     assert FinalsBracketRepository(database).get_bracket_by_id(built["bracket"].bracket_id) is not None
 
 
+def test_finals_correction_path_mutates_no_calculation_state_after_completion():
+    """Codex review (PR #206, P2): it is not enough for the eventual
+    official-result write to be refused if the recalculation that precedes
+    it inside `correct_finals_result` has already committed a new
+    `bbbffl_matchup_calculation` revision/fingerprint/timestamp for a
+    completed season. Unlike `test_finals_grand_final_correction_refused_
+    after_completion` (which mocks out calculation entirely to isolate the
+    outer transaction's own guard), this test seeds a *real*, evidence-
+    backed calculation (`seed_real_finals_grand_final_calculation`) and
+    exercises the real, unmocked `correct_finals_result` end to end, so the
+    calculation-level fix (`MatchupCalculationService`'s `guard_season`)
+    is what is actually being proven, not merely asserted."""
+    built = build_completable_season(year=5212)
+    facts = seed_real_finals_grand_final_calculation(built, 5212)
+    database = built["database"]
+    gf_matchup_id = built["grand_final_matchup_id"]
+
+    before = dict(
+        database.execute(
+            "SELECT revision, input_fingerprint, snapshot, updated_at FROM bbbffl_matchup_calculation "
+            "WHERE matchup_id=?",
+            (gf_matchup_id,),
+        ).fetchone()
+    )
+    assert before  # the real, pre-completion calculation above did persist a row
+
+    complete_season(database, built["season"].season_id, actor=ACTOR, reason="complete 2026 replay")
+
+    lifecycle = CompetitionLifecycleRepository(database)
+    try:
+        correct_finals_result(
+            database,
+            facts,
+            lifecycle,
+            RoundReviewRepository(database),
+            IdentityRepository(database),
+            gf_matchup_id,
+            actor=ACTOR,
+            reason="attempted GF correction after completion",
+        )
+        raise AssertionError("expected SeasonCompletedError")
+    except SeasonCompletedError:
+        pass
+
+    after = dict(
+        database.execute(
+            "SELECT revision, input_fingerprint, snapshot, updated_at FROM bbbffl_matchup_calculation "
+            "WHERE matchup_id=?",
+            (gf_matchup_id,),
+        ).fetchone()
+    )
+    assert after == before  # byte-for-byte unchanged: no recalculation was persisted
+
+    matchup_row = database.execute(
+        "SELECT effective_official_version FROM bbbffl_matchup WHERE matchup_id=?", (gf_matchup_id,)
+    ).fetchone()
+    assert matchup_row["effective_official_version"] == 1  # no new official result/version
+
+    pairing = database.execute(
+        "SELECT status FROM finals_bracket_pairing WHERE matchup_id=?", (gf_matchup_id,)
+    ).fetchone()
+    assert pairing["status"] == "active"  # no downstream pairing/rewind mutation occurred
+
+    # Calling the underlying, now-guarded calculation entry point directly
+    # confirms the fix lives at the calculation layer itself, not merely
+    # somewhere upstream of it in `correct_finals_result`'s own flow.
+    gf_round_id = database.execute(
+        "SELECT bbbffl_round_id FROM bbbffl_matchup WHERE matchup_id=?", (gf_matchup_id,)
+    ).fetchone()["bbbffl_round_id"]
+    try:
+        MatchupCalculationService(database, facts).calculate_round(gf_round_id, guard_season=True)
+        raise AssertionError("expected SeasonCompletedError")
+    except SeasonCompletedError:
+        pass
+    after_direct = dict(
+        database.execute(
+            "SELECT revision, input_fingerprint, snapshot, updated_at FROM bbbffl_matchup_calculation "
+            "WHERE matchup_id=?",
+            (gf_matchup_id,),
+        ).fetchone()
+    )
+    assert after_direct == before
+
+
 def test_finals_bracket_rewind_cascade_refused_after_completion():
     """`rewind_bracket` is the standalone correction-triggered pairing/
     elimination cascade path (Steve's confirmed rewind policy) -- distinct
@@ -211,6 +296,58 @@ def test_superscore_republication_refused_after_completion():
 
     # Reads still work.
     assert service.leaderboard(round_id) is not None
+
+
+def test_superscore_republication_mutates_no_calculation_state_after_completion():
+    """Codex review (PR #206, P2): it is not enough for the eventual
+    leaderboard write to be refused if `SuperScoreLeaderboardService.
+    publish`'s own recalculation step has already upserted new revision/
+    fingerprint/timestamp rows into `superscore_entry_calculation` for a
+    completed season. Captures all ten entry-calculation rows before the
+    attempt and asserts every one is byte-for-byte unchanged afterward."""
+    built = build_completable_season(year=5222)
+    database = built["database"]
+    round_id = built["superscore_rounds"][1]
+
+    def _calculation_rows():
+        return {
+            row["season_entry_id"]: dict(row)
+            for row in database.execute(
+                "SELECT * FROM superscore_entry_calculation WHERE bbbffl_round_id=?", (round_id,)
+            ).fetchall()
+        }
+
+    before = _calculation_rows()
+    assert len(before) == 10
+
+    complete_season(database, built["season"].season_id, actor=ACTOR, reason="complete 2026 replay")
+
+    service = SuperScoreLeaderboardService(database, _Facts(built["superscore_stats"][1]))
+    try:
+        service.publish(round_id, actor=ACTOR, reason="attempted republication after completion")
+        raise AssertionError("expected SeasonCompletedError")
+    except SeasonCompletedError:
+        pass
+
+    after = _calculation_rows()
+    assert after == before  # byte-for-byte unchanged for all ten entries
+
+    leaderboard_version = database.execute(
+        "SELECT MAX(version) AS v FROM superscore_leaderboard_revision WHERE bbbffl_round_id=?", (round_id,)
+    ).fetchone()["v"]
+    assert leaderboard_version == 1  # no new leaderboard revision was added
+
+    # Calling the underlying, now-guarded calculation entry point directly
+    # (the same one the standalone `/calculate` preview route reaches)
+    # confirms the fix lives at the calculation layer itself.
+    from app.superscore_results import SuperScoreCalculationService
+
+    try:
+        SuperScoreCalculationService(database, _Facts(built["superscore_stats"][1])).calculate_round(round_id)
+        raise AssertionError("expected SeasonCompletedError")
+    except SeasonCompletedError:
+        pass
+    assert _calculation_rows() == before
 
 
 # -- Premiership/wooden-spoon re-recording ------------------------------------

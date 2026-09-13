@@ -24,6 +24,7 @@ from app.admin_dashboard import (
 from app.audit import ActorContext, AuditEventRepository
 from app.auth import RoleGrantRepository
 from app.competition_lifecycle import CompetitionLifecycleRepository
+from app.db import transaction
 from app.draft import DraftRepository
 from app.fixtures import FixtureRepository
 from app.identity import IdentityRepository
@@ -349,8 +350,18 @@ def test_audit_summary_includes_role_grants_for_non_entry_coaches():
 
 def test_completed_season_reaches_the_season_complete_stage():
     g = build_governed_season(year=9199, close_preseason=True, open_round=True)
-    for target in ("active", "completed"):
-        g.seasons.transition_lifecycle(g.season.season_id, target, actor=ActorContext.anonymous_operator("admin"))
+    g.seasons.transition_lifecycle(g.season.season_id, "active", actor=ActorContext.anonymous_operator("admin"))
+    # Issue #195 (Codex review): `transition_lifecycle` itself now refuses
+    # `target="completed"` (only `app.season_completion.complete_season`
+    # may reach it, after its own readiness gate and award materialisation)
+    # -- this dashboard test cares only about display behaviour for a
+    # `completed` `lifecycle_state`, not season-completion's award/
+    # readiness semantics, so it forces the state directly via the same
+    # private in-transaction seam `complete_season` itself uses.
+    with transaction(g.database) as connection:
+        g.seasons._transition_lifecycle_in_transaction(
+            connection, g.season.season_id, "completed", actor=ActorContext.anonymous_operator("admin"), reason=None
+        )
     dashboard = _dashboard(g)
     assert dashboard["season"]["lifecycle_state"] == "completed"
     assert next(s for s in dashboard["workflow_map"] if s["stage"] == STAGE_SEASON_COMPLETE)["is_current"]

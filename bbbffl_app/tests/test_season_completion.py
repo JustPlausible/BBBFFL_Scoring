@@ -24,6 +24,30 @@ from tests.season_completion_helpers import build_completable_season
 ACTOR = ActorContext.anonymous_operator("test")
 
 
+# -- The completion command is the only path to "completed" -----------------
+
+
+def test_transition_lifecycle_refuses_to_reach_completed_directly():
+    """Codex review, PR #206: the generic, unconditional `transition_
+    lifecycle` must never be usable to reach `completed` directly -- that
+    would bypass `complete_season`'s readiness gate and award
+    materialisation entirely, permanently locking the season (via the write
+    fence) with missing or stale historical facts. Only `complete_season`
+    may perform this transition."""
+    built = build_completable_season(year=5102)
+    database, season_id = built["database"], built["season"].season_id
+
+    try:
+        SeasonRepository(database).transition_lifecycle(season_id, "completed", actor=ACTOR, reason="bypass attempt")
+        raise AssertionError("expected ValueError")
+    except ValueError as exc:
+        assert "app.season_completion.complete_season" in str(exc)
+
+    season = SeasonRepository(database).get_season(season_id)
+    assert season.lifecycle_state == "active"
+    assert SeasonAwardRepository(database).get_active(season_id, PREMIERSHIP) is None
+
+
 # -- Premiership/wooden-spoon recording --------------------------------------
 
 

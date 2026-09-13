@@ -3,7 +3,7 @@
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from app.audit import AuditEventRepository
+from app.audit import ActorContext, AuditEventRepository
 from app.db import transaction
 from app.round_mapping import RoundMappingRepository
 from app.season import SeasonRepository
@@ -47,7 +47,24 @@ def test_2026_replay_and_2027_operational_seasons_are_isolated(repository):
 def test_lifecycle_is_forward_only_and_audited(repository):
     season = repository.create_season(2027, "2027")
     assert repository.transition_lifecycle(season.season_id, "active").version == 2
-    assert repository.transition_lifecycle(season.season_id, "completed").version == 3
+    # Issue #195 (Codex review): the public `transition_lifecycle` must
+    # never reach `completed` directly -- only `app.season_completion.
+    # complete_season` may, after its own readiness gate and award
+    # materialisation. The underlying forward-only/audited mechanism for
+    # that leg is exercised directly against `_transition_lifecycle_in_
+    # transaction` below, the same private seam `complete_season` itself
+    # uses, since a bare `setup`/`2027`-shaped season here has no finals
+    # bracket or SuperScore rounds for a real `complete_season` call.
+    with pytest.raises(ValueError, match="app.season_completion.complete_season"):
+        repository.transition_lifecycle(season.season_id, "completed")
+
+    with transaction(repository.database) as connection:
+        assert (
+            repository._transition_lifecycle_in_transaction(
+                connection, season.season_id, "completed", actor=ActorContext.anonymous_operator("admin"), reason=None
+            ).version
+            == 3
+        )
     with pytest.raises(ValueError, match="completed -> active"):
         repository.transition_lifecycle(season.season_id, "active")
     events = AuditEventRepository(repository.database).list_events(entity_type="season", entity_id=season.season_id)

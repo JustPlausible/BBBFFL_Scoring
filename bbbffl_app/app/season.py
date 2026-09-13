@@ -270,6 +270,20 @@ class SeasonRepository:
         actor: ActorContext = ActorContext.anonymous_operator("admin"),
         reason: str | None = None,
     ) -> Season:
+        """Issue #195 (Codex review): `active -> completed` must never be
+        reachable through this generic, unconditional transition -- doing
+        so would bypass `app.season_completion.complete_season`'s readiness
+        gate, its premiership/wooden-spoon award materialisation, and its
+        `season.completed` audit event entirely, leaving the season
+        irreversibly `completed` (the write fence then permanently refuses
+        any repair) with missing or stale historical facts. Every other
+        transition (`setup -> active` included) is unaffected."""
+        if target == "completed":
+            raise ValueError(
+                "season completion must go through app.season_completion.complete_season -- it also verifies "
+                "every required round is final and materialises the premiership/wooden-spoon awards, none of "
+                "which transition_lifecycle('completed') alone would do"
+            )
         with transaction(self.database) as connection:
             return self._transition_lifecycle_in_transaction(connection, season_id, target, actor=actor, reason=reason)
 

@@ -26,6 +26,7 @@ from app.finals import (
     FinalsBracketAdvanceStateError,
     FinalsBracketRepository,
     StaleFinalsResultError,
+    _StaleMatchupDuringDownstreamCheck,
 )
 from app.finals_preflight import open_finals_week
 from tests.finals_helpers import (
@@ -576,22 +577,23 @@ def test_materialise_pairing_locks_the_round_lifecycle_row_before_the_pairing_ro
     assert locked_order == ["lifecycle", "pairing", "lifecycle", "pairing"]
 
 
-def test_downstream_play_state_retries_against_the_pairings_current_matchup_id():
+def test_downstream_play_state_aborts_when_the_pairings_matchup_id_changed_under_lock():
     """Codex review, PR #201 (fresh evidence beyond the earlier stale-
-    matchup-id fix): `_downstream_play_state`'s own artifact scan ran
-    against the *given* pairing_row's matchup_id, which could be stale
-    (None) if a concurrent `_materialise_pairing` attached a real matchup
-    -- and released this identical lifecycle lock -- in the gap between an
-    unlocked caller read and this function's own lifecycle lock being
-    acquired. Every matchup-gated check (ruling/calculation/official-
-    result) would then silently run against the stale None instead of the
-    real matchup, missing whatever a concurrent caller (e.g. a Scorer
-    ruling, which doesn't need this lifecycle lock at all) attached to it
-    in that window. This proves the fix by calling the method directly
-    with a deliberately stale pairing_row (matchup_id=None) against a
-    pairing whose *real*, current matchup already has a published official
-    result -- exactly the kind of artifact the stale path would have
-    missed entirely."""
+    matchup-id fix, twice over): `_downstream_play_state`'s own artifact
+    scan ran against the *given* pairing_row's matchup_id, which could be
+    stale (None) if a concurrent `_materialise_pairing` attached a real
+    matchup -- and released this identical lifecycle lock -- in the gap
+    between an unlocked caller read and this function's own lifecycle lock
+    being acquired. Retrying *within* this same transaction (an earlier
+    version of this fix) would then lock the newly-discovered matchup only
+    after lifecycle was already held -- the reverse of
+    `correct_matchup_result`'s own order, reopening the exact deadlock
+    cycle a still-earlier fix removed. It must instead abort the whole
+    transaction (`_StaleMatchupDuringDownstreamCheck`) so the caller can
+    restart from scratch and lock the now-known matchup before lifecycle.
+    Proven here by calling the method directly with a deliberately stale
+    pairing_row (matchup_id=None) against a pairing that is actually
+    already materialised."""
     built, bracket, repo = _bracket_with_mappings(2413)
     _week1_to_week2(built, repo, bracket, qf_result=(100, 50), ef_result=(50, 100))
     open_finals_week(built["database"], bracket.bracket_id, 2, actor=ACTOR)
@@ -605,9 +607,41 @@ def test_downstream_play_state_retries_against_the_pairings_current_matchup_id()
         "away_season_entry_id": first_semi.away_season_entry_id,
         "matchup_id": None,  # stale: captured before materialisation
     }
-    with transaction(built["database"]) as conn:
-        artifacts = repo._downstream_play_state(conn, stale_pairing_row)
+    with pytest.raises(_StaleMatchupDuringDownstreamCheck), transaction(built["database"]) as conn:
+        repo._downstream_play_state(conn, stale_pairing_row)
 
-    assert any(a["type"] == "official_result" and a["matchup_id"] == first_semi.matchup_id for a in artifacts), (
-        f"expected an official_result artifact for the real (not stale-None) matchup, got {artifacts}"
+
+def test_rewind_bracket_restarts_the_whole_transaction_when_downstream_check_finds_a_stale_matchup_id(monkeypatch):
+    """End-to-end counterpart of the direct-call test above: `rewind_bracket`
+    catches `_StaleMatchupDuringDownstreamCheck` and restarts its whole
+    transaction from scratch (never resuming mid-transaction), so the
+    retry's own fresh `_active_pairing_row` read picks up the real,
+    current matchup_id and the rewind completes correctly -- including its
+    matchup-id reconciliation -- despite the forced restart."""
+    built, bracket, repo = _bracket_with_mappings(2414)
+    week1_pairings = _week1_to_week2(built, repo, bracket, qf_result=(100, 50), ef_result=(50, 100))
+    open_finals_week(built["database"], bracket.bracket_id, 2, actor=ACTOR)
+    first_semi = next(p for p in repo.list_pairings(bracket.bracket_id, week_number=2) if p.slot == "first_semi")
+    assert first_semi.matchup_id is not None
+    correct_official_result(
+        built["database"], week1_pairings["ef"].matchup_id, 95, 60, reason="flips first_semi's away entry"
     )
+
+    real_downstream_play_state = FinalsBracketRepository._downstream_play_state
+    call_count = {"n": 0}
+
+    def force_one_stale_retry(self, conn, pairing_row):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise _StaleMatchupDuringDownstreamCheck()
+        return real_downstream_play_state(self, conn, pairing_row)
+
+    monkeypatch.setattr(FinalsBracketRepository, "_downstream_play_state", force_one_stale_retry)
+
+    applied = repo.rewind_bracket(bracket.bracket_id, 1, actor=ACTOR, reason="forced restart", apply=True)
+
+    assert not applied["blocked"]
+    assert call_count["n"] >= 2  # the forced first attempt, plus at least one successful retry
+    new_first_semi = next(p for p in repo.list_pairings(bracket.bracket_id, week_number=2) if p.slot == "first_semi")
+    assert new_first_semi.matchup_id is not None
+    assert new_first_semi.away_season_entry_id != first_semi.away_season_entry_id

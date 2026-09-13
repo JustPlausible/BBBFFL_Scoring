@@ -38,6 +38,16 @@ correction landed between your preview and apply calls, it silently
 proceeds from the corrected result rather than rejecting your now-stale
 preview. With it, a correction in that gap is detected under lock and
 `apply` aborts (`StaleFinalsResultError`) instead.
+
+`create-bracket apply` refuses (exit 1, no mutation) unless a
+finals-seeding snapshot (`scripts.finals_seeding_2026 apply`) already
+exists for the season against `--ordinary-competition-id`. This CLI is the
+approved 2026 replay/operator workflow, so it never falls back to the
+mathematical ladder order for a real bracket -- run finals-seeding `apply`
+first. `FinalsBracketRepository.create_bracket`'s own ladder fallback
+still exists and is still tested (issue #190 requires it as a generic
+repository capability), but it is for a caller other than this CLI, never
+for the approved 2026 path this script is.
 """
 
 from __future__ import annotations
@@ -57,6 +67,7 @@ from app.finals import (
     StaleSeedOrderError,
 )
 from app.finals_preflight import build_finals_week_preflight, open_finals_week
+from app.finals_seeding import FinalsSeedingRepository
 from app.migrations import migrate
 
 ACTOR = ActorContext.anonymous_operator("replay_operator")
@@ -75,6 +86,27 @@ def cmd_create_bracket_preview(database, args: argparse.Namespace) -> int:
 
 
 def cmd_create_bracket_apply(database, args: argparse.Namespace) -> int:
+    # Repo owner's decision, PR #201: the 2026 replay/operator workflow this
+    # CLI is the approved surface for must fail closed unless the
+    # authoritative finals-seeding snapshot already exists for this season
+    # -- never fall back to the mathematical ladder order for a real 2026
+    # bracket. `FinalsBracketRepository.create_bracket`'s own ladder
+    # fallback stays (issue #190 explicitly requires and tests it as a
+    # generic repository capability, e.g. for a season with no historical
+    # snapshot concept at all), but this CLI is not that caller.
+    snapshot = FinalsSeedingRepository(database).get_snapshot(args.season_id)
+    if snapshot is None or snapshot.competition_id != args.ordinary_competition_id:
+        print(
+            "Refusing to create the 2026 finals bracket: no finals-seeding snapshot exists yet for this "
+            "season against --ordinary-competition-id. This CLI is the approved 2026 replay/operator "
+            "workflow, which requires the authoritative historical snapshot to exist BEFORE bracket "
+            "creation -- run 'python -m scripts.finals_seeding_2026 ... apply' first. "
+            "(FinalsBracketRepository.create_bracket's own ladder fallback, used when no snapshot exists, "
+            "remains available as a generic repository capability for other callers -- never for this CLI.)",
+            file=sys.stderr,
+        )
+        return 1
+
     result = FinalsBracketRepository(database).create_bracket(
         args.season_id, args.competition_id, args.ordinary_competition_id, actor=ACTOR, reason=args.reason
     )

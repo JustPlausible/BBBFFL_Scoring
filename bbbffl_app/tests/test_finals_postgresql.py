@@ -480,3 +480,92 @@ def test_rewind_reloads_the_pairings_matchup_id_after_a_concurrent_materialisati
     ).fetchone()
     assert reused_matchup["home_season_entry_id"] == new_first_semi.home_season_entry_id
     assert reused_matchup["away_season_entry_id"] == new_first_semi.away_season_entry_id
+
+
+def test_submission_in_flight_behind_a_rewinds_lifecycle_lock_fails_closed_for_a_displaced_participant(
+    postgres_database, monkeypatch
+):
+    """Repo owner's decision on PR #201's participant-eligibility thread:
+    #190 must not leave open a race where a displaced team's in-flight
+    lineup submission -- already queued behind the identical
+    `bbbffl_round_lifecycle` row lock `rewind_bracket`'s own downstream-
+    play-state check acquires -- commits normally right after the rewind
+    changes the matchup's participants. `WeeklyLineupRepository.
+    _finalize_submission` now revalidates, immediately after acquiring
+    that same lock, that the submitting `season_entry_id` is still a
+    participant in some matchup for the round. Proven here by having
+    rewind genuinely hold that lifecycle lock open while a concurrent
+    submission for the about-to-be-displaced entry demonstrably blocks
+    trying to acquire it, then fails closed (`DisplacedParticipantError`)
+    once it resumes after the rewind commits."""
+    from app.lineups import DisplacedParticipantError, WeeklyLineupRepository
+    from app.player_pool import OwnershipRepository, PlayerPoolRepository
+
+    built, bracket, repo, pairings = _bracket_at_week1_played(postgres_database, 2907)
+    repo.advance_bracket(bracket.bracket_id, 1, actor=ACTOR, reason="advance to week 2")
+    open_finals_week(postgres_database, bracket.bracket_id, 2, actor=ACTOR)
+    first_semi = next(p for p in repo.list_pairings(bracket.bracket_id, week_number=2) if p.slot == "first_semi")
+    round_id = repo.get_week_round_id(bracket.bracket_id, 2)
+    displaced_entry = first_semi.away_season_entry_id  # EF winner -- displaced by an EF flip below
+
+    scope = postgres_database.execute(
+        "SELECT c.season_id, c.competition_id FROM bbbffl_round r "
+        "JOIN competition_stream c ON c.competition_id = r.competition_id WHERE r.bbbffl_round_id=?",
+        (round_id,),
+    ).fetchone()
+    OwnershipRepository(postgres_database).configure_squad_limit(scope["season_id"], 5)
+    player = PlayerPoolRepository(postgres_database).refresh_player(scope["season_id"], 970002, "Displaced Race Player")
+    OwnershipRepository(postgres_database).acquire(player.season_player_id, displaced_entry)
+    lineups = WeeklyLineupRepository(postgres_database)
+    draft = lineups.save_draft(
+        scope["season_id"],
+        scope["competition_id"],
+        round_id,
+        displaced_entry,
+        {"F1": player.season_player_id},
+        expected_revision=0,
+    )
+
+    # Flips the EF winner (originally away, 100 beats 50): home now wins,
+    # so first_semi's away entry (displaced_entry, the old EF winner) is
+    # replaced by the old EF loser once rewind commits.
+    correct_official_result(
+        postgres_database, pairings["ef"].matchup_id, 90, 10, reason="displaces first_semi's away entry"
+    )
+
+    rewind_holds_lock = threading.Event()
+    allow_rewind_to_commit = threading.Event()
+    real_append = finals_module.append_event
+    call_count = {"n": 0}
+
+    def pause_rewind(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            rewind_holds_lock.set()
+            assert allow_rewind_to_commit.wait(timeout=5)
+        return real_append(*args, **kwargs)
+
+    monkeypatch.setattr(finals_module, "append_event", pause_rewind)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        rewind = executor.submit(
+            repo.rewind_bracket, bracket.bracket_id, 1, actor=ACTOR, reason="displaces first_semi", apply=True
+        )
+        assert rewind_holds_lock.wait(timeout=5)
+
+        submission = executor.submit(
+            lineups.submit, draft.lineup_id, expected_draft_revision=1, expected_submission_version=0
+        )
+        time.sleep(0.2)
+        assert not submission.done(), "submission did not wait for the same lifecycle row lock the rewind holds"
+
+        allow_rewind_to_commit.set()
+        rewind_result = rewind.result(timeout=5)
+        with pytest.raises(DisplacedParticipantError):
+            submission.result(timeout=5)
+
+    assert not rewind_result["blocked"]
+    reloaded = postgres_database.execute(
+        "SELECT effective_submission_version FROM weekly_lineup WHERE lineup_id=?", (draft.lineup_id,)
+    ).fetchone()
+    assert reloaded["effective_submission_version"] is None, "the displaced entry's submission must never commit"

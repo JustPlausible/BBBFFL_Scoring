@@ -116,6 +116,15 @@ class LineupIntegrityError(ValueError):
     pass
 
 
+class DisplacedParticipantError(LineupIntegrityError):
+    """The submitting `season_entry_id` is no longer a participant in any
+    matchup for this round -- something changed the round's matchup
+    participants (e.g. a finals bracket correction/rewind, issue #190)
+    after this submission was drafted or queued. See
+    `_finalize_submission`'s revalidation, immediately after it acquires
+    the `bbbffl_round_lifecycle` row lock."""
+
+
 class RoundPublishedError(LineupIntegrityError):
     """A locked-lineup correction was attempted against a round that has
     already reached final publication (issue #137). This workflow never
@@ -653,6 +662,40 @@ class WeeklyLineupRepository:
                 "a submission while the BBBFFL round is live requires an active position-level lock "
                 "guard (see app.lockouts.LockoutRepository.guard); none was supplied"
             )
+        # Issue #190 (Codex review, PR #201): a finals bracket rewind can
+        # supersede a pairing and change its matchup's participants while
+        # a submission for the displaced entry is already in flight,
+        # queued behind this identical `bbbffl_round_lifecycle` row lock
+        # `rewind_bracket`'s own downstream-play-state check acquires
+        # before superseding. Revalidate, now that this lock is held (so
+        # nothing about the round's matchups can change again for the rest
+        # of this transaction), that `season_entry_id` is still a
+        # participant in *some* matchup for this round -- closing the race
+        # where a displaced entry's queued submission would otherwise
+        # commit normally right after the rewind. This is a generic
+        # `bbbffl_matchup` check, not a finals-specific one: for an
+        # ordinary round, whose matchup participants never change after
+        # fixture draw, it is always trivially satisfied. Only applies when
+        # the round actually has at least one matchup: a matchup-free round
+        # (SuperScore, by design -- `create_stream_matchup` is a finals-only
+        # primitive -- or a finals round whose own matchup has not been
+        # materialised yet) has nothing for this check to compare against
+        # and must stay exempt.
+        matchup_count = conn.execute(
+            "SELECT COUNT(*) AS n FROM bbbffl_matchup WHERE bbbffl_round_id=?", (lineup["bbbffl_round_id"],)
+        ).fetchone()["n"]
+        if matchup_count:
+            still_a_participant = conn.execute(
+                "SELECT 1 FROM bbbffl_matchup WHERE bbbffl_round_id=? AND "
+                "(home_season_entry_id=? OR away_season_entry_id=?)",
+                (lineup["bbbffl_round_id"], lineup["season_entry_id"], lineup["season_entry_id"]),
+            ).fetchone()
+            if not still_a_participant:
+                raise DisplacedParticipantError(
+                    f"season_entry_id {lineup['season_entry_id']} is no longer a participant in any matchup for "
+                    "this round -- the matchup's participants changed (e.g. a finals bracket correction/rewind) "
+                    "after this submission was drafted or queued; reload and resubmit"
+                )
         self._validate_players(conn, lineup["season_id"], positions, lock=True)
         self._validate_ownership(conn, lineup["season_entry_id"], positions)
         if lock_guard is not None:

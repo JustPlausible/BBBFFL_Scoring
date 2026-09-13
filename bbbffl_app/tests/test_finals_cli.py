@@ -20,7 +20,12 @@ from scripts.finals_bracket_2026 import (
     cmd_rewind,
     main,
 )
-from tests.finals_helpers import accept_week_mapping, build_finals_ready_season, seed_official_result
+from tests.finals_helpers import (
+    accept_week_mapping,
+    build_finals_ready_season,
+    seed_finals_seeding_snapshot_row,
+    seed_official_result,
+)
 
 
 def test_database_url_is_a_top_level_option_documented_before_the_subcommand():
@@ -135,6 +140,13 @@ def test_cli_preview_apply_round_trip_and_full_lifecycle_against_a_real_database
     )
     assert cmd_create_bracket_preview(database, preview_ns) == 0
 
+    # `create-bracket apply` is the approved 2026 operator workflow and
+    # refuses without a matching finals-seeding snapshot (repo owner's
+    # decision, PR #201) -- see test_cli_create_bracket_apply_refuses_
+    # without_a_matching_finals_seeding_snapshot for that refusal itself.
+    seed_order = [entry.season_entry_id for entry in built["entries"]]
+    seed_finals_seeding_snapshot_row(database, season_id, ordinary_id, seed_order)
+
     apply_ns = argparse.Namespace(
         season_id=season_id,
         competition_id=competition_id,
@@ -192,3 +204,43 @@ def test_cli_create_bracket_preview_reports_failure_exit_code_when_regular_seaso
         ordinary_competition_id=built["ordinary_competition_id"],
     )
     assert cmd_create_bracket_preview(built["database"], namespace) == 1
+
+
+def test_cli_create_bracket_apply_refuses_without_a_matching_finals_seeding_snapshot():
+    """Repo owner's decision, PR #201: `create-bracket apply` is the
+    approved 2026 replay/operator workflow and must never silently fall
+    back to the mathematical ladder order for a real bracket -- it refuses
+    (exit 1, no mutation) unless a finals-seeding snapshot already exists
+    for the season against `--ordinary-competition-id`. The repository's
+    own `create_bracket` ladder fallback remains a generic capability
+    (exercised directly, bypassing this CLI, by
+    tests/test_finals.py/tests/test_finals_postgresql.py), but this CLI is
+    never that caller."""
+    built = build_finals_ready_season(year=2503)
+    apply_ns = argparse.Namespace(
+        season_id=built["season"].season_id,
+        competition_id=built["finals_competition"].competition_id,
+        ordinary_competition_id=built["ordinary_competition_id"],
+        reason="should be refused without a snapshot",
+    )
+    assert cmd_create_bracket_apply(built["database"], apply_ns) == 1
+    assert (
+        FinalsBracketRepository(built["database"]).get_bracket(
+            built["season"].season_id, built["finals_competition"].competition_id
+        )
+        is None
+    )
+
+    # Once the matching snapshot exists, apply succeeds (`finals_seeding_
+    # snapshot` has at most one row per season, so this test can only ever
+    # seed the correctly-matching one, not also a mismatched one).
+    seed_order = [entry.season_entry_id for entry in built["entries"]]
+    seed_finals_seeding_snapshot_row(
+        built["database"], built["season"].season_id, built["ordinary_competition_id"], seed_order
+    )
+    assert cmd_create_bracket_apply(built["database"], apply_ns) == 0
+    created = FinalsBracketRepository(built["database"]).get_bracket(
+        built["season"].season_id, built["finals_competition"].competition_id
+    )
+    assert created is not None
+    assert created.seed_source == "snapshot"

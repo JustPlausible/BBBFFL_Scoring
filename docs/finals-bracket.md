@@ -47,7 +47,19 @@ Every later decision -- Week 1 pairing, a tie-break, an audit payload --
 reads the bracket's own frozen `finals_bracket_seed` rows, never a fresh
 ladder/snapshot read.
 
-This ladder-fallback path also locks the same `bbbffl_season` row
+**The ladder fallback above is a generic `FinalsBracketRepository`
+capability, not the approved 2026 replay/operator path.** Issue #190
+requires and tests it -- a caller with no historical-snapshot concept at
+all must still be able to create a bracket from the mathematical ladder --
+but `scripts/finals_bracket_2026.py`, the approved 2026 CLI, never uses it
+in practice: `create-bracket apply` refuses outright (exit 1, no mutation)
+unless a finals-seeding snapshot already exists for the season against
+`--ordinary-competition-id` (repo owner's decision, PR #201). Run
+`scripts.finals_seeding_2026 ... apply` first. This is a deterministic
+operator-workflow boundary, not merely a documented convention.
+
+This ladder-fallback path (for the generic repository caller that does
+still exercise it) also locks the same `bbbffl_season` row
 `app.finals_seeding.FinalsSeedingRepository.apply`'s own
 `_require_replay_context(locked=True)` locks before it creates the 2026
 historical snapshot, and re-checks for one under that lock -- closing the
@@ -64,12 +76,14 @@ forbids (`app.finals_seeding` "remain[s] a read-only dependenc[y], never
 depended upon in the other direction" -- see `app.finals`'s module
 docstring and `tests/test_architecture.py::
 test_finals_does_not_depend_on_routes_grand_final_lockouts_or_composition_root`'s
-reverse-dependency assertion). Closing this direction would require
-`app.finals_seeding` to consult `app.finals`'s own table, which #190 cannot
-do without crossing that boundary itself; the documented operator workflow
-(finals-seeding `apply` before finals-bracket `create-bracket`, per issue
-#187's and this issue's own CLIs, never run concurrently against the same
-season) is the only thing preventing it in practice today.
+reverse-dependency assertion). Repo owner's decision, PR #201: rather than
+crossing that boundary, the approved 2026 CLI closes this for the path
+that actually matters instead -- since `create-bracket apply` never
+reaches the ladder fallback at all (the snapshot-presence refusal above
+runs first), the real 2026 bracket can never be the ladder-sourced side of
+this race in the first place. The residual race remains reachable only
+through the generic repository API directly (bypassing this CLI), which
+issue #190's own approved operator workflow never does.
 
 ## Two confirmed policies (Steve, issue #190)
 
@@ -126,7 +140,7 @@ python -m scripts.finals_bracket_2026 --database-url ... \
     create-bracket apply --season-id ... --competition-id ... \
         --ordinary-competition-id ... --reason "..."
 python -m scripts.finals_bracket_2026 --database-url ... \
-    open-week --bracket-id <id> --week 1
+    open-week --bracket-id <id> --week 1 --reason "..."
 python -m scripts.finals_bracket_2026 --database-url ... \
     advance preview --bracket-id <id> --from-week 1
 python -m scripts.finals_bracket_2026 --database-url ... \

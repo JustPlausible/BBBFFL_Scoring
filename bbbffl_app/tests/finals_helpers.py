@@ -4,6 +4,7 @@ built on tests.midseason_draft_helpers.build_season) plus a `finals`-typed
 competition stream ready for `app.finals.FinalsBracketRepository`."""
 
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from sqlalchemy import text
 
@@ -77,6 +78,36 @@ def seed_official_result(database, matchup_id: str, home_score, away_score, *, v
             text("UPDATE bbbffl_matchup SET effective_official_version=:version WHERE matchup_id=:matchup_id"),
             {"version": version, "matchup_id": matchup_id},
         )
+
+
+def seed_finals_seeding_snapshot_row(database, season_id: str, competition_id: str, seed_order: list[str]) -> None:
+    """Directly insert a `finals_seeding_snapshot` row and its ten
+    `finals_seeding_snapshot_seed_row` children (`seed_order[0]` is seed
+    position 1, etc.), bypassing `FinalsSeedingRepository.apply`'s own
+    strict validation (year-2026-only, the ten real historical team names)
+    that most `build_finals_ready_season` test seasons (arbitrary years,
+    synthetic team names) could never satisfy. Exists purely so a test can
+    put a season in the "authoritative snapshot already exists" state
+    `scripts.finals_bracket_2026 create-bracket apply`'s snapshot-presence
+    refusal (repo owner's decision, PR #201) checks for, and so
+    `FinalsBracketRepository.create_bracket`'s own snapshot path (which the
+    presence of this row now makes it take) has a real, usable seed order
+    -- no `finals_seeding_snapshot_mathematical_row` children are inserted
+    since nothing this module exercises reads them."""
+    now = _now()
+    snapshot_id = f"test-snapshot-{season_id}"
+    with database.engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO finals_seeding_snapshot VALUES (:snapshot_id, :season_id, :competition_id, 20, :now)"),
+            {"snapshot_id": snapshot_id, "season_id": season_id, "competition_id": competition_id, "now": now},
+        )
+        for position, entry_id in enumerate(seed_order, 1):
+            conn.execute(
+                text(
+                    "INSERT INTO finals_seeding_snapshot_seed_row VALUES (:row_id, :snapshot_id, :position, :entry_id)"
+                ),
+                {"row_id": str(uuid4()), "snapshot_id": snapshot_id, "position": position, "entry_id": entry_id},
+            )
 
 
 def correct_official_result(database, matchup_id: str, home_score, away_score, *, reason: str):

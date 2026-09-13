@@ -156,6 +156,22 @@ class StaleFinalsResultError(RuntimeError):
     caller must reload and retry, never resume with the stale result."""
 
 
+class _StaleMatchupDuringDownstreamCheck(Exception):
+    """Internal control-flow signal, never raised across this class's own
+    public API: `_downstream_play_state` discovered a pairing's matchup_id
+    changed (a concurrent `_materialise_pairing` attached one) after it
+    had already locked the round's lifecycle row. Retrying within that
+    same transaction would require locking the newly-discovered matchup
+    *after* lifecycle -- the reverse of `correct_matchup_result`'s own
+    order -- reopening exactly the deadlock cycle an earlier fix removed
+    (Codex review, PR #201). `rewind_bracket` catches this and restarts
+    the whole transaction from scratch instead, so the retry locks the
+    now-known matchup before lifecycle, in the correct order."""
+
+
+_MAX_REWIND_RETRIES = 3
+
+
 class DownstreamPlayStateError(FinalsBracketError):
     """`rewind_bracket` found downstream play state attached to the pairing
     it was asked to supersede. Steve's confirmed policy requires failing
@@ -785,6 +801,7 @@ class FinalsBracketRepository:
         target_week = from_week + 1
         seed_rank = self._seed_rank(bracket_id)
         source_ids = self._source_matchup_ids(bracket_id, from_week)
+        self._require_complete_expected_versions(source_ids, expected_versions)
 
         with transaction(self.database) as conn:
             for slot in self._target_slots(from_week):
@@ -886,7 +903,13 @@ class FinalsBracketRepository:
         `StaleFinalsResultError` instead of silently superseding pairings
         derived from a result that changed since that preview (Codex
         review, PR #201) -- without it, `apply` derives from whatever the
-        prerequisite matchups' official results happen to be right now."""
+        prerequisite matchups' official results happen to be right now.
+        Retries the whole transaction from scratch, up to
+        `_MAX_REWIND_RETRIES` times, if `_downstream_play_state` discovers
+        a pairing's matchup_id changed while it held the round's lifecycle
+        lock (Codex review, PR #201) -- see
+        `_StaleMatchupDuringDownstreamCheck`'s own docstring for why this
+        must restart the transaction rather than retry within it."""
         if from_week not in (1, 2, 3):
             raise ValueError("from_week must be 1, 2, or 3")
         if apply and (not reason or not reason.strip()):
@@ -896,7 +919,41 @@ class FinalsBracketRepository:
         target_week = from_week + 1
         seed_rank = self._seed_rank(bracket_id)
         source_ids = self._source_matchup_ids(bracket_id, from_week)
+        self._require_complete_expected_versions(source_ids, expected_versions)
 
+        for _attempt in range(_MAX_REWIND_RETRIES):
+            try:
+                return self._rewind_bracket_transaction(
+                    bracket_id,
+                    from_week,
+                    target_week,
+                    seed_rank,
+                    source_ids,
+                    expected_versions,
+                    actor=actor,
+                    reason=reason,
+                    apply=apply,
+                )
+            except _StaleMatchupDuringDownstreamCheck:
+                continue
+        raise FinalsBracketAdvanceStateError(
+            f"rewind_bracket could not complete after {_MAX_REWIND_RETRIES} attempts, each racing a concurrent "
+            "materialisation; reload and retry"
+        )
+
+    def _rewind_bracket_transaction(
+        self,
+        bracket_id: str,
+        from_week: int,
+        target_week: int,
+        seed_rank: dict[str, int],
+        source_ids: set[str],
+        expected_versions: dict[str, int] | None,
+        *,
+        actor: ActorContext,
+        reason: str,
+        apply: bool,
+    ) -> dict:
         with transaction(self.database) as conn:
             locked = {mid: self._lock_matchup_version(conn, mid, expected_versions) for mid in sorted(source_ids)}
             derivation = self._derive(conn, bracket_id, from_week, seed_rank, locked)
@@ -1137,6 +1194,23 @@ class FinalsBracketRepository:
             ids.add(row["matchup_id"])
         return ids
 
+    def _require_complete_expected_versions(self, source_ids: set[str], expected_versions: dict | None) -> None:
+        """Codex review, PR #201: `_lock_matchup_version`'s own `.get()`
+        silently treats an *omitted* prerequisite matchup id as an opt-out
+        of its staleness check -- a caller-supplied `{}` or a partial map
+        would let a corrected result for the missing id through unnoticed,
+        even though supplying `expected_versions` at all is an explicit
+        request that every prerequisite be checked. Fail closed upfront,
+        before locking anything, if any prerequisite id is missing."""
+        if expected_versions is None:
+            return
+        missing = source_ids - expected_versions.keys()
+        if missing:
+            raise FinalsBracketError(
+                f"expected_versions is missing required prerequisite matchup id(s) {sorted(missing)} -- supply "
+                "every id preview reported, or omit expected_versions entirely to skip the staleness check"
+            )
+
     def _lock_matchup_version(self, conn, matchup_id: str, expected_versions: dict[str, int] | None) -> int:
         row = conn.execute(
             "SELECT effective_official_version FROM bbbffl_matchup WHERE matchup_id=?"
@@ -1376,22 +1450,22 @@ class FinalsBracketRepository:
             # matchup after materialisation but before this lock succeeded.
             # Re-read the pairing's current matchup_id now that lifecycle is
             # held -- it cannot change again for the rest of this
-            # transaction -- and retry this whole check once against the
-            # correct id if it changed, so the matchup-first lock/scan above
-            # actually runs against it.
+            # transaction. If it changed, the matchup-first lock/scan above
+            # ran against the wrong (stale) id -- but retrying *within*
+            # this same transaction would mean locking the newly-discovered
+            # matchup only now, after lifecycle is already held: the
+            # reverse of correct_matchup_result's own matchup-then-
+            # lifecycle order, and exactly the deadlock cycle an earlier
+            # fix removed. Abort this whole transaction instead
+            # (`_StaleMatchupDuringDownstreamCheck`, caught by
+            # `rewind_bracket`, which restarts it from scratch so the
+            # retry locks the now-known matchup before lifecycle, in the
+            # correct order) (Codex review, PR #201).
             current_matchup_id = conn.execute(
                 "SELECT matchup_id FROM finals_bracket_pairing WHERE pairing_id=?", (pairing_row["pairing_id"],)
             ).fetchone()["matchup_id"]
             if current_matchup_id != matchup_id:
-                return self._downstream_play_state(
-                    conn,
-                    {
-                        "pairing_id": pairing_row["pairing_id"],
-                        "home_season_entry_id": pairing_row["home_season_entry_id"],
-                        "away_season_entry_id": pairing_row["away_season_entry_id"],
-                        "matchup_id": current_matchup_id,
-                    },
-                )
+                raise _StaleMatchupDuringDownstreamCheck()
         if round_id and entries:
             placeholders = ",".join("?" for _ in entries)
             lineup_rows = conn.execute(
@@ -1404,12 +1478,36 @@ class FinalsBracketRepository:
                     {"type": "lineup_submission", "season_entry_ids": [row["season_entry_id"] for row in lineup_rows]}
                 )
         if round_id:
-            activation = conn.execute(
-                "SELECT 1 FROM bbbffl_round_lockout_trigger_activation a "
-                "JOIN bbbffl_round_lockout_trigger t ON t.trigger_id = a.trigger_id "
-                "WHERE t.bbbffl_round_id=? LIMIT 1",
-                (round_id,),
-            ).fetchone()
+            # Codex review, PR #201: `LockoutRepository._materialize_round_
+            # triggers` locks each configured trigger's own
+            # `bbbffl_round_lockout_trigger` header row (never this round's
+            # lifecycle row) before inserting its
+            # `bbbffl_round_lockout_trigger_activation` row -- holding the
+            # lifecycle lock above does not serialize against it at all, so
+            # an activation that commits concurrently, after an unlocked
+            # read here, would go unnoticed. Lock every trigger header for
+            # this round first (deterministic order, sorted by trigger_id,
+            # so two callers locking the same set can never deadlock on
+            # each other), so a concurrent activation is either already
+            # committed and visible, or its writer is still queued behind
+            # this same lock and cannot land before the supersede that
+            # follows this check.
+            trigger_ids = sorted(
+                r["trigger_id"]
+                for r in conn.execute(
+                    "SELECT trigger_id FROM bbbffl_round_lockout_trigger WHERE bbbffl_round_id=?"
+                    + _for_update_suffix(self.database),
+                    (round_id,),
+                ).fetchall()
+            )
+            activation = None
+            if trigger_ids:
+                placeholders = ",".join("?" for _ in trigger_ids)
+                activation = conn.execute(
+                    f"SELECT 1 FROM bbbffl_round_lockout_trigger_activation WHERE trigger_id IN ({placeholders}) "
+                    "LIMIT 1",
+                    tuple(trigger_ids),
+                ).fetchone()
             if activation:
                 artifacts.append({"type": "position_lock", "bbbffl_round_id": round_id})
         if matchup_id is not None:

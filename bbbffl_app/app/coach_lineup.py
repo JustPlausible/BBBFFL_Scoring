@@ -23,6 +23,7 @@ from app.lockouts import (
 from app.opening_round import DeferredSlotLockedError, OpeningRoundNominationRepository, OpeningRoundSelectionGuard
 from app.player_pool import OwnershipRepository, PlayerPoolRepository
 from app.round_mapping import RoundMappingRepository
+from app.superscore_participation import require_superscore_entry_eligible
 
 COACH_LINEUP_POSITIONS = POSITIONS
 EXPECTED_COACH_LINEUP_ERRORS = (
@@ -288,8 +289,8 @@ class CoachLineupService:
             "FROM season_entry e JOIN season_entry_coach_history a ON a.season_entry_id=e.season_entry_id "
             "AND a.ended_at IS NULL JOIN competition_stream c ON c.season_id=e.season_id "
             "JOIN bbbffl_round r ON r.competition_id=c.competition_id "
-            "WHERE a.coach_id=? AND c.stream_type IN ('ordinary','finals') "
-            "AND (c.stream_type='ordinary' OR EXISTS (SELECT 1 FROM finals_bracket_pairing fp "
+            "WHERE a.coach_id=? AND c.stream_type IN ('ordinary','finals','superscore') "
+            "AND (c.stream_type IN ('ordinary','superscore') OR EXISTS (SELECT 1 FROM finals_bracket_pairing fp "
             "JOIN finals_bracket_week fw ON fw.bracket_id=fp.bracket_id AND fw.week_number=fp.week_number "
             "WHERE fw.bbbffl_round_id=r.bbbffl_round_id AND fp.status='active' AND fp.matchup_id IS NOT NULL "
             "AND e.season_entry_id IN (fp.home_season_entry_id,fp.away_season_entry_id))) "
@@ -346,7 +347,7 @@ class CoachLineupService:
             "JOIN competition_stream c ON c.season_id=e.season_id "
             "JOIN bbbffl_round r ON r.competition_id=c.competition_id "
             "WHERE a.coach_id=? AND e.season_id=? AND r.bbbffl_round_id=? "
-            "AND c.stream_type IN ('ordinary','finals')",
+            "AND c.stream_type IN ('ordinary','finals','superscore')",
             (coach_id, season_id, round_id),
         ).fetchone()
         if row is None:
@@ -354,6 +355,7 @@ class CoachLineupService:
         resolved = dict(row)
         try:
             require_round_participant(self.database, resolved["competition_id"], round_id, resolved["season_entry_id"])
+            require_superscore_entry_eligible(self.database, resolved["competition_id"], resolved["season_entry_id"])
         except ValueError:
             return None
         return resolved
@@ -385,6 +387,7 @@ class CoachLineupService:
 
     def submit(self, draft, submission_version, coach_id):
         require_round_participant(self.database, draft.competition_id, draft.bbbffl_round_id, draft.season_entry_id)
+        require_superscore_entry_eligible(self.database, draft.competition_id, draft.season_entry_id)
         guard = OpeningRoundSelectionGuard(self.nominations, self.lockouts.guard(match_facts=self.match_facts))
         return ValidatedLineupSubmissionService(self.database, self.afl_client).submit(
             draft.lineup_id,
@@ -500,6 +503,14 @@ class CoachLineupService:
         )
 
     def _opponent(self, season_id, number, entry_id, *, round_id=None, stream_type="ordinary"):
+        if stream_type == "superscore":
+            # SuperScore has no head-to-head pairing at all -- ten
+            # independent entries ranked by total score, feeding a
+            # leaderboard later (#193), never a matchup/opponent
+            # presentation. `coach_lineup.html` already renders `opponent`
+            # conditionally (`{% if lineup.opponent %}`), so `None` here is
+            # sufficient to suppress the "vs ..." line with no template change.
+            return None
         if stream_type == "finals":
             row = self.database.execute(
                 "SELECT CASE WHEN p.home_season_entry_id=? THEN p.away_season_entry_id ELSE p.home_season_entry_id END opponent "

@@ -31,6 +31,8 @@ from app.config import BASE_DIR
 from app.csrf import issue_token, verify_token
 from app.lineup_adjudication import LineupAdjudicationService
 from app.round_review import calculation_staleness_for_entry
+from app.superscore_participation import SuperScoreParticipantError, require_superscore_entry_eligible
+from app.superscore_round import eligible_entries
 
 router = APIRouter(prefix="/api/admin/lineup-adjudication")
 page_router = APIRouter()
@@ -64,12 +66,12 @@ def _authorise_round(request: Request, principal: Principal, round_id: str) -> d
     never trust a browser-supplied season identifier as authority."""
     row = request.app.state.database.execute(
         "SELECT r.bbbffl_round_id, r.label round_label, r.sequence, r.competition_id, "
-        "c.season_id, s.label season_label, l.state round_state "
+        "c.season_id, c.stream_type, s.label season_label, l.state round_state "
         "FROM bbbffl_round r "
         "JOIN competition_stream c ON c.competition_id=r.competition_id "
         "JOIN bbbffl_season s ON s.season_id=c.season_id "
         "LEFT JOIN bbbffl_round_lifecycle l ON l.bbbffl_round_id=r.bbbffl_round_id "
-        "WHERE r.bbbffl_round_id=? AND c.stream_type IN ('ordinary','finals')",
+        "WHERE r.bbbffl_round_id=? AND c.stream_type IN ('ordinary','finals','superscore')",
         (round_id,),
     ).fetchone()
     if row is None:
@@ -82,6 +84,10 @@ def _authorise_entry(request: Request, scope: dict, season_entry_id: str) -> dic
     entry = request.app.state.identities.get_public_team(season_entry_id)
     if entry is None or entry.season_id != scope["season_id"]:
         raise HTTPException(status_code=404, detail="Private resource not found")
+    try:
+        require_superscore_entry_eligible(request.app.state.database, scope["competition_id"], season_entry_id)
+    except SuperScoreParticipantError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     coach = request.app.state.identities.get_current_coach(season_entry_id)
     return {"team_name": entry.team_name, "coach_name": coach.display_name if coach else None}
 
@@ -209,10 +215,16 @@ def list_round_entries(round_id: str, request: Request, principal: Principal = D
     an operator only ever needs to adjudicate the ones that do not."""
     scope = _authorise_round(request, principal, round_id)
     state = request.app.state
-    matchups = state.lifecycle.list_matchups(round_id)
-    entry_ids = sorted(
-        {matchup.home_season_entry_id for matchup in matchups} | {m.away_season_entry_id for m in matchups}
-    )
+    if scope["stream_type"] == "superscore":
+        # SuperScore has no matchups at all -- all ten season entries are
+        # eligible participants (docs/2026-finals-superscore-design.md's
+        # confirmed rule), never derived from a matchup pairing.
+        entry_ids = eligible_entries(state.database, scope["season_id"])
+    else:
+        matchups = state.lifecycle.list_matchups(round_id)
+        entry_ids = sorted(
+            {matchup.home_season_entry_id for matchup in matchups} | {m.away_season_entry_id for m in matchups}
+        )
     entries = []
     for entry_id in entry_ids:
         team = state.identities.get_public_team(entry_id)

@@ -105,6 +105,11 @@ EXPECTED_TABLES = {
     "finals_bracket_week",
     "finals_bracket_pairing",
     "finals_bracket_elimination",
+    "superscore_stream",
+    "superscore_entry_review_state",
+    "superscore_entry_slot_ruling",
+    "superscore_entry_interchange_ruling",
+    "superscore_entry_override",
 }
 
 

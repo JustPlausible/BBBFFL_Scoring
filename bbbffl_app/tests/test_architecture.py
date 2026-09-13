@@ -144,6 +144,27 @@ ROUND_REVIEW = {"app.round_review"}
 # dependencies, never depended upon in the other direction.
 FINALS = {"app.finals", "app.finals_review"}
 
+# SuperScore roster, eligibility and round lifecycle setup (issue #192): the
+# SuperScore-stream counterpart to `app.finals`/`app.round_review` -- it
+# sits directly on top of the persisted season model (`app.competition_
+# lifecycle` for the round-lifecycle transaction, `app.round_mapping` for
+# its AFL-round-mapping confirmation) rather than being a sibling of it, for
+# the same reason `app.finals` does (see this file's FINALS/ROUND_REVIEW
+# comments): `app.superscore_review`'s entry-scoped ruling boundary is
+# meant to be composed the same way `app.round_review`'s matchup-keyed one
+# is. `app.superscore_round` owns creating the `superscore`-typed
+# competition stream/rounds and the durable per-entry `superscore_entry_
+# review_state` row set (gap #4); `app.superscore_review` owns the
+# entry-scoped DNP/Interchange/override ruling boundary (gap #2), keyed by
+# `(bbbffl_round_id, season_entry_id, ...)` since SuperScore has no
+# `matchup_id` at all. Neither imports the other's sibling table by SQL --
+# `app.lineups`'s additive review-state-advance/ruling-invalidation hooks
+# (gaps #3-#4) reach into these tables directly, by raw SQL, exactly the
+# way it already reaches into `app.round_review`'s tables, never by
+# importing either of these two modules back (see `test_season_model_and_
+# lockouts_do_not_depend_on_superscore` below).
+SUPERSCORE = {"app.superscore_round", "app.superscore_review"}
+
 # Anonymous ordinary-season presentation/read service (issue #78).  It is an
 # allow-listed DTO layer above the persisted review and ladder boundaries;
 # routes may import it, while it never depends on HTTP or the composition root.
@@ -191,6 +212,7 @@ AUTH = {"app.auth", "app.authorization"}
 COACH_LINEUP = {
     "app.coach_lineup",
     "app.finals_participation",
+    "app.superscore_participation",
     "app.lineup_correction",
     "app.lineup_adjudication",
 }
@@ -319,6 +341,7 @@ ALL_GROUPS = (
     | REPLAY
     | ROUND_REVIEW
     | FINALS
+    | SUPERSCORE
     | PUBLIC_READ_MODEL
     | OPENING_ROUND
     | AUTH
@@ -612,6 +635,28 @@ def test_finals_does_not_depend_on_routes_grand_final_lockouts_or_composition_ro
 
     for module in sorted(SEASON_MODEL | LOCKOUTS | WEEKLY_SUBMISSION_SOURCES | REPLAY_BOOTSTRAP):
         assert "app.finals" not in graph[module], f"{module} must not depend on app.finals"
+
+
+def test_superscore_does_not_depend_on_routes_grand_final_lockouts_or_composition_root(graph):
+    """`app.superscore_round`/`app.superscore_review` (issue #192) sit
+    directly on the season model -- but must stay a sibling of the Grand
+    Final vertical and must never depend on lockouts, routes, or the
+    composition root, exactly like `app.finals`. The reverse direction also
+    holds: neither the season model nor lockouts/weekly-submission-sources
+    may depend back on either -- `app.lineups`'s additive review-state-
+    advance/ruling-invalidation hooks (issue #192 gaps #3-#4) reach into
+    `superscore_entry_review_state`/`superscore_entry_slot_ruling`/
+    `superscore_entry_interchange_ruling`/`superscore_entry_override` by
+    raw SQL, exactly as it already does for `app.round_review`'s tables,
+    never by importing either module."""
+    forbidden = GRAND_FINAL_VERTICAL | LOCKOUTS | ROUTES | COMPOSITION_ROOT
+    for module in sorted(SUPERSCORE):
+        offending = graph[module] & forbidden
+        assert not offending, f"{module} must not depend on {sorted(offending)}"
+
+    for module in sorted(SEASON_MODEL | LOCKOUTS | WEEKLY_SUBMISSION_SOURCES | REPLAY_BOOTSTRAP):
+        offending = graph[module] & SUPERSCORE
+        assert not offending, f"{module} must not depend on {sorted(offending)}"
 
 
 def test_opening_round_does_not_depend_on_grand_final_routes_or_composition_root(graph):

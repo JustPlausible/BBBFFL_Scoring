@@ -743,6 +743,26 @@ class WeeklyLineupRepository:
         )
         if not result.rowcount:
             raise LineupConflictError("concurrent submission")
+        # Issue #192 gap #4: every write that changes an entry's effective
+        # submitted lineup for a SuperScore round -- the initial submission,
+        # an unlocked resubmission, or a post-lockout correction alike --
+        # must lock and advance that entry's durable `superscore_entry_
+        # review_state` row in the same transaction, so a stale calculation
+        # (#193) can never look current after the effective lineup it was
+        # computed from has since changed. `_finalize_submission` is the
+        # single choke point every submission source (`submit`,
+        # `submit_positions`, `submit_correction`, `submit_adjudicated_
+        # first_submission`) funnels through, so this one call covers all
+        # of them uniformly. A safe no-op for ordinary/finals rounds: raw
+        # SQL against a table that only ever has rows for a SuperScore
+        # round -- mirroring how `_invalidate_stale_review_state` below
+        # already reaches into `app.round_review`'s tables by raw SQL
+        # rather than importing that (higher-layer) module; `app.
+        # superscore_round`/`app.superscore_review` sit at the identical
+        # higher layer and must not be imported here either. A failed
+        # mutation never reaches this line at all (an earlier raise rolls
+        # back the whole transaction), so nothing advances on failure.
+        self._advance_superscore_review_state(conn, lineup["bbbffl_round_id"], lineup["season_entry_id"])
         append_event(
             conn,
             actor=actor,
@@ -1113,6 +1133,22 @@ class WeeklyLineupRepository:
         return self.get_submission(lineup_id, version), correlation_id
 
     @staticmethod
+    def _advance_superscore_review_state(conn, bbbffl_round_id: str, season_entry_id: str) -> None:
+        """Issue #192 gap #4: lock-and-advance the entry's durable
+        `superscore_entry_review_state.review_version` -- matches zero rows
+        (a harmless no-op) for an ordinary/finals round, since that table
+        only ever has rows for a SuperScore round created via `app.
+        superscore_round.setup_round`. Calculation persistence (#193) must
+        never call anything resembling this: it locks and compares this
+        same row, but only ever records the version it was computed
+        against (`computed_as_of_review_version`), never advances it."""
+        conn.execute(
+            "UPDATE superscore_entry_review_state SET review_version = review_version + 1, updated_at=? "
+            "WHERE bbbffl_round_id=? AND season_entry_id=?",
+            (_now(), bbbffl_round_id, season_entry_id),
+        )
+
+    @staticmethod
     def _invalidate_stale_review_state(conn, bbbffl_round_id: str, season_entry_id: str, changed_positions) -> list:
         """Two correctness gaps closed together, both found by review of
         this correction feature:
@@ -1152,26 +1188,67 @@ class WeeklyLineupRepository:
            clearing an override via `RoundReviewRepository.record_override(
            override_score=None)` already does.
 
-        Raw SQL against `app.round_review`'s tables, not an import of that
-        module -- `app.round_review` sits *above* the season model
-        (app.lineups), so the reverse dependency this method would need if
-        it called into `app.round_review` directly is architecturally
+        3. Issue #192 gap #3: SuperScore has no `bbbffl_matchup` row at all
+           (there is no matchup to derive from), so the matchup loop below
+           is already a safe no-op for a SuperScore round. `superscore_
+           entry_slot_ruling`/`superscore_entry_interchange_ruling`/
+           `superscore_entry_override` are the entry-scoped counterparts of
+           the three matchup-keyed tables above (see `app.superscore_
+           review`), and the identical correctness gap applies: a DNP
+           ruling/override recorded against the *pre-correction* occupant
+           of a position must not silently keep applying to whichever
+           player the correction just installed there instead. Cleared
+           here, unconditionally, before the matchup loop -- always a safe
+           no-op for an ordinary/finals round, since those tables only ever
+           have rows for a SuperScore round. This must be in-transaction,
+           not a disconnected external wrapper: `submit_correction` opens
+           and commits its own transaction internally and exposes neither
+           that connection nor a callback to any caller.
+
+        Raw SQL against `app.round_review`'s/`app.superscore_review`'s own
+        tables, not an import of either module -- both sit *above* the
+        season model (app.lineups), so the reverse dependency this method
+        would need if it called into either directly is architecturally
         disallowed (see tests/test_architecture.py); this mirrors how this
         method already reaches into `weekly_lineup_lock`/
         `opening_round_nomination` by table name rather than by import. A
-        round with no persisted matchups yet (or no rulings/overrides at
+        round with no persisted matchups/SuperScore rulings yet (or none at
         all -- the overwhelming common case) is a safe no-op.
 
         Returns the list of positions any ruling/override/interchange
         ruling was actually invalidated for, for the correction's own audit
         payload.
         """
+        invalidated: set = set()
+        for position in changed_positions:
+            ruling_result = conn.execute(
+                "DELETE FROM superscore_entry_slot_ruling WHERE bbbffl_round_id=? AND season_entry_id=? AND slot=?",
+                (bbbffl_round_id, season_entry_id, position),
+            )
+            override_result = conn.execute(
+                "DELETE FROM superscore_entry_override WHERE bbbffl_round_id=? AND season_entry_id=? AND position=?",
+                (bbbffl_round_id, season_entry_id, position),
+            )
+            if ruling_result.rowcount or override_result.rowcount:
+                invalidated.add(position)
+        superscore_interchange_row = conn.execute(
+            "SELECT target_position FROM superscore_entry_interchange_ruling "
+            "WHERE bbbffl_round_id=? AND season_entry_id=?",
+            (bbbffl_round_id, season_entry_id),
+        ).fetchone()
+        if superscore_interchange_row is not None and (
+            "Interchange" in changed_positions or superscore_interchange_row["target_position"] in changed_positions
+        ):
+            conn.execute(
+                "DELETE FROM superscore_entry_interchange_ruling WHERE bbbffl_round_id=? AND season_entry_id=?",
+                (bbbffl_round_id, season_entry_id),
+            )
+            invalidated.add("Interchange")
         matchups = conn.execute(
             "SELECT matchup_id FROM bbbffl_matchup WHERE bbbffl_round_id=? "
             "AND (home_season_entry_id=? OR away_season_entry_id=?)",
             (bbbffl_round_id, season_entry_id, season_entry_id),
         ).fetchall()
-        invalidated: set = set()
         for matchup in matchups:
             matchup_id = matchup["matchup_id"]
             conn.execute(

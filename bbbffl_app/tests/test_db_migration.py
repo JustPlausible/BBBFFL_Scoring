@@ -99,6 +99,12 @@ EXPECTED_TABLES = {
     "finals_seeding_snapshot_mathematical_row",
     "finals_seeding_snapshot_reference",
     "finals_seeding_snapshot_seed_row",
+    "finals_bracket",
+    "finals_bracket_seed",
+    "finals_bracket_result_reference",
+    "finals_bracket_week",
+    "finals_bracket_pairing",
+    "finals_bracket_elimination",
 }
 
 

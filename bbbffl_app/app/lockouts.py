@@ -441,6 +441,19 @@ class RoundMatchFactsProvider:
             raise MatchResolutionError(f"BBBFFL round {bbbffl_round_id} has no accepted AFL round mapping")
         return self._afl_client.get_matches(mapping.afl_round_id)
 
+    def matches_for_materialization(self, bbbffl_round_id: str) -> tuple[list[Match], int]:
+        """Fetch facts and retain the accepted mapping revision they used.
+
+        Trigger materialisation revalidates this revision after acquiring
+        the round lock, so provider I/O stays outside the database critical
+        section without allowing facts from a superseded mapping to fire a
+        trigger.
+        """
+        mapping = self._round_mappings.resolve(bbbffl_round_id)
+        if mapping is None:
+            raise MatchResolutionError(f"BBBFFL round {bbbffl_round_id} has no accepted AFL round mapping")
+        return self._afl_client.get_matches(mapping.afl_round_id), mapping.revision
+
     def byes_for(self, bbbffl_round_id: str) -> frozenset[int] | None:
         """This round's confirmed AFL bye clubs, straight from afl-api's own
         round metadata (`Round.byes`) -- the identical positive signal
@@ -1460,16 +1473,54 @@ class LockoutRepository:
         standalone transaction. Idempotent (`ON CONFLICT DO NOTHING` via
         `_insert_trigger_activation`); a round with no configured triggers
         is a safe no-op."""
+        # Provider retrieval may perform mapping resolution and network I/O.
+        # It must finish before taking the parent row lock: ordinary lock-
+        # state/page-render requests must not serialize configuration behind
+        # a slow AFL provider call. Production providers return the mapping
+        # revision used for the fetch; fixed test/replay providers have no
+        # mutable mapping boundary and use the legacy matches_for contract.
+        fetch_for_materialization = getattr(match_facts, "matches_for_materialization", None)
+        if callable(fetch_for_materialization):
+            matches, fetched_mapping_revision = fetch_for_materialization(bbbffl_round_id)
+        else:
+            matches = match_facts.matches_for(bbbffl_round_id)
+            fetched_mapping_revision = None
+        matches_by_id = {match.match_id: match for match in matches}
+
         with transaction(self.database) as conn:
-            trigger_ids = [
+            # Take the stable parent lock first. Besides preserving the
+            # zero-trigger/configure serialization, this gives every
+            # round-wide trigger operation the same outer lock order.
+            conn.execute(
+                "SELECT 1 FROM bbbffl_round WHERE bbbffl_round_id=?" + _for_update_suffix(self.database),
+                (bbbffl_round_id,),
+            )
+            if fetched_mapping_revision is not None:
+                mapping = conn.execute(
+                    "SELECT r.revision FROM round_afl_mapping m "
+                    "JOIN round_afl_mapping_revision r "
+                    "ON r.mapping_id=m.mapping_id AND r.revision=m.current_revision "
+                    "WHERE m.bbbffl_round_id=? AND r.state='accepted'",
+                    (bbbffl_round_id,),
+                ).fetchone()
+                current_revision = mapping["revision"] if mapping else None
+                if current_revision != fetched_mapping_revision:
+                    raise MatchResolutionError(
+                        "the accepted AFL round mapping changed while match facts were being fetched; "
+                        "retry lock-state evaluation with fresh facts"
+                    )
+            # A bulk SELECT ... FOR UPDATE may acquire locks in query-plan
+            # order; sorting its returned rows afterwards is too late. Read
+            # identifiers unlocked, then acquire each header lock in the
+            # same deterministic order used by finals rewind.
+            trigger_ids = sorted(
                 r["trigger_id"]
                 for r in conn.execute(
                     "SELECT trigger_id FROM bbbffl_round_lockout_trigger WHERE bbbffl_round_id=?", (bbbffl_round_id,)
                 ).fetchall()
-            ]
+            )
             if not trigger_ids:
                 return
-            matches_by_id = {match.match_id: match for match in match_facts.matches_for(bbbffl_round_id)}
             for trigger_id in trigger_ids:
                 # Lock this trigger's header row so a concurrent
                 # LockoutTriggerRepository.replace (which takes the same

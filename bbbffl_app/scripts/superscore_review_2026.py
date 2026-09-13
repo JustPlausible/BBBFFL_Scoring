@@ -153,6 +153,13 @@ def cmd_override(database, args: argparse.Namespace) -> int:
 
 def cmd_status(database, args: argparse.Namespace) -> int:
     reviews = SuperScoreReviewRepository(database)
+    # Codex review (P2): a recorded ruling with target_position=None
+    # (explicit "no coverage", via --no-coverage) and no ruling recorded at
+    # all both used to print as bare `null` here, indistinguishably -- only
+    # the former actually clears the unresolved-interchange publication
+    # blocker, so an operator reading this status could not tell which one
+    # they were looking at. `recorded` makes that distinction explicit.
+    interchange = reviews.get_interchange_ruling(args.round_id, args.season_entry_id)
     _print(
         {
             "round_id": args.round_id,
@@ -162,11 +169,10 @@ def cmd_status(database, args: argparse.Namespace) -> int:
                 slot: {"dnp": ruling.dnp}
                 for slot, ruling in reviews.get_slot_rulings(args.round_id, args.season_entry_id).items()
             },
-            "interchange_ruling": (
-                reviews.get_interchange_ruling(args.round_id, args.season_entry_id).target_position
-                if reviews.get_interchange_ruling(args.round_id, args.season_entry_id)
-                else None
-            ),
+            "interchange_ruling": {
+                "recorded": interchange is not None,
+                "target_position": interchange.target_position if interchange is not None else None,
+            },
             "overrides": {
                 position: override.override_score
                 for position, override in reviews.get_overrides(args.round_id, args.season_entry_id).items()

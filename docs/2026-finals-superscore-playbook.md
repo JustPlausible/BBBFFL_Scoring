@@ -220,14 +220,17 @@ since neither stream depends on the other's lifecycle.
         --database-url <url> ensure-round --competition-id <superscore_competition_id> --round-number <N>
       ```
 
-   b. **Confirm its AFL-round mapping**, sourced from the *corresponding
-      finals week's own accepted mapping* (never re-derived independently
-      -- see `scripts/superscore_round_2026.py`'s own docstring):
+   b. **Confirm its AFL-round mapping**, derived directly from the
+      *corresponding finals week's own accepted mapping* via
+      `--finals-round-id` -- never typed independently (Codex review, PR
+      #207: `AflApiReferenceValidator.round_exists` alone cannot catch an
+      operator typo naming a real but wrong AFL round; only comparing
+      against the finals week's own accepted mapping can):
 
       ```bash
       $FINALS run --rm -v "$PWD/bbbffl_app:/app" app python -m scripts.superscore_round_2026 \
         --database-url <url> confirm-mapping --round-id <ss_round_id> \
-        --afl-season-id <year> --afl-round-id <afl_round_id_from_finals_week_N> \
+        --finals-round-id <the_concurrent_finals_week_N_round_id> \
         --evidence-path /replay/evidence/2026-second-half.json \
         --checkpoint-path /replay/state/checkpoint.json \
         --reason "2026 finals replay: SS<N> mapping, concurrent with finals week <N>"

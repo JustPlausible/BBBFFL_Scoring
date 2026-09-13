@@ -40,6 +40,10 @@ class CompletedSeasonError(SuperScoreResultError):
     pass
 
 
+class MissingCorrectionReasonError(SuperScoreResultError):
+    pass
+
+
 @dataclass(frozen=True)
 class CalculatedEntry:
     bbbffl_round_id: str
@@ -229,7 +233,7 @@ class SuperScoreLeaderboardService:
                 "SELECT r.competition_id,c.season_id,l.state FROM bbbffl_round r "
                 "JOIN competition_stream c ON c.competition_id=r.competition_id "
                 "JOIN bbbffl_round_lifecycle l ON l.bbbffl_round_id=r.bbbffl_round_id "
-                "WHERE r.bbbffl_round_id=? AND c.stream_type='superscore'",
+                "WHERE r.bbbffl_round_id=? AND c.stream_type='superscore'" + _for_update_suffix(self.database),
                 (round_id,),
             ).fetchone()
             if context is None or context["state"] not in ("review", "final"):
@@ -271,6 +275,8 @@ class SuperScoreLeaderboardService:
                 (round_id,),
             ).fetchone()
             version, now = version_row["version"], _now()
+            if version > 1 and (reason is None or not reason.strip()):
+                raise MissingCorrectionReasonError("a non-empty reason is required to correct a leaderboard")
             conn.execute(
                 "INSERT INTO superscore_leaderboard_revision VALUES (?,?,?,?,?,?,?)",
                 (round_id, version, now, actor.actor_type, actor.actor_id, actor.actor_role, reason),
@@ -287,6 +293,7 @@ class SuperScoreLeaderboardService:
                     "publication": {
                         "leaderboard_version": version,
                         "published_at": now,
+                        "published_by_type": actor.actor_type,
                         "published_by": actor.actor_id,
                         "published_by_role": actor.actor_role,
                         "reason": reason,

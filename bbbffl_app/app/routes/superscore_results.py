@@ -5,7 +5,14 @@ from pydantic import BaseModel
 
 from app.audit import ActorContext
 from app.authorization import Principal, require_authenticated, require_role_covers_season, resolve_principal
+from app.csrf import verify_token
 from app.routes.round_review import require_round_reviewer
+from app.superscore_results import (
+    CompletedSeasonError,
+    StaleSuperScoreEvidenceError,
+    StaleSuperScorePublicationError,
+    SuperScoreResultError,
+)
 
 router = APIRouter(prefix="/api/season-superscore")
 
@@ -23,6 +30,20 @@ def _round(request, round_id):
     if row is None:
         raise HTTPException(404, "Unknown SuperScore round")
     return row
+
+
+def _csrf(request: Request, principal: Principal) -> None:
+    """Apply the shared double-submit check only to cookie sessions."""
+    if principal.session_id is not None and not verify_token(
+        request.app.state.settings.session_secret,
+        request.cookies.get("bbbffl_csrf"),
+        request.headers.get("X-CSRF-Token"),
+    ):
+        raise HTTPException(403, "Invalid CSRF token")
+
+
+def _operator_actor(principal: Principal) -> ActorContext:
+    return ActorContext("anonymous_operator", principal.coach_id, principal.role.value)
 
 
 @router.get("/rounds/{round_id}/leaderboard")
@@ -59,6 +80,7 @@ def scorer_leaderboard(round_id: str, request: Request, principal: Principal = D
 def calculate(round_id: str, request: Request, principal: Principal = Depends(require_round_reviewer)):
     row = _round(request, round_id)
     require_role_covers_season(request, principal, row["season_id"])
+    _csrf(request, principal)
     return request.app.state.superscore_results.calculations.calculate_round(round_id)
 
 
@@ -71,8 +93,14 @@ def publish(
 ):
     row = _round(request, round_id)
     require_role_covers_season(request, principal, row["season_id"])
-    return request.app.state.superscore_results.publish(
-        round_id,
-        actor=ActorContext("coach", principal.coach_id, principal.role.value),
-        reason=payload.reason,
-    )
+    _csrf(request, principal)
+    try:
+        return request.app.state.superscore_results.publish(
+            round_id, actor=_operator_actor(principal), reason=payload.reason
+        )
+    except StaleSuperScoreEvidenceError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except CompletedSeasonError as exc:
+        raise HTTPException(423, str(exc)) from exc
+    except (StaleSuperScorePublicationError, SuperScoreResultError) as exc:
+        raise HTTPException(409, str(exc)) from exc

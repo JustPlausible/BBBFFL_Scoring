@@ -62,12 +62,43 @@ def upgrade():
         sa.CheckConstraint("rank >= 1", name="ck_superscore_result_rank"),
         sa.CheckConstraint("is_joint_winner IN (0,1)", name="ck_superscore_joint_winner"),
     )
+    bind = op.get_bind()
+    publication_tables = ("superscore_leaderboard_revision", "superscore_official_result")
+    if bind.dialect.name == "sqlite":
+        for table in publication_tables:
+            op.execute(
+                f"CREATE TRIGGER {table}_immutable_update BEFORE UPDATE ON {table} "
+                f"BEGIN SELECT RAISE(ABORT, '{table} history is immutable'); END"
+            )
+            op.execute(
+                f"CREATE TRIGGER {table}_immutable_delete BEFORE DELETE ON {table} "
+                f"BEGIN SELECT RAISE(ABORT, '{table} history is immutable'); END"
+            )
+    else:
+        op.execute(
+            "CREATE FUNCTION reject_immutable_superscore_result_change() RETURNS trigger AS $$ "
+            "BEGIN RAISE EXCEPTION 'SuperScore publication history is immutable'; END; $$ LANGUAGE plpgsql"
+        )
+        for table in publication_tables:
+            op.execute(
+                f"CREATE TRIGGER {table}_immutable BEFORE UPDATE OR DELETE ON {table} "
+                "FOR EACH ROW EXECUTE FUNCTION reject_immutable_superscore_result_change()"
+            )
 
 
 def downgrade():
     bind = op.get_bind()
     if bind.execute(sa.text("SELECT COUNT(*) FROM superscore_leaderboard_revision")).scalar_one():
         raise RuntimeError("0032 downgrade refused: published SuperScore history would be lost")
+    publication_tables = ("superscore_official_result", "superscore_leaderboard_revision")
+    if bind.dialect.name == "sqlite":
+        for table in publication_tables:
+            op.execute(f"DROP TRIGGER IF EXISTS {table}_immutable_update")
+            op.execute(f"DROP TRIGGER IF EXISTS {table}_immutable_delete")
+    else:
+        for table in publication_tables:
+            op.execute(f"DROP TRIGGER IF EXISTS {table}_immutable ON {table}")
+        op.execute("DROP FUNCTION reject_immutable_superscore_result_change() CASCADE")
     op.drop_table("superscore_official_result")
     op.drop_table("superscore_leaderboard_revision")
     op.drop_table("superscore_entry_calculation")

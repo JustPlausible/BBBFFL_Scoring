@@ -4,7 +4,9 @@ import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import DatabaseError
 
 from app.afl_client import Match, PlayerStatLine, Team
 from app.audit import ActorContext
@@ -13,7 +15,11 @@ from app.db import connect
 from app.lineups import POSITIONS
 from app.migrations import migrate
 from app.season import _now
-from app.superscore_results import SuperScoreCalculationService, SuperScoreLeaderboardService
+from app.superscore_results import (
+    MissingCorrectionReasonError,
+    SuperScoreCalculationService,
+    SuperScoreLeaderboardService,
+)
 from tests.superscore_helpers import build_superscore_ready_season, open_superscore_round
 
 
@@ -110,6 +116,68 @@ def test_publication_is_one_immutable_ten_entry_revision_with_joint_winners():
     assert [item["rank"] for item in second["entries"]] != [item["rank"] for item in first["entries"]]
     assert built["database"].execute("SELECT COUNT(*) AS n FROM bbbffl_official_result").fetchone()["n"] == 0
 
+    header = (
+        built["database"]
+        .execute("SELECT * FROM superscore_leaderboard_revision WHERE bbbffl_round_id=? AND version=2", (round_id,))
+        .fetchone()
+    )
+    assert header["published_by_type"] == "anonymous_operator"
+    assert header["reason"] == "correct AFL evidence"
+    audit = (
+        built["database"]
+        .execute(
+            "SELECT actor_type,actor_id,actor_role,reason FROM audit_event "
+            "WHERE action='superscore.leaderboard.corrected' AND entity_id=?",
+            (round_id,),
+        )
+        .fetchone()
+    )
+    assert dict(audit) == {
+        "actor_type": "anonymous_operator",
+        "actor_id": "scorer",
+        "actor_role": "scorer",
+        "reason": "correct AFL evidence",
+    }
+
+
+def test_publication_tables_reject_update_and_delete_but_allow_correction_insert():
+    built, round_id, stats = _ready(6203)
+    service = SuperScoreLeaderboardService(built["database"], Facts(stats))
+    actor = ActorContext.anonymous_operator("scorer")
+    service.publish(round_id, actor=actor)
+    with pytest.raises(DatabaseError, match="immutable"):
+        with built["database"].engine.begin() as conn:
+            conn.execute(
+                text("UPDATE superscore_leaderboard_revision SET reason='tampered' WHERE bbbffl_round_id=:r"),
+                {"r": round_id},
+            )
+    with pytest.raises(DatabaseError, match="immutable"):
+        with built["database"].engine.begin() as conn:
+            conn.execute(text("DELETE FROM superscore_leaderboard_revision WHERE bbbffl_round_id=:r"), {"r": round_id})
+    with pytest.raises(DatabaseError, match="immutable"):
+        with built["database"].engine.begin() as conn:
+            conn.execute(
+                text("UPDATE superscore_official_result SET rank=99 WHERE bbbffl_round_id=:r"), {"r": round_id}
+            )
+    with pytest.raises(DatabaseError, match="immutable"):
+        with built["database"].engine.begin() as conn:
+            conn.execute(text("DELETE FROM superscore_official_result WHERE bbbffl_round_id=:r"), {"r": round_id})
+    assert service.publish(round_id, actor=actor, reason="valid correction")["version"] == 2
+
+
+def test_correction_requires_non_blank_reason_but_initial_publication_does_not():
+    built, round_id, stats = _ready(6204)
+    service = SuperScoreLeaderboardService(built["database"], Facts(stats))
+    actor = ActorContext.anonymous_operator("scorer")
+    assert service.publish(round_id, actor=actor, reason=None)["version"] == 1
+    with pytest.raises(MissingCorrectionReasonError, match="non-empty reason"):
+        service.publish(round_id, actor=actor, reason=None)
+    with pytest.raises(MissingCorrectionReasonError, match="non-empty reason"):
+        service.publish(round_id, actor=actor, reason="  ")
+    corrected = service.publish(round_id, actor=actor, reason="confirmed evidence correction")
+    assert corrected["version"] == 2
+    assert corrected["reason"] == "confirmed evidence correction"
+
 
 def test_postgresql_overlapping_entry_calculations_really_block():
     """The second evidence read cannot begin until the first transaction
@@ -117,8 +185,6 @@ def test_postgresql_overlapping_entry_calculations_really_block():
     an assertion that SQL happens to contain ``FOR UPDATE``."""
     url = os.getenv("BBBFFL_DATABASE_URL")
     if not url or not url.startswith("postgresql"):
-        import pytest
-
         pytest.skip("PostgreSQL concurrency semantics require BBBFFL_DATABASE_URL")
     migrate(url)
     database = connect(url)

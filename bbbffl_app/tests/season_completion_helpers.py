@@ -13,7 +13,6 @@ from app.afl_client import Match, PlayerStatLine, Team
 from app.audit import ActorContext
 from app.calculations import MatchupCalculationService
 from app.competition_lifecycle import CompetitionLifecycleRepository
-from app.db import transaction
 from app.finals import FinalsBracketRepository
 from app.finals_preflight import open_finals_week
 from app.lineups import POSITIONS
@@ -171,34 +170,24 @@ def seed_real_finals_grand_final_calculation(built, year):
 
 
 def _setup_round_without_the_pre_existing_postgres_count_for_update_bug(database, bbbffl_round_id, entries, *, reason):
-    """A test-only stand-in for `app.superscore_round.setup_round`.
+    """Issue #194: this used to be a test-only stand-in for
+    `app.superscore_round.setup_round`, needed because `setup_round`/
+    `_create_review_state_rows`'s own verification query
+    (`SELECT COUNT(*) ... FOR UPDATE`) was rejected outright by real
+    PostgreSQL ("FOR UPDATE is not allowed with aggregate functions") -- a
+    pre-existing bug in issue #192/#193's own code, confirmed present on the
+    unmodified base branch and unrelated to issue #195's write fence.
 
-    `setup_round`/`_create_review_state_rows`'s own verification query
-    (`SELECT COUNT(*) ... FOR UPDATE`) is rejected outright by real
-    PostgreSQL ("FOR UPDATE is not allowed with aggregate functions") --
-    a pre-existing bug in issue #192/#193's own code, confirmed present on
-    the unmodified base branch and unrelated to issue #195's write fence.
-    Fixing it would mean touching `app.superscore_round`, which issue
-    #195's scope explicitly restricts to "adding the shared guard" only
-    (this module needs no guard -- it does not change official results).
-    This helper performs the identical `create_non_ordinary_round` +
-    `superscore_entry_review_state` row creation `setup_round` does,
-    without that one query, so `tests/test_season_completion_postgresql.py`
-    can build a genuine completable season against real PostgreSQL."""
-    lifecycle = CompetitionLifecycleRepository(database)
-    round_row = lifecycle.get_round(bbbffl_round_id)
-    if round_row is None:
-        round_row = lifecycle.create_non_ordinary_round(bbbffl_round_id, actor=ACTOR, reason=reason)
-    now = _now()
-    with transaction(database) as conn:
-        for entry in entries:
-            conn.execute(
-                "INSERT INTO superscore_entry_review_state "
-                "(bbbffl_round_id, season_entry_id, review_version, created_at, updated_at) "
-                "VALUES (?, ?, 0, ?, ?) ON CONFLICT (bbbffl_round_id, season_entry_id) DO NOTHING",
-                (bbbffl_round_id, entry.season_entry_id, now, now),
-            )
-    return round_row
+    Issue #194 fixed that bug directly in `app.superscore_round` (locking
+    and counting the individual rows in Python instead of `COUNT(*) ...
+    FOR UPDATE`), because #194's own SuperScore-round-setup operator CLI
+    depends on `setup_round` actually working against real PostgreSQL --
+    the only engine the replay ever runs against. This helper now simply
+    delegates to the real, fixed `setup_round`, kept under its original
+    name so every existing call site in this module is unchanged."""
+    from app.superscore_round import setup_round
+
+    return setup_round(database, bbbffl_round_id, actor=ACTOR, reason=reason)
 
 
 def _seed_and_publish_superscore_round(database, competition_id, round_id, entries, *, number, year):

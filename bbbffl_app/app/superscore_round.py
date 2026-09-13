@@ -233,11 +233,22 @@ def _create_review_state_rows(database, season_id: str, bbbffl_round_id: str, *,
                 "VALUES (?, ?, 0, ?, ?) ON CONFLICT (bbbffl_round_id, season_entry_id) DO NOTHING",
                 (bbbffl_round_id, season_entry_id, now, now),
             )
-        count = conn.execute(
-            "SELECT COUNT(*) AS n FROM superscore_entry_review_state WHERE bbbffl_round_id=?"
+        # Issue #194: lock and count the individual rows in Python, rather
+        # than `SELECT COUNT(*) ... FOR UPDATE` -- real PostgreSQL rejects
+        # `FOR UPDATE` combined with an aggregate function ("FOR UPDATE is
+        # not allowed with aggregate functions"), which made this method
+        # fail outright against Postgres (confirmed on the unmodified base
+        # branch; SQLite's tests never caught it because SQLite silently
+        # tolerates `FOR UPDATE`). This still locks every matching row
+        # before the count is trusted, exactly as the aggregate query
+        # intended, and is the only change -- the completeness check and
+        # its rollback-on-mismatch behaviour are unchanged.
+        locked_rows = conn.execute(
+            "SELECT season_entry_id FROM superscore_entry_review_state WHERE bbbffl_round_id=?"
             + _for_update_suffix(database),
             (bbbffl_round_id,),
-        ).fetchone()["n"]
+        ).fetchall()
+        count = len(locked_rows)
         if count != EXPECTED_ENTRY_COUNT:
             # Raising here rolls back this entire transaction -- including
             # every row this call itself just inserted -- so setup fails

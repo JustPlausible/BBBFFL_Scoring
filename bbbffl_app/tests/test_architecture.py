@@ -180,10 +180,15 @@ SUPERSCORE = {"app.superscore_round", "app.superscore_review", "app.superscore_r
 # spoon, since that fact is explicitly an ordinary-competition one, not a
 # finals-derived one. `app.season_completion` is the one layer above both:
 # the atomic `active -> completed` command composing `app.season_awards`
-# and the season/finals/SuperScore lifecycle state it gates on. Neither
-# module is HTTP-routed, and no lower layer (SEASON_MODEL, FINALS,
-# SUPERSCORE) may depend back on either.
-SEASON_COMPLETION = {"app.season_awards", "app.season_completion"}
+# and the season/finals/SuperScore lifecycle state it gates on.
+# `app.season_archival` (issue #194) is the narrow, read-only layer above
+# `app.season_completion` alone: it asserts a season has actually observed
+# `completed`, with its exact `season.completed` audit event, before the
+# final archival/checkpoint evidence step 7 may bind to it -- it takes no
+# lock, starts no transaction, and materialises nothing, unlike the three
+# modules below it. None of these four modules is HTTP-routed, and no lower
+# layer (SEASON_MODEL, FINALS, SUPERSCORE) may depend back on any of them.
+SEASON_COMPLETION = {"app.season_awards", "app.season_completion", "app.season_archival"}
 
 # Anonymous ordinary-season presentation/read service (issue #78).  It is an
 # allow-listed DTO layer above the persisted review and ladder boundaries;

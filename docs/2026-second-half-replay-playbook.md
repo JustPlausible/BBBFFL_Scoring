@@ -725,11 +725,13 @@ This playbook stops at the completed home-and-away season. The next phase
 (finals seeding from the locked top-five, the four-week finals bracket,
 and the four independent SuperScore streams) is planned in
 [`docs/2026-finals-superscore-design.md`](2026-finals-superscore-design.md)
-(issue #170), which decomposes it into implementation issues; its own
-operational playbook remains separate and not-yet-written, matching
-`docs/evidence/2026-first-half-replay/second-half-handoff.md`'s own
-"Intended scope" list (items 4–6) and the roadmap's Milestone E
-(`docs/roadmap/2027-season-roadmap.md`). Before starting it:
+(issue #170), which decomposes it into implementation issues. Its own
+operational playbook, anticipated here since PR #188, is now written:
+[`docs/2026-finals-superscore-playbook.md`](2026-finals-superscore-playbook.md)
+(issue #194) -- matching `docs/evidence/2026-first-half-replay/
+second-half-handoff.md`'s own "Intended scope" list (items 4–6) and the
+roadmap's Milestone E (`docs/roadmap/2027-season-roadmap.md`). Before
+starting it:
 
 - take the Round 20 checkpoint from section K as its starting database copy,
   under the same preserve-source/copy-forward discipline this playbook uses
@@ -737,9 +739,12 @@ operational playbook remains separate and not-yet-written, matching
 - confirm the finals/SuperScore domain implementation (`docs/roadmap/
   2027-season-roadmap.md` milestone E, work packages 35, 37–38) has landed
   before attempting to replay it;
-- extend `docs/evidence/2026-second-half-replay/` (or a new
-  `2026-finals-replay` evidence directory, following the same convention)
-  rather than inventing an unrelated format.
+- record its own evidence in
+  [`docs/evidence/2026-finals-replay/`](evidence/2026-finals-replay/)
+  (issue #194's decision -- a new directory, not an extension of this
+  playbook's own `docs/evidence/2026-second-half-replay/`, for the
+  reasons `docs/evidence/2026-finals-replay/README.md` explains), rather
+  than inventing an unrelated format.
 
 **Bridge Round 20 into the historical finals order (issue #187).** Before
 that finals/SuperScore implementation runs, take the one narrow,

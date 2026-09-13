@@ -210,6 +210,90 @@ surface, accepting the same filter parameters), exists to prove the
 boundary end-to-end through the real API rather than only through unit
 tests -- it is not, and must not become, a full audit UI.
 
+## Finals, SuperScore and season-completion action catalogue (issue #194)
+
+The action names below are the ones `app.finals`/`app.finals_review`
+(issues #190/#191), `app.superscore_round`/`app.superscore_review`/
+`app.superscore_results` (issues #192/#193) and `app.season_awards`/
+`app.season_completion` (issue #195) actually append, verified directly
+against those modules' source and their test suites rather than assumed
+from prose -- issue #170's design document's own catalogue sketch used
+`finals.result.published`/`finals.result.corrected`/`season.completed`
+correctly, but did not name every event these modules actually emit (e.g.
+`finals.round.finalized`, `finals.premier.recorded`, and the distinction
+between `finals.premier.recorded` and `season.premiership.recorded` below).
+Every event follows the append-only, actor/reason-provenanced convention
+above unchanged; nothing new is introduced by this section beyond the
+names, entity types and one intentional near-duplicate pair explained below.
+
+### Finals bracket lifecycle (`app.finals`)
+
+| Action | `entity_type` / `entity_id` | When |
+|---|---|---|
+| `finals.bracket.created` | `finals.bracket` / `bracket_id` | Bracket creation (`FinalsBracketRepository.create_bracket`), once per `(season_id, competition_id)`. |
+| `finals.bracket.advanced` | `finals.bracket` / `bracket_id` | `advance_bracket` derives and persists the next week's pairing(s) from the previous week's official result(s). |
+| `finals.bracket.rewound` | `finals.bracket` / `bracket_id` | `rewind_bracket` (apply mode) supersedes and regenerates the immediately downstream pairing/elimination after an upstream correction, only while that downstream week has no play state. |
+| `finals.elimination.recorded` | `finals.pairing` / pairing-scoped id | A pairing's losing entry is recorded eliminated (Elimination Final, First Semi-Final, Preliminary Final). |
+
+### Finals result publication/correction (`app.finals_review`)
+
+| Action | `entity_type` / `entity_id` | When |
+|---|---|---|
+| `finals.result.published` | `competition.matchup` / `matchup_id` | First official result for a finals matchup, one event per matchup in the week's `publish_finals_round` transaction. |
+| `finals.result.corrected` | `competition.matchup` / `matchup_id` | A later, versioned correction to an already-published finals result (`correct_finals_result`); the prior version is preserved, never overwritten. |
+| `finals.round.finalized` | `competition.round` / `bbbffl_round_id` | The finals week's `bbbffl_round_lifecycle` transitions to `final` once every match in that week has published. |
+| `finals.premier.recorded` | `season.entry` / `season_entry_id` | Whenever the Grand Final publishes or its result is corrected -- **not** the official season award; see the distinction below. |
+| `finals.wooden_spoon.recorded` | `season.entry` / `season_entry_id` | Recorded alongside `finals.premier.recorded` when the Grand Final first publishes, from the bracket's own frozen mathematical rank-10 provenance -- **not** re-recorded on a Grand Final correction (only the premier is), and **not** the official season award; see below. |
+
+**`finals.premier.recorded`/`finals.wooden_spoon.recorded` are deliberately
+not the same event as `season.premiership.recorded`/`season.wooden_spoon.
+recorded` below, and must never be conflated when reading the audit trail.**
+The `finals.*` pair is an informational record `app.finals_review` appends
+purely from the finals stream's own state, the moment the Grand Final
+publishes/is corrected -- there is no persisted, versioned `season_award`
+row behind it, and it exists whether or not the season is ever completed.
+The `season.*` pair below is the durable, versioned `season_award` record
+issue #195's completion transaction (or an explicit `reconcile_premiership`/
+`reconcile_wooden_spoon` re-recording) materialises against **locked,
+effective** provenance -- the actual official award of record. A reader
+reconstructing "who won the premiership" must use `season.premiership.
+recorded`, never `finals.premier.recorded` alone.
+
+### SuperScore stream/round lifecycle (`app.superscore_round`)
+
+| Action | `entity_type` / `entity_id` | When |
+|---|---|---|
+| `superscore.stream.created` | `superscore.stream` / `competition_id` | The season's `superscore`-typed `competition_stream` is created (`ensure_stream`), once per season. |
+| `superscore.round.review_state_created` | `superscore.round` / `bbbffl_round_id` | `setup_round` atomically creates the complete ten-entry `superscore_entry_review_state` row set for one of SS1-SS4. |
+
+### SuperScore entry-scoped rulings (`app.superscore_review`)
+
+| Action | `entity_type` / `entity_id` | When |
+|---|---|---|
+| `superscore.review.slot_ruling` | slot-ruling-scoped id | A DNP ruling for one entry's one slot (`record_dnp_ruling`), the entry-scoped counterpart of ordinary/finals' matchup-keyed `scoring.dnp.changed`. |
+| `superscore.review.interchange_ruling` | interchange-ruling-scoped id | An interchange target-position ruling for one entry (`record_interchange_ruling`). |
+| `superscore.review.override` | override-scoped id | A manual score override for one entry's one slot (`record_override`). |
+
+### SuperScore leaderboard publication/correction (`app.superscore_results`)
+
+| Action | `entity_type` / `entity_id` | When |
+|---|---|---|
+| `superscore.leaderboard.published` | `superscore.leaderboard` / `bbbffl_round_id` | First published leaderboard for one of SS1-SS4 (`SuperScoreLeaderboardService.publish`, version 1). |
+| `superscore.leaderboard.corrected` | `superscore.leaderboard` / `bbbffl_round_id` | A later, versioned correction to an already-published leaderboard (the same `publish` command, version > 1); the prior version is preserved. |
+
+### Season awards and completion (`app.season_awards`/`app.season_completion`)
+
+| Action | `entity_type` / `entity_id` | When |
+|---|---|---|
+| `season.premiership.recorded` | `season` / `season_id` | `reconcile_premiership` idempotently creates or supersedes the official, versioned `season_award(award_type='premiership')` record against the *effective* Grand Final result -- called directly, or as step 3 of `complete_season`. |
+| `season.wooden_spoon.recorded` | `season` / `season_id` | `reconcile_wooden_spoon` idempotently creates or supersedes `season_award(award_type='wooden_spoon')` against the *live* mathematical Round 20 ladder -- deliberately never the finals bracket's frozen seed/provenance (see `app/season_awards.py`'s module docstring). Called directly, or as step 3 of `complete_season`. |
+| `season.completed` | `season` / `season_id` | Step 4 of `complete_season`'s atomic six-step transaction, immediately before the step-5 `active -> completed` lifecycle transition (which itself appends the existing `season.lifecycle.changed` event). This is the event issue #194's final archival checkpoint (step 7) must observe and bind to -- see `app/season_archival.py` and `docs/2026-finals-superscore-playbook.md`. |
+
+`season.completed`'s `payload` carries `premiership_award_id`/
+`wooden_spoon_award_id`/`finals_round_ids`/`superscore_round_ids` -- the
+complete set of round ids the readiness gate verified `final` -- so a reader
+can confirm exactly what was checked without re-deriving it.
+
 ## Replay
 
 Audit events are **not** replayed to reconstruct current scoring. What the

@@ -61,9 +61,11 @@ def test_materialize_round_triggers_acquires_header_locks_one_at_a_time_in_sorte
             return self.rows[0] if self.rows else None
 
     calls = []
+    timeline = []
 
     class Connection:
         def execute(self, statement, parameters=()):
+            timeline.append("database")
             calls.append((statement, parameters))
             if statement.startswith("SELECT trigger_id FROM"):
                 return Result([{"trigger_id": "trigger-z"}, {"trigger_id": "trigger-a"}])
@@ -77,7 +79,12 @@ def test_materialize_round_triggers_acquires_header_locks_one_at_a_time_in_sorte
 
     database = SimpleNamespace(engine=SimpleNamespace(dialect=SimpleNamespace(name="postgresql")))
     monkeypatch.setattr(lockouts_module, "transaction", fake_transaction)
-    facts = SimpleNamespace(matches_for=lambda _round_id: [])
+
+    def matches_for(_round_id):
+        timeline.append("provider")
+        return []
+
+    facts = SimpleNamespace(matches_for=matches_for)
 
     LockoutRepository(database)._materialize_round_triggers(
         "round-1", match_facts=facts, evaluation_at=datetime(2027, 1, 1, tzinfo=timezone.utc)
@@ -91,6 +98,35 @@ def test_materialize_round_triggers_acquires_header_locks_one_at_a_time_in_sorte
         if statement.startswith("SELECT current_revision") and statement.endswith("FOR UPDATE")
     ]
     assert header_locks == ["trigger-a", "trigger-z"]
+    assert timeline[0] == "provider", "provider retrieval must finish before the parent FOR UPDATE"
+
+
+def test_materialize_round_triggers_rejects_facts_from_a_mapping_changed_before_the_round_lock(monkeypatch):
+    class Result:
+        def __init__(self, row=None):
+            self.row = row
+
+        def fetchone(self):
+            return self.row
+
+    class Connection:
+        def execute(self, statement, _parameters=()):
+            if statement.startswith("SELECT r.revision FROM round_afl_mapping"):
+                return Result({"revision": 2})
+            return Result()
+
+    @contextmanager
+    def fake_transaction(_database):
+        yield Connection()
+
+    database = SimpleNamespace(engine=SimpleNamespace(dialect=SimpleNamespace(name="postgresql")))
+    facts = SimpleNamespace(matches_for_materialization=lambda _round_id: ([], 1))
+    monkeypatch.setattr(lockouts_module, "transaction", fake_transaction)
+
+    with pytest.raises(MatchResolutionError, match="mapping changed while match facts were being fetched"):
+        LockoutRepository(database)._materialize_round_triggers(
+            "round-1", match_facts=facts, evaluation_at=datetime(2027, 1, 1, tzinfo=timezone.utc)
+        )
 
 
 # issue #185: a club deliberately absent from every match in ALL_MATCHES --

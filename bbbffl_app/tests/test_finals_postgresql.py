@@ -652,9 +652,8 @@ def test_rewind_acquires_each_trigger_header_lock_in_sorted_id_order(postgres_da
     real_execute = db_module._TransactionConnection.execute
 
     def recording_execute(self, statement, parameters=()):
-        if (
-            statement.startswith("SELECT 1 FROM bbbffl_round_lockout_trigger WHERE trigger_id=?")
-            and statement.endswith("FOR UPDATE")
+        if statement.startswith("SELECT 1 FROM bbbffl_round_lockout_trigger WHERE trigger_id=?") and statement.endswith(
+            "FOR UPDATE"
         ):
             acquired.append(parameters[0])
         return real_execute(self, statement, parameters)

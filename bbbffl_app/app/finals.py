@@ -1548,8 +1548,7 @@ class FinalsBracketRepository:
             )
             for trigger_id in trigger_ids:
                 conn.execute(
-                    "SELECT 1 FROM bbbffl_round_lockout_trigger WHERE trigger_id=?"
-                    + _for_update_suffix(self.database),
+                    "SELECT 1 FROM bbbffl_round_lockout_trigger WHERE trigger_id=?" + _for_update_suffix(self.database),
                     (trigger_id,),
                 ).fetchone()
             activation = None

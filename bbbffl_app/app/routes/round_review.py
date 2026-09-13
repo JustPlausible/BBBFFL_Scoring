@@ -26,7 +26,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from app.audit import ActorContext
-from app.authorization import Principal, Role, require_authenticated, require_role_covers_season, resolve_principal
+from app.authorization import Principal, require_role_covers_season, require_round_reviewer
 from app.config import BASE_DIR
 from app.public_rounds import authoritative_player_names, authoritative_submissions, build_public_ladder
 from app.round_review import attempt_correction, attempt_signoff, build_round_review
@@ -35,15 +35,6 @@ from app.routes.admin import require_admin
 router = APIRouter(prefix="/api/admin/round-review")
 page_router = APIRouter()
 templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
-
-
-def require_round_reviewer(principal: Principal = Depends(resolve_principal)) -> Principal:
-    """Round-scoped review authority, deliberately narrower than the
-    legacy/global admin router's shared ``require_scorer`` dependency."""
-    require_authenticated(principal)
-    if principal.role not in (Role.SCORER, Role.REPLAY_OPERATOR, Role.ADMIN):
-        raise HTTPException(status_code=403, detail="Round review authority required")
-    return principal
 
 
 def _actor(principal: Principal, operator_name: str | None) -> ActorContext:

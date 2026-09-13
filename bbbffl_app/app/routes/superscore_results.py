@@ -4,9 +4,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from app.audit import ActorContext
-from app.authorization import Principal, require_authenticated, require_role_covers_season, resolve_principal
+from app.authorization import (
+    Principal,
+    require_authenticated,
+    require_role_covers_season,
+    require_round_reviewer,
+    resolve_principal,
+)
 from app.csrf import verify_token
-from app.routes.round_review import require_round_reviewer
 from app.superscore_results import (
     CompletedSeasonError,
     StaleSuperScoreEvidenceError,

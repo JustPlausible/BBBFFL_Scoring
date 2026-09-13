@@ -133,6 +133,18 @@ def require_authenticated(principal: Principal = None) -> Principal:
     return principal
 
 
+def require_round_reviewer(principal: Principal = Depends(resolve_principal)) -> Principal:
+    """Shared authority for ordinary and SuperScore result review.
+
+    Season coverage remains a target-round decision at each route; this
+    dependency only establishes the supported privileged active roles.
+    """
+    require_authenticated(principal)
+    if principal.role not in (Role.SCORER, Role.REPLAY_OPERATOR, Role.ADMIN):
+        raise HTTPException(status_code=403, detail="Round review authority required")
+    return principal
+
+
 def require_coach(principal: Principal) -> Principal:
     require_authenticated(principal)
     if principal.role is not Role.COACH:

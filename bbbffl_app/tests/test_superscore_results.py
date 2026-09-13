@@ -98,6 +98,7 @@ def test_ten_entries_calculate_without_matchups_and_record_review_version():
 
 def test_publication_is_one_immutable_ten_entry_revision_with_joint_winners():
     built, round_id, stats = _ready(6201)
+    ordinary_before = built["database"].execute("SELECT COUNT(*) AS n FROM bbbffl_official_result").fetchone()["n"]
     # Give the top two equal evidence: equal highest scores are joint winners.
     top = sorted(stats)[-1]
     stats[sorted(stats)[-2]] = stats[top]
@@ -114,7 +115,8 @@ def test_publication_is_one_immutable_ten_entry_revision_with_joint_winners():
     assert len(second["entries"]) == 10
     assert service.leaderboard(round_id, version=1, include_inputs=True)["entries"][0]["input_snapshot"] == frozen
     assert [item["rank"] for item in second["entries"]] != [item["rank"] for item in first["entries"]]
-    assert built["database"].execute("SELECT COUNT(*) AS n FROM bbbffl_official_result").fetchone()["n"] == 0
+    ordinary_after = built["database"].execute("SELECT COUNT(*) AS n FROM bbbffl_official_result").fetchone()["n"]
+    assert ordinary_after == ordinary_before
 
     header = (
         built["database"]

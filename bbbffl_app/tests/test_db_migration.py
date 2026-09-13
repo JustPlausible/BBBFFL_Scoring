@@ -110,6 +110,9 @@ EXPECTED_TABLES = {
     "superscore_entry_slot_ruling",
     "superscore_entry_interchange_ruling",
     "superscore_entry_override",
+    "superscore_entry_calculation",
+    "superscore_leaderboard_revision",
+    "superscore_official_result",
 }
 
 

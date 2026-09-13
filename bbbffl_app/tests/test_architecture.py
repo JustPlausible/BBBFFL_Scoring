@@ -157,13 +157,16 @@ FINALS = {"app.finals", "app.finals_review"}
 # review_state` row set (gap #4); `app.superscore_review` owns the
 # entry-scoped DNP/Interchange/override ruling boundary (gap #2), keyed by
 # `(bbbffl_round_id, season_entry_id, ...)` since SuperScore has no
-# `matchup_id` at all. Neither imports the other's sibling table by SQL --
+# `matchup_id` at all. Issue #193's `app.superscore_results` is the
+# application boundary above both: it reuses the scoring/review algorithms,
+# persists entry calculations, and atomically publishes whole leaderboards.
+# None imports the other's sibling table by SQL --
 # `app.lineups`'s additive review-state-advance/ruling-invalidation hooks
 # (gaps #3-#4) reach into these tables directly, by raw SQL, exactly the
 # way it already reaches into `app.round_review`'s tables, never by
 # importing either of these two modules back (see `test_season_model_and_
 # lockouts_do_not_depend_on_superscore` below).
-SUPERSCORE = {"app.superscore_round", "app.superscore_review"}
+SUPERSCORE = {"app.superscore_round", "app.superscore_review", "app.superscore_results"}
 
 # Anonymous ordinary-season presentation/read service (issue #78).  It is an
 # allow-listed DTO layer above the persisted review and ladder boundaries;
@@ -307,6 +310,7 @@ ROUTES = {
     "app.routes.admin",
     "app.routes.public",
     "app.routes.superscore",
+    "app.routes.superscore_results",
     "app.routes.health",
     "app.routes.draft",
     "app.routes.preseason",

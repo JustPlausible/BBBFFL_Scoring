@@ -191,8 +191,10 @@ class LineupCorrectionService:
         """
         _ensure_correction_actor(actor)
         from app.finals_participation import require_round_participant
+        from app.superscore_participation import require_superscore_entry_eligible
 
         require_round_participant(self.database, competition_id, bbbffl_round_id, season_entry_id)
+        require_superscore_entry_eligible(self.database, competition_id, season_entry_id)
         unknown = set(position_changes) - set(POSITIONS)
         if unknown:
             raise LineupIntegrityError(f"unknown scoring positions: {sorted(unknown)}")

@@ -263,6 +263,7 @@ class LineupAdjudicationService:
 
     def _eligibility(self, season_id, competition_id, bbbffl_round_id, season_entry_id, *, evaluation_at=None):
         from app.finals_participation import FinalsParticipantError, require_round_participant
+        from app.superscore_participation import SuperScoreParticipantError, require_superscore_entry_eligible
 
         """Non-transactional pre-check, for a fast/clear refusal and for the
         preview UI. Every fact this also depends on is re-validated
@@ -290,6 +291,10 @@ class LineupAdjudicationService:
             require_round_participant(self.database, competition_id, bbbffl_round_id, season_entry_id)
         except FinalsParticipantError as exc:
             reasons.append(str(exc))
+        try:
+            require_superscore_entry_eligible(self.database, competition_id, season_entry_id)
+        except SuperScoreParticipantError as exc:
+            reasons.append(str(exc))
         if round_state not in ("live", "review"):
             reasons.append(f"round is {round_state!r}; adjudication requires the round to be live or review")
         if effective_version:
@@ -306,24 +311,50 @@ class LineupAdjudicationService:
         return lineup_id, effective_version, round_state, activated, reasons
 
     def _carry_forward_source(self, season_id, competition_id, round_id, entry_id):
-        """Resolve same-stream first, then the specified finals->ordinary edge."""
+        """Resolve same-stream first, then the specified cross-stream edge:
+        finals Week 1/seed-1's Week 2 -> ordinary (#191), or SuperScore's
+        SS1 -> ordinary (#192, the confirmed "SS1 falls back to the coach's
+        most recent ordinary lineup" rule).
+
+        Codex review, PR #204: SS2-SS4 must never reach the cross-stream
+        branch, even if their own same-stream lookup finds nothing (e.g. a
+        coach who also missed the round(s) before this one) -- unlike
+        finals, where the bracket-participant check alone already scopes
+        Week 1 correctly, SuperScore's same-stream lookup can genuinely
+        return `None` for SS2-SS4 too. The SuperScore branch below is
+        therefore explicitly gated on this being the stream's first round
+        (`sequence == 1`, i.e. SS1), not merely on the same-stream lookup
+        having failed.
+        """
         source = self._carry_forward.resolve_source(season_id, competition_id, round_id, entry_id)
         if source is not None:
             return source
         from app.carry_forward import CarryForwardSource
         from app.finals_participation import resolve_cross_stream_fallback_source, stream_type
 
-        if stream_type(self.database, competition_id) != "finals":
+        current_stream_type = stream_type(self.database, competition_id)
+        if current_stream_type == "finals":
+            bracket = self.database.execute(
+                "SELECT ordinary_competition_id FROM finals_bracket WHERE season_id=? AND competition_id=?",
+                (season_id, competition_id),
+            ).fetchone()
+            ordinary_competition_id = bracket["ordinary_competition_id"] if bracket else None
+        elif current_stream_type == "superscore":
+            round_row = self.database.execute(
+                "SELECT sequence FROM bbbffl_round WHERE bbbffl_round_id=?", (round_id,)
+            ).fetchone()
+            if round_row is None or round_row["sequence"] != 1:
+                return None
+            stream = self.database.execute(
+                "SELECT ordinary_competition_id FROM superscore_stream WHERE season_id=? AND competition_id=?",
+                (season_id, competition_id),
+            ).fetchone()
+            ordinary_competition_id = stream["ordinary_competition_id"] if stream else None
+        else:
             return None
-        bracket = self.database.execute(
-            "SELECT ordinary_competition_id FROM finals_bracket WHERE season_id=? AND competition_id=?",
-            (season_id, competition_id),
-        ).fetchone()
-        if bracket is None:
+        if ordinary_competition_id is None:
             return None
-        row = resolve_cross_stream_fallback_source(
-            self.database, season_id, bracket["ordinary_competition_id"], entry_id
-        )
+        row = resolve_cross_stream_fallback_source(self.database, season_id, ordinary_competition_id, entry_id)
         if row is None:
             return None
         submission = self.lineups.get_submission(row["lineup_id"], row["effective_submission_version"])

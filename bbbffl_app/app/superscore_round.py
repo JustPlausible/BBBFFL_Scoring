@@ -1,0 +1,319 @@
+"""Issue #192: SuperScore roster, eligibility and round lifecycle setup --
+the third of six #170 follow-ups, built on #197's `create_non_ordinary_round`
+primitive (merged in 0029/0030/#200) exactly as `app.finals` (#190) is.
+
+Read `docs/2026-finals-superscore-design.md`'s "SuperScore design" section
+first. This module owns:
+
+- Creating the `superscore`-typed `competition_stream` and its four
+  independent rounds (SS1-SS4), for all ten coaches, concurrent with finals
+  -- no bracket, no pairing, no matchup (`app.competition_lifecycle.
+  CompetitionLifecycleRepository.create_stream_matchup` is finals-only by
+  design; SuperScore never calls it).
+- The durable per-entry `superscore_entry_review_state` row set: round
+  setup creates one row (`review_version=0`) for every one of the ten
+  eligible entries *before* any lineup, ruling or calculation exists, and
+  fails the whole setup atomically if the complete set of ten cannot be
+  created or verified. This row -- never a field on the optional,
+  derived entry-scoped calculation row #193 will add -- is the durable
+  lock/CAS target for the round's lifetime; a round must not open until the
+  complete set exists (`open_round` below).
+- Confirming the SS1-SS4 AFL-round mapping against real `afl-api` evidence
+  via the existing `app.round_mapping.RoundMappingRepository`/
+  `AflApiReferenceValidator` boundary -- the same mapping machinery every
+  other stream (ordinary, finals) already uses, never a bespoke check.
+
+This module deliberately does **not** implement SuperScore scoring,
+publication or leaderboard results (#193's job, which locks/compares/
+records against the review-state rows created here but must never advance
+them), a SuperScore-specific draft/roster (there is none -- the same ten
+`season_entry` rows and `player_ownership_period` ledger as the ordinary
+competition), or cumulative/aggregate standings across the four rounds.
+"""
+
+from dataclasses import dataclass
+
+from app.audit import ActorContext, append_event
+from app.competition_lifecycle import CompetitionLifecycleRepository
+from app.db import _for_update_suffix, transaction
+from app.round_mapping import AflReferenceValidator, RoundMapping, RoundMappingRepository
+from app.season import SeasonRepository, _now
+
+# Confirmed historical rule (docs/2026-finals-superscore-design.md's
+# "SuperScore design"): all ten coaches participate in every SuperScore
+# round, including the five teams eliminated from or never qualified for
+# the finals. There is no SuperScore-specific eligibility narrower than
+# "is a season entry of this season" -- see `app.superscore_participation.
+# require_superscore_entry_eligible`, the explicit per-request check this
+# module's setup count is the durable, round-scoped counterpart of.
+EXPECTED_ENTRY_COUNT = 10
+
+STREAM_TYPE = "superscore"
+ROUND_LABELS = {1: "SS1", 2: "SS2", 3: "SS3", 4: "SS4"}
+
+
+class SuperScoreRoundError(ValueError):
+    """Base class for this module's domain errors."""
+
+
+class IncompleteReviewStateError(SuperScoreRoundError):
+    """Round setup could not create/verify the complete set of ten durable
+    `superscore_entry_review_state` rows -- the whole setup transaction is
+    rolled back, and (see `open_round`) the round must not transition to
+    `open` while this remains true."""
+
+
+@dataclass(frozen=True)
+class SuperScoreStream:
+    competition_id: str
+    season_id: str
+    ordinary_competition_id: str
+
+
+def eligible_entries(database, season_id: str) -> list[str]:
+    """Every season entry eligible for SuperScore -- always all ten
+    (docs/2026-finals-superscore-design.md's confirmed rule), sorted for a
+    deterministic lock order wherever this is used to acquire multiple
+    `superscore_entry_review_state` row locks at once (mirroring the
+    finals bracket's deterministic `matchup_id`-ordered locking)."""
+    rows = database.execute(
+        "SELECT season_entry_id FROM season_entry WHERE season_id=? ORDER BY season_entry_id", (season_id,)
+    ).fetchall()
+    return [row["season_entry_id"] for row in rows]
+
+
+def get_stream(database, season_id: str) -> SuperScoreStream | None:
+    row = database.execute(
+        "SELECT competition_id, season_id, ordinary_competition_id FROM superscore_stream WHERE season_id=?",
+        (season_id,),
+    ).fetchone()
+    return SuperScoreStream(**dict(row)) if row else None
+
+
+def ensure_stream(
+    database,
+    season_id: str,
+    rules_version_id: str,
+    ordinary_competition_id: str,
+    *,
+    stream_key: str = "superscore",
+    label: str = "SuperScore",
+    actor: ActorContext = ActorContext.anonymous_operator("admin"),
+    reason: str | None = None,
+) -> SuperScoreStream:
+    """Idempotently create (or return the already-created) `superscore`
+    competition stream for this season, recording which ordinary
+    competition its SS1 cross-stream carry-forward fallback resolves
+    against (`app.superscore_participation.resolve_cross_stream_fallback_
+    source`) -- the SuperScore-stream counterpart of `finals_bracket.
+    ordinary_competition_id`.
+
+    Validates `ordinary_competition_id` up front, mirroring `app.finals.
+    FinalsBracketRepository._resolve_seed`'s identical check for
+    `finals_bracket.ordinary_competition_id`: `superscore_stream.
+    ordinary_competition_id` carries the same foreign key, so an unchecked
+    bogus id would otherwise only fail *after* `create_competition` below
+    has already committed its own `competition_stream` row in its own
+    transaction (`app.db.transaction` never nests), leaving an orphan that
+    then blocks a retry on `(season_id, stream_key)` uniqueness. Failing
+    here instead means nothing is created at all on bad input."""
+    existing = get_stream(database, season_id)
+    if existing is not None:
+        if existing.ordinary_competition_id != ordinary_competition_id:
+            raise SuperScoreRoundError(
+                f"a SuperScore stream already exists for season {season_id} scoped to ordinary competition "
+                f"{existing.ordinary_competition_id!r}, not {ordinary_competition_id!r}"
+            )
+        return existing
+    ordinary = database.execute(
+        "SELECT season_id, stream_type FROM competition_stream WHERE competition_id=?",
+        (ordinary_competition_id,),
+    ).fetchone()
+    if ordinary is None or ordinary["season_id"] != season_id or ordinary["stream_type"] != "ordinary":
+        raise SuperScoreRoundError(
+            f"ordinary_competition_id {ordinary_competition_id!r} must name this season's own ordinary "
+            "home-and-away competition"
+        )
+    season_repo = SeasonRepository(database)
+    created = season_repo.create_competition(season_id, rules_version_id, stream_key, label, STREAM_TYPE)
+    now = _now()
+    with transaction(database) as conn:
+        conn.execute(
+            "INSERT INTO superscore_stream VALUES (?, ?, ?, ?)",
+            (created.competition_id, season_id, ordinary_competition_id, now),
+        )
+        append_event(
+            conn,
+            actor=actor,
+            action="superscore.stream.created",
+            entity_type="superscore.stream",
+            entity_id=created.competition_id,
+            entity_version="1",
+            reason=reason,
+            after_state={"season_id": season_id, "ordinary_competition_id": ordinary_competition_id},
+        )
+    return SuperScoreStream(created.competition_id, season_id, ordinary_competition_id)
+
+
+def ensure_round(database, competition_id: str, round_number: int, sequence: int) -> str:
+    """Idempotently create (or return the already-created) logical
+    `bbbffl_round` row (`app.season.SeasonRepository.create_round`'s generic
+    primitive -- unchanged, no SuperScore-specific schema) for one of
+    SS1-SS4. Returns `bbbffl_round_id`."""
+    if round_number not in ROUND_LABELS:
+        raise SuperScoreRoundError(f"unknown SuperScore round number: {round_number}")
+    label = ROUND_LABELS[round_number]
+    round_key = label.lower()
+    existing = database.execute(
+        "SELECT bbbffl_round_id FROM bbbffl_round WHERE competition_id=? AND round_key=?",
+        (competition_id, round_key),
+    ).fetchone()
+    if existing is not None:
+        return existing["bbbffl_round_id"]
+    created = SeasonRepository(database).create_round(competition_id, round_key, label, sequence)
+    return created.bbbffl_round_id
+
+
+def confirm_afl_mapping(
+    database,
+    validator: AflReferenceValidator,
+    bbbffl_round_id: str,
+    afl_season_id: int,
+    afl_round_id: int,
+    *,
+    actor: ActorContext = ActorContext.anonymous_operator("admin"),
+    reason: str,
+) -> RoundMapping:
+    """Confirm (accept, or correct if a diverging one already exists) the
+    AFL-round mapping for one SuperScore round against real `afl-api`
+    evidence, via the same `app.round_mapping` boundary every stream uses --
+    never a bespoke SuperScore mapping check. `validator` is anything
+    satisfying `app.round_mapping.AflReferenceValidator` (production callers
+    pass `app.round_mapping.AflApiReferenceValidator(afl_client)`, exactly
+    as `app.round_preflight` does for the ordinary/ finals case). Idempotent:
+    re-confirming the identical `(afl_season_id, afl_round_id)` is a no-op.
+
+    Per docs/2026-finals-superscore-design.md's confirmed rule, SS1-SS4 run
+    across the *same* four AFL rounds as the four finals weeks -- callers
+    should source `afl_season_id`/`afl_round_id` from the corresponding
+    finals week's own accepted mapping (`app.round_mapping.
+    RoundMappingRepository.resolve`) rather than re-deriving them, so the
+    evidence for both streams' concurrency is the identical accepted AFL
+    round reference, not merely an assumption of equal round numbers."""
+    repo = RoundMappingRepository(database)
+    existing = repo.resolve(bbbffl_round_id)
+    if existing is not None and existing.afl_season_id == afl_season_id and existing.afl_round_id == afl_round_id:
+        return existing
+    if existing is None:
+        return repo.accept(bbbffl_round_id, afl_season_id, afl_round_id, validator, actor=actor, reason=reason)
+    return repo.correct(bbbffl_round_id, afl_season_id, afl_round_id, validator, actor=actor, reason=reason)
+
+
+def _create_review_state_rows(database, season_id: str, bbbffl_round_id: str, *, actor: ActorContext, reason):
+    """The core of gap #4: create an always-present `superscore_entry_
+    review_state` row (`review_version=0`) for every one of the ten
+    eligible entries, atomically -- raising (and rolling back every row
+    this call itself inserted) if the complete set cannot be created or
+    verified. Idempotent against a partially- or fully-completed prior
+    attempt (`ON CONFLICT ... DO NOTHING`), so calling this again after an
+    earlier failure -- or simply re-running setup -- never duplicates or
+    disturbs an already-advanced row's `review_version`."""
+    entries = eligible_entries(database, season_id)
+    if len(entries) != EXPECTED_ENTRY_COUNT:
+        raise IncompleteReviewStateError(
+            f"season {season_id} has {len(entries)} entries, not the expected {EXPECTED_ENTRY_COUNT}; "
+            "cannot create the complete SuperScore review-state row set"
+        )
+    now = _now()
+    with transaction(database) as conn:
+        for season_entry_id in entries:
+            conn.execute(
+                "INSERT INTO superscore_entry_review_state "
+                "(bbbffl_round_id, season_entry_id, review_version, created_at, updated_at) "
+                "VALUES (?, ?, 0, ?, ?) ON CONFLICT (bbbffl_round_id, season_entry_id) DO NOTHING",
+                (bbbffl_round_id, season_entry_id, now, now),
+            )
+        count = conn.execute(
+            "SELECT COUNT(*) AS n FROM superscore_entry_review_state WHERE bbbffl_round_id=?"
+            + _for_update_suffix(database),
+            (bbbffl_round_id,),
+        ).fetchone()["n"]
+        if count != EXPECTED_ENTRY_COUNT:
+            # Raising here rolls back this entire transaction -- including
+            # every row this call itself just inserted -- so setup fails
+            # atomically rather than leaving a partial set committed.
+            raise IncompleteReviewStateError(
+                f"round {bbbffl_round_id} has {count} superscore_entry_review_state rows, not the expected "
+                f"{EXPECTED_ENTRY_COUNT}; round setup failed atomically and nothing was committed"
+            )
+        append_event(
+            conn,
+            actor=actor,
+            action="superscore.round.review_state_created",
+            entity_type="superscore.round",
+            entity_id=bbbffl_round_id,
+            entity_version=str(count),
+            reason=reason,
+            after_state={"season_entry_ids": entries},
+        )
+
+
+def setup_round(
+    database,
+    bbbffl_round_id: str,
+    *,
+    actor: ActorContext = ActorContext.anonymous_operator("admin"),
+    reason: str | None = None,
+):
+    """Give a SuperScore round its `bbbffl_round_lifecycle` row (via #197's
+    `create_non_ordinary_round`, idempotent here against an already-created
+    round) and then create/verify its complete ten-row `superscore_entry_
+    review_state` set (gap #4) -- the round must not open until both steps
+    have succeeded (see `open_round`)."""
+    lifecycle = CompetitionLifecycleRepository(database)
+    round_row = lifecycle.get_round(bbbffl_round_id)
+    if round_row is None:
+        round_row = lifecycle.create_non_ordinary_round(bbbffl_round_id, actor=actor, reason=reason)
+    _create_review_state_rows(database, round_row.season_id, bbbffl_round_id, actor=actor, reason=reason)
+    return round_row
+
+
+def review_state_complete(database, bbbffl_round_id: str) -> bool:
+    """Whether the round's durable review-state row set is complete -- the
+    fail-closed gate `open_round` enforces before ever transitioning past
+    `upcoming` (issue #192's acceptance criterion: "a round cannot open
+    with an incomplete review-state set")."""
+    count = database.execute(
+        "SELECT COUNT(*) AS n FROM superscore_entry_review_state WHERE bbbffl_round_id=?", (bbbffl_round_id,)
+    ).fetchone()["n"]
+    return count == EXPECTED_ENTRY_COUNT
+
+
+def open_round(
+    database,
+    bbbffl_round_id: str,
+    *,
+    actor: ActorContext = ActorContext.anonymous_operator("scorer"),
+    reason: str | None = None,
+):
+    """The `upcoming -> open` transition for a SuperScore round, fenced by
+    `review_state_complete` -- refuses (`IncompleteReviewStateError`,
+    no mutation) rather than ever opening a round whose durable per-entry
+    review-state rows are not all present. Nothing about #197's own
+    `_validate_frozen_context`/mapping-revision check is duplicated or
+    weakened here; this is purely an additive precondition in front of the
+    existing, unmodified `CompetitionLifecycleRepository.transition`."""
+    if not review_state_complete(database, bbbffl_round_id):
+        raise IncompleteReviewStateError(
+            f"round {bbbffl_round_id} does not have a complete superscore_entry_review_state row set; "
+            "it cannot open until setup_round() has succeeded"
+        )
+    return CompetitionLifecycleRepository(database).transition(bbbffl_round_id, "open", actor=actor, reason=reason)
+
+
+def get_review_state(database, bbbffl_round_id: str, season_entry_id: str) -> int | None:
+    row = database.execute(
+        "SELECT review_version FROM superscore_entry_review_state WHERE bbbffl_round_id=? AND season_entry_id=?",
+        (bbbffl_round_id, season_entry_id),
+    ).fetchone()
+    return row["review_version"] if row else None

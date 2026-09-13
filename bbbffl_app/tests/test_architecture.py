@@ -142,7 +142,7 @@ ROUND_REVIEW = {"app.round_review"}
 # (see this file's ROUND_REVIEW comment). It builds no bracket logic into
 # `app.ladder`/`app.finals_seeding` themselves -- those remain read-only
 # dependencies, never depended upon in the other direction.
-FINALS = {"app.finals"}
+FINALS = {"app.finals", "app.finals_review"}
 
 # Anonymous ordinary-season presentation/read service (issue #78).  It is an
 # allow-listed DTO layer above the persisted review and ladder boundaries;
@@ -188,7 +188,12 @@ AUTH = {"app.auth", "app.authorization"}
 # (reusing app.coach_lineup's collaborators, plus app.carry_forward's
 # previous-round resolution for its own carry-forward fallback), imported
 # directly by its thin route (app/routes/lineup_adjudication.py).
-COACH_LINEUP = {"app.coach_lineup", "app.lineup_correction", "app.lineup_adjudication"}
+COACH_LINEUP = {
+    "app.coach_lineup",
+    "app.finals_participation",
+    "app.lineup_correction",
+    "app.lineup_adjudication",
+}
 
 # AFL participation-evidence classification (roadmap package 26, issue #57):
 # a pure function of public afl-api facts (a match, a bye list, a stat line)

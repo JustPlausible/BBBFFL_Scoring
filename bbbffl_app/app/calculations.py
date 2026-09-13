@@ -103,7 +103,7 @@ class MatchupCalculationService:
         overwriting a newer single-match calculation.
         """
         with transaction(self.database) as conn:
-            rows = []
+            rows_by_id = {}
             for matchup_id in sorted(matchup_ids):
                 row = conn.execute(
                     "SELECT * FROM bbbffl_matchup WHERE matchup_id=?" + _for_update_suffix(self.database),
@@ -111,10 +111,16 @@ class MatchupCalculationService:
                 ).fetchone()
                 if row is None:
                     raise KeyError(matchup_id)
-                rows.append(row)
+                rows_by_id[matchup_id] = row
             context = self._round_context(conn, round_id)
             facts = (_RoundFacts(self.afl_client, context["afl_round_id"]), self._bye_team_ids(context))
-            return [self._calculate(conn, row, context, facts, upstream_revision, observed_at) for row in rows]
+            # Lock order is deliberately independent of presentation order.
+            # Preserve `_matchups`' matchup_order in the returned list so
+            # ordinary callers retain their established semantics.
+            return [
+                self._calculate(conn, rows_by_id[mid], context, facts, upstream_revision, observed_at)
+                for mid in matchup_ids
+            ]
 
     def _bye_team_ids(self, context):
         """The AFL clubs on an ordinary bye for this round, if the configured

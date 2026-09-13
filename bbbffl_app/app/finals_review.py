@@ -17,6 +17,74 @@ class StaleFinalsSnapshotError(RuntimeError):
     pass
 
 
+def _mathematical_wooden_spoon(conn, bracket_id):
+    """Resolve rank 10 from the bracket's frozen mathematical provenance."""
+    bracket = conn.execute("SELECT * FROM finals_bracket WHERE bracket_id=?", (bracket_id,)).fetchone()
+    if bracket is None:
+        raise KeyError(bracket_id)
+    if bracket["seed_source"] == "snapshot":
+        row = conn.execute(
+            "SELECT mr.season_entry_id, s.snapshot_id, s.through_round "
+            "FROM finals_seeding_snapshot s JOIN finals_seeding_snapshot_mathematical_row mr "
+            "ON mr.snapshot_id=s.snapshot_id WHERE s.snapshot_id=? AND mr.rank=10",
+            (bracket["finals_seeding_snapshot_id"],),
+        ).fetchone()
+        if row is None:
+            raise ValueError("snapshot-backed bracket has no frozen mathematical rank 10")
+        return row["season_entry_id"], {
+            "seed_source": "snapshot",
+            "finals_seeding_snapshot_id": row["snapshot_id"],
+            "through_round": row["through_round"],
+        }
+    if bracket["seed_source"] == "ladder":
+        # For the ladder path `_resolve_seed` freezes the mathematical order
+        # itself in finals_bracket_seed (there is no historical override),
+        # while result references preserve every input version that produced
+        # it. Reading that frozen row is not a live ladder recomputation.
+        row = conn.execute(
+            "SELECT season_entry_id FROM finals_bracket_seed WHERE bracket_id=? AND seed_position=10",
+            (bracket_id,),
+        ).fetchone()
+        refs = conn.execute(
+            "SELECT matchup_id,official_version FROM finals_bracket_result_reference "
+            "WHERE bracket_id=? ORDER BY matchup_id",
+            (bracket_id,),
+        ).fetchall()
+        if row is None or not refs:
+            raise ValueError("ladder-backed bracket has insufficient frozen mathematical provenance")
+        return row["season_entry_id"], {
+            "seed_source": "ladder",
+            "through_round": bracket["through_round"],
+            "latest_included_round": bracket["latest_included_round"],
+            "result_references": [dict(ref) for ref in refs],
+        }
+    raise ValueError("unknown finals bracket seed source")
+
+
+def _premier(conn, bracket_id, review):
+    if review.home.effective_score != review.away.effective_score:
+        return (
+            review.home.season_entry_id
+            if review.home.effective_score > review.away.effective_score
+            else review.away.season_entry_id
+        )
+    ranks = conn.execute(
+        "SELECT season_entry_id,seed_position FROM finals_bracket_seed WHERE bracket_id=? AND season_entry_id IN (?,?)",
+        (bracket_id, review.home.season_entry_id, review.away.season_entry_id),
+    ).fetchall()
+    return min(ranks, key=lambda row: row["seed_position"])["season_entry_id"]
+
+
+def _premier_for_scores(conn, bracket_id, home_id, away_id, home_score, away_score):
+    if home_score != away_score:
+        return home_id if home_score > away_score else away_id
+    ranks = conn.execute(
+        "SELECT season_entry_id,seed_position FROM finals_bracket_seed WHERE bracket_id=? AND season_entry_id IN (?,?)",
+        (bracket_id, home_id, away_id),
+    ).fetchall()
+    return min(ranks, key=lambda row: row["seed_position"])["season_entry_id"]
+
+
 def _finals_matchup_context(database, matchup_id):
     row = database.execute(
         "SELECT m.*, c.stream_type, c.season_id, w.bracket_id, w.week_number "
@@ -141,36 +209,11 @@ def publish_finals_round(database, afl_client, lifecycle, review_repo, identitie
             bracket = conn.execute(
                 "SELECT bracket_id FROM finals_bracket_week WHERE bbbffl_round_id=?", (round_id,)
             ).fetchone()
-            if grand.home.effective_score == grand.away.effective_score:
-                ranks = conn.execute(
-                    "SELECT season_entry_id,seed_position FROM finals_bracket_seed WHERE bracket_id=? "
-                    "AND season_entry_id IN (?,?)",
-                    (bracket["bracket_id"], grand.home.season_entry_id, grand.away.season_entry_id),
-                ).fetchall()
-                premier = min(ranks, key=lambda row: row["seed_position"])["season_entry_id"]
-            else:
-                premier = (
-                    grand.home.season_entry_id
-                    if grand.home.effective_score > grand.away.effective_score
-                    else grand.away.season_entry_id
-                )
-            mathematical = conn.execute(
-                "SELECT mr.season_entry_id, s.snapshot_id, s.through_round "
-                "FROM finals_bracket b JOIN finals_seeding_snapshot s "
-                "ON s.snapshot_id=b.finals_seeding_snapshot_id "
-                "JOIN finals_seeding_snapshot_mathematical_row mr ON mr.snapshot_id=s.snapshot_id "
-                "WHERE b.bracket_id=? AND mr.rank=10",
-                (bracket["bracket_id"],),
-            ).fetchone()
-            if mathematical is None:
-                raise ValueError("Grand Final cannot publish without a frozen mathematical ladder wooden-spoon fact")
-            spoon = mathematical["season_entry_id"]
+            premier = _premier(conn, bracket["bracket_id"], grand)
+            spoon, spoon_provenance = _mathematical_wooden_spoon(conn, bracket["bracket_id"])
             for action, entry in (("finals.premier.recorded", premier), ("finals.wooden_spoon.recorded", spoon)):
                 provenance = (
-                    {
-                        "finals_seeding_snapshot_id": mathematical["snapshot_id"],
-                        "through_round": mathematical["through_round"],
-                    }
+                    spoon_provenance
                     if action == "finals.wooden_spoon.recorded"
                     else {"grand_final_matchup_id": grand.matchup_id, "official_version": 1}
                 )
@@ -198,7 +241,11 @@ def correct_finals_result(database, afl_client, lifecycle, review_repo, identiti
     batch_factory = getattr(afl_client, "evidence_batch", None)
     scope = batch_factory() if callable(batch_factory) else nullcontext(afl_client)
     with scope as evidence:
-        MatchupCalculationService(database, afl_client).calculate_matchup(matchup_id)
+        # One shared facts cache and every round matchup lock, matching
+        # publication's freshness/serialization boundary. A correction may
+        # drive both downstream Week-2 pairings, so a partial stale round
+        # must never be reconciled from mixed evidence.
+        MatchupCalculationService(database, afl_client).calculate_round(context["bbbffl_round_id"])
         fresh_fn = getattr(evidence, "is_evidence_fresh", None)
         fresh = fresh_fn() if callable(fresh_fn) else True
         matchup = lifecycle.get_matchup(matchup_id)
@@ -206,18 +253,29 @@ def correct_finals_result(database, afl_client, lifecycle, review_repo, identiti
     if review.blockers:
         raise SignoffValidationError({matchup_id: review.blockers})
     snapshot = _freeze_matchup_inputs(review, actor)
+    bracket_repo = FinalsBracketRepository(database)
+    source_ids = (
+        bracket_repo._source_matchup_ids(context["bracket_id"], context["week_number"])
+        if context["week_number"] < 4
+        else {matchup_id}
+    )
     with transaction(database) as conn:
-        locked = conn.execute(
-            "SELECT m.*, c.revision calculation_revision, c.input_fingerprint calculation_fingerprint "
-            "FROM bbbffl_matchup m JOIN bbbffl_matchup_calculation c ON c.matchup_id=m.matchup_id "
-            "WHERE m.matchup_id=?" + _for_update_suffix(database),
+        locked_matchups = {}
+        for source_id in sorted(source_ids):
+            locked_matchups[source_id] = conn.execute(
+                "SELECT * FROM bbbffl_matchup WHERE matchup_id=?" + _for_update_suffix(database),
+                (source_id,),
+            ).fetchone()
+        locked = locked_matchups[matchup_id]
+        calculation = conn.execute(
+            "SELECT revision,input_fingerprint FROM bbbffl_matchup_calculation WHERE matchup_id=?",
             (matchup_id,),
         ).fetchone()
         if (
             locked["effective_official_version"] != old_version
             or locked["review_version"] != review.review_version
-            or locked["calculation_revision"] != snapshot["calculation_revision"]
-            or locked["calculation_fingerprint"] != snapshot["calculation_fingerprint"]
+            or calculation["revision"] != snapshot["calculation_revision"]
+            or calculation["input_fingerprint"] != snapshot["calculation_fingerprint"]
         ):
             raise StaleFinalsSnapshotError("finals result, calculation, or review changed during correction")
         version, now, correlation = old_version + 1, _now(), new_correlation_id()
@@ -250,17 +308,44 @@ def correct_finals_result(database, afl_client, lifecycle, review_repo, identiti
             before_state={"official_version": old_version},
             after_state={"official_version": version},
         )
-    if context["week_number"] < 4:
-        bracket = FinalsBracketRepository(database)
-        preview = bracket.rewind_bracket(
-            context["bracket_id"], context["week_number"], actor=actor, reason=reason, apply=False
-        )
-        bracket.rewind_bracket(
-            context["bracket_id"],
-            context["week_number"],
-            actor=actor,
-            reason=reason,
-            apply=True,
-            expected_versions=preview["expected_versions"],
-        )
+        if context["week_number"] < 4:
+            expected_versions = {
+                source_id: (version if source_id == matchup_id else row["effective_official_version"])
+                for source_id, row in locked_matchups.items()
+            }
+            bracket_repo.rewind_bracket_in_transaction(
+                conn,
+                context["bracket_id"],
+                context["week_number"],
+                actor=actor,
+                reason=reason,
+                expected_versions=expected_versions,
+            )
+        else:
+            old = conn.execute(
+                "SELECT home_score,away_score FROM bbbffl_official_result WHERE matchup_id=? AND version=?",
+                (matchup_id, old_version),
+            ).fetchone()
+            old_premier = _premier_for_scores(
+                conn,
+                context["bracket_id"],
+                locked["home_season_entry_id"],
+                locked["away_season_entry_id"],
+                old["home_score"],
+                old["away_score"],
+            )
+            new_premier = _premier(conn, context["bracket_id"], review)
+            append_event(
+                conn,
+                actor=actor,
+                action="finals.premier.recorded",
+                entity_type="season.entry",
+                entity_id=new_premier,
+                entity_version=str(version),
+                correlation_id=correlation,
+                reason=reason,
+                before_state={"season_entry_id": old_premier, "official_version": old_version},
+                after_state={"season_entry_id": new_premier, "official_version": version},
+                payload={"grand_final_matchup_id": matchup_id, "supersedes_official_version": old_version},
+            )
     return lifecycle.effective_result(matchup_id)

@@ -269,6 +269,49 @@ def test_rewind_never_recurses_past_the_immediately_downstream_week():
     assert week3_before == week3_after
 
 
+def test_transaction_aware_rewind_refusal_rolls_back_callers_result_change():
+    """#191: correction and rewind are one atomic outcome, never a 409
+    after the new effective result has already committed."""
+    built, bracket, repo = _bracket_with_mappings(2490)
+    week1 = _week1_to_week2(built, repo, bracket, qf_result=(100, 50), ef_result=(50, 100))
+    open_finals_week(built["database"], bracket.bracket_id, 2, actor=ACTOR)
+    week2 = {p.slot: p for p in repo.list_pairings(bracket.bracket_id, week_number=2)}
+    seed_official_result(built["database"], week2["first_semi"].matchup_id, 120, 40)
+    qf_id = week1["qf"].matchup_id
+    source_ids = repo._source_matchup_ids(bracket.bracket_id, 1)
+
+    with pytest.raises(DownstreamPlayStateError):
+        with transaction(built["database"]) as conn:
+            versions = {}
+            for source_id in sorted(source_ids):
+                row = conn.execute(
+                    "SELECT effective_official_version FROM bbbffl_matchup WHERE matchup_id=?", (source_id,)
+                ).fetchone()
+                versions[source_id] = row["effective_official_version"]
+            conn.execute(
+                "INSERT INTO bbbffl_official_result VALUES (?,2,70,100,'now',NULL,'atomic correction',NULL)",
+                (qf_id,),
+            )
+            conn.execute("UPDATE bbbffl_matchup SET effective_official_version=2 WHERE matchup_id=?", (qf_id,))
+            versions[qf_id] = 2
+            repo.rewind_bracket_in_transaction(
+                conn, bracket.bracket_id, 1, actor=ACTOR, reason="atomic correction", expected_versions=versions
+            )
+
+    matchup = (
+        built["database"]
+        .execute("SELECT effective_official_version FROM bbbffl_matchup WHERE matchup_id=?", (qf_id,))
+        .fetchone()
+    )
+    assert matchup["effective_official_version"] == 1
+    assert (
+        built["database"]
+        .execute("SELECT 1 FROM bbbffl_official_result WHERE matchup_id=? AND version=2", (qf_id,))
+        .fetchone()
+        is None
+    )
+
+
 def test_rewind_requires_a_reason_when_applying():
     built, bracket, repo = _bracket_with_mappings(2406)
     _week1_to_week2(built, repo, bracket, qf_result=(100, 50), ef_result=(50, 100))

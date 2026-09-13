@@ -1,5 +1,8 @@
 """Five-matchup acceptance coverage for persisted season scoring."""
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+
 from sqlalchemy import text
 
 from app.afl_client import Match, PlayerStatLine, Team
@@ -147,6 +150,31 @@ def test_persisted_round_calculates_five_idempotent_matchups_with_slot_evidence(
     stats[changed_player] = PlayerStatLine(changed_player, goals=99)
     changed = service.calculate_round(round_.bbbffl_round_id, upstream_revision="stats-2")
     assert sum(item.revision == 2 for item in changed) == 1
+
+
+def test_shared_calculation_service_never_exposes_a_request_transaction_as_its_database():
+    """Regression for PR #203's shared-service state race.
+
+    Two calls overlap in provider I/O on one service instance. Each observes
+    the configured DatabaseConnection throughout; neither can leak its
+    request-local transaction connection through ``service.database``.
+    """
+    db, lifecycle, round_, stats = setup_round(year=2701)
+    matchup_ids = [m.matchup_id for m in lifecycle.list_matchups(round_.bbbffl_round_id)[:2]]
+    barrier = Barrier(2)
+
+    class OverlappingFacts(Facts):
+        def get_matches(self, round_id):
+            assert service.database is db
+            barrier.wait(timeout=5)
+            assert service.database is db
+            return super().get_matches(round_id)
+
+    service = MatchupCalculationService(db, OverlappingFacts(stats))
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(service.calculate_matchup, matchup_ids))
+    assert {result.matchup_id for result in results} == set(matchup_ids)
+    assert service.database is db
 
 
 def test_two_rule_versions_drive_the_shared_scoring_core():

@@ -86,7 +86,7 @@ class MatchupCalculationService:
         self.afl_client = afl_client
 
     def calculate_round(self, round_id, *, upstream_revision=None, observed_at=None):
-        matchup_ids = [row["matchup_id"] for row in self._matchups(round_id)]
+        matchup_ids = [row["matchup_id"] for row in self._matchups(self.database, round_id)]
         return self._calculate_locked(matchup_ids, round_id, upstream_revision, observed_at)
 
     def calculate_matchup(self, matchup_id, *, upstream_revision=None, observed_at=None):
@@ -102,26 +102,19 @@ class MatchupCalculationService:
         shared facts cache is constructed, preventing stale cached facts from
         overwriting a newer single-match calculation.
         """
-        original = self.database
-        with transaction(original) as conn:
+        with transaction(self.database) as conn:
             rows = []
             for matchup_id in sorted(matchup_ids):
                 row = conn.execute(
-                    "SELECT * FROM bbbffl_matchup WHERE matchup_id=?" + _for_update_suffix(original),
+                    "SELECT * FROM bbbffl_matchup WHERE matchup_id=?" + _for_update_suffix(self.database),
                     (matchup_id,),
                 ).fetchone()
                 if row is None:
                     raise KeyError(matchup_id)
                 rows.append(row)
-            # Route every subsequent evidence/scoring read through this same
-            # transaction while the serialization locks remain held.
-            self.database = conn
-            try:
-                context = self._round_context(round_id)
-                facts = (_RoundFacts(self.afl_client, context["afl_round_id"]), self._bye_team_ids(context))
-                return [self._calculate(row, context, facts, upstream_revision, observed_at) for row in rows]
-            finally:
-                self.database = original
+            context = self._round_context(conn, round_id)
+            facts = (_RoundFacts(self.afl_client, context["afl_round_id"]), self._bye_team_ids(context))
+            return [self._calculate(conn, row, context, facts, upstream_revision, observed_at) for row in rows]
 
     def _bye_team_ids(self, context):
         """The AFL clubs on an ordinary bye for this round, if the configured
@@ -147,10 +140,10 @@ class MatchupCalculationService:
                 return None if round_.byes is None else frozenset(team.team_id for team in round_.byes)
         return None
 
-    def _calculate(self, matchup, context, facts, upstream_revision, observed_at):
+    def _calculate(self, conn, matchup, context, facts, upstream_revision, observed_at):
         rules = ScoringRules.from_dict(json.loads(context["scoring_rules"]) if context["scoring_rules"] else None)
-        home = self._entry(matchup["home_season_entry_id"], context, facts, rules)
-        away = self._entry(matchup["away_season_entry_id"], context, facts, rules)
+        home = self._entry(conn, matchup["home_season_entry_id"], context, facts, rules)
+        away = self._entry(conn, matchup["away_season_entry_id"], context, facts, rules)
         observed_at = observed_at or _now()
         snapshot = {
             "engine_version": ENGINE_VERSION,
@@ -176,10 +169,12 @@ class MatchupCalculationService:
         fingerprint = hashlib.sha256(
             json.dumps(fingerprint_input, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
-        revision = self._persist(matchup, context, home, away, snapshot, fingerprint, upstream_revision, observed_at)
+        revision = self._persist(
+            conn, matchup, context, home, away, snapshot, fingerprint, upstream_revision, observed_at
+        )
         return CalculatedMatchup(matchup["matchup_id"], revision, fingerprint, snapshot)
 
-    def _deferred_positions(self, bbbffl_round_id, season_entry_id):
+    def _deferred_positions(self, conn, bbbffl_round_id, season_entry_id):
         """`{position: {"season_player_id": ..., "afl_opening_round_id": ...,
         "rule_id": ..., "source_afl_match_id": ...}}` for every current
         Opening Round deferred nomination targeting this round/entry
@@ -195,7 +190,7 @@ class MatchupCalculationService:
         currently occupying it is the nominated one (the nomination could
         have been corrected after submission, or the submission could have
         bypassed `app.opening_round.OpeningRoundSelectionGuard`)."""
-        rows = self.database.execute(
+        rows = conn.execute(
             "SELECT n.position, n.season_player_id, n.source_afl_match_id, rev.afl_opening_round_id "
             "FROM opening_round_nomination n "
             "JOIN opening_round_rule r ON r.rule_id=n.rule_id "
@@ -205,21 +200,21 @@ class MatchupCalculationService:
         ).fetchall()
         return {row["position"]: dict(row) for row in rows}
 
-    def _entry(self, entry_id, context, facts, rules):
-        lineup = self.database.execute(
+    def _entry(self, conn, entry_id, context, facts, rules):
+        lineup = conn.execute(
             "SELECT * FROM weekly_lineup WHERE season_id=? AND competition_id=? AND bbbffl_round_id=? AND season_entry_id=?",
             (context["season_id"], context["competition_id"], context["bbbffl_round_id"], entry_id),
         ).fetchone()
         if not lineup or lineup["effective_submission_version"] is None:
             raise ValueError(f"entry {entry_id} has no effective submitted lineup")
         version = lineup["effective_submission_version"]
-        slots = self.database.execute(
+        slots = conn.execute(
             "SELECT s.position, s.season_player_id, p.canonical_player_id, p.afl_team_id FROM weekly_lineup_submission_slot s LEFT JOIN season_player_pool p ON p.season_player_id=s.season_player_id WHERE s.lineup_id=? AND s.version=? ORDER BY s.position",
             (lineup["lineup_id"], version),
         ).fetchall()
         evidence, total = [], 0
         round_facts, bye_team_ids = facts
-        deferred_positions = self._deferred_positions(context["bbbffl_round_id"], entry_id)
+        deferred_positions = self._deferred_positions(conn, context["bbbffl_round_id"], entry_id)
         interchange_raw = None
         for slot in slots:
             nomination = deferred_positions.get(slot["position"])
@@ -387,22 +382,8 @@ class MatchupCalculationService:
             "interchange_potential_scores": interchange_potential_scores,
         }
 
-    def _persist(self, matchup, context, home, away, snapshot, fingerprint, upstream_revision, observed_at):
+    def _persist(self, conn, matchup, context, home, away, snapshot, fingerprint, upstream_revision, observed_at):
         encoded = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
-        # `_calculate_locked` binds `self.database` to its transaction
-        # connection, so persistence remains in the same lock scope. Keep a
-        # small compatibility path for direct unit calls to this private
-        # method.
-        if hasattr(self.database, "_connection"):
-            return self._persist_on(
-                self.database, matchup, context, home, away, encoded, fingerprint, upstream_revision, observed_at
-            )
-        with transaction(self.database) as conn:
-            return self._persist_on(
-                conn, matchup, context, home, away, encoded, fingerprint, upstream_revision, observed_at
-            )
-
-    def _persist_on(self, conn, matchup, context, home, away, encoded, fingerprint, upstream_revision, observed_at):
         # A missing row cannot be protected by SELECT FOR UPDATE.  This
         # upsert makes first-write creation and revision comparison one
         # PostgreSQL operation: identical contenders retain revision 1;
@@ -439,8 +420,8 @@ class MatchupCalculationService:
         ).fetchone()
         return row["revision"]
 
-    def _round_context(self, round_id):
-        row = self.database.execute(
+    def _round_context(self, conn, round_id):
+        row = conn.execute(
             "SELECT l.*, c.rules_version_id, v.scoring_rules FROM bbbffl_round_lifecycle l JOIN competition_stream c ON c.competition_id=l.competition_id JOIN season_rules_version v ON v.rules_version_id=c.rules_version_id WHERE l.bbbffl_round_id=?",
             (round_id,),
         ).fetchone()
@@ -448,7 +429,8 @@ class MatchupCalculationService:
             raise KeyError(round_id)
         return row
 
-    def _matchups(self, round_id):
-        return self.database.execute(
+    @staticmethod
+    def _matchups(conn, round_id):
+        return conn.execute(
             "SELECT * FROM bbbffl_matchup WHERE bbbffl_round_id=? ORDER BY matchup_order", (round_id,)
         ).fetchall()

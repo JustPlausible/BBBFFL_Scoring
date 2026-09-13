@@ -31,7 +31,7 @@ from app.afl_client import AflApiError
 from app.db import _for_update_suffix, transaction
 from app.participation import assess_participation
 from app.scoring import PlayerStats, ScoringRules, score_position
-from app.season import _now
+from app.season import SeasonRepository, _now
 
 ENGINE_VERSION = "bbbffl-core-v1"
 POSITION_MAP = {
@@ -85,24 +85,48 @@ class MatchupCalculationService:
         self.database = database
         self.afl_client = afl_client
 
-    def calculate_round(self, round_id, *, upstream_revision=None, observed_at=None):
+    def calculate_round(self, round_id, *, upstream_revision=None, observed_at=None, guard_season=False):
         matchup_ids = [row["matchup_id"] for row in self._matchups(self.database, round_id)]
-        return self._calculate_locked(matchup_ids, round_id, upstream_revision, observed_at)
+        return self._calculate_locked(matchup_ids, round_id, upstream_revision, observed_at, guard_season=guard_season)
 
-    def calculate_matchup(self, matchup_id, *, upstream_revision=None, observed_at=None):
+    def calculate_matchup(self, matchup_id, *, upstream_revision=None, observed_at=None, guard_season=False):
         row = self.database.execute("SELECT * FROM bbbffl_matchup WHERE matchup_id=?", (matchup_id,)).fetchone()
         if not row:
             raise KeyError(matchup_id)
-        return self._calculate_locked([matchup_id], row["bbbffl_round_id"], upstream_revision, observed_at)[0]
+        return self._calculate_locked(
+            [matchup_id], row["bbbffl_round_id"], upstream_revision, observed_at, guard_season=guard_season
+        )[0]
 
-    def _calculate_locked(self, matchup_ids, round_id, upstream_revision, observed_at):
+    def _calculate_locked(self, matchup_ids, round_id, upstream_revision, observed_at, *, guard_season=False):
         """Lock #197's always-present matchup rows for compute through persist.
 
         Bulk calculation takes every lock in deterministic order before the
         shared facts cache is constructed, preventing stale cached facts from
         overwriting a newer single-match calculation.
-        """
+
+        `guard_season` (issue #195, Codex review on PR #206): finals'
+        publish/correction flow (`app.finals_review`) recomputes *before*
+        it opens its own guarded transaction, and this method's own persist
+        step (`_persist`, below) commits in its own transaction regardless
+        -- so without this, a completed season's `bbbffl_matchup_
+        calculation` row could still be mutated even though the eventual
+        official-result write is correctly refused. When `True`, the
+        owning season is locked and guarded (`SeasonRepository.
+        guard_writable`) as the *first* statement of this transaction,
+        ahead of the matchup-row locks below, maintaining the "season lock
+        first" ordering every other guarded write path already uses --
+        never an unlocked pre-check, so this call and `app.season_
+        completion.complete_season` only ever serialize through that one
+        lock. Ordinary calculation (every other caller) leaves this `False`
+        -- unaffected, exactly as before this issue existed."""
         with transaction(self.database) as conn:
+            if guard_season:
+                season_lookup = conn.execute(
+                    "SELECT season_id FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?", (round_id,)
+                ).fetchone()
+                if season_lookup is None:
+                    raise KeyError(round_id)
+                SeasonRepository(self.database).guard_writable(conn, season_lookup["season_id"])
             rows_by_id = {}
             for matchup_id in sorted(matchup_ids):
                 row = conn.execute(

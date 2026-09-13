@@ -113,6 +113,7 @@ EXPECTED_TABLES = {
     "superscore_entry_calculation",
     "superscore_leaderboard_revision",
     "superscore_official_result",
+    "season_award",
 }
 
 

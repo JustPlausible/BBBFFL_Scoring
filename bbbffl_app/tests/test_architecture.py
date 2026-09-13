@@ -168,6 +168,23 @@ FINALS = {"app.finals", "app.finals_review"}
 # lockouts_do_not_depend_on_superscore` below).
 SUPERSCORE = {"app.superscore_round", "app.superscore_review", "app.superscore_results"}
 
+# End-of-season completion (issue #195): the season-outcome application
+# boundary that sits *above* the season model and finals, the same shape as
+# `app.replay_bootstrap`/`app.finals_seeding` (see this file's REPLAY_
+# BOOTSTRAP comment) -- a narrow, audited command over persisted state,
+# never a route dependency. `app.season_awards` derives and persists the
+# premiership/wooden-spoon `season_award` records: it reuses `app.finals_
+# review`'s existing tie-break determination (`_premier_for_scores`) for
+# the premiership, and reads `app.ladder` directly (never `app.finals`'s own
+# frozen bracket provenance -- see its module docstring) for the wooden
+# spoon, since that fact is explicitly an ordinary-competition one, not a
+# finals-derived one. `app.season_completion` is the one layer above both:
+# the atomic `active -> completed` command composing `app.season_awards`
+# and the season/finals/SuperScore lifecycle state it gates on. Neither
+# module is HTTP-routed, and no lower layer (SEASON_MODEL, FINALS,
+# SUPERSCORE) may depend back on either.
+SEASON_COMPLETION = {"app.season_awards", "app.season_completion"}
+
 # Anonymous ordinary-season presentation/read service (issue #78).  It is an
 # allow-listed DTO layer above the persisted review and ladder boundaries;
 # routes may import it, while it never depends on HTTP or the composition root.
@@ -346,6 +363,7 @@ ALL_GROUPS = (
     | ROUND_REVIEW
     | FINALS
     | SUPERSCORE
+    | SEASON_COMPLETION
     | PUBLIC_READ_MODEL
     | OPENING_ROUND
     | AUTH

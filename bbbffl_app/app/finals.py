@@ -76,6 +76,7 @@ from app.competition_lifecycle import CompetitionLifecycleRepository
 from app.db import _for_update_suffix, transaction
 from app.finals_seeding import FinalsSeedingRepository, UnresolvedLadderTieError
 from app.ladder import LadderRepository
+from app.season import SeasonRepository
 
 __all__ = [
     "DownstreamPlayStateError",
@@ -959,8 +960,20 @@ class FinalsBracketRepository:
         # Finals result correction already holds the prerequisite matchup
         # locks and must reconcile the bracket in that *same* transaction.
         # Public rewind calls retain the normal self-owned transaction.
-        scope = transaction(self.database) if conn is None else nullcontext(conn)
+        owns_transaction = conn is None
+        scope = transaction(self.database) if owns_transaction else nullcontext(conn)
         with scope as conn:
+            if owns_transaction and apply:
+                # Issue #195's shared completed-season write fence -- only
+                # for a standalone `rewind_bracket(apply=True)` call (not a
+                # read-only preview, and not the finals-correction-nested
+                # case, which already guarded the season lock as the first
+                # statement of its own outer transaction). Locked first,
+                # ahead of the prerequisite matchup locks below.
+                season_id = conn.execute(
+                    "SELECT season_id FROM finals_bracket WHERE bracket_id=?", (bracket_id,)
+                ).fetchone()["season_id"]
+                SeasonRepository(self.database).guard_writable(conn, season_id)
             locked = {mid: self._lock_matchup_version(conn, mid, expected_versions) for mid in sorted(source_ids)}
             derivation = self._derive(conn, bracket_id, from_week, seed_rank, locked)
 

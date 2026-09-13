@@ -13,7 +13,7 @@ from app.finals import (
     _StaleMatchupDuringDownstreamCheck,
 )
 from app.round_review import SignoffValidationError, _freeze_matchup_inputs, build_matchup_review
-from app.season import _now
+from app.season import SeasonRepository, _now
 
 EXPECTED_MATCH_COUNTS = {1: 2, 2: 2, 3: 1, 4: 1}
 
@@ -135,7 +135,11 @@ def publish_finals_round(database, afl_client, lifecycle, review_repo, identitie
     batch_factory = getattr(afl_client, "evidence_batch", None)
     scope = batch_factory() if callable(batch_factory) else nullcontext(afl_client)
     with scope as evidence:
-        MatchupCalculationService(database, afl_client).calculate_round(round_id)
+        # Issue #195 (Codex review, PR #206): `guard_season=True` makes this
+        # recomputation's own transaction refuse (and write nothing) if the
+        # season is already completed, closing the gap where a rejected
+        # publish attempt could still mutate `bbbffl_matchup_calculation`.
+        MatchupCalculationService(database, afl_client).calculate_round(round_id, guard_season=True)
         fresh_fn = getattr(evidence, "is_evidence_fresh", None)
         fresh = fresh_fn() if callable(fresh_fn) else True
         review = build_finals_round_review(lifecycle, review_repo, identities, round_id, evidence_fresh=fresh)
@@ -146,6 +150,16 @@ def publish_finals_round(database, afl_client, lifecycle, review_repo, identitie
     snapshots = {m.matchup_id: _freeze_matchup_inputs(m, actor) for m in review["matchups"]}
     results = {m.matchup_id: (m.home.effective_score, m.away.effective_score) for m in review["matchups"]}
     with transaction(database) as conn:
+        # Issue #195's shared completed-season write fence: lock the owning
+        # season row first, ahead of the round/matchup locks below, so this
+        # transaction and `app.season_completion.complete_season` can only
+        # ever serialize through that one lock.
+        season_row = conn.execute(
+            "SELECT season_id FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?", (round_id,)
+        ).fetchone()
+        if season_row is None:
+            raise KeyError(round_id)
+        SeasonRepository(database).guard_writable(conn, season_row["season_id"])
         round_row = conn.execute(
             "SELECT * FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?" + _for_update_suffix(database),
             (round_id,),
@@ -249,8 +263,11 @@ def correct_finals_result(database, afl_client, lifecycle, review_repo, identiti
         # One shared facts cache and every round matchup lock, matching
         # publication's freshness/serialization boundary. A correction may
         # drive both downstream Week-2 pairings, so a partial stale round
-        # must never be reconciled from mixed evidence.
-        MatchupCalculationService(database, afl_client).calculate_round(context["bbbffl_round_id"])
+        # must never be reconciled from mixed evidence. `guard_season=True`
+        # (issue #195, Codex review, PR #206): see `publish_finals_round`'s
+        # identical rationale -- refuses and writes nothing if the season
+        # is already completed, before any calculation is persisted.
+        MatchupCalculationService(database, afl_client).calculate_round(context["bbbffl_round_id"], guard_season=True)
         fresh_fn = getattr(evidence, "is_evidence_fresh", None)
         fresh = fresh_fn() if callable(fresh_fn) else True
         matchup = lifecycle.get_matchup(matchup_id)
@@ -284,6 +301,10 @@ def _correct_finals_result_transaction(database, context, review, snapshot, acto
         else {matchup_id}
     )
     with transaction(database) as conn:
+        # Issue #195's shared completed-season write fence -- locked first,
+        # ahead of every matchup row below (see `publish_finals_round`'s
+        # identical rationale).
+        SeasonRepository(database).guard_writable(conn, context["season_id"])
         locked_matchups = {}
         for source_id in sorted(source_ids):
             locked_matchups[source_id] = conn.execute(

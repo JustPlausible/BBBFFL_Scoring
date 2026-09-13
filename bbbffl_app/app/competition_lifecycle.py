@@ -37,7 +37,40 @@ from uuid import UUID, uuid4, uuid5
 
 from app.audit import ActorContext, append_event, new_correlation_id
 from app.db import _for_update_suffix, transaction
-from app.season import _now
+from app.season import SeasonRepository, _now
+
+
+def _guard_season_writable_for_round(conn, database, round_id):
+    """Issue #195's shared completed-season write fence: resolve the owning
+    season for a round (an unlocked read -- the round/competition/season
+    relationship is immutable once created, so there is nothing to race
+    here) and lock/guard it, *before* this transaction locks or mutates
+    anything else. Locking the season row first, ahead of any matchup/round
+    row, is what lets a correction and `app.season_completion.
+    complete_season` serialize purely through this one lock rather than
+    risk a deadlock from acquiring the same two locks in reversed order."""
+    row = conn.execute(
+        "SELECT c.season_id FROM bbbffl_round r JOIN competition_stream c ON c.competition_id=r.competition_id "
+        "WHERE r.bbbffl_round_id=?",
+        (round_id,),
+    ).fetchone()
+    if row is None:
+        raise KeyError(round_id)
+    SeasonRepository(database).guard_writable(conn, row["season_id"])
+
+
+def _guard_season_writable_for_matchup(conn, database, matchup_id):
+    """`_guard_season_writable_for_round`'s counterpart for a matchup-keyed
+    write path (`correct_matchup_result`), which has no `round_id` in hand
+    up front."""
+    row = conn.execute(
+        "SELECT c.season_id FROM bbbffl_matchup m JOIN bbbffl_round r ON r.bbbffl_round_id=m.bbbffl_round_id "
+        "JOIN competition_stream c ON c.competition_id=r.competition_id WHERE m.matchup_id=?",
+        (matchup_id,),
+    ).fetchone()
+    if row is None:
+        raise KeyError(matchup_id)
+    SeasonRepository(database).guard_writable(conn, row["season_id"])
 
 
 class StaleRoundVersionError(RuntimeError):
@@ -454,6 +487,7 @@ class CompetitionLifecycleRepository:
         behaviour exactly.
         """
         with transaction(self.database) as conn:
+            _guard_season_writable_for_round(conn, self.database, round_id)
             row = self._locked_round(conn, round_id)
             if expected_round_version is not None and row["version"] != expected_round_version:
                 raise StaleRoundVersionError(
@@ -535,6 +569,7 @@ class CompetitionLifecycleRepository:
         if not reason:
             raise ValueError("an authorised post-final correction requires a reason")
         with transaction(self.database) as conn:
+            _guard_season_writable_for_round(conn, self.database, round_id)
             row = self._locked_round(conn, round_id)
             if expected_round_version is not None and row["version"] != expected_round_version:
                 raise StaleRoundVersionError(
@@ -632,6 +667,7 @@ class CompetitionLifecycleRepository:
         if not reason:
             raise ValueError("an authorised correction requires a reason")
         with transaction(self.database) as conn:
+            _guard_season_writable_for_matchup(conn, self.database, matchup_id)
             matchup = conn.execute(
                 "SELECT * FROM bbbffl_matchup WHERE matchup_id=?" + _for_update_suffix(self.database),
                 (matchup_id,),

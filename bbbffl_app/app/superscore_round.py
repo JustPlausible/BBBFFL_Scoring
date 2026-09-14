@@ -155,11 +155,33 @@ def ensure_stream(
     return SuperScoreStream(created.competition_id, season_id, ordinary_competition_id)
 
 
+def _require_superscore_competition(database, competition_id: str) -> None:
+    """The `ensure_round`/`resolve_concurrent_finals_afl_mapping` sibling of
+    `_require_superscore_round`: refuses a `competition_id` that does not
+    belong to a `superscore`-typed `competition_stream`, *before* a
+    round/mapping is created against it (Codex review, PR #207, round 5:
+    `_require_superscore_round` alone runs too late -- `ensure_round` given
+    a finals `competition_id` by mistake would already have created a
+    bogus `ss1`-labelled round under it, and `resolve_concurrent_finals_
+    afl_mapping` would then happily persist a mapping against it, before
+    either ever reached `setup_round`/`open_round`)."""
+    row = database.execute(
+        "SELECT stream_type FROM competition_stream WHERE competition_id=?", (competition_id,)
+    ).fetchone()
+    if row is None:
+        raise SuperScoreRoundError(f"unknown competition {competition_id}")
+    if row["stream_type"] != STREAM_TYPE:
+        raise SuperScoreRoundError(
+            f"competition {competition_id} is a {row['stream_type']!r}-typed stream, not {STREAM_TYPE!r}"
+        )
+
+
 def ensure_round(database, competition_id: str, round_number: int, sequence: int) -> str:
     """Idempotently create (or return the already-created) logical
     `bbbffl_round` row (`app.season.SeasonRepository.create_round`'s generic
     primitive -- unchanged, no SuperScore-specific schema) for one of
     SS1-SS4. Returns `bbbffl_round_id`."""
+    _require_superscore_competition(database, competition_id)
     if round_number not in ROUND_LABELS:
         raise SuperScoreRoundError(f"unknown SuperScore round number: {round_number}")
     label = ROUND_LABELS[round_number]
@@ -209,6 +231,102 @@ def confirm_afl_mapping(
     return repo.correct(bbbffl_round_id, afl_season_id, afl_round_id, validator, actor=actor, reason=reason)
 
 
+_ROUND_KEY_TO_WEEK = {label.lower(): number for number, label in ROUND_LABELS.items()}
+
+
+def resolve_concurrent_finals_afl_mapping(database, bbbffl_round_id: str) -> RoundMapping:
+    """Resolve the accepted AFL-round mapping of the *exact* finals week that
+    must run concurrently with the given SuperScore round (SS1 <-> finals
+    week 1, ..., SS4 <-> finals week 4), per `confirm_afl_mapping`'s own
+    documented rule -- verifying the finals week actually belongs to the
+    same season *and* is the matching week number, not merely that some
+    finals round happens to carry an accepted mapping (Codex review, PR
+    #207, round 2: an operator-suppliable "which finals round" parameter
+    cannot be trusted to be the *correct* one -- deriving both the season
+    and the week number from `bbbffl_round_id` itself, with no
+    operator-suppliable substitute, closes that off by construction).
+
+    Raises `SuperScoreRoundError` if `bbbffl_round_id` does not belong to a
+    `superscore`-typed stream, is not one of SS1-SS4, its season has no
+    finals bracket yet, that bracket has no matching week yet, or that
+    week's round has not been opened yet (its AFL-round mapping is frozen
+    onto `bbbffl_round_lifecycle` only once `open_finals_week` creates that
+    row -- see the note below on why this reads the frozen row rather than
+    the mapping's own current head)."""
+    round_row = database.execute(
+        "SELECT r.round_key, c.season_id, c.stream_type FROM bbbffl_round r "
+        "JOIN competition_stream c ON c.competition_id=r.competition_id "
+        "WHERE r.bbbffl_round_id=?",
+        (bbbffl_round_id,),
+    ).fetchone()
+    if round_row is None:
+        raise SuperScoreRoundError(f"unknown round {bbbffl_round_id}")
+    if round_row["stream_type"] != STREAM_TYPE:
+        raise SuperScoreRoundError(
+            f"round {bbbffl_round_id} belongs to a {round_row['stream_type']!r}-typed stream, not {STREAM_TYPE!r}"
+        )
+    week_number = _ROUND_KEY_TO_WEEK.get(round_row["round_key"])
+    if week_number is None:
+        raise SuperScoreRoundError(f"round {bbbffl_round_id} (round_key={round_row['round_key']!r}) is not SS1-SS4")
+    season_id = round_row["season_id"]
+
+    bracket = database.execute("SELECT bracket_id FROM finals_bracket WHERE season_id=?", (season_id,)).fetchone()
+    if bracket is None:
+        raise SuperScoreRoundError(
+            f"season {season_id} has no finals bracket yet; cannot derive "
+            f"{ROUND_LABELS[week_number]}'s concurrent AFL-round mapping"
+        )
+    week = database.execute(
+        "SELECT bbbffl_round_id FROM finals_bracket_week WHERE bracket_id=? AND week_number=?",
+        (bracket["bracket_id"], week_number),
+    ).fetchone()
+    if week is None:
+        raise SuperScoreRoundError(f"finals bracket {bracket['bracket_id']} has no week {week_number} round yet")
+
+    # Codex review, PR #207, round 7: reading `RoundMappingRepository.
+    # resolve()` here returns the finals week's *current* accepted mapping
+    # head, not necessarily what that week's own round is actually using.
+    # `app.competition_lifecycle.CompetitionLifecycleRepository.
+    # create_non_ordinary_round` freezes `mapping_id`/`mapping_revision`/
+    # `afl_season_id`/`afl_round_id` onto the finals round's own
+    # `bbbffl_round_lifecycle` row at *round-creation* time (when
+    # `open_finals_week` first creates it), and every later read of that
+    # round (`app.calculations._round_context`'s `l.afl_round_id`, `l.*`)
+    # uses that frozen snapshot, never a fresh `resolve()`. A correction
+    # to the finals week's mapping after its round was created (e.g. via
+    # `app.round_mapping.RoundMappingRepository.correct`, which has no
+    # dependency on lifecycle state at all) advances the mapping head
+    # without updating that already-frozen lifecycle row -- so deriving
+    # SuperScore's mapping from the live head, as this function used to,
+    # could accept SS1-SS4 against a *different* real AFL round than the
+    # one finals week actually calculates against, silently violating the
+    # shared-round invariant. Reading the finals week's own frozen
+    # lifecycle row instead guarantees SuperScore always derives the
+    # exact same AFL round finals calculations already committed to.
+    lifecycle_row = database.execute(
+        "SELECT mapping_id, mapping_revision, provider, afl_season_id, afl_round_id, created_at "
+        "FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?",
+        (week["bbbffl_round_id"],),
+    ).fetchone()
+    if lifecycle_row is None:
+        raise SuperScoreRoundError(
+            f"finals week {week_number} (round {week['bbbffl_round_id']}) has not been opened yet; "
+            "open it first so its AFL-round mapping is frozen"
+        )
+    return RoundMapping(
+        mapping_id=lifecycle_row["mapping_id"],
+        bbbffl_round_id=week["bbbffl_round_id"],
+        revision=lifecycle_row["mapping_revision"],
+        state="accepted",
+        provider=lifecycle_row["provider"],
+        afl_season_id=lifecycle_row["afl_season_id"],
+        afl_round_id=lifecycle_row["afl_round_id"],
+        created_at=lifecycle_row["created_at"],
+        created_by=None,
+        reason=None,
+    )
+
+
 def _create_review_state_rows(database, season_id: str, bbbffl_round_id: str, *, actor: ActorContext, reason):
     """The core of gap #4: create an always-present `superscore_entry_
     review_state` row (`review_version=0`) for every one of the ten
@@ -233,11 +351,22 @@ def _create_review_state_rows(database, season_id: str, bbbffl_round_id: str, *,
                 "VALUES (?, ?, 0, ?, ?) ON CONFLICT (bbbffl_round_id, season_entry_id) DO NOTHING",
                 (bbbffl_round_id, season_entry_id, now, now),
             )
-        count = conn.execute(
-            "SELECT COUNT(*) AS n FROM superscore_entry_review_state WHERE bbbffl_round_id=?"
+        # Issue #194: lock and count the individual rows in Python, rather
+        # than `SELECT COUNT(*) ... FOR UPDATE` -- real PostgreSQL rejects
+        # `FOR UPDATE` combined with an aggregate function ("FOR UPDATE is
+        # not allowed with aggregate functions"), which made this method
+        # fail outright against Postgres (confirmed on the unmodified base
+        # branch; SQLite's tests never caught it because SQLite silently
+        # tolerates `FOR UPDATE`). This still locks every matching row
+        # before the count is trusted, exactly as the aggregate query
+        # intended, and is the only change -- the completeness check and
+        # its rollback-on-mismatch behaviour are unchanged.
+        locked_rows = conn.execute(
+            "SELECT season_entry_id FROM superscore_entry_review_state WHERE bbbffl_round_id=?"
             + _for_update_suffix(database),
             (bbbffl_round_id,),
-        ).fetchone()["n"]
+        ).fetchall()
+        count = len(locked_rows)
         if count != EXPECTED_ENTRY_COUNT:
             # Raising here rolls back this entire transaction -- including
             # every row this call itself just inserted -- so setup fails
@@ -258,6 +387,29 @@ def _create_review_state_rows(database, season_id: str, bbbffl_round_id: str, *,
         )
 
 
+def _require_superscore_round(database, bbbffl_round_id: str) -> None:
+    """Refuse a round that does not belong to a `superscore`-typed
+    `competition_stream`. `CompetitionLifecycleRepository.
+    create_non_ordinary_round` (#197) permits both finals and SuperScore
+    streams, so nothing before this stopped an operator mistake from
+    running SuperScore's own round-setup/open lifecycle against a finals
+    week's round, corrupting it outside its own proper
+    `app.finals_preflight.open_finals_week` pathway (Codex review, PR
+    #207, round 4)."""
+    row = database.execute(
+        "SELECT c.stream_type FROM bbbffl_round r JOIN competition_stream c ON c.competition_id=r.competition_id "
+        "WHERE r.bbbffl_round_id=?",
+        (bbbffl_round_id,),
+    ).fetchone()
+    if row is None:
+        raise SuperScoreRoundError(f"unknown round {bbbffl_round_id}")
+    if row["stream_type"] != STREAM_TYPE:
+        raise SuperScoreRoundError(
+            f"round {bbbffl_round_id} belongs to a {row['stream_type']!r}-typed stream, not {STREAM_TYPE!r}; "
+            "use that stream's own lifecycle boundary instead"
+        )
+
+
 def setup_round(
     database,
     bbbffl_round_id: str,
@@ -270,6 +422,7 @@ def setup_round(
     round) and then create/verify its complete ten-row `superscore_entry_
     review_state` set (gap #4) -- the round must not open until both steps
     have succeeded (see `open_round`)."""
+    _require_superscore_round(database, bbbffl_round_id)
     lifecycle = CompetitionLifecycleRepository(database)
     round_row = lifecycle.get_round(bbbffl_round_id)
     if round_row is None:
@@ -303,12 +456,46 @@ def open_round(
     `_validate_frozen_context`/mapping-revision check is duplicated or
     weakened here; this is purely an additive precondition in front of the
     existing, unmodified `CompetitionLifecycleRepository.transition`."""
+    _require_superscore_round(database, bbbffl_round_id)
     if not review_state_complete(database, bbbffl_round_id):
         raise IncompleteReviewStateError(
             f"round {bbbffl_round_id} does not have a complete superscore_entry_review_state row set; "
             "it cannot open until setup_round() has succeeded"
         )
     return CompetitionLifecycleRepository(database).transition(bbbffl_round_id, "open", actor=actor, reason=reason)
+
+
+def advance_round_to_review(
+    database,
+    bbbffl_round_id: str,
+    *,
+    actor: ActorContext = ActorContext.anonymous_operator("scorer"),
+    reason: str | None = None,
+):
+    """Stream-aware equivalent of the generic `/rounds/{id}/transition`
+    route (`app/routes/round_review.py`'s `transition_round_review`, which
+    explicitly refuses a non-`ordinary` round and directs it to "its own
+    stream-aware lifecycle module") -- this is that module's SuperScore
+    half, the sibling of `app.finals.FinalsBracketRepository.
+    advance_week_to_review`. `SuperScoreLeaderboardService._persist`
+    requires the round to already be `review` or `final`
+    (`app/superscore_results.py`), but nothing before this ever moved a
+    SuperScore round past `open`; every SS round must pass through here
+    (open -> live -> review) after lineups are submitted and before
+    calculation/publication. Uses the same `CompetitionLifecycleRepository.
+    transition`/`LEGAL_TRANSITIONS` every ordinary round already uses -- no
+    new lifecycle mechanism. Idempotent against a round already at
+    `review` or `final`."""
+    _require_superscore_round(database, bbbffl_round_id)
+    lifecycle = CompetitionLifecycleRepository(database)
+    current = lifecycle.get_round(bbbffl_round_id)
+    if current is None or current.state == "upcoming":
+        raise SuperScoreRoundError(f"round {bbbffl_round_id} is not open yet; run open_round first")
+    if current.state in ("review", "final"):
+        return current
+    if current.state == "open":
+        current = lifecycle.transition(bbbffl_round_id, "live", actor=actor, reason=reason)
+    return lifecycle.transition(bbbffl_round_id, "review", actor=actor, reason=reason)
 
 
 def get_review_state(database, bbbffl_round_id: str, season_entry_id: str) -> int | None:

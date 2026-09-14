@@ -666,6 +666,36 @@ class FinalsBracketRepository:
         )
         return {"round": opened, "already_open": False}
 
+    def advance_week_to_review(
+        self, bracket_id: str, week_number: int, *, actor: ActorContext, reason: str | None = None
+    ) -> dict:
+        """Stream-aware equivalent of the generic `/rounds/{id}/transition`
+        route (`app/routes/round_review.py`'s `transition_round_review`,
+        which explicitly refuses a non-`ordinary` round and directs it to
+        "its own stream-aware lifecycle module") -- this is that module's
+        finals half. `publish_finals_round` requires the round to already
+        be in `review` (`app/finals_review.py`), but nothing before this
+        method ever moved a finals round past `open`; every finals-week
+        round must pass through here (open -> live -> review) after its
+        lineups are submitted and before its result is published. Uses the
+        same `CompetitionLifecycleRepository.transition`/`LEGAL_TRANSITIONS`
+        every ordinary round already uses -- no new lifecycle mechanism.
+        Idempotent against a round already at `review` or `final`."""
+        round_id = self.get_week_round_id(bracket_id, week_number)
+        lifecycle = CompetitionLifecycleRepository(self.database)
+        current = lifecycle.get_round(round_id)
+        if current is None or current.state == "upcoming":
+            raise FinalsBracketAdvanceStateError(
+                f"finals week {week_number} round is not open yet; run open_finals_week first"
+            )
+        if current.state in ("review", "final"):
+            return {"round": current, "already_advanced": True}
+        default_reason = reason or f"Finals {WEEK_LABELS[week_number]} advanced to review before publication"
+        if current.state == "open":
+            current = lifecycle.transition(round_id, "live", actor=actor, reason=default_reason)
+        current = lifecycle.transition(round_id, "review", actor=actor, reason=default_reason)
+        return {"round": current, "already_advanced": False}
+
     def _materialise_pairing(self, round_id: str, pairing: FinalsPairing, *, actor: ActorContext, reason: str) -> bool:
         """Returns `True` once the pairing is materialised (including
         idempotently, if a concurrent caller already did it), or `False` if

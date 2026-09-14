@@ -31,7 +31,7 @@ from app.audit import ActorContext, append_event
 from app.db import _for_update_suffix, transaction
 from app.lineups import POSITIONS as SLOTS
 from app.participation import ParticipationEvidence, assess_participation
-from app.season import _now
+from app.season import SeasonRepository, _now
 
 OVERRIDE_POSITIONS = tuple(slot for slot in SLOTS if slot != "Interchange")
 
@@ -130,6 +130,25 @@ class SuperScoreReviewRepository:
     def __init__(self, database):
         self.database = database
 
+    def _guard_season_writable(self, conn, bbbffl_round_id):
+        """Issue #194 (Codex review, P1): every write in this repository
+        changes review state a published leaderboard's score depends on,
+        so it must take the same completed-season write fence
+        `app.superscore_results`/`app.finals_review`/`app.calculations`
+        already take -- locked first, before any review-state row lock
+        below, exactly mirroring `SuperScoreCalculationService.
+        _calculate_entries`'s identical rationale. Without this, review
+        state remained operator-mutable after `complete_season`, silently
+        invalidating the archival guard's own assumption (`app.
+        season_archival`) that no result-affecting writer remains once a
+        season reads `completed`."""
+        season_lookup = conn.execute(
+            "SELECT season_id FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?", (bbbffl_round_id,)
+        ).fetchone()
+        if season_lookup is None:
+            raise UnknownReviewStateError(f"no round lifecycle for round {bbbffl_round_id}")
+        SeasonRepository(self.database).guard_writable(conn, season_lookup["season_id"])
+
     def _locked_review_state(self, conn, bbbffl_round_id, season_entry_id, expected_review_version):
         row = conn.execute(
             "SELECT review_version FROM superscore_entry_review_state WHERE bbbffl_round_id=? AND season_entry_id=?"
@@ -162,6 +181,7 @@ class SuperScoreReviewRepository:
         if slot not in SLOTS:
             raise InvalidSlotError(f"Unknown slot: {slot}")
         with transaction(self.database) as conn:
+            self._guard_season_writable(conn, bbbffl_round_id)
             state = self._locked_review_state(conn, bbbffl_round_id, season_entry_id, expected_review_version)
             existing = conn.execute(
                 "SELECT dnp FROM superscore_entry_slot_ruling WHERE bbbffl_round_id=? AND season_entry_id=? AND slot=?",
@@ -223,6 +243,7 @@ class SuperScoreReviewRepository:
         if target_position is not None and target_position not in OVERRIDE_POSITIONS:
             raise InvalidSlotError(f"Invalid target_position: {target_position}")
         with transaction(self.database) as conn:
+            self._guard_season_writable(conn, bbbffl_round_id)
             state = self._locked_review_state(conn, bbbffl_round_id, season_entry_id, expected_review_version)
             existing = conn.execute(
                 "SELECT target_position FROM superscore_entry_interchange_ruling "
@@ -298,6 +319,7 @@ class SuperScoreReviewRepository:
             if not reason:
                 raise MissingOverrideReasonError("a manual override requires an explicit reason")
         with transaction(self.database) as conn:
+            self._guard_season_writable(conn, bbbffl_round_id)
             state = self._locked_review_state(conn, bbbffl_round_id, season_entry_id, expected_review_version)
             existing = conn.execute(
                 "SELECT override_score, reason FROM superscore_entry_override "

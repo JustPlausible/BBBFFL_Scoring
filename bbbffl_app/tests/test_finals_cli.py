@@ -15,6 +15,7 @@ from scripts.finals_bracket_2026 import (
     build_parser,
     cmd_advance_apply,
     cmd_advance_preview,
+    cmd_advance_week_to_review,
     cmd_create_bracket_apply,
     cmd_create_bracket_preview,
     cmd_open_week,
@@ -201,6 +202,13 @@ def test_cli_preview_apply_round_trip_and_full_lifecycle_against_a_real_database
     assert cmd_open_week(database, open_ns) == 0
     preflight = build_finals_week_preflight(database, bracket.bracket_id, 1)
     assert preflight["round_state"] == "open"
+
+    advance_to_review_ns = argparse.Namespace(bracket_id=bracket.bracket_id, week=1, reason="CLI advance to review")
+    assert cmd_advance_week_to_review(database, advance_to_review_ns) == 0
+    round_id = FinalsBracketRepository(database).get_week_round_id(bracket.bracket_id, 1)
+    from app.competition_lifecycle import CompetitionLifecycleRepository
+
+    assert CompetitionLifecycleRepository(database).get_round(round_id).state == "review"
 
     pairings = {p.slot: p for p in FinalsBracketRepository(database).list_pairings(bracket.bracket_id, week_number=1)}
     seed_official_result(database, pairings["qf"].matchup_id, 100, 50)

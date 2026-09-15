@@ -62,6 +62,19 @@ th{color:#8b949e;font-weight:600}
 #message:empty{display:none}
 #message{border:1px solid #f85149;background:#2a1414;border-radius:8px;padding:10px;margin:10px 0}
 .visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}
+.score{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+.matchup{border-left:5px solid #388bfd}
+.matchup.blocked{border-left-color:#f85149}
+.matchup.official{border-left-color:#3fb950}
+.slots{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px}
+.slot{background:#0d1117;border-radius:7px;padding:9px}
+.side{margin-top:14px}
+.control{display:flex;gap:5px;flex-wrap:wrap;margin-top:7px}
+.control input{min-width:0;flex:1}
+.diagnostics{margin-top:12px;border-top:1px solid #30363d;padding-top:10px}
+.diagnostics>summary{cursor:pointer;color:#79c0ff;font-weight:600}
+.stream-section{margin:22px 0}
+.stream-section>h2{margin-top:0}
 @media(max-width:640px){
   header,main{padding:10px}
   table thead{display:none}
@@ -235,7 +248,174 @@ function attentionHtml(items){
     +attentionGroup('completed','Completed / recent',byCategory('completed'));
 }
 
+// -- Finals-week composed section (issue #208): the finals bracket and the
+// concurrent SuperScore round for the same AFL finals week, rendered as two
+// distinct sections -- never merged into one matchup model. Finals rulings
+// reuse the exact generic per-matchup DNP/Interchange/override endpoints
+// (`/api/admin/round-review/{round_id}/...`) the ordinary Scorer Round
+// Centre uses (those endpoints are stream-agnostic already); SuperScore
+// rulings use its own entry-scoped endpoints (`app.routes.superscore_review`)
+// -- SuperScore has no matchup to key a ruling by at all.
+
+function playerLabel(name,club,fallback){return name?(club?`${esc(name)} (${esc(club)})`:esc(name)):fallback}
+
+function slotHtml(s,urls,ver,entry,matchupId){
+  const matchAttr=matchupId?` data-matchup="${esc(matchupId)}"`:'';
+  const actionable=s.dnp_ruling==null&&['review_required','recommend_dnp'].includes(s.dnp_recommendation);
+  const rec=s.dnp_recommendation?`<div class="${actionable?'warn':'muted'}">Evidence: ${esc(s.participation_state)} · ${esc(s.dnp_recommendation)} · ${esc(s.participation_reason||'')}</div>`:'';
+  return `<div class="slot"><strong>${esc(s.slot)}</strong> <span class="pill">${s.effective_score}</span><div>${playerLabel(s.player_name,s.afl_club,'Vacant')}</div><div class="muted">Calculated ${esc(s.calculated_score)} · played ${s.played?'yes':'no'}</div>${rec}<div class="${actionable?'warn':'muted'}">Manual ruling: ${s.dnp_ruling==null?(actionable?'attention required':'not required'):s.dnp_ruling?'DNP confirmed':'DNP rejected'}</div>${s.override_score!=null?`<div class="warn">Override ${s.override_score}: ${esc(s.override_reason)}</div>`:''}<div class="control"><button data-dnp-url="${esc(urls.dnp)}" data-dnp="1" data-entry="${esc(entry)}" data-slot="${esc(s.slot)}" data-ver="${esc(ver)}"${matchAttr}>Confirm DNP</button><button data-dnp-url="${esc(urls.dnp)}" data-dnp="0" data-entry="${esc(entry)}" data-slot="${esc(s.slot)}" data-ver="${esc(ver)}"${matchAttr}>Reject DNP</button></div><div class="control"><input type="number" step="0.5" placeholder="Override score"><input placeholder="Required reason"><button data-override-url="${esc(urls.override)}" data-entry="${esc(entry)}" data-slot="${esc(s.slot)}" data-ver="${esc(ver)}"${matchAttr}>Set</button></div></div>`;
+}
+
+function interchangeHtml(ir,urls,entryId,ver,matchupId){
+  const opts=Object.entries(ir.potential_scores||{}).map(([p,sc])=>`<option value="${esc(p)}">${esc(p)} (${esc(sc)})</option>`).join('');
+  const matchAttr=matchupId?` data-matchup="${esc(matchupId)}"`:'';
+  const selectId=`ir-${esc(matchupId||entryId)}-${esc(entryId)}`;
+  const rec=ir.dnp_recommendation?`<div class="muted">Evidence: ${esc(ir.participation_state)} · ${esc(ir.dnp_recommendation)} · ${esc(ir.participation_reason||'')}</div>`:'';
+  return `<div class="card"><strong>Interchange</strong> ${playerLabel(ir.player_name,ir.afl_club,'no player assigned')} · assignment ${esc(ir.target_position||'unresolved')}${rec}<div class="muted">Manual ruling: ${ir.dnp_ruling==null?'not required unless evidence is ambiguous':ir.dnp_ruling?'DNP confirmed':'DNP rejected'}</div><div class="control"><button data-dnp-url="${esc(urls.dnp)}" data-dnp="1" data-entry="${esc(entryId)}" data-slot="Interchange" data-ver="${esc(ver)}"${matchAttr}>Confirm Interchange DNP</button><button data-dnp-url="${esc(urls.dnp)}" data-dnp="0" data-entry="${esc(entryId)}" data-slot="Interchange" data-ver="${esc(ver)}"${matchAttr}>Reject Interchange DNP</button></div><div class="control"><select id="${selectId}"><option value="">No assignment</option>${opts}</select><button data-interchange-url="${esc(urls.interchange)}" data-entry="${esc(entryId)}" data-ver="${esc(ver)}" data-select="${selectId}"${matchAttr}>Confirm assignment</button></div></div>`;
+}
+
+function sideHtml(side,m,urls){
+  const ir=side.interchange;
+  return `<section class="side"><div class="score"><h4>${esc(side.team_name||`Unknown team (${side.season_entry_id})`)}</h4><strong>${m.calculation_revision==null?'—':side.effective_score}</strong></div><details class="diagnostics"><summary>Positions, DNP/interchange evidence and rulings</summary><div class="slots">${side.slots.map(s=>slotHtml(s,urls,m.review_version,side.season_entry_id,m.matchup_id)).join('')}</div>${interchangeHtml(ir,urls,side.season_entry_id,m.review_version,m.matchup_id)}</details></section>`;
+}
+
+function finalsMatchupHtml(m,finals){
+  const homeName=m.home.team_name||`Unknown team (${m.home.season_entry_id})`;
+  const awayName=m.away.team_name||`Unknown team (${m.away.season_entry_id})`;
+  const urls={dnp:finals.dnp_url,interchange:finals.interchange_url,override:finals.override_url};
+  return `<article class="card matchup ${m.blockers.length?'blocked':''}"><div class="score"><h3>${esc(homeName)} ${m.calculation_revision==null?'—':m.home.effective_score}</h3><h3>${m.calculation_revision==null?'—':m.away.effective_score} ${esc(awayName)}</h3></div><div class="muted">Calculation revision ${esc(m.calculation_revision??'none')} · review v${esc(m.review_version)}</div>${m.blockers.map(b=>`<div class="warn">⚠ ${esc(b)}</div>`).join('')}${sideHtml(m.home,m,urls)}${sideHtml(m.away,m,urls)}</article>`;
+}
+
+function finalsReviewHtml(finals){
+  const review=finals.review;
+  if(!review)return '<p class="muted">Calculation has not started for this finals week yet.</p>';
+  return `<p><span class="pill ${review.ready?'state-final':'state-review'}">${review.ready?'Ready for publication':'Not ready for publication'}</span></p>
+    ${(review.blockers||[]).map(b=>`<div class="warn">⚠ ${esc(b)}</div>`).join('')}
+    ${review.matchups.map(m=>finalsMatchupHtml(m,finals)).join('')}`;
+}
+
+function finalsPreflightHtml(preflight){
+  const blockers=preflight.readiness.blockers.map(b=>`<div class="warn">⚠ ${esc(b.message)}</div>`).join('');
+  return `<p><span class="pill ${preflight.readiness.safe_to_open?'state-open':'state-upcoming'}">${preflight.readiness.safe_to_open?'Ready to open':'Not yet ready to open'}</span></p>${blockers}`;
+}
+
+function finalsActionsHtml(finals){
+  const actions=[];
+  if(finals.lifecycle_state==='not_created'||finals.lifecycle_state==='upcoming')actions.push(`<button data-finals-action="${esc(finals.open_week_url)}">Open finals week</button>`);
+  if(finals.lifecycle_state==='open'||finals.lifecycle_state==='live')actions.push(`<button data-finals-action="${esc(finals.advance_to_review_url)}">Advance to review</button>`);
+  if(finals.lifecycle_state==='open'||finals.lifecycle_state==='live'||finals.lifecycle_state==='review')actions.push(`<button data-finals-action="${esc(finals.calculate_url)}">Calculate / refresh scores</button>`);
+  if(finals.lifecycle_state==='review')actions.push(`<input id="finals-publish-reason" placeholder="Publish reason (optional)"><button class="primary" data-finals-publish-query="${esc(finals.publish_url)}">Publish finals results</button>`);
+  return actions.length?`<div class="control">${actions.join('')}</div>`:'';
+}
+
+function renderFinalsSection(finals){
+  if(!finals.available){
+    return `<section class="card"><h2>${esc(finals.week_label)}</h2><p class="muted">${esc(finals.message)}</p></section>`;
+  }
+  const bye=finals.bye?`<p class="muted">Bye this week: <strong>${esc(finals.bye.team_name||'Unknown team')}</strong></p>`:'';
+  const matchupSummaries=finals.matchups.map(m=>`<div class="team-card"><h4>${esc(m.slot_label)}</h4><div>${esc(m.home_team_name||'TBD')} v ${esc(m.away_team_name||'TBD')}</div>${m.matchup_id?'':'<div class="muted">Pairing not yet materialised.</div>'}</div>`).join('');
+  return `<section class="card" aria-labelledby="finals-heading">
+    <h2 id="finals-heading">${esc(finals.week_label)} <span class="pill state-${esc(finals.lifecycle_state)}">${esc(finals.lifecycle_state)}</span></h2>
+    ${bye}
+    <div class="cards">${matchupSummaries||'<p class="muted">No finals pairing for this week yet.</p>'}</div>
+    ${finals.preflight?finalsPreflightHtml(finals.preflight):''}
+    ${finalsActionsHtml(finals)}
+    ${finals.review?finalsReviewHtml(finals):''}
+    <h3>Finals lineup readiness (${finals.lineups.length} participating teams)</h3>
+    ${lineupsHtml(finals.lineups)}
+  </section>`;
+}
+
+function superscoreEntryHtml(entry,superscore){
+  const ee=entry.effective_entry;
+  const urls={dnp:entry.ruling_url+'/dnp',interchange:entry.ruling_url+'/interchange',override:entry.ruling_url+'/override'};
+  const detail=ee?`<details class="diagnostics"><summary>Positions, DNP/interchange evidence and rulings</summary><div class="slots">${ee.slots.map(s=>slotHtml(s,urls,entry.review_version,entry.season_entry_id,null)).join('')}</div>${interchangeHtml(ee.interchange,urls,entry.season_entry_id,entry.review_version,null)}</details>`
+    :`<p class="muted">Not yet calculated -- use Calculate to see position-level evidence.</p>`;
+  return `<div class="team-card">
+    <h4>${esc(entry.team_name||'Unknown team')} <span class="state-badge submission-${esc(entry.submission_state)}">${esc(entry.submission_state.replace('_',' '))}</span></h4>
+    <div class="muted">${esc(entry.coach_name||'')}</div>
+    <div>Review status: <span class="pill">${esc(entry.review_status.replace('_',' '))}</span>${entry.rank?` · rank ${esc(entry.rank)}${entry.is_joint_winner?' (joint)':''}`:''}</div>
+    <div>Total score: ${entry.total_score==null?'—':esc(entry.total_score)}</div>
+    <div class="grid-links"><a href="${esc(entry.delegated_lineup_url)}">Delegated entry</a>${entry.correction_available?`<a href="${esc(entry.correction_url)}">Correct locked lineup</a>`:''}${entry.adjudication_available?`<a href="${esc(entry.adjudication_url)}">Adjudicate missed submission</a>`:''}</div>
+    ${detail}
+  </div>`;
+}
+
+function superscoreSectionHtml(superscore){
+  if(!superscore.available){
+    return `<section class="card"><h2>SuperScore</h2><p class="muted">${esc(superscore.message)}</p></section>`;
+  }
+  const leaderboard=superscore.leaderboard;
+  const advanceButton=(superscore.lifecycle_state==='open'||superscore.lifecycle_state==='live')?`<button data-finals-action="${esc(superscore.advance_to_review_url)}">Advance to review</button>`:'';
+  return `<section class="card" aria-labelledby="superscore-heading">
+    <h2 id="superscore-heading">${esc(superscore.round_label)} <span class="pill state-${esc(superscore.lifecycle_state)}">${esc(superscore.lifecycle_state)}</span></h2>
+    <p class="muted">All ${esc(superscore.entry_count)} eligible season entries -- no opponent/matchup involved.</p>
+    <div class="control"><button data-finals-action="${esc(superscore.calculate_url)}">Calculate / refresh all entries</button>${advanceButton}<input id="superscore-publish-reason" placeholder="Publish reason (optional)"><button class="primary" data-finals-publish="${esc(superscore.publish_url)}">Publish leaderboard</button></div>
+    ${leaderboard?`<p class="ok">Published: leaderboard v${esc(leaderboard.version)} (${esc(leaderboard.published_at)})</p>`:'<p class="muted">No leaderboard published yet.</p>'}
+    <div class="cards">${superscore.entries.map(e=>superscoreEntryHtml(e,superscore)).join('')}</div>
+  </section>`;
+}
+
+function renderFinalsWeekDashboard(dashboard){
+  document.querySelector('#app').innerHTML=`
+    <section class="card"><h2>${esc(dashboard.season.label)} · ${esc(dashboard.week_label)}</h2><p class="muted">Concurrent finals + SuperScore operator surface for this AFL finals week (issue #208).</p></section>
+    <div class="stream-section">${renderFinalsSection(dashboard.finals)}</div>
+    <div class="stream-section">${superscoreSectionHtml(dashboard.superscore)}</div>`;
+  wireFinalsWeek(dashboard);
+}
+
+function finalsMutation(url,body){
+  return api2(url,body,'POST').then(()=>load()).catch(e=>{msg('Action failed: '+e.message);return load()});
+}
+
+async function api2(path,body,method){
+  const headers={'Content-Type':'application/json','X-CSRF-Token':csrfToken};
+  const r=await fetch(path,{method:method||(body?'POST':'GET'),headers,body:body?JSON.stringify(body):undefined});
+  const d=await r.json().catch(()=>({detail:r.statusText}));
+  if(!r.ok){const e=new Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail));e.status=r.status;throw e}
+  return d;
+}
+
+function wireFinalsWeek(dashboard){
+  document.querySelectorAll('[data-finals-action]').forEach(b=>b.onclick=()=>finalsMutation(b.dataset.finalsAction,{}));
+  document.querySelectorAll('[data-finals-publish]').forEach(b=>b.onclick=()=>{
+    const input=b.previousElementSibling;
+    finalsMutation(b.dataset.finalsPublish,{reason:input&&input.value?input.value:null});
+  });
+  // Finals' /publish route reads `reason` as a query parameter, not a JSON
+  // body field (`app/routes/finals_preflight.py`'s `publish_week`) -- issue
+  // #208 review: sending it in the body silently lost the operator's
+  // publish reason (recorded as `reason=None`) since FastAPI never reads a
+  // plain scalar route parameter from the request body.
+  document.querySelectorAll('[data-finals-publish-query]').forEach(b=>b.onclick=()=>{
+    const input=b.previousElementSibling;
+    const reason=input&&input.value?input.value:'';
+    const url=b.dataset.finalsPublishQuery+(reason?`?reason=${encodeURIComponent(reason)}`:'');
+    finalsMutation(url,{});
+  });
+  document.querySelectorAll('[data-dnp-url]').forEach(b=>b.onclick=()=>finalsMutation(b.dataset.dnpUrl,{
+    ...(b.dataset.matchup?{matchup_id:b.dataset.matchup}:{}),
+    slot:b.dataset.slot,season_entry_id:b.dataset.entry,dnp:b.dataset.dnp==='1',expected_review_version:+b.dataset.ver,reason:'Scorer ruling'
+  }));
+  document.querySelectorAll('[data-interchange-url]').forEach(b=>b.onclick=()=>{
+    const select=document.getElementById(b.dataset.select);
+    finalsMutation(b.dataset.interchangeUrl,{
+      ...(b.dataset.matchup?{matchup_id:b.dataset.matchup}:{}),
+      season_entry_id:b.dataset.entry,target_position:select&&select.value?select.value:null,expected_review_version:+b.dataset.ver,reason:'Scorer ruling'
+    });
+  });
+  document.querySelectorAll('[data-override-url]').forEach(b=>b.onclick=()=>{
+    const inputs=b.parentElement.querySelectorAll('input');
+    if(!inputs[1].value)return alert('A manual override reason is required.');
+    finalsMutation(b.dataset.overrideUrl,{
+      ...(b.dataset.matchup?{matchup_id:b.dataset.matchup}:{}),
+      season_entry_id:b.dataset.entry,position:b.dataset.slot,override_score:inputs[0].value===''?null:+inputs[0].value,reason:inputs[1].value,expected_review_version:+b.dataset.ver
+    });
+  });
+}
+
 function renderDashboard(dashboard){
+  if(dashboard&&dashboard.stream==='finals_week'){renderFinalsWeekDashboard(dashboard);return}
   if(!dashboard||!dashboard.round){
     document.querySelector('#app').innerHTML='<div class="card"><p class="muted">No ordinary rounds are configured for this season yet.</p></div>';
     return;

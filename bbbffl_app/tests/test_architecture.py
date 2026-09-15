@@ -46,6 +46,10 @@ FOUNDATION = {
     "app.password_hashing",
     "app.csrf",
     "app.auth_rate_limit",
+    # Human-readable stream/round label formatting (issue #208): a pure
+    # function over strings, with no internal dependency of its own -- see
+    # its own module docstring.
+    "app.stream_presentation",
 }
 
 # Persistence core: the only place SQL/transaction plumbing lives.
@@ -313,7 +317,20 @@ FINALS_PREFLIGHT = {"app.finals_preflight"}
 # (app.routes.scorer_dashboard), but must stay a sibling of the Grand Final
 # vertical and must never depend on routes or the composition root, and no
 # lower layer may depend back on it.
-SCORER_DASHBOARD = {"app.scorer_dashboard"}
+#
+# `app.finals_superscore_dashboard` (issue #208) is the same shape again,
+# for the concurrent finals-week/SuperScore Scorer surface: it composes
+# `app.scorer_dashboard.compute_round_readiness` (the exact lockout/lineup
+# readiness evaluation the ordinary dashboard already performs) with
+# `app.finals`/`app.finals_review`/`app.finals_preflight`/`app.
+# finals_participation`'s own bracket/pairing/review model and `app.
+# superscore_results`'s own entry-scoped leaderboard model, never a
+# reimplementation of either. `app.routes.scorer_dashboard` picks between
+# this module and `app.scorer_dashboard.build_scorer_dashboard` based on
+# the requested round's stream type (`app.scorer_dashboard.
+# round_stream_type`) -- kept in the route layer, not here, so this module
+# never needs to import its ordinary sibling's route.
+SCORER_DASHBOARD = {"app.scorer_dashboard", "app.finals_superscore_dashboard"}
 
 # Administrator Dashboard (issue #148): a governance/readiness/navigation
 # aggregation read model that sits *above* both `app.season_centre` and
@@ -352,6 +369,7 @@ ROUTES = {
     "app.routes.admin_dashboard",
     "app.routes.midseason_draft",
     "app.routes.finals_preflight",
+    "app.routes.superscore_review",
 }
 
 COMPOSITION_ROOT = {"app.main"}

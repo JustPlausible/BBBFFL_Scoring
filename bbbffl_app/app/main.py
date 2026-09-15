@@ -94,6 +94,7 @@ from app.routes import scorer_dashboard as scorer_dashboard_routes
 from app.routes import season_centre as season_centre_routes
 from app.routes import superscore as superscore_routes
 from app.routes import superscore_results as superscore_result_routes
+from app.routes import superscore_review as superscore_review_routes
 from app.scorer_decisions import (
     CompetitionFinalizedError,
     InvalidPositionError,
@@ -281,6 +282,7 @@ app.include_router(admin.page_router)
 app.include_router(superscore_routes.router)
 app.include_router(superscore_routes.page_router)
 app.include_router(superscore_result_routes.router)
+app.include_router(superscore_review_routes.router)
 app.include_router(draft_routes.router)
 app.include_router(draft_routes.page_router)
 app.include_router(preseason_routes.router)

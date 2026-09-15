@@ -16,12 +16,12 @@ from pathlib import Path
 import pytest
 from fastapi.encoders import jsonable_encoder
 
+from app.audit import ActorContext
 from app.competition_lifecycle import CompetitionLifecycleRepository
+from app.finals import FinalsBracketRepository
 from app.finals_superscore_dashboard import build_finals_week_dashboard
 from app.identity import IdentityRepository
 from app.round_review import RoundReviewRepository
-from app.audit import ActorContext
-from app.finals import FinalsBracketRepository
 from tests.finals_helpers import accept_week_mapping, build_finals_ready_season
 from tests.test_scorer_dashboard_finals_superscore import _open_finals_week1_and_superscore1
 

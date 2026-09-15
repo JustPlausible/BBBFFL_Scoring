@@ -131,6 +131,37 @@ def publish_week(
     return {"round_id": published.bbbffl_round_id, "state": published.state, "week_number": week_number}
 
 
+@router.post("/{bracket_id}/weeks/{week_number}/advance-to-review")
+def advance_week_to_review(
+    bracket_id: str,
+    week_number: int,
+    request: Request,
+    reason: str | None = None,
+    principal: Principal = Depends(require_round_reviewer),
+):
+    """The finals-week `open -> live -> review` progression action (issue
+    #208): before this route existed, nothing on the HTTP surface could
+    reach `FinalsBracketRepository.advance_week_to_review` at all, so a
+    finals week's publish action (`.../publish`, below) -- which requires
+    the round to already be `review` -- was unreachable through any
+    supported operator workflow once a week had opened. Idempotent against
+    a week already at `review`/`final` (`already_advanced` reports which)."""
+    _authorise_bracket(request, principal, bracket_id)
+    _csrf(request, principal)
+    repo = FinalsBracketRepository(request.app.state.database)
+    try:
+        result = repo.advance_week_to_review(bracket_id, week_number, actor=_actor(principal), reason=reason)
+    except KeyError as exc:
+        raise HTTPException(404, "Unknown finals week") from exc
+    except FinalsBracketError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {
+        "round_id": result["round"].bbbffl_round_id,
+        "state": result["round"].state,
+        "already_advanced": result["already_advanced"],
+    }
+
+
 @router.post("/{bracket_id}/matchups/{matchup_id}/correct")
 def correct_result(
     bracket_id: str,

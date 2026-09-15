@@ -23,6 +23,7 @@ from app.lockouts import (
 from app.opening_round import DeferredSlotLockedError, OpeningRoundNominationRepository, OpeningRoundSelectionGuard
 from app.player_pool import OwnershipRepository, PlayerPoolRepository
 from app.round_mapping import RoundMappingRepository
+from app.stream_presentation import humanize_round_label
 from app.superscore_participation import require_superscore_entry_eligible
 
 COACH_LINEUP_POSITIONS = POSITIONS
@@ -284,7 +285,7 @@ class CoachLineupService:
         which a heavyweight lineup-editor page needs and an account summary
         does not."""
         rows = self.database.execute(
-            "SELECT e.season_id, e.season_entry_id, c.competition_id, "
+            "SELECT e.season_id, e.season_entry_id, c.competition_id, c.stream_type, "
             "r.bbbffl_round_id round_id, r.label round_label, r.sequence "
             "FROM season_entry e JOIN season_entry_coach_history a ON a.season_entry_id=e.season_entry_id "
             "AND a.ended_at IS NULL JOIN competition_stream c ON c.season_id=e.season_id "
@@ -314,7 +315,7 @@ class CoachLineupService:
         return {
             "season_id": row["season_id"],
             "round_id": row["round_id"],
-            "round_label": row["round_label"],
+            "round_label": humanize_round_label(row["stream_type"], row["round_label"]),
             "draft_revision": draft.revision if draft else None,
             "submission_version": submission.version if submission else None,
             "submitted_at": submission.submitted_at if submission else None,
@@ -353,6 +354,7 @@ class CoachLineupService:
         if row is None:
             return None
         resolved = dict(row)
+        resolved["round_label"] = humanize_round_label(resolved["stream_type"], resolved["round_label"])
         try:
             require_round_participant(self.database, resolved["competition_id"], round_id, resolved["season_entry_id"])
             require_superscore_entry_eligible(self.database, resolved["competition_id"], resolved["season_entry_id"])

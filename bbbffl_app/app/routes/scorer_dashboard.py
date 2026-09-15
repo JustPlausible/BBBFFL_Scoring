@@ -29,7 +29,8 @@ from app.authorization import (
 )
 from app.config import BASE_DIR
 from app.csrf import issue_token
-from app.scorer_dashboard import build_scorer_dashboard
+from app.finals_superscore_dashboard import build_finals_week_dashboard
+from app.scorer_dashboard import build_scorer_dashboard, round_stream_type
 
 # The active roles that can reach this dashboard at all (issue #147) --
 # `require_scorer_dashboard` below is the enforced version of this same
@@ -129,17 +130,36 @@ def get_dashboard(
             "dashboard": None,
         }
     state = request.app.state
-    dashboard = build_scorer_dashboard(
-        state.database,
-        state.lifecycle,
-        state.identities,
-        state.seasons,
-        state.round_review,
-        state.audit_events,
-        state.afl_client,
-        resolved_season_id,
-        round_id=round_id,
-    )
+    # Issue #208: a `round_id` naming a real `finals`/`superscore` round in
+    # this season gets that round's own composed operator surface --
+    # `build_scorer_dashboard` only ever reads `ordinary` rounds, and
+    # before this dispatch existed such a `round_id` was silently ignored,
+    # resolving back to whatever ordinary round it would otherwise have
+    # picked (the reported "resolves back to Round 20" defect).
+    stream = round_stream_type(state.database, round_id) if round_id is not None else None
+    if stream in ("finals", "superscore"):
+        season = state.seasons.get_season(resolved_season_id)
+        dashboard = build_finals_week_dashboard(
+            state.database, state.lifecycle, state.identities, state.round_review, state.afl_client, season, round_id
+        )
+        if dashboard is None:
+            # `round_id` named a real finals/superscore round, but not one
+            # belonging to `resolved_season_id` (or its bracket/week could
+            # not be resolved) -- fail closed with a 404 rather than
+            # silently falling through to an unrelated ordinary round.
+            raise HTTPException(status_code=404, detail="Unknown finals or SuperScore round for this season")
+    else:
+        dashboard = build_scorer_dashboard(
+            state.database,
+            state.lifecycle,
+            state.identities,
+            state.seasons,
+            state.round_review,
+            state.audit_events,
+            state.afl_client,
+            resolved_season_id,
+            round_id=round_id,
+        )
     _annotate_actionability(dashboard, principal)
     return {
         "acting_context": _acting_context(principal),

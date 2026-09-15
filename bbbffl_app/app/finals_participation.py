@@ -31,6 +31,27 @@ def require_round_participant(database, competition_id, round_id, season_entry_i
         raise FinalsParticipantError("entry is not an active participant in this finals round")
 
 
+def list_round_participant_entry_ids(database, round_id) -> list[str]:
+    """Every `season_entry_id` actually participating in this finals round's
+    *active* pairings -- issue #208's stream-aware Scorer surfaces use this
+    (never broad season membership) to decide which entries' lineups belong
+    on a finals week's readiness table. Deliberately excludes a bye slot's
+    lone `home_season_entry_id` (it has no `matchup_id` and no lineup to
+    submit for this week -- see `require_round_participant`'s own docstring
+    on why a bye is not participation)."""
+    rows = database.execute(
+        "SELECT p.home_season_entry_id, p.away_season_entry_id FROM finals_bracket_pairing p "
+        "JOIN finals_bracket_week w ON w.bracket_id=p.bracket_id AND w.week_number=p.week_number "
+        "WHERE w.bbbffl_round_id=? AND p.status='active' AND p.matchup_id IS NOT NULL",
+        (round_id,),
+    ).fetchall()
+    ids: set[str] = set()
+    for row in rows:
+        ids.add(row["home_season_entry_id"])
+        ids.add(row["away_season_entry_id"])
+    return sorted(ids)
+
+
 def resolve_cross_stream_fallback_source(database, season_id, ordinary_competition_id, season_entry_id):
     """Return the latest genuinely submitted ordinary lineup for an entry."""
     return database.execute(

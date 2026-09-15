@@ -313,7 +313,17 @@ def record_override(
 def signoff(
     round_id: str, payload: SignoffRequest, request: Request, principal: Principal = Depends(require_round_reviewer)
 ):
-    _authorise_round(request, principal, round_id)
+    round_ = _authorise_round(request, principal, round_id)
+    # Issue #208: `lifecycle.publish_results` below is the *ordinary*
+    # publication path -- it has no notion of a finals week's variable
+    # match count, premier/wooden-spoon recording or rewind-safe
+    # correction cascade. Without this fence, this generic endpoint would
+    # let an operator publish a finals round through the wrong boundary,
+    # silently bypassing `app.finals_review.publish_finals_round` entirely
+    # (the same reason `/matchup/{matchup_id}/correct` below already
+    # refuses a finals matchup, and `/transition` already refuses a
+    # non-ordinary round).
+    _require_ordinary_stream(request, round_.competition_id, action="Signing off a round")
     state = request.app.state
     afl_client = state.afl_client
     # Recompute every matchup's calculated snapshot immediately before

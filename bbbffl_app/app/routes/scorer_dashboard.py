@@ -114,6 +114,22 @@ def _annotate_actionability(dashboard: dict, principal: Principal) -> None:
         item["actionable_by_you"] = actionable(item.get("capability"))
 
 
+def _annotate_finals_week_actionability(dashboard: dict, principal: Principal) -> None:
+    """Issue #208 review (Codex, P2): "Open finals week" is the one finals
+    action that needs `roundsetup.manage` (`app.routes.finals_preflight.
+    require_finals_operator`) -- every other finals/SuperScore mutation
+    this dashboard links to (advance-to-review, calculate, publish, entry
+    rulings) uses `require_round_reviewer`, the same base authority already
+    required to view this dashboard at all, so a Replay Operator who can
+    reach this page still cannot open a finals week and must be told that
+    rather than shown a button that will 403 (mirrors `_annotate_
+    actionability`'s existing `actionable_by_you` convention for the
+    ordinary dashboard's next-action/attention items)."""
+    finals = dashboard.get("finals")
+    if finals is not None and finals.get("available"):
+        finals["open_week_actionable_by_you"] = principal_has_capability(principal, "roundsetup.manage")
+
+
 @router.get("")
 def get_dashboard(
     request: Request,
@@ -148,6 +164,7 @@ def get_dashboard(
             # not be resolved) -- fail closed with a 404 rather than
             # silently falling through to an unrelated ordinary round.
             raise HTTPException(status_code=404, detail="Unknown finals or SuperScore round for this season")
+        _annotate_finals_week_actionability(dashboard, principal)
     else:
         dashboard = build_scorer_dashboard(
             state.database,

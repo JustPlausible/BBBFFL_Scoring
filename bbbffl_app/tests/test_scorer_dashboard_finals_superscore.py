@@ -20,12 +20,38 @@ from fastapi.testclient import TestClient
 
 from app.audit import ActorContext
 from app.authorization import Principal, Role
+from app.coach_lineup import CoachLineupService
+from app.db import transaction
 from app.finals import FinalsBracketRepository
 from app.finals_preflight import open_finals_week
-from app.superscore_round import confirm_afl_mapping, ensure_round, ensure_stream, open_round, setup_round
+from app.superscore_results import SuperScoreLeaderboardService
+from app.superscore_round import (
+    advance_round_to_review,
+    confirm_afl_mapping,
+    ensure_round,
+    ensure_stream,
+    open_round,
+    setup_round,
+)
 from tests.finals_helpers import KnownRound, accept_week_mapping, build_finals_ready_season
 
 ACTOR = ActorContext.anonymous_operator("test")
+
+
+class _StubAflClient:
+    def get_matches(self, afl_round_id):
+        return []
+
+    def get_rounds(self, afl_season_id):
+        return []
+
+
+def _coach_id(database, season_entry_id):
+    row = database.execute(
+        "SELECT coach_id FROM season_entry_coach_history WHERE season_entry_id=? AND ended_at IS NULL",
+        (season_entry_id,),
+    ).fetchone()
+    return row["coach_id"]
 
 
 def _open_finals_week1_and_superscore1(year=2404, database=None):
@@ -176,6 +202,56 @@ def test_superscore_section_lists_all_ten_entries_with_no_fabricated_opponent(da
     assert superscore["calculate_url"] == f"/api/season-superscore/scorer/rounds/{built['ss1_round_id']}/calculate"
 
 
+def test_published_entry_shows_the_frozen_leaderboard_total_not_a_later_mutable_recalculation(dashboard_client):
+    """Issue #208 review finding (P2): once an entry is published, its
+    `rank`/`is_joint_winner` already come from the frozen leaderboard row --
+    but `total_score` was still read from the *mutable* `superscore_entry_
+    calculation` row, which a later recalculation (e.g. after a post-
+    publish DNP ruling correction) can change without touching the
+    published leaderboard. That paired a frozen rank with a score that no
+    longer matches it. `total_score` must come from the same frozen
+    leaderboard row as `rank` whenever the entry is published."""
+    client = dashboard_client
+    built = _seed(client, 9410)
+    database = built["database"]
+
+    service = CoachLineupService(database, afl_client=_StubAflClient())
+    for entry_obj in built["entries"]:
+        coach_id = _coach_id(database, entry_obj.season_entry_id)
+        entry = service.resolve(coach_id, built["season"].season_id, built["ss1_round_id"])
+        draft = service.ensure_draft(built["season"].season_id, built["ss1_round_id"], entry)
+        service.submit(draft, submission_version=0, coach_id=coach_id)
+
+    advance_round_to_review(database, built["ss1_round_id"], actor=ACTOR, reason="advance for publish")
+    leaderboard_service = SuperScoreLeaderboardService(database, _StubAflClient())
+    published = leaderboard_service.publish(built["ss1_round_id"], actor=ACTOR, reason="publish for test")
+    published_entry = published["entries"][0]
+    entry_id = published_entry["season_entry_id"]
+    published_total_score = published_entry["total_score"]
+
+    # Simulate a later, unpublished recalculation drifting the mutable
+    # calculation row's score away from the frozen, already-published
+    # leaderboard total -- e.g. a post-publish DNP correction that hasn't
+    # (yet) been re-published.
+    drifted_score = published_total_score + 37.5
+    with transaction(database) as conn:
+        conn.execute(
+            "UPDATE superscore_entry_calculation SET total_score=? WHERE bbbffl_round_id=? AND season_entry_id=?",
+            (drifted_score, built["ss1_round_id"], entry_id),
+        )
+
+    _admin(client)
+    response = client.get(
+        "/api/scorer/dashboard", params={"season_id": built["season"].season_id, "round_id": built["ss1_round_id"]}
+    )
+    assert response.status_code == 200, response.text
+    entries = {e["season_entry_id"]: e for e in response.json()["dashboard"]["superscore"]["entries"]}
+    entry = entries[entry_id]
+    assert entry["review_status"] == "published"
+    assert entry["total_score"] == published_total_score
+    assert entry["total_score"] != drifted_score
+
+
 def test_requesting_a_finals_round_from_a_different_season_fails_closed(dashboard_client):
     """Never trust `round_id` as authority over which season's data to
     compose -- a real finals round belonging to a *different* season than
@@ -195,6 +271,49 @@ def test_requesting_a_finals_round_from_a_different_season_fails_closed(dashboar
         params={"season_id": built_a["season"].season_id, "round_id": built_b["week1_round_id"]},
     )
     assert response.status_code == 404
+
+
+def test_replay_operator_is_told_open_finals_week_is_not_actionable_for_them(dashboard_client):
+    """Issue #208 review finding (P2): `open_week` (`app.routes.
+    finals_preflight.open_week`) requires `roundsetup.manage` -- a Replay
+    Operator holds `round.review` (enough to reach this dashboard at all)
+    but not `roundsetup.manage`, so the composed dashboard must say so
+    rather than advertise a button that will 403, mirroring the ordinary
+    dashboard's existing `actionable_by_you` convention for next-action/
+    attention items."""
+    from app.routes.scorer_dashboard import require_scorer_dashboard
+
+    client = dashboard_client
+    built = _seed(client, 9408)
+    operator = Principal(Role.REPLAY_OPERATOR, display_name="Operator")
+    client.app.dependency_overrides[require_scorer_dashboard] = lambda: operator
+
+    response = client.get(
+        "/api/scorer/dashboard", params={"season_id": built["season"].season_id, "round_id": built["week1_round_id"]}
+    )
+    assert response.status_code == 200, response.text
+    finals = response.json()["dashboard"]["finals"]
+    assert finals["available"] is True
+    assert finals["open_week_actionable_by_you"] is False
+
+
+def test_scorer_is_told_open_finals_week_is_actionable_for_them(dashboard_client):
+    """The counterpart to the Replay Operator case above: a Scorer *does*
+    hold `roundsetup.manage`, so the same week must be presented as
+    actionable, never withheld just because gating exists at all."""
+    from app.routes.scorer_dashboard import require_scorer_dashboard
+
+    client = dashboard_client
+    built = _seed(client, 9409)
+    scorer = Principal(Role.SCORER, display_name="Scorer")
+    client.app.dependency_overrides[require_scorer_dashboard] = lambda: scorer
+
+    response = client.get(
+        "/api/scorer/dashboard", params={"season_id": built["season"].season_id, "round_id": built["week1_round_id"]}
+    )
+    assert response.status_code == 200, response.text
+    finals = response.json()["dashboard"]["finals"]
+    assert finals["open_week_actionable_by_you"] is True
 
 
 def test_ordinary_dashboard_navigation_is_unaffected(dashboard_client):

@@ -323,12 +323,22 @@ def _build_superscore_section(database, identities, afl_client, season, week_num
         else:
             review_status = "submitted"
         snapshot = json.loads(calc["snapshot"]) if calc is not None else None
+        if published is not None:
+            # Once published, the leaderboard's frozen total_score is the
+            # authoritative figure -- it must never drift out of step with
+            # the (equally frozen) rank alongside it, even if a later,
+            # unpublished recalculation changes `calc`.
+            total_score = published["total_score"]
+        elif calc is not None:
+            total_score = float(calc["total_score"])
+        else:
+            total_score = None
         entries.append(
             {
                 **team,
                 "review_version": current_review_version,
                 "review_status": review_status,
-                "total_score": float(calc["total_score"]) if calc is not None else None,
+                "total_score": total_score,
                 "rank": published["rank"] if published is not None else None,
                 "is_joint_winner": published["is_joint_winner"] if published is not None else False,
                 "effective_entry": snapshot["effective_entry"] if snapshot is not None else None,

@@ -301,7 +301,13 @@ function finalsPreflightHtml(preflight){
 
 function finalsActionsHtml(finals){
   const actions=[];
-  if(finals.lifecycle_state==='not_created'||finals.lifecycle_state==='upcoming')actions.push(`<button data-finals-action="${esc(finals.open_week_url)}">Open finals week</button>`);
+  if(finals.lifecycle_state==='not_created'||finals.lifecycle_state==='upcoming'){
+    if(finals.open_week_actionable_by_you===false){
+      actions.push(`<p class="muted">Requires <code>roundsetup.manage</code> authority, not held by your active role. A Secretary or Administrator can open: <a href="${esc(finals.open_week_url)}">${esc(finals.open_week_url)}</a></p>`);
+    }else{
+      actions.push(`<button data-finals-action="${esc(finals.open_week_url)}">Open finals week</button>`);
+    }
+  }
   if(finals.lifecycle_state==='open'||finals.lifecycle_state==='live')actions.push(`<button data-finals-action="${esc(finals.advance_to_review_url)}">Advance to review</button>`);
   if(finals.lifecycle_state==='open'||finals.lifecycle_state==='live'||finals.lifecycle_state==='review')actions.push(`<button data-finals-action="${esc(finals.calculate_url)}">Calculate / refresh scores</button>`);
   if(finals.lifecycle_state==='review')actions.push(`<input id="finals-publish-reason" placeholder="Publish reason (optional)"><button class="primary" data-finals-publish-query="${esc(finals.publish_url)}">Publish finals results</button>`);

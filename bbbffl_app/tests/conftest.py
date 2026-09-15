@@ -9,6 +9,29 @@ CATS = Team(team_id=1001, name="Cats")
 PIES = Team(team_id=1002, name="Pies")
 
 
+@pytest.fixture(autouse=True)
+def isolate_application_dependency_overrides():
+    """Keep FastAPI dependency overrides local to the test that installs them.
+
+    The HTTP tests deliberately share ``app.main.app``.  FastAPI stores
+    dependency overrides on that application object, rather than on an
+    individual ``TestClient``, so closing a client does not remove an
+    override.  Without a test-boundary reset, an authorization override in
+    one module can silently turn later authenticated requests into an admin
+    (or scorer), even when those requests use a fresh client and database.
+
+    Clear both before and after each test: the first clear also protects a
+    focused/failed run from stale process state, while the final clear makes
+    the isolation guarantee independent of fixture teardown order and test
+    outcome.
+    """
+    from app.main import app
+
+    app.dependency_overrides.clear()
+    yield
+    app.dependency_overrides.clear()
+
+
 class FakeSeason:
     def __init__(self, season_id=1, round_number=1, year=2026):
         self.season_id = season_id

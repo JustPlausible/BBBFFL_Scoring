@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.authorization import Principal, Role
+from app.season import SeasonCompletedError
 from app.superscore_review import SuperScoreReviewRepository
 from tests.test_scorer_dashboard_finals_superscore import _open_finals_week1_and_superscore1
 
@@ -134,6 +135,44 @@ def test_ruling_for_an_entry_outside_the_round_is_rejected(review_client):
         json={"slot": "F1", "dnp": True, "expected_review_version": 0, "reason": "test"},
     )
     assert response.status_code == 404
+
+
+def test_ruling_endpoints_translate_the_completed_season_write_fence_to_423(review_client, monkeypatch):
+    """Issue #208 review finding (P2): `SuperScoreReviewRepository`'s
+    `_guard_season_writable` can raise `SeasonCompletedError` for any of
+    these three writes, but the routes previously caught only validation,
+    unknown-state and stale-version errors -- letting it escape as an
+    unhandled 500 instead of the 423 the existing calculate/publish routes
+    already return for the identical fence."""
+    client = review_client
+    built = _seed(client, 9507)
+    _admin(client)
+    entry_id = built["entries"][0].season_entry_id
+
+    def _raise(*args, **kwargs):
+        raise SeasonCompletedError("season is completed")
+
+    monkeypatch.setattr(SuperScoreReviewRepository, "record_dnp_ruling", _raise)
+    monkeypatch.setattr(SuperScoreReviewRepository, "record_interchange_ruling", _raise)
+    monkeypatch.setattr(SuperScoreReviewRepository, "record_override", _raise)
+
+    dnp = client.post(
+        f"/api/scorer/superscore/rounds/{built['ss1_round_id']}/entries/{entry_id}/dnp",
+        json={"slot": "F1", "dnp": True, "expected_review_version": 0, "reason": "test"},
+    )
+    assert dnp.status_code == 423
+
+    interchange = client.post(
+        f"/api/scorer/superscore/rounds/{built['ss1_round_id']}/entries/{entry_id}/interchange",
+        json={"target_position": "F1", "expected_review_version": 0},
+    )
+    assert interchange.status_code == 423
+
+    override = client.post(
+        f"/api/scorer/superscore/rounds/{built['ss1_round_id']}/entries/{entry_id}/override",
+        json={"position": "F1", "override_score": 1.0, "reason": "test", "expected_review_version": 0},
+    )
+    assert override.status_code == 423
 
 
 def test_ruling_endpoints_reject_a_finals_round(review_client):

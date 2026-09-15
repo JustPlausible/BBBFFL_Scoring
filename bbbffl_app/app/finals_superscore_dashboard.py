@@ -50,6 +50,7 @@ from app.stream_presentation import humanize_round_label
 from app.superscore_results import SuperScoreLeaderboardService
 
 SUPERSCORE_CALCULATE_URL = "/api/season-superscore/scorer/rounds/{round_id}/calculate"
+SUPERSCORE_ADVANCE_TO_REVIEW_URL = "/api/season-superscore/scorer/rounds/{round_id}/advance-to-review"
 SUPERSCORE_PUBLISH_URL = "/api/season-superscore/scorer/rounds/{round_id}/publish"
 SUPERSCORE_RULING_URL = "/api/scorer/superscore/rounds/{round_id}/entries/{season_entry_id}"
 FINALS_OPEN_URL = "/api/admin/finals/{bracket_id}/weeks/{week_number}/open"
@@ -347,5 +348,6 @@ def _build_superscore_section(database, identities, afl_client, season, week_num
         "leaderboard": leaderboard,
         "lockout": {"triggers": readiness["trigger_rows"]},
         "calculate_url": SUPERSCORE_CALCULATE_URL.format(round_id=superscore_round_id),
+        "advance_to_review_url": SUPERSCORE_ADVANCE_TO_REVIEW_URL.format(round_id=superscore_round_id),
         "publish_url": SUPERSCORE_PUBLISH_URL.format(round_id=superscore_round_id),
     }

@@ -79,3 +79,27 @@ def test_generic_signoff_route_refuses_a_finals_round(finals_client):
     response = client.post(f"/api/admin/round-review/{built['week1_round_id']}/signoff", json={"reason": "test"})
     assert response.status_code == 409
     assert "stream-specific" in response.json()["detail"] or "boundary" in response.json()["detail"]
+
+
+def test_superscore_advance_to_review_moves_an_open_round_to_review(finals_client):
+    """Issue #208 review finding (P1): `SuperScoreLeaderboardService.
+    _persist` requires the round already be `review`/`final`, but before
+    this route existed nothing on the HTTP surface could reach
+    `app.superscore_round.advance_round_to_review` -- only the standalone
+    `scripts/superscore_round_2026.py` CLI could -- so the browser Scorer
+    workflow's "Publish leaderboard" action always 409'd."""
+    client = finals_client
+    built = _open_finals_week1_and_superscore1(year=9604, database=client.app.state.database)
+    _admin(client)
+
+    response = client.post(
+        f"/api/season-superscore/scorer/rounds/{built['ss1_round_id']}/advance-to-review", json={"reason": "test"}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["state"] == "review"
+
+    again = client.post(
+        f"/api/season-superscore/scorer/rounds/{built['ss1_round_id']}/advance-to-review", json={"reason": "repeat"}
+    )
+    assert again.status_code == 200
+    assert again.json()["state"] == "review"

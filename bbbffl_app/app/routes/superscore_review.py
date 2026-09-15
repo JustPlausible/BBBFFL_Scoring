@@ -18,6 +18,7 @@ from app.audit import ActorContext
 from app.authorization import Principal, require_role_covers_season, require_round_reviewer
 from app.csrf import verify_token
 from app.superscore_review import (
+    CompletedSeasonError,
     InvalidOverridePositionError,
     InvalidSlotError,
     MissingOverrideReasonError,
@@ -134,6 +135,8 @@ def record_dnp(
         raise HTTPException(404, str(exc)) from exc
     except StaleReviewVersionError as exc:
         raise HTTPException(409, str(exc)) from exc
+    except CompletedSeasonError as exc:
+        raise HTTPException(423, str(exc)) from exc
     return _view(request, round_id, season_entry_id)
 
 
@@ -163,6 +166,8 @@ def record_interchange(
         raise HTTPException(404, str(exc)) from exc
     except StaleReviewVersionError as exc:
         raise HTTPException(409, str(exc)) from exc
+    except CompletedSeasonError as exc:
+        raise HTTPException(423, str(exc)) from exc
     return _view(request, round_id, season_entry_id)
 
 
@@ -198,4 +203,6 @@ def record_override(
         raise HTTPException(404, str(exc)) from exc
     except StaleReviewVersionError as exc:
         raise HTTPException(409, str(exc)) from exc
+    except CompletedSeasonError as exc:
+        raise HTTPException(423, str(exc)) from exc
     return _view(request, round_id, season_entry_id)

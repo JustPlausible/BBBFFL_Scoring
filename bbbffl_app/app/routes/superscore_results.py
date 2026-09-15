@@ -18,11 +18,16 @@ from app.superscore_results import (
     StaleSuperScorePublicationError,
     SuperScoreResultError,
 )
+from app.superscore_round import SuperScoreRoundError, advance_round_to_review
 
 router = APIRouter(prefix="/api/season-superscore")
 
 
 class PublishRequest(BaseModel):
+    reason: str | None = None
+
+
+class AdvanceToReviewRequest(BaseModel):
     reason: str | None = None
 
 
@@ -110,6 +115,35 @@ def calculate(round_id: str, request: Request, principal: Principal = Depends(re
         return request.app.state.superscore_results.calculations.calculate_round(round_id)
     except CompletedSeasonError as exc:
         raise HTTPException(423, str(exc)) from exc
+
+
+@router.post("/scorer/rounds/{round_id}/advance-to-review")
+def advance_to_review(
+    round_id: str,
+    payload: AdvanceToReviewRequest,
+    request: Request,
+    principal: Principal = Depends(require_round_reviewer),
+):
+    """The SuperScore `open -> live -> review` progression action (issue
+    #208 review finding): `SuperScoreLeaderboardService.publish`/`_persist`
+    require the round already be `review` or `final`, but nothing on the
+    HTTP surface could reach `app.superscore_round.advance_round_to_review`
+    before this route existed -- only `scripts/superscore_round_2026.py`
+    could, so the browser Scorer workflow always 409'd on publish once a
+    round opened. Idempotent against a round already at `review`/`final`
+    (mirrors `advance_round_to_review`'s own idempotency)."""
+    row = _round(request, round_id)
+    require_role_covers_season(request, principal, row["season_id"])
+    _csrf(request, principal)
+    try:
+        result = advance_round_to_review(
+            request.app.state.database, round_id, actor=_operator_actor(principal), reason=payload.reason
+        )
+    except CompletedSeasonError as exc:
+        raise HTTPException(423, str(exc)) from exc
+    except SuperScoreRoundError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"round_id": round_id, "state": result.state}
 
 
 @router.post("/scorer/rounds/{round_id}/publish")

@@ -266,11 +266,17 @@ function slotHtml(s,urls,ver,entry,matchupId){
   return `<div class="slot"><strong>${esc(s.slot)}</strong> <span class="pill">${s.effective_score}</span><div>${playerLabel(s.player_name,s.afl_club,'Vacant')}</div><div class="muted">Calculated ${esc(s.calculated_score)} · played ${s.played?'yes':'no'}</div>${rec}<div class="${actionable?'warn':'muted'}">Manual ruling: ${s.dnp_ruling==null?(actionable?'attention required':'not required'):s.dnp_ruling?'DNP confirmed':'DNP rejected'}</div>${s.override_score!=null?`<div class="warn">Override ${s.override_score}: ${esc(s.override_reason)}</div>`:''}<div class="control"><button data-dnp-url="${esc(urls.dnp)}" data-dnp="1" data-entry="${esc(entry)}" data-slot="${esc(s.slot)}" data-ver="${esc(ver)}"${matchAttr}>Confirm DNP</button><button data-dnp-url="${esc(urls.dnp)}" data-dnp="0" data-entry="${esc(entry)}" data-slot="${esc(s.slot)}" data-ver="${esc(ver)}"${matchAttr}>Reject DNP</button></div><div class="control"><input type="number" step="0.5" placeholder="Override score"><input placeholder="Required reason"><button data-override-url="${esc(urls.override)}" data-entry="${esc(entry)}" data-slot="${esc(s.slot)}" data-ver="${esc(ver)}"${matchAttr}>Set</button></div></div>`;
 }
 
+function interchangeHtml(ir,urls,entryId,ver,matchupId){
+  const opts=Object.entries(ir.potential_scores||{}).map(([p,sc])=>`<option value="${esc(p)}">${esc(p)} (${esc(sc)})</option>`).join('');
+  const matchAttr=matchupId?` data-matchup="${esc(matchupId)}"`:'';
+  const selectId=`ir-${esc(matchupId||entryId)}-${esc(entryId)}`;
+  const rec=ir.dnp_recommendation?`<div class="muted">Evidence: ${esc(ir.participation_state)} · ${esc(ir.dnp_recommendation)} · ${esc(ir.participation_reason||'')}</div>`:'';
+  return `<div class="card"><strong>Interchange</strong> ${playerLabel(ir.player_name,ir.afl_club,'no player assigned')} · assignment ${esc(ir.target_position||'unresolved')}${rec}<div class="muted">Manual ruling: ${ir.dnp_ruling==null?'not required unless evidence is ambiguous':ir.dnp_ruling?'DNP confirmed':'DNP rejected'}</div><div class="control"><button data-dnp-url="${esc(urls.dnp)}" data-dnp="1" data-entry="${esc(entryId)}" data-slot="Interchange" data-ver="${esc(ver)}"${matchAttr}>Confirm Interchange DNP</button><button data-dnp-url="${esc(urls.dnp)}" data-dnp="0" data-entry="${esc(entryId)}" data-slot="Interchange" data-ver="${esc(ver)}"${matchAttr}>Reject Interchange DNP</button></div><div class="control"><select id="${selectId}"><option value="">No assignment</option>${opts}</select><button data-interchange-url="${esc(urls.interchange)}" data-entry="${esc(entryId)}" data-ver="${esc(ver)}" data-select="${selectId}"${matchAttr}>Confirm assignment</button></div></div>`;
+}
+
 function sideHtml(side,m,urls){
   const ir=side.interchange;
-  const opts=Object.entries(ir.potential_scores||{}).map(([p,sc])=>`<option value="${esc(p)}">${esc(p)} (${esc(sc)})</option>`).join('');
-  const matchAttr=m.matchup_id?` data-matchup="${esc(m.matchup_id)}"`:'';
-  return `<section class="side"><div class="score"><h4>${esc(side.team_name||`Unknown team (${side.season_entry_id})`)}</h4><strong>${m.calculation_revision==null?'—':side.effective_score}</strong></div><details class="diagnostics"><summary>Positions, DNP/interchange evidence and rulings</summary><div class="slots">${side.slots.map(s=>slotHtml(s,urls,m.review_version,side.season_entry_id,m.matchup_id)).join('')}</div><div class="card"><strong>Interchange</strong> ${playerLabel(ir.player_name,ir.afl_club,'no player assigned')} · assignment ${esc(ir.target_position||'unresolved')}<div class="control"><select id="ir-${esc(m.matchup_id)}-${esc(side.season_entry_id)}"><option value="">No assignment</option>${opts}</select><button data-interchange-url="${esc(urls.interchange)}" data-entry="${esc(side.season_entry_id)}" data-ver="${esc(m.review_version)}" data-select="ir-${esc(m.matchup_id)}-${esc(side.season_entry_id)}"${matchAttr}>Confirm assignment</button></div></div></details></section>`;
+  return `<section class="side"><div class="score"><h4>${esc(side.team_name||`Unknown team (${side.season_entry_id})`)}</h4><strong>${m.calculation_revision==null?'—':side.effective_score}</strong></div><details class="diagnostics"><summary>Positions, DNP/interchange evidence and rulings</summary><div class="slots">${side.slots.map(s=>slotHtml(s,urls,m.review_version,side.season_entry_id,m.matchup_id)).join('')}</div>${interchangeHtml(ir,urls,side.season_entry_id,m.review_version,m.matchup_id)}</details></section>`;
 }
 
 function finalsMatchupHtml(m,finals){
@@ -298,7 +304,7 @@ function finalsActionsHtml(finals){
   if(finals.lifecycle_state==='not_created'||finals.lifecycle_state==='upcoming')actions.push(`<button data-finals-action="${esc(finals.open_week_url)}">Open finals week</button>`);
   if(finals.lifecycle_state==='open'||finals.lifecycle_state==='live')actions.push(`<button data-finals-action="${esc(finals.advance_to_review_url)}">Advance to review</button>`);
   if(finals.lifecycle_state==='open'||finals.lifecycle_state==='live'||finals.lifecycle_state==='review')actions.push(`<button data-finals-action="${esc(finals.calculate_url)}">Calculate / refresh scores</button>`);
-  if(finals.lifecycle_state==='review')actions.push(`<input id="finals-publish-reason" placeholder="Publish reason (optional)"><button class="primary" data-finals-publish="${esc(finals.publish_url)}">Publish finals results</button>`);
+  if(finals.lifecycle_state==='review')actions.push(`<input id="finals-publish-reason" placeholder="Publish reason (optional)"><button class="primary" data-finals-publish-query="${esc(finals.publish_url)}">Publish finals results</button>`);
   return actions.length?`<div class="control">${actions.join('')}</div>`:'';
 }
 
@@ -323,7 +329,7 @@ function renderFinalsSection(finals){
 function superscoreEntryHtml(entry,superscore){
   const ee=entry.effective_entry;
   const urls={dnp:entry.ruling_url+'/dnp',interchange:entry.ruling_url+'/interchange',override:entry.ruling_url+'/override'};
-  const detail=ee?`<details class="diagnostics"><summary>Positions, DNP evidence and rulings</summary><div class="slots">${ee.slots.map(s=>slotHtml(s,urls,entry.review_version,entry.season_entry_id,null)).join('')}</div></details>`
+  const detail=ee?`<details class="diagnostics"><summary>Positions, DNP/interchange evidence and rulings</summary><div class="slots">${ee.slots.map(s=>slotHtml(s,urls,entry.review_version,entry.season_entry_id,null)).join('')}</div>${interchangeHtml(ee.interchange,urls,entry.season_entry_id,entry.review_version,null)}</details>`
     :`<p class="muted">Not yet calculated -- use Calculate to see position-level evidence.</p>`;
   return `<div class="team-card">
     <h4>${esc(entry.team_name||'Unknown team')} <span class="state-badge submission-${esc(entry.submission_state)}">${esc(entry.submission_state.replace('_',' '))}</span></h4>
@@ -340,10 +346,11 @@ function superscoreSectionHtml(superscore){
     return `<section class="card"><h2>SuperScore</h2><p class="muted">${esc(superscore.message)}</p></section>`;
   }
   const leaderboard=superscore.leaderboard;
+  const advanceButton=(superscore.lifecycle_state==='open'||superscore.lifecycle_state==='live')?`<button data-finals-action="${esc(superscore.advance_to_review_url)}">Advance to review</button>`:'';
   return `<section class="card" aria-labelledby="superscore-heading">
     <h2 id="superscore-heading">${esc(superscore.round_label)} <span class="pill state-${esc(superscore.lifecycle_state)}">${esc(superscore.lifecycle_state)}</span></h2>
     <p class="muted">All ${esc(superscore.entry_count)} eligible season entries -- no opponent/matchup involved.</p>
-    <div class="control"><button data-finals-action="${esc(superscore.calculate_url)}">Calculate / refresh all entries</button><input id="superscore-publish-reason" placeholder="Publish reason (optional)"><button class="primary" data-finals-publish="${esc(superscore.publish_url)}">Publish leaderboard</button></div>
+    <div class="control"><button data-finals-action="${esc(superscore.calculate_url)}">Calculate / refresh all entries</button>${advanceButton}<input id="superscore-publish-reason" placeholder="Publish reason (optional)"><button class="primary" data-finals-publish="${esc(superscore.publish_url)}">Publish leaderboard</button></div>
     ${leaderboard?`<p class="ok">Published: leaderboard v${esc(leaderboard.version)} (${esc(leaderboard.published_at)})</p>`:'<p class="muted">No leaderboard published yet.</p>'}
     <div class="cards">${superscore.entries.map(e=>superscoreEntryHtml(e,superscore)).join('')}</div>
   </section>`;
@@ -374,6 +381,17 @@ function wireFinalsWeek(dashboard){
   document.querySelectorAll('[data-finals-publish]').forEach(b=>b.onclick=()=>{
     const input=b.previousElementSibling;
     finalsMutation(b.dataset.finalsPublish,{reason:input&&input.value?input.value:null});
+  });
+  // Finals' /publish route reads `reason` as a query parameter, not a JSON
+  // body field (`app/routes/finals_preflight.py`'s `publish_week`) -- issue
+  // #208 review: sending it in the body silently lost the operator's
+  // publish reason (recorded as `reason=None`) since FastAPI never reads a
+  // plain scalar route parameter from the request body.
+  document.querySelectorAll('[data-finals-publish-query]').forEach(b=>b.onclick=()=>{
+    const input=b.previousElementSibling;
+    const reason=input&&input.value?input.value:'';
+    const url=b.dataset.finalsPublishQuery+(reason?`?reason=${encodeURIComponent(reason)}`:'');
+    finalsMutation(url,{});
   });
   document.querySelectorAll('[data-dnp-url]').forEach(b=>b.onclick=()=>finalsMutation(b.dataset.dnpUrl,{
     ...(b.dataset.matchup?{matchup_id:b.dataset.matchup}:{}),

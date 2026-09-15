@@ -31,7 +31,7 @@ from app.audit import ActorContext, append_event
 from app.db import _for_update_suffix, transaction
 from app.lineups import POSITIONS as SLOTS
 from app.participation import ParticipationEvidence, assess_participation
-from app.season import SeasonRepository, _now
+from app.season import SeasonCompletedError, SeasonRepository, _now
 
 OVERRIDE_POSITIONS = tuple(slot for slot in SLOTS if slot != "Interchange")
 
@@ -54,6 +54,17 @@ OVERRIDE_RECORDED = "superscore.review.override.recorded"
 ENTITY_TYPE_SLOT_RULING = "superscore.review.slot_ruling"
 ENTITY_TYPE_INTERCHANGE_RULING = "superscore.review.interchange_ruling"
 ENTITY_TYPE_OVERRIDE = "superscore.review.override"
+
+
+# Issue #208 (Codex review): the same shared completed-season write-fence
+# error `app.superscore_results`/`app.finals_review`/`app.calculations`
+# already raise (`app.season.SeasonRepository.guard_writable`), re-exported
+# under this name so `app/routes/superscore_review.py` can translate it to
+# HTTP 423 -- exactly like `app.superscore_results.CompletedSeasonError`
+# already does for the calculate/publish routes -- without importing
+# `app.season` directly from the routes layer (see tests/test_architecture.py's
+# `test_routes_never_import_persistence_or_season_model_directly`).
+CompletedSeasonError = SeasonCompletedError
 
 
 class SuperScoreReviewError(Exception):

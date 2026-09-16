@@ -371,7 +371,18 @@ function renderFinalsWeekDashboard(dashboard){
 }
 
 function finalsMutation(url,body){
-  return api2(url,body,'POST').then(()=>load()).catch(e=>{msg('Action failed: '+e.message);return load()});
+  // A failed mutation (e.g. a stale `expected_review_version`, or an
+  // unresolved publication blocker) still needs a reload -- the operator's
+  // in-memory dashboard is now stale and retrying blind risks the same
+  // conflict again. But `load()` unconditionally clears the message box
+  // the instant its own fetch succeeds, so setting the failure message
+  // *before* that reload (as this used to) meant it was wiped out again
+  // within the same reload before anyone could read it (Codex review). Set
+  // it only once the reload has finished settling the dashboard.
+  return api2(url,body,'POST').then(()=>load()).catch(e=>{
+    const failureText='Action failed: '+e.message;
+    return load().then(()=>msg(failureText));
+  });
 }
 
 async function api2(path,body,method){
@@ -474,6 +485,22 @@ async function tryActivateQualifyingRole(){
     return false;
   }
 }
+function dashboardRoundId(dashboard){
+  // A composed finals-week dashboard (issue #208) never has a single
+  // `round` -- it has a `finals` round_id and a concurrent `superscore`
+  // round_id side by side -- but `load()` still needs *some* round
+  // identifier to keep requesting the same week on every reload. Without
+  // this, reloading after any finals/SuperScore mutation would drop back
+  // to `null`, and the server would then resolve an unrelated ordinary
+  // round instead (Codex review: the original "resolves back to Round 20"
+  // defect resurfacing after the first action). Exactly one of the two
+  // sections is guaranteed available here: whichever stream `round_id`
+  // was originally requested with.
+  if(dashboard&&dashboard.stream==='finals_week'){
+    return (dashboard.finals&&dashboard.finals.round_id)||(dashboard.superscore&&dashboard.superscore.round_id)||null;
+  }
+  return dashboard&&dashboard.round?dashboard.round.bbbffl_round_id:null;
+}
 async function load(){
   try{
     const qs=new URLSearchParams();
@@ -483,7 +510,7 @@ async function load(){
     msg('');
     renderContext(d.acting_context);
     current.season_id=d.dashboard?d.dashboard.season.season_id:(d.seasons[0]&&d.seasons[0].season_id)||current.season_id;
-    current.round_id=d.dashboard&&d.dashboard.round?d.dashboard.round.bbbffl_round_id:null;
+    current.round_id=dashboardRoundId(d.dashboard);
     updateUrlParams(current.season_id,current.round_id);
     renderSelectors(d.seasons,d.dashboard);
     if(!d.seasons.length){

@@ -954,6 +954,22 @@ def _activity_row(event, *, team_by_lineup: dict, team_by_entry: dict, matchup_e
     }
 
 
+def round_stream_type(database, round_id: str) -> str | None:
+    """The `competition_stream.stream_type` a `bbbffl_round_id` belongs to,
+    or `None` if it names no round at all -- the one place `build_scorer_
+    dashboard` decides whether an explicitly requested `round_id` is
+    `ordinary` (this module's own read model, unchanged) or `finals`/
+    `superscore` (issue #208: composed by `app.finals_superscore_dashboard`
+    instead, never silently ignored/resolved back to whatever ordinary
+    round `select_current_round` would otherwise pick)."""
+    row = database.execute(
+        "SELECT c.stream_type FROM bbbffl_round r JOIN competition_stream c ON c.competition_id=r.competition_id "
+        "WHERE r.bbbffl_round_id=?",
+        (round_id,),
+    ).fetchone()
+    return row["stream_type"] if row else None
+
+
 def build_scorer_dashboard(
     database,
     lifecycle,
@@ -1019,30 +1035,25 @@ def build_scorer_dashboard(
     )
 
 
-def _build_round_dashboard(
+def compute_round_readiness(
     database,
-    lifecycle,
     identities,
-    seasons_repo,
-    round_review_repo,
-    audit_events,
     afl_client,
-    season,
-    selected: dict,
-    rounds: list[dict],
-    round_options: list[dict],
+    *,
+    season_id: str,
+    competition_id: str,
+    round_id: str,
+    entry_ids: list[str],
+    lifecycle_state: str,
 ) -> dict:
-    round_id = selected["bbbffl_round_id"]
-    competition_id = selected["competition_id"]
-    lifecycle_state = selected["round_state"] or "not_created"
-
-    preflight = None
-    if lifecycle_state in ("not_created", "upcoming"):
-        preflight = build_round_preflight(database, lifecycle, identities, afl_client, round_id)
-
-    entry_ids = _entry_ids_for_round(database, identities, season.season_id, competition_id, round_id)
-    entry_name_map = {entry.season_entry_id: entry.team_name for entry in identities.list_entries(season.season_id)}
-
+    """Lockout trigger state plus per-entry lineup readiness for one round --
+    factored out of `_build_round_dashboard` (issue #208) so the finals-week
+    composed dashboard (`app.finals_superscore_dashboard`) can compute the
+    identical facts for a finals/SuperScore round's own participants,
+    rather than a second implementation of lockout/readiness evaluation.
+    Every rule below is exactly what `_build_round_dashboard` already
+    enforced for `ordinary` rounds -- this is a relocation, not a behaviour
+    change, and `_build_round_dashboard` itself now just calls this."""
     lineups_repo = WeeklyLineupRepository(database)
     lockouts_repo = LockoutRepository(database)
     # Cached for the lifetime of this one build (Codex review, PR #159): a
@@ -1090,7 +1101,7 @@ def _build_round_dashboard(
             lockouts_repo,
             identities,
             match_facts,
-            season_id=season.season_id,
+            season_id=season_id,
             competition_id=competition_id,
             round_id=round_id,
             entry_ids=entry_ids,
@@ -1117,7 +1128,7 @@ def _build_round_dashboard(
                 lockouts_repo,
                 identities,
                 match_facts,
-                season_id=season.season_id,
+                season_id=season_id,
                 competition_id=competition_id,
                 round_id=round_id,
                 entry_ids=entry_ids,
@@ -1132,7 +1143,7 @@ def _build_round_dashboard(
             lockouts_repo,
             identities,
             match_facts,
-            season_id=season.season_id,
+            season_id=season_id,
             competition_id=competition_id,
             round_id=round_id,
             entry_ids=entry_ids,
@@ -1141,6 +1152,56 @@ def _build_round_dashboard(
         )
 
     all_matches_finished = bool(matches) and all(match.state in ("postgame", "completed") for match in matches)
+    return {
+        "trigger_rows": trigger_rows,
+        "team_rows": team_rows,
+        "evidence_fresh": evidence_fresh,
+        "lockout_evidence_error": lockout_evidence_error,
+        "trigger_plan_configured": trigger_plan_configured,
+        "all_matches_finished": all_matches_finished,
+    }
+
+
+def _build_round_dashboard(
+    database,
+    lifecycle,
+    identities,
+    seasons_repo,
+    round_review_repo,
+    audit_events,
+    afl_client,
+    season,
+    selected: dict,
+    rounds: list[dict],
+    round_options: list[dict],
+) -> dict:
+    round_id = selected["bbbffl_round_id"]
+    competition_id = selected["competition_id"]
+    lifecycle_state = selected["round_state"] or "not_created"
+
+    preflight = None
+    if lifecycle_state in ("not_created", "upcoming"):
+        preflight = build_round_preflight(database, lifecycle, identities, afl_client, round_id)
+
+    entry_ids = _entry_ids_for_round(database, identities, season.season_id, competition_id, round_id)
+    entry_name_map = {entry.season_entry_id: entry.team_name for entry in identities.list_entries(season.season_id)}
+
+    readiness = compute_round_readiness(
+        database,
+        identities,
+        afl_client,
+        season_id=season.season_id,
+        competition_id=competition_id,
+        round_id=round_id,
+        entry_ids=entry_ids,
+        lifecycle_state=lifecycle_state,
+    )
+    trigger_rows = readiness["trigger_rows"]
+    team_rows = readiness["team_rows"]
+    evidence_fresh = readiness["evidence_fresh"]
+    lockout_evidence_error = readiness["lockout_evidence_error"]
+    trigger_plan_configured = readiness["trigger_plan_configured"]
+    all_matches_finished = readiness["all_matches_finished"]
 
     matchups = lifecycle.list_matchups(round_id) if lifecycle_state != "not_created" else []
     round_review_view = None

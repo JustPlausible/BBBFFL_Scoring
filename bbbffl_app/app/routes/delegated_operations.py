@@ -25,6 +25,7 @@ from app.coach_lineup import (
 )
 from app.config import BASE_DIR
 from app.csrf import issue_token, verify_token
+from app.finals_participation import FinalsParticipantError, require_round_participant
 from app.lineup_proxy import LineupProxyService
 from app.opening_round import (
     ENTITY_TYPE_NOMINATION,
@@ -36,6 +37,8 @@ from app.opening_round import (
     build_opening_round_readiness,
     describe_accepted_rules,
 )
+from app.stream_presentation import humanize_round_label
+from app.superscore_participation import SuperScoreParticipantError, require_superscore_entry_eligible
 
 router = APIRouter(prefix="/api/operations")
 page_router = APIRouter()
@@ -96,16 +99,32 @@ def _csrf(request: Request, principal: Principal) -> None:
 
 
 def _scope(request: Request, principal: Principal, round_id: str) -> dict:
+    """Resolve the delegated operator's target round/entry, generalised
+    (issue #208) to `ordinary`, `finals` and `superscore` rounds -- never
+    just `ordinary` as before. Authority still comes only from the acting
+    context (never the URL), and `round_label`/`season_label` are always
+    the operator-facing labels (`app.stream_presentation.
+    humanize_round_label` expands a SuperScore round's terse stored label
+    "SS1" to "SuperScore 1"; a finals round's stored label is already
+    "Finals Week 1" -- see `app.finals.WEEK_LABELS`).
+
+    Applies the same stream-specific participation boundary the coach
+    lineup surface enforces (`app.finals_participation.
+    require_round_participant`/`app.superscore_participation.
+    require_superscore_entry_eligible`): a delegate must not gain the
+    ability to operate on an invalid finals participant, or a non-existent
+    SuperScore entry, merely because this route now accepts non-ordinary
+    rounds."""
     row = request.app.state.database.execute(
         "SELECT r.bbbffl_round_id, r.label round_label, r.sequence, r.competition_id, "
-        "c.season_id, s.label season_label FROM bbbffl_round r "
+        "c.season_id, c.stream_type, s.label season_label FROM bbbffl_round r "
         "JOIN competition_stream c ON c.competition_id=r.competition_id "
         "JOIN bbbffl_season s ON s.season_id=c.season_id "
-        "WHERE r.bbbffl_round_id=? AND c.stream_type='ordinary'",
+        "WHERE r.bbbffl_round_id=? AND c.stream_type IN ('ordinary','finals','superscore')",
         (round_id,),
     ).fetchone()
     if row is None:
-        raise HTTPException(404, "Unknown ordinary BBBFFL round")
+        raise HTTPException(404, "Unknown BBBFFL round")
     require_role_covers_season(request, principal, row["season_id"])
     entry_id = principal.represented_season_entry_id
     if entry_id is None:
@@ -114,7 +133,17 @@ def _scope(request: Request, principal: Principal, round_id: str) -> dict:
     entry = request.app.state.identities.get_public_team(entry_id)
     if entry is None or entry.season_id != row["season_id"]:
         raise HTTPException(404, "Private resource not found")
-    return {**dict(row), "season_entry_id": entry_id, "team_name": entry.team_name}
+    try:
+        require_round_participant(request.app.state.database, row["competition_id"], round_id, entry_id)
+        require_superscore_entry_eligible(request.app.state.database, row["competition_id"], entry_id)
+    except (FinalsParticipantError, SuperScoreParticipantError) as exc:
+        raise HTTPException(404, "Private resource not found") from exc
+    return {
+        **dict(row),
+        "round_label": humanize_round_label(row["stream_type"], row["round_label"]),
+        "season_entry_id": entry_id,
+        "team_name": entry.team_name,
+    }
 
 
 def _guard(request: Request):

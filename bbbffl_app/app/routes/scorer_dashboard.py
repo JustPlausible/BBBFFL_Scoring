@@ -29,7 +29,8 @@ from app.authorization import (
 )
 from app.config import BASE_DIR
 from app.csrf import issue_token
-from app.scorer_dashboard import build_scorer_dashboard
+from app.finals_superscore_dashboard import build_finals_week_dashboard
+from app.scorer_dashboard import build_scorer_dashboard, round_stream_type
 
 # The active roles that can reach this dashboard at all (issue #147) --
 # `require_scorer_dashboard` below is the enforced version of this same
@@ -113,6 +114,22 @@ def _annotate_actionability(dashboard: dict, principal: Principal) -> None:
         item["actionable_by_you"] = actionable(item.get("capability"))
 
 
+def _annotate_finals_week_actionability(dashboard: dict, principal: Principal) -> None:
+    """Issue #208 review (Codex, P2): "Open finals week" is the one finals
+    action that needs `roundsetup.manage` (`app.routes.finals_preflight.
+    require_finals_operator`) -- every other finals/SuperScore mutation
+    this dashboard links to (advance-to-review, calculate, publish, entry
+    rulings) uses `require_round_reviewer`, the same base authority already
+    required to view this dashboard at all, so a Replay Operator who can
+    reach this page still cannot open a finals week and must be told that
+    rather than shown a button that will 403 (mirrors `_annotate_
+    actionability`'s existing `actionable_by_you` convention for the
+    ordinary dashboard's next-action/attention items)."""
+    finals = dashboard.get("finals")
+    if finals is not None and finals.get("available"):
+        finals["open_week_actionable_by_you"] = principal_has_capability(principal, "roundsetup.manage")
+
+
 @router.get("")
 def get_dashboard(
     request: Request,
@@ -129,17 +146,37 @@ def get_dashboard(
             "dashboard": None,
         }
     state = request.app.state
-    dashboard = build_scorer_dashboard(
-        state.database,
-        state.lifecycle,
-        state.identities,
-        state.seasons,
-        state.round_review,
-        state.audit_events,
-        state.afl_client,
-        resolved_season_id,
-        round_id=round_id,
-    )
+    # Issue #208: a `round_id` naming a real `finals`/`superscore` round in
+    # this season gets that round's own composed operator surface --
+    # `build_scorer_dashboard` only ever reads `ordinary` rounds, and
+    # before this dispatch existed such a `round_id` was silently ignored,
+    # resolving back to whatever ordinary round it would otherwise have
+    # picked (the reported "resolves back to Round 20" defect).
+    stream = round_stream_type(state.database, round_id) if round_id is not None else None
+    if stream in ("finals", "superscore"):
+        season = state.seasons.get_season(resolved_season_id)
+        dashboard = build_finals_week_dashboard(
+            state.database, state.lifecycle, state.identities, state.round_review, state.afl_client, season, round_id
+        )
+        if dashboard is None:
+            # `round_id` named a real finals/superscore round, but not one
+            # belonging to `resolved_season_id` (or its bracket/week could
+            # not be resolved) -- fail closed with a 404 rather than
+            # silently falling through to an unrelated ordinary round.
+            raise HTTPException(status_code=404, detail="Unknown finals or SuperScore round for this season")
+        _annotate_finals_week_actionability(dashboard, principal)
+    else:
+        dashboard = build_scorer_dashboard(
+            state.database,
+            state.lifecycle,
+            state.identities,
+            state.seasons,
+            state.round_review,
+            state.audit_events,
+            state.afl_client,
+            resolved_season_id,
+            round_id=round_id,
+        )
     _annotate_actionability(dashboard, principal)
     return {
         "acting_context": _acting_context(principal),

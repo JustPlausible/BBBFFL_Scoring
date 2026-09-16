@@ -103,6 +103,7 @@ from app.round_mapping import AflApiReferenceValidator, AflReferenceValidator, R
 from app.superscore_round import confirm_afl_mapping, open_round, resolve_concurrent_finals_afl_mapping, setup_round
 
 __all__ = [
+    "FrozenMappingDivergedError",
     "LockoutPlanDivergedError",
     "PairedOpenWeekError",
     "open_finals_and_superscore_week",
@@ -113,6 +114,24 @@ __all__ = [
 class PairedOpenWeekError(Exception):
     """The finals/SuperScore pairing failed validation -- nothing was
     opened and nothing was mutated."""
+
+
+class FrozenMappingDivergedError(Exception):
+    """SS's round already has a frozen `bbbffl_round_lifecycle.afl_*`
+    mapping snapshot -- recorded once, when `app.superscore_round.
+    setup_round` first calls `create_non_ordinary_round` -- that diverges
+    from the concurrent finals week's current accepted mapping. Correcting
+    only the mutable `round_afl_mapping` head (`confirm_afl_mapping`) never
+    reaches that frozen snapshot: every reader of an already-set-up round
+    (`app.calculations._round_context`'s `l.afl_round_id`, `l.*`, exactly
+    as `resolve_concurrent_finals_afl_mapping`'s own docstring explains for
+    the finals side) consults the frozen row, never a fresh `resolve()`. So
+    updating just the head here would misreport a successful
+    synchronisation while the round kept calculating against its old,
+    frozen AFL round. Nothing is mutated; an operator must resolve the
+    divergence directly (e.g. correct the finals week's mapping back to
+    what SS already froze, or rebuild SS's round) before synchronisation
+    can proceed."""
 
 
 class LockoutPlanDivergedError(Exception):
@@ -127,6 +146,49 @@ class LockoutPlanDivergedError(Exception):
     genuine sequence-reordering cycle (e.g. two trigger keys swapping
     sequences) that cannot be applied one trigger at a time without a
     transient collision."""
+
+
+def _plan_trigger_sync(ss_round_id, finals_triggers, ss_triggers_by_key):
+    """Pure, no-I/O planning pass for `_sync_triggers` -- determines
+    *every* trigger that needs writing and a safe application order for
+    all of them, without touching the database. Issue #211 P1 (Codex
+    review, round 2): the previous version interleaved this planning with
+    the actual `configure()` writes, one multi-pass loop at a time -- each
+    `configure()` call commits its own transaction, so a later pass
+    discovering a genuine, unresolvable cycle (e.g. a two-key sequence
+    swap) still left every trigger *already* applied in an earlier pass
+    committed, violating this function's own fail-closed, nothing-mutated
+    contract for a plan a real operator could construct (a free move
+    alongside a genuine swap). Planning the whole move graph first, purely
+    in memory, means a cycle is detected and raised *before* any write
+    happens at all -- the only write phase left (`_sync_triggers` below)
+    replays an already-fully-validated, guaranteed-resolvable order."""
+    simulated_sequences = {key: trigger.sequence for key, trigger in ss_triggers_by_key.items()}
+    ordered: list[tuple] = []
+    remaining = list(finals_triggers)
+    progressed = True
+    while remaining and progressed:
+        progressed = False
+        still_remaining = []
+        for trigger in remaining:
+            occupied = {seq for key, seq in simulated_sequences.items() if key != trigger.trigger_key}
+            if trigger.sequence in occupied:
+                still_remaining.append(trigger)
+                continue
+            simulated_sequences[trigger.trigger_key] = trigger.sequence
+            ordered.append(trigger)
+            progressed = True
+        remaining = still_remaining
+
+    if remaining:
+        stuck_keys = sorted(trigger.trigger_key for trigger in remaining)
+        raise LockoutPlanDivergedError(
+            f"SS round {ss_round_id} cannot be synchronised automatically: trigger key(s) {stuck_keys} form a "
+            "sequence-reordering cycle (e.g. two triggers swapping sequences) that cannot be applied one trigger "
+            "at a time without a transient collision. Reorder them manually (e.g. via a temporary intermediate "
+            "sequence) before retrying synchronisation."
+        )
+    return ordered
 
 
 def _sync_triggers(trigger_repo, ss_round_id, finals_triggers, ss_triggers_by_key, ss_mapping_revision, actor, reason):
@@ -146,7 +208,7 @@ def _sync_triggers(trigger_repo, ss_round_id, finals_triggers, ss_triggers_by_ke
             "the round-preflight lockout form) before synchronisation can proceed."
         )
 
-    pending = []
+    pending_keys = set()
     unchanged_trigger_keys = []
     for trigger in finals_triggers:
         existing = ss_triggers_by_key.get(trigger.trigger_key)
@@ -159,55 +221,30 @@ def _sync_triggers(trigger_repo, ss_round_id, finals_triggers, ss_triggers_by_ke
         if current == desired:
             unchanged_trigger_keys.append(trigger.trigger_key)
         else:
-            pending.append((trigger, existing))
+            pending_keys.add(trigger.trigger_key)
 
-    # Issue #211 P1 (Codex review): applying every changed trigger's real
-    # target sequence directly, in an arbitrary order, cannot safely
-    # express a *reordering* -- `configure()`'s sequence-uniqueness check
-    # always compares against every currently-persisted trigger for the
-    # round, so e.g. swapping two sequences can transiently collide with a
-    # not-yet-updated sibling's still-old sequence. A greedy multi-pass
-    # application instead only ever applies a change once its target
-    # sequence is free against SS's *current* persisted state -- correct
-    # for the common cases Codex called out (a new early trigger inserted,
-    # shifting the existing main/selective stages) without needing any
-    # fragile temporary-value manoeuvre. A genuine cycle (two keys
-    # swapping sequences with each other) can never converge this way --
-    # detected below and reported, never silently left half-applied.
+    # Plan every pending trigger's safe application order *before* writing
+    # anything -- see `_plan_trigger_sync`'s own docstring for why this
+    # must happen up front rather than interleaved with the writes below.
+    ordered_plan = _plan_trigger_sync(
+        ss_round_id, [t for t in finals_triggers if t.trigger_key in pending_keys], ss_triggers_by_key
+    )
+
     synced_trigger_keys: list[str] = []
-    progressed = True
-    while pending and progressed:
-        progressed = False
-        still_pending = []
-        current_sequences_by_key = {t.trigger_key: t.sequence for t in trigger_repo.list_triggers(ss_round_id)}
-        for trigger, existing in pending:
-            occupied = {seq for key, seq in current_sequences_by_key.items() if key != trigger.trigger_key}
-            if trigger.sequence in occupied:
-                still_pending.append((trigger, existing))
-                continue
-            trigger_repo.configure(
-                ss_round_id,
-                trigger.trigger_key,
-                trigger.trigger_type,
-                trigger.sequence,
-                list(trigger.afl_match_ids),
-                actor=actor,
-                reason=reason,
-                expected_revision=existing.revision if existing is not None else 0,
-                expected_mapping_revision=ss_mapping_revision,
-            )
-            synced_trigger_keys.append(trigger.trigger_key)
-            progressed = True
-        pending = still_pending
-
-    if pending:
-        stuck_keys = sorted(trigger.trigger_key for trigger, _existing in pending)
-        raise LockoutPlanDivergedError(
-            f"SS round {ss_round_id} cannot be synchronised automatically: trigger key(s) {stuck_keys} form a "
-            "sequence-reordering cycle (e.g. two triggers swapping sequences) that cannot be applied one trigger "
-            "at a time without a transient collision. Reorder them manually (e.g. via a temporary intermediate "
-            "sequence) before retrying synchronisation."
+    for trigger in ordered_plan:
+        existing = ss_triggers_by_key.get(trigger.trigger_key)
+        trigger_repo.configure(
+            ss_round_id,
+            trigger.trigger_key,
+            trigger.trigger_type,
+            trigger.sequence,
+            list(trigger.afl_match_ids),
+            actor=actor,
+            reason=reason,
+            expected_revision=existing.revision if existing is not None else 0,
+            expected_mapping_revision=ss_mapping_revision,
         )
+        synced_trigger_keys.append(trigger.trigger_key)
 
     return synced_trigger_keys, unchanged_trigger_keys
 
@@ -227,6 +264,27 @@ def synchronise_lockout_plan_from_finals(
     finals_mapping = resolve_concurrent_finals_afl_mapping(database, ss_round_id)
     finals_round_id = finals_mapping.bbbffl_round_id
     default_reason = reason or (f"SS lockout plan synchronised from concurrent finals round {finals_round_id}")
+
+    # Issue #211 P1 (Codex review, round 2): once SS's round has been set
+    # up (`app.superscore_round.setup_round` -> `create_non_ordinary_round`),
+    # its AFL mapping is frozen onto its own `bbbffl_round_lifecycle` row --
+    # see `FrozenMappingDivergedError`'s own docstring for why correcting
+    # only the mutable mapping head below would silently misreport success
+    # while calculations kept consuming the stale frozen snapshot. Checked
+    # before any mutation, so a divergence here mutates nothing.
+    frozen_round = CompetitionLifecycleRepository(database).get_round(ss_round_id)
+    if frozen_round is not None and (
+        frozen_round.afl_season_id != finals_mapping.afl_season_id
+        or frozen_round.afl_round_id != finals_mapping.afl_round_id
+    ):
+        raise FrozenMappingDivergedError(
+            f"SS round {ss_round_id} already has a frozen AFL mapping (season {frozen_round.afl_season_id}, "
+            f"round {frozen_round.afl_round_id}) that diverges from the concurrent finals week's current mapping "
+            f"(season {finals_mapping.afl_season_id}, round {finals_mapping.afl_round_id}). Correcting only the "
+            "mutable mapping head would not update the frozen snapshot calculations actually use -- resolve this "
+            "divergence directly before synchronisation can proceed."
+        )
+
     existing_ss_mapping = RoundMappingRepository(database).resolve(ss_round_id)
     mapping_synced = existing_ss_mapping is None or (
         existing_ss_mapping.afl_season_id != finals_mapping.afl_season_id
@@ -330,13 +388,21 @@ def open_finals_and_superscore_week(
                 f"finals week {week_number} failed preflight and the pairing was not opened: "
                 f"{finals_preflight['readiness']['blockers']}"
             )
-        # Issue #211 P1 (Codex review): `build_finals_week_preflight`
-        # reports "safe to open" purely from mapping/pairing state -- it
-        # never requires a configured lockout plan (unlike the ordinary
-        # round preflight's own `main_lockout_incomplete` blocker). Opening
-        # this pairing with no configured main trigger would synchronise
-        # that same absence onto SS, silently leaving both streams'
-        # selections without a round lockout at all.
+
+    if not superscore_already_open:
+        # Issue #211 P1 (Codex review, round 2): this check must gate on
+        # whether *SuperScore* is about to open, not on whether Finals
+        # itself is already open -- `build_finals_week_preflight` reports
+        # "safe to open" purely from mapping/pairing state, it never
+        # requires a configured lockout plan (unlike the ordinary round
+        # preflight's own `main_lockout_incomplete` blocker), and Finals
+        # can already be open via the still-supported standalone `/open`
+        # endpoint with no main trigger configured at all. Nesting this
+        # under `not finals_already_open` (as it was before) let exactly
+        # that case bypass it entirely: retrying the paired action would
+        # synchronise the finals plan's absent main trigger onto SS and
+        # still open it, leaving both streams' selections without a round
+        # lockout.
         finals_triggers = LockoutTriggerRepository(database).list_triggers(finals_round_id)
         if not any(t.trigger_type == "main" for t in finals_triggers):
             raise PairedOpenWeekError(

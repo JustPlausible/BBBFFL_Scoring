@@ -222,6 +222,22 @@ def _build_finals_section(
     persisted = CompetitionLifecycleRepository(database).get_round(finals_round_id)
     lifecycle_state = persisted.state if persisted else "not_created"
 
+    # Issue #211 P1 (Codex review, round 2): `open_finals_and_superscore_
+    # week` explicitly supports retrying just the SuperScore half once
+    # Finals has already opened (its own open transition is irreversible,
+    # so a later validator/sync/setup failure leaves Finals open and
+    # SuperScore still unopened) -- but `finalsActionsHtml` in
+    # scorer_dashboard.html only ever showed the (paired) open-week button
+    # while `lifecycle_state` itself read `not_created`/`upcoming`. Once
+    # Finals opened, reloading the dashboard removed the only UI path back
+    # to that supported retry. Surfacing whether SuperScore's own open is
+    # still pending lets the template keep the button visible in exactly
+    # that state, regardless of Finals' own lifecycle_state.
+    superscore_open_pending = False
+    if superscore_round_id is not None:
+        superscore_persisted = CompetitionLifecycleRepository(database).get_round(superscore_round_id)
+        superscore_open_pending = superscore_persisted is None or superscore_persisted.state == "upcoming"
+
     preflight = None
     if lifecycle_state in ("not_created", "upcoming"):
         preflight = build_finals_week_preflight(database, bracket_id, week_number)
@@ -263,6 +279,7 @@ def _build_finals_section(
         "lockout": {"triggers": readiness["trigger_rows"]},
         "trigger_plan_configured": readiness["trigger_plan_configured"],
         "lockout_evidence_unavailable": readiness["lockout_evidence_error"],
+        "superscore_open_pending": superscore_open_pending,
         "open_week_url": (
             FINALS_OPEN_PAIRED_URL.format(bracket_id=bracket_id, week_number=week_number)
             if superscore_round_id is not None

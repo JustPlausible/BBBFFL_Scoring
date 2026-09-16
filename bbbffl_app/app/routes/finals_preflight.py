@@ -14,7 +14,12 @@ from app.csrf import verify_token
 from app.finals import DownstreamPlayStateError, FinalsBracketError, FinalsBracketRepository, StaleFinalsResultError
 from app.finals_preflight import build_finals_week_preflight, open_finals_week
 from app.finals_review import correct_finals_result, publish_finals_round
-from app.finals_superscore_open import PairedOpenWeekError, open_finals_and_superscore_week
+from app.finals_superscore_open import (
+    FrozenMappingDivergedError,
+    LockoutPlanDivergedError,
+    PairedOpenWeekError,
+    open_finals_and_superscore_week,
+)
 from app.routes.round_review import require_round_reviewer
 from app.superscore_round import SuperScoreRoundError
 
@@ -126,6 +131,14 @@ def open_week_paired(
     except PairedOpenWeekError as exc:
         raise HTTPException(409, str(exc)) from exc
     except (FinalsBracketError, SuperScoreRoundError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (LockoutPlanDivergedError, FrozenMappingDivergedError) as exc:
+        # Issue #211 P2 (Codex review, round 2): both are expected,
+        # operator-resolvable "the SS lockout plan/mapping cannot be
+        # safely auto-synchronised" outcomes (a stale SS-only trigger key,
+        # an unreconcilable sequence cycle, or a frozen mapping divergence)
+        # -- without this, they fell through to an uncaught 500 instead of
+        # the actionable 409 every other paired-open conflict returns.
         raise HTTPException(409, str(exc)) from exc
 
 

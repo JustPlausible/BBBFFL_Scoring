@@ -183,6 +183,20 @@ def test_superscore_section_renders_a_compact_table_not_oversized_cards_but_keep
     assert ">Opponent<" not in superscore_section
 
 
+def test_open_finals_week_button_stays_visible_while_superscore_open_is_still_pending(tmp_path):
+    """Issue #211 P1 (Codex review, round 2): once Finals has opened but a
+    concurrent SuperScore round is still unopened (e.g. after a
+    synchronisation/setup failure retryable via the paired action), the
+    dashboard must keep exposing the "Open finals week" button rather than
+    hiding it once `finals.lifecycle_state` itself reads 'open'."""
+    payload = _real_dashboard_payload(9704)
+    assert payload["finals"]["lifecycle_state"] == "open"
+    payload["finals"]["superscore_open_pending"] = True
+    html = _rendered_html(payload, tmp_path, "harness_pending_superscore")
+    finals_section = html.split('id="finals-heading"', 1)[1]
+    assert f'data-finals-action="{payload["finals"]["open_week_url"]}"' in finals_section
+
+
 def test_render_finals_week_dashboard_does_not_throw_before_the_week_has_opened(tmp_path):
     """The `!finals.available`-style branches (preflight not yet satisfied,
     SuperScore not yet configured for this week) are real, reachable states

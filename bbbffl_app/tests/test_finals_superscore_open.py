@@ -25,8 +25,16 @@ from fastapi.testclient import TestClient
 from app.audit import ActorContext
 from app.competition_lifecycle import CompetitionLifecycleRepository
 from app.finals import FinalsBracketRepository
-from app.finals_superscore_open import LockoutPlanDivergedError, PairedOpenWeekError, open_finals_and_superscore_week
+from app.finals_preflight import open_finals_week
+from app.finals_superscore_open import (
+    FrozenMappingDivergedError,
+    LockoutPlanDivergedError,
+    PairedOpenWeekError,
+    open_finals_and_superscore_week,
+    synchronise_lockout_plan_from_finals,
+)
 from app.lockouts import LockoutTriggerRepository
+from app.round_mapping import RoundMappingRepository
 from app.superscore_round import confirm_afl_mapping, ensure_round, ensure_stream, setup_round
 from tests.finals_helpers import KnownRound, accept_week_mapping
 from tests.finals_seeding_helpers import build_2026_replay_season
@@ -234,6 +242,66 @@ def test_paired_open_fails_closed_when_ss_carries_a_stale_trigger_key_not_in_the
         )
 
 
+def test_synchronise_lockout_plan_refuses_to_silently_update_only_the_mapping_head_on_a_frozen_divergence():
+    """Issue #211 P1 (Codex review, round 2): once SS's round has been set
+    up, its AFL mapping is frozen onto its own `bbbffl_round_lifecycle`
+    row -- correcting only the mutable `round_afl_mapping` head here would
+    never reach that frozen snapshot, which calculations actually
+    consume. Synchronisation must fail closed and mutate nothing rather
+    than silently report success while SS keeps scoring against a
+    different real AFL round than the one its concurrent finals week
+    actually uses."""
+    database = _database_for_test(9511)
+    built = _seed(database, 9511)
+    afl_round_id = built["afl_round_id"]
+    other_afl_round_id = afl_round_id + 1
+
+    # Finals must actually be opened -- `resolve_concurrent_finals_afl_
+    # mapping` only reads the finals week's *frozen* lifecycle mapping,
+    # which `open_finals_week` is what creates.
+    open_finals_week(database, built["bracket"].bracket_id, 1, actor=ACTOR)
+
+    confirm_afl_mapping(
+        database,
+        KnownRound({(9511, other_afl_round_id)}),
+        built["ss1_round_id"],
+        9511,
+        other_afl_round_id,
+        reason="SS frozen against a different AFL round than finals",
+    )
+    setup_round(database, built["ss1_round_id"], reason="pre-existing SS setup")
+
+    with pytest.raises(FrozenMappingDivergedError, match="frozen AFL mapping"):
+        synchronise_lockout_plan_from_finals(
+            database, KnownRound({(9511, afl_round_id)}), built["ss1_round_id"], actor=ACTOR
+        )
+
+    # Nothing mutated: SS's mapping head still points at the divergent,
+    # already-frozen round -- never silently advanced toward finals'.
+    ss_mapping = RoundMappingRepository(database).resolve(built["ss1_round_id"])
+    assert ss_mapping.afl_round_id == other_afl_round_id
+
+
+def test_paired_open_still_rejects_a_missing_main_trigger_when_finals_was_already_opened_standalone():
+    """Issue #211 P1 (Codex review, round 2): the main-trigger requirement
+    must gate on whether *SuperScore* is about to open, not on whether
+    Finals is already open -- otherwise a finals week opened through the
+    still-supported standalone `/open` endpoint (bypassing this check
+    entirely) lets a retried paired action synchronise an empty lockout
+    plan onto SS and still open it."""
+    database = _database_for_test(9512)
+    built = _seed(database, 9512, with_lockout_triggers=False)
+    afl_round_id = built["afl_round_id"]
+    open_finals_week(database, built["bracket"].bracket_id, 1, actor=ACTOR)
+
+    with pytest.raises(PairedOpenWeekError, match="main/remaining lockout trigger"):
+        open_finals_and_superscore_week(
+            database, _StubAflClient(afl_round_id), built["bracket"].bracket_id, 1, actor=ACTOR
+        )
+    lifecycle = CompetitionLifecycleRepository(database)
+    assert lifecycle.get_round(built["ss1_round_id"]) is None
+
+
 def test_resync_reports_a_genuine_sequence_swap_it_cannot_apply_one_trigger_at_a_time():
     """Issue #211 P1 (Codex review): `LockoutTriggerRepository.configure`'s
     sequence-uniqueness check always compares against every currently-
@@ -263,6 +331,101 @@ def test_resync_reports_a_genuine_sequence_swap_it_cannot_apply_one_trigger_at_a
         open_finals_and_superscore_week(
             database, _StubAflClient(afl_round_id), built["bracket"].bracket_id, 1, actor=ACTOR
         )
+
+
+def test_resync_of_a_mixed_plan_with_a_free_move_and_a_genuine_cycle_mutates_nothing():
+    """Issue #211 P1 (Codex review, round 2): planning the *entire* move
+    graph before writing anything means a plan mixing an independently-
+    resolvable free move (main's sequence shifting) with a genuinely
+    unresolvable two-key cycle (early-1/early-2 swapping) must mutate
+    nothing at all -- not even the free move -- when the cycle makes the
+    whole plan unsynchronisable. The previous version applied `main`'s
+    move (its own committed `configure()` call) before discovering the
+    cycle on a later pass, leaving SS half-synchronised despite the
+    fail-closed contract."""
+    database = _database_for_test(9513)
+    built = _seed(database, 9513, with_lockout_triggers=False)
+    afl_round_id = built["afl_round_id"]
+    trigger_repo = LockoutTriggerRepository(database)
+    trigger_repo.configure(built["week1_round_id"], "early-1", "selective", 1, [1111], actor=ACTOR, reason="e1")
+    trigger_repo.configure(built["week1_round_id"], "early-2", "selective", 2, [2222], actor=ACTOR, reason="e2")
+    trigger_repo.configure(built["week1_round_id"], "main", "main", 3, [3333], actor=ACTOR, reason="main")
+
+    # SS mirrors the initial plan: early-1=1, early-2=2, main=3.
+    open_finals_and_superscore_week(database, _StubAflClient(afl_round_id), built["bracket"].bracket_id, 1, actor=ACTOR)
+
+    # Finals swaps early-1/early-2 (a genuine cycle) *and* independently
+    # moves main to a free sequence -- submitted together.
+    trigger_repo.configure(built["week1_round_id"], "early-1", "selective", 0, [1111], actor=ACTOR, reason="vacate e1")
+    trigger_repo.configure(built["week1_round_id"], "early-2", "selective", 1, [2222], actor=ACTOR, reason="e2 to 1")
+    trigger_repo.configure(built["week1_round_id"], "early-1", "selective", 2, [1111], actor=ACTOR, reason="e1 to 2")
+    trigger_repo.replace(
+        built["week1_round_id"], "main", trigger_type="main", sequence=4, afl_match_ids=[3333], reason="main to 4"
+    )
+
+    with pytest.raises(LockoutPlanDivergedError, match="cycle"):
+        open_finals_and_superscore_week(
+            database, _StubAflClient(afl_round_id), built["bracket"].bracket_id, 1, actor=ACTOR
+        )
+
+    # The free move (main's sequence) must not have been applied to SS
+    # either, even though it was independently resolvable in isolation --
+    # the whole synchronisation is all-or-nothing.
+    ss_triggers = {t.trigger_key: t for t in LockoutTriggerRepository(database).list_triggers(built["ss1_round_id"])}
+    assert ss_triggers["main"].sequence == 3
+
+
+def test_resync_applies_a_resolvable_multi_trigger_shift_when_no_cycle_exists():
+    """Regression for the `_plan_trigger_sync` refactor (issue #211 P1,
+    Codex review, round 2): a plan with no genuine cycle -- a new early
+    trigger inserted ahead of an existing main, shifting it out -- must
+    still apply successfully in one synchronisation call."""
+    database = _database_for_test(9514)
+    built = _seed(database, 9514, with_lockout_triggers=False)
+    afl_round_id = built["afl_round_id"]
+    trigger_repo = LockoutTriggerRepository(database)
+    trigger_repo.configure(built["week1_round_id"], "main", "main", 1, [3333], actor=ACTOR, reason="main")
+
+    open_finals_and_superscore_week(database, _StubAflClient(afl_round_id), built["bracket"].bracket_id, 1, actor=ACTOR)
+    ss_triggers = {
+        t.trigger_key: t.sequence for t in LockoutTriggerRepository(database).list_triggers(built["ss1_round_id"])
+    }
+    assert ss_triggers == {"main": 1}
+
+    # Finals inserts a new early trigger ahead of main, shifting main out
+    # to a later sequence -- via a safe vacate/reoccupy on the finals side.
+    trigger_repo.configure(built["week1_round_id"], "main", "main", 99, [3333], actor=ACTOR, reason="vacate main")
+    trigger_repo.configure(
+        built["week1_round_id"], "early-1", "selective", 1, [1111], actor=ACTOR, reason="insert early-1"
+    )
+    trigger_repo.configure(built["week1_round_id"], "main", "main", 2, [3333], actor=ACTOR, reason="main to 2")
+
+    result = synchronise_lockout_plan_from_finals(
+        database, KnownRound({(9514, afl_round_id)}), built["ss1_round_id"], actor=ACTOR
+    )
+    assert set(result["synced_trigger_keys"]) == {"early-1", "main"}
+
+    ss_triggers = {
+        t.trigger_key: t.sequence for t in LockoutTriggerRepository(database).list_triggers(built["ss1_round_id"])
+    }
+    assert ss_triggers == {"main": 2, "early-1": 1}
+
+
+def test_open_paired_route_returns_409_not_500_for_a_diverged_lockout_plan(finals_client):
+    """Issue #211 P2 (Codex review, round 2): `LockoutPlanDivergedError`
+    reaching this route must translate to the same 409 every other
+    paired-open conflict returns, never an uncaught 500."""
+    database = finals_client.app.state.database
+    built = _seed(database, 9506)
+    finals_client.app.state.afl_client = _StubAflClient(built["afl_round_id"])
+    finals_client.post(f"/api/admin/finals/{built['bracket'].bracket_id}/weeks/1/open-paired")
+
+    LockoutTriggerRepository(database).configure(
+        built["ss1_round_id"], "ss-only", "selective", 0, [7777], actor=ACTOR, reason="stale SS-only trigger"
+    )
+
+    response = finals_client.post(f"/api/admin/finals/{built['bracket'].bracket_id}/weeks/1/open-paired")
+    assert response.status_code == 409, response.text
 
 
 @pytest.fixture

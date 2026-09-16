@@ -54,6 +54,14 @@ SUPERSCORE_ADVANCE_TO_REVIEW_URL = "/api/season-superscore/scorer/rounds/{round_
 SUPERSCORE_PUBLISH_URL = "/api/season-superscore/scorer/rounds/{round_id}/publish"
 SUPERSCORE_RULING_URL = "/api/scorer/superscore/rounds/{round_id}/entries/{season_entry_id}"
 FINALS_OPEN_URL = "/api/admin/finals/{bracket_id}/weeks/{week_number}/open"
+# Issue #211 P1 (Codex review): the dashboard's own "Open finals week"
+# button must actually reach workflow B's paired action
+# (`app.finals_superscore_open.open_finals_and_superscore_week`) whenever a
+# concurrent SuperScore round exists -- otherwise it silently continues
+# opening Finals alone, leaving SS's lockout plan unsynchronised and SS
+# itself unopened, and the paired endpoint stays reachable only to a caller
+# who already knows its URL.
+FINALS_OPEN_PAIRED_URL = "/api/admin/finals/{bracket_id}/weeks/{week_number}/open-paired"
 FINALS_ADVANCE_TO_REVIEW_URL = "/api/admin/finals/{bracket_id}/weeks/{week_number}/advance-to-review"
 FINALS_PUBLISH_URL = "/api/admin/finals/{bracket_id}/weeks/{week_number}/publish"
 FINALS_ROUND_REVIEW_API_URL = "/api/admin/round-review/{round_id}"
@@ -124,6 +132,7 @@ def build_finals_week_dashboard(database, lifecycle, identities, round_review_re
         bracket_id,
         week_number,
         finals_round_id,
+        superscore_round_id,
     )
     superscore_section = _build_superscore_section(
         database, identities, afl_client, season, week_number, superscore_round_id
@@ -162,7 +171,16 @@ def build_finals_week_dashboard(database, lifecycle, identities, round_review_re
 
 
 def _build_finals_section(
-    database, lifecycle, identities, round_review_repo, afl_client, season, bracket_id, week_number, finals_round_id
+    database,
+    lifecycle,
+    identities,
+    round_review_repo,
+    afl_client,
+    season,
+    bracket_id,
+    week_number,
+    finals_round_id,
+    superscore_round_id,
 ):
     if bracket_id is None or finals_round_id is None:
         return {
@@ -245,7 +263,11 @@ def _build_finals_section(
         "lockout": {"triggers": readiness["trigger_rows"]},
         "trigger_plan_configured": readiness["trigger_plan_configured"],
         "lockout_evidence_unavailable": readiness["lockout_evidence_error"],
-        "open_week_url": FINALS_OPEN_URL.format(bracket_id=bracket_id, week_number=week_number),
+        "open_week_url": (
+            FINALS_OPEN_PAIRED_URL.format(bracket_id=bracket_id, week_number=week_number)
+            if superscore_round_id is not None
+            else FINALS_OPEN_URL.format(bracket_id=bracket_id, week_number=week_number)
+        ),
         "advance_to_review_url": FINALS_ADVANCE_TO_REVIEW_URL.format(bracket_id=bracket_id, week_number=week_number),
         "publish_url": FINALS_PUBLISH_URL.format(bracket_id=bracket_id, week_number=week_number),
         "round_review_api_url": FINALS_ROUND_REVIEW_API_URL.format(round_id=finals_round_id),

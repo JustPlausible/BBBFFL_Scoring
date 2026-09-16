@@ -179,6 +179,53 @@ def test_finals_section_shows_week1_matchups_and_bye_without_publishing_through_
     )
 
 
+def test_finals_open_week_url_is_the_paired_endpoint_when_a_concurrent_superscore_round_exists(dashboard_client):
+    """Issue #211 P1 (Codex review): the dashboard's own "Open finals week"
+    button must reach workflow B's paired action
+    (`app.finals_superscore_open.open_finals_and_superscore_week`), not
+    silently continue opening Finals alone while a concurrent SuperScore
+    round sits unopened and unsynchronised."""
+    client = dashboard_client
+    built = _seed(client, 9411)
+    _admin(client)
+
+    response = client.get(
+        "/api/scorer/dashboard", params={"season_id": built["season"].season_id, "round_id": built["week1_round_id"]}
+    )
+    finals = response.json()["dashboard"]["finals"]
+    assert finals["open_week_url"] == f"/api/admin/finals/{built['bracket'].bracket_id}/weeks/1/open-paired"
+
+
+def test_finals_open_week_url_falls_back_to_the_standalone_endpoint_without_a_concurrent_superscore_round(
+    dashboard_client,
+):
+    """No SuperScore round is configured for this week at all -- pairing is
+    impossible, so the dashboard must keep using the standalone finals-only
+    open action rather than a paired endpoint that would only ever fail."""
+    client = dashboard_client
+    database = client.app.state.database
+    built = build_finals_ready_season(year=9412, database=database)
+    repo = FinalsBracketRepository(database)
+    bracket = repo.create_bracket(
+        built["season"].season_id,
+        built["finals_competition"].competition_id,
+        built["ordinary_competition_id"],
+        actor=ACTOR,
+        reason="issue #211 no-superscore dashboard test bracket",
+    )["bracket"]
+    week1_round_id = repo.get_week_round_id(bracket.bracket_id, 1)
+    accept_week_mapping(database, week1_round_id, year=9412, afl_round_id=9001)
+    open_finals_week(database, bracket.bracket_id, 1, actor=ACTOR)
+    _admin(client)
+
+    response = client.get(
+        "/api/scorer/dashboard", params={"season_id": built["season"].season_id, "round_id": week1_round_id}
+    )
+    finals = response.json()["dashboard"]["finals"]
+    assert finals["available"] is True
+    assert finals["open_week_url"] == f"/api/admin/finals/{bracket.bracket_id}/weeks/1/open"
+
+
 def test_superscore_section_lists_all_ten_entries_with_no_fabricated_opponent(dashboard_client):
     client = dashboard_client
     built = _seed(client, 9404)

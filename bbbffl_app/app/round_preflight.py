@@ -17,6 +17,7 @@ differ (see docs/round-afl-mapping.md)."""
 from contextlib import nullcontext
 
 from app.afl_client import is_recognized_match_status, normalize_match_status
+from app.finals import SLOT_LABELS, WEEK_LABELS, FinalsBracketRepository
 from app.lockouts import LockoutTriggerRepository, StaleTriggerRevisionError, TriggerValidationError
 from app.opening_round import (
     OpeningRoundNominationRepository,
@@ -386,26 +387,119 @@ def build_round_preflight(database, lifecycle, identities, afl_client, round_id:
         except Exception:
             mapping_context = None
 
-    draw = database.execute("SELECT * FROM season_fixture_draw WHERE season_id=?", (logical["season_id"],)).fetchone()
+    # Issue #211 P1: this ordinary fixture-draw block, and the "exactly
+    # five matchups" blocker below, apply only to an `ordinary`-stream
+    # round. Before this guard, `build_round_preflight` ran this same
+    # season-wide `season_fixture_draw`/`season_fixture_matchup` query for
+    # *any* round_id -- including a finals week's own `bbbffl_round_id` --
+    # so a finals week's preflight page (which shares this exact read
+    # model/route for AFL mapping + lockout-trigger configuration; there is
+    # no finals-specific equivalent) silently rendered the ordinary round's
+    # own five-match fixture for whichever BBBFFL round number happened to
+    # match the finals week number, instead of that week's actual persisted
+    # bracket pairings/bye. `finals_bracket`, built below, is the
+    # finals-specific replacement -- reusing `FinalsBracketRepository`, the
+    # exact bracket read model the Scorer Operations Dashboard already
+    # renders (`app.finals_superscore_dashboard._build_finals_section`),
+    # never a second/UI-only reimplementation of it.
+    stream_type = logical["stream_type"]
     pairs = []
-    if draw and draw["state"] == "frozen":
-        rows = database.execute(
-            "SELECT * FROM season_fixture_matchup "
-            "WHERE fixture_draw_id=? AND bbbffl_round_number=? ORDER BY matchup_order",
-            (draw["fixture_draw_id"], logical["sequence"]),
-        ).fetchall()
-        names = {entry.season_entry_id: entry.team_name for entry in identities.list_entries(logical["season_id"])}
-        pairs = [
-            {
-                **dict(row),
-                "home_team_name": names.get(row["home_season_entry_id"], "Unknown team"),
-                "away_team_name": names.get(row["away_season_entry_id"], "Unknown team"),
+    finals_bracket = None
+    if stream_type == "ordinary":
+        draw = database.execute(
+            "SELECT * FROM season_fixture_draw WHERE season_id=?", (logical["season_id"],)
+        ).fetchone()
+        if draw and draw["state"] == "frozen":
+            rows = database.execute(
+                "SELECT * FROM season_fixture_matchup "
+                "WHERE fixture_draw_id=? AND bbbffl_round_number=? ORDER BY matchup_order",
+                (draw["fixture_draw_id"], logical["sequence"]),
+            ).fetchall()
+            names = {entry.season_entry_id: entry.team_name for entry in identities.list_entries(logical["season_id"])}
+            pairs = [
+                {
+                    **dict(row),
+                    "home_team_name": names.get(row["home_season_entry_id"], "Unknown team"),
+                    "away_team_name": names.get(row["away_season_entry_id"], "Unknown team"),
+                }
+                for row in rows
+            ]
+        if len(pairs) != 5:
+            blockers.append(
+                {"code": "fixture_invalid", "message": "A frozen fixture with exactly five matchups is required."}
+            )
+    elif stream_type == "finals":
+        week_row = database.execute(
+            "SELECT bracket_id, week_number FROM finals_bracket_week WHERE bbbffl_round_id=?", (round_id,)
+        ).fetchone()
+        if week_row is None:
+            blockers.append(
+                {
+                    "code": "finals_week_unresolved",
+                    "message": "This round is not registered against any finals bracket week.",
+                }
+            )
+        else:
+            bracket_id, week_number = week_row["bracket_id"], week_row["week_number"]
+            bracket_repo = FinalsBracketRepository(database)
+            pairings = bracket_repo.list_pairings(bracket_id, week_number=week_number)
+            names = {entry.season_entry_id: entry.team_name for entry in identities.list_entries(logical["season_id"])}
+            bye = None
+            matchups = []
+            for pairing in pairings:
+                if pairing.slot == "bye":
+                    bye = {
+                        "season_entry_id": pairing.home_season_entry_id,
+                        "team_name": names.get(pairing.home_season_entry_id, "Unknown team"),
+                    }
+                    continue
+                matchups.append(
+                    {
+                        "slot": pairing.slot,
+                        "slot_label": SLOT_LABELS.get(pairing.slot, pairing.slot),
+                        "home_season_entry_id": pairing.home_season_entry_id,
+                        "home_team_name": names.get(pairing.home_season_entry_id, "Unknown team"),
+                        "away_season_entry_id": pairing.away_season_entry_id,
+                        "away_team_name": names.get(pairing.away_season_entry_id, "Unknown team"),
+                        "matchup_id": pairing.matchup_id,
+                    }
+                )
+            if not matchups and bye is None:
+                blockers.append(
+                    {
+                        "code": "pairing_missing",
+                        "message": f"Finals week {week_number} has no pairing yet; advance the bracket from the "
+                        "prior week's result(s) first.",
+                    }
+                )
+            finals_bracket = {
+                "bracket_id": bracket_id,
+                "week_number": week_number,
+                "week_label": WEEK_LABELS.get(week_number, f"Finals Week {week_number}"),
+                "bye": bye,
+                "matchups": matchups,
             }
-            for row in rows
-        ]
-    if len(pairs) != 5:
+    # Issue #211 P1: this page's own "Open Round" action
+    # (`open_preflight_round`) always creates/opens an *ordinary* lifecycle
+    # row (`CompetitionLifecycleRepository.create_ordinary_round`) --
+    # correct only for an `ordinary`-stream round. A finals week has its own
+    # stream-specific open action (`app.finals_preflight.open_finals_week`,
+    # reached via the Scorer Operations Dashboard/`/api/admin/finals/...`);
+    # a SuperScore round has its own (`app.superscore_round.open_round`).
+    # Blocking here -- not merely hiding a button client-side -- is what
+    # keeps this shared mapping/lockout-configuration surface from ever
+    # fabricating the wrong domain's lifecycle row, whichever stream the
+    # operator reaches it for.
+    if stream_type != "ordinary":
         blockers.append(
-            {"code": "fixture_invalid", "message": "A frozen fixture with exactly five matchups is required."}
+            {
+                "code": "non_ordinary_stream_open_unsupported",
+                "message": (
+                    f"This round belongs to the {stream_type!r} stream; open it through its own stream-specific "
+                    "open action (the Scorer Operations Dashboard), not this ordinary round preflight page. "
+                    "AFL mapping and lockout-trigger configuration above remain valid for this stream."
+                ),
+            }
         )
 
     afl_matches, evidence_error = [], None
@@ -681,6 +775,7 @@ def build_round_preflight(database, lifecycle, identities, afl_client, round_id:
         "mapping_recommendation": mapping_recommendation.__dict__ if mapping_recommendation else None,
         "afl_seasons": afl_seasons,
         "fixture_matchups": pairs,
+        "finals_bracket": finals_bracket,
         "afl_matches": match_views,
         "afl_evidence_fresh": evidence_fresh,
         "lockout_triggers": trigger_views,

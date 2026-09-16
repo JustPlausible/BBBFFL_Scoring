@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from app.audit import ActorContext, append_event, new_correlation_id
 from app.calculations import ENGINE_VERSION, MatchupCalculationService, _RoundFacts
 from app.db import _for_update_suffix, transaction
+from app.player_pool import PlayerPoolRepository
 from app.round_review import _side_review
 from app.scoring import ScoringRules
 from app.season import SeasonCompletedError, SeasonRepository, _now
@@ -75,6 +76,17 @@ def _effective_entry(conn, round_id, entry_id, raw, identities=None):
         "SELECT * FROM superscore_entry_override WHERE bbbffl_round_id=? AND season_entry_id=?",
         (round_id, entry_id),
     ).fetchall()
+    # Issue #211 P1: without a `player_labels` map, `_side_review` (via
+    # `_player_label`) always resolves every slot -- including the
+    # persisted, submitted Interchange player -- to `(None, None)`, which
+    # the Scorer UI then renders as "no player assigned"/"assignment
+    # unresolved" regardless of what was actually submitted. Ordinary/finals
+    # review (`app.round_review.build_matchup_review`) resolves this exact
+    # map from `PlayerPoolRepository.labels_by_id` before calling
+    # `_side_review`; SuperScore review must do the same, not silently omit
+    # it.
+    season_player_ids = {slot["season_player_id"] for slot in raw["slots"] if slot["season_player_id"]}
+    player_labels = PlayerPoolRepository(conn).labels_by_id(season_player_ids)
     side, blockers = _side_review(
         entry_id,
         raw,
@@ -87,6 +99,7 @@ def _effective_entry(conn, round_id, entry_id, raw, identities=None):
             for r in overrides
         },
         identities,
+        player_labels,
     )
     return (
         side,

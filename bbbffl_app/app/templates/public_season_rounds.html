@@ -25,7 +25,13 @@
 .ladder th,.ladder td{padding:7px 4px;text-align:right;border-bottom:1px solid #ddd}
 .ladder th:nth-child(2),.ladder td:nth-child(2){text-align:left}
 .match.bye{border-left-color:#9aa4ae}
-@media(max-width:640px){.matches{grid-template-columns:1fr}.card{padding:11px}.wide{display:none}}
+.lineups-toggle{margin-top:8px}
+.lineups-toggle summary{cursor:pointer;font-size:.8rem;font-weight:700;color:#0757a5}
+.lineups{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px}
+.players{list-style:none;padding:0;margin:8px 0}
+.players li{padding:6px 0;border-top:1px solid #e7eaee}
+.tag{font-size:.8rem;font-weight:700}
+@media(max-width:640px){.matches{grid-template-columns:1fr}.card{padding:11px}.wide{display:none}.lineups{grid-template-columns:1fr}}
 </style></head><body>
 <header><div><strong>BBBFFL</strong><div id="heading">Season</div></div><nav><a href="/">Home</a></nav></header>
 <main>
@@ -67,26 +73,52 @@ function matchCard(m, detailRoundId){
   return `<div class="card match ${esc(m.status)}">${inner}</div>`;
 }
 
+// Finals-only: the persisted bracket seed (issue #213 Codex follow-up) --
+// "1. Running Hots" -- never inferred/recomputed here, just displayed
+// exactly as `app.public_finals._seed_positions` (the frozen
+// `finals_bracket_seed` rows) reports it. `seed` is null/undefined for a
+// team the public read model could not resolve a seed for.
+function teamLabel(team){
+  return (team.seed!==null && team.seed!==undefined) ? `${team.seed}. ${esc(team.name)}` : esc(team.name);
+}
+
+// Player/lineup rendering (issue #213 Codex follow-up) -- reused verbatim
+// from public_round_centre.html's identical `player`/`side` functions:
+// finals matchup sides carry the exact same public lineup-evidence shape
+// (`app.public_rounds._side`/`_slot`) ordinary matchups already expose,
+// so the same renderer applies unchanged rather than a second one.
+function player(p){let outcome=p.outcome==='replaced_by_interchange'?'DNP · replaced by Interchange':p.outcome==='confirmed_dnp_zero'?'Confirmed DNP · scored zero':'';let deferred=p.deferred_source?`<div class="note">↪ ${esc(p.deferred_source.label)}</div>`:'';return `<li><strong>${esc(p.position)}</strong> ${esc(p.player_name||'Vacant')} <span class="tag">${esc(p.effective_score)}</span>${outcome?`<div class="note">${esc(outcome)}</div>`:''}${deferred}</li>`}
+function side(s){if(!s.lineup)return '<div><p class="note">Submitted lineup not yet public.</p></div>';let interchange=s.lineup.interchange;return `<div><ul class="players">${s.lineup.players.map(player).join('')}</ul><div class="note"><strong>Interchange:</strong> ${esc(interchange.player_name||'None')}${interchange.replaces_position?` · replaces ${esc(interchange.replaces_position)}`:''}</div></div>`}
+
 // Finals matchup cards (issue #213) -- the finals-bracket analogue of
 // `matchCard` above: labelled by bracket slot (Elimination Final,
-// Qualifying Final, ...) rather than a bare match order, and never
-// linked anywhere -- a finals week has no separate per-matchup
-// lineup-breakdown page of its own, its bracket/SuperScore content all
-// lives on this same page.
+// Qualifying Final, ...) rather than a bare match order. A finals week
+// has no separate per-matchup lineup-breakdown page of its own (a direct
+// finals-round URL canonicalises back to this same aggregate page), so
+// positional evidence is an inline expandable section on the card
+// itself instead -- the same `side`/`player` renderer and public
+// lineup-evidence shape the ordinary per-matchup detail page uses,
+// never scorer-only/unpublished state (`side()` already only ever shows
+// a lineup once a real authoritative submission exists).
 function finalsMatchCard(m){
   let scoreline='';
   if(m.status!=='scheduled'){
-    scoreline=`<div class="scoreline"><div><strong>${esc(m.home.team.name)}</strong><div class="score">${esc(m.home.official_score??m.home.calculated_score??'–')}</div></div><span>v</span><div><strong>${esc(m.away.team.name)}</strong><div class="score">${esc(m.away.official_score??m.away.calculated_score??'–')}</div></div></div>`;
+    scoreline=`<div class="scoreline"><div><strong>${teamLabel(m.home.team)}</strong><div class="score">${esc(m.home.official_score??m.home.calculated_score??'–')}</div></div><span>v</span><div><strong>${teamLabel(m.away.team)}</strong><div class="score">${esc(m.away.official_score??m.away.calculated_score??'–')}</div></div></div>`;
   } else {
-    scoreline=`<div class="scoreline"><div><strong>${esc(m.home.team.name)}</strong></div><span>v</span><div><strong>${esc(m.away.team.name)}</strong></div></div>`;
+    scoreline=`<div class="scoreline"><div><strong>${teamLabel(m.home.team)}</strong></div><span>v</span><div><strong>${teamLabel(m.away.team)}</strong></div></div>`;
   }
   let published=auTime(m.published_at);
   let note=published?`<div class="note">Published ${esc(published)} (AEST/AEDT)</div>`:(m.status==='scheduled'?`<div class="note">${esc(m.status_label)}</div>`:'');
-  return `<div class="card match ${esc(m.status)}"><div class="status">${esc(m.slot_label)}</div>${scoreline}${note}</div>`;
+  // `lineup` is only ever present on an *opened* matchup's side dict
+  // (`app.public_finals._finals_matchups` -> `app.public_rounds._side`);
+  // a not-yet-materialised preview side has no such key at all, so there
+  // is nothing meaningful to expand yet.
+  let lineups=('lineup' in m.home)?`<details class="lineups-toggle"><summary>Lineups</summary><div class="lineups">${side(m.home)}${side(m.away)}</div></details>`:'';
+  return `<div class="card match ${esc(m.status)}"><div class="status">${esc(m.slot_label)}</div>${scoreline}${note}${lineups}</div>`;
 }
 
 function byeCard(bye){
-  return `<div class="card match bye"><div class="status">Bye</div><div class="scoreline"><div><strong>${esc(bye.team_name)}</strong></div></div></div>`;
+  return `<div class="card match bye"><div class="status">Bye</div><div class="scoreline"><div><strong>${teamLabel({name:bye.team_name,seed:bye.seed})}</strong></div></div></div>`;
 }
 
 function superscoreSection(ss){

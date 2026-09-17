@@ -11,7 +11,9 @@ Reuses, never reimplements:
   bye/pairing structure -- the exact bracket read model
   `app/round_preflight.py`'s finals branch and
   `app.finals_superscore_dashboard._build_finals_section` already render
-  for the Scorer.
+  for the Scorer -- and `FinalsBracketRepository.list_seed_rows` for each
+  team's persisted bracket seed position, never recomputed from the
+  live/current ladder (see `_seed_positions`).
 - `app.finals_review.build_finals_round_review` (never the ordinary,
   five-matchup-only `app.round_review.build_round_review`) for a finals
   matchup's calculated/official state, and `app.public_rounds._side`/
@@ -121,15 +123,37 @@ def build_public_superscore_round(database, afl_client, identities, season_id, w
     }
 
 
-def _pairing_preview(pairing, identities):
+def _seed_positions(database, bracket_id):
+    """`season_entry_id -> seed_position` for one bracket, straight from
+    the persisted `finals_bracket_seed` rows this bracket was created
+    from (`FinalsBracketRepository.list_seed_rows`) -- never recomputed
+    from the current/live ladder. Replay evidence may intentionally
+    differ from the mathematical order (see `app.finals`'s module
+    docstring's "two truths" seed-source discussion), so the public
+    bracket display must show exactly the seed the bracket itself froze,
+    not a fresh derivation that could disagree with it."""
+    return {
+        row.season_entry_id: row.seed_position for row in FinalsBracketRepository(database).list_seed_rows(bracket_id)
+    }
+
+
+def _team_ref(identities, entry_id, seed_by_entry):
+    return {"name": _team_name(identities, entry_id), "seed": seed_by_entry.get(entry_id)}
+
+
+def _bye_ref(identities, entry_id, seed_by_entry):
+    return {"team_name": _team_name(identities, entry_id), "seed": seed_by_entry.get(entry_id)}
+
+
+def _pairing_preview(pairing, identities, seed_by_entry):
     return {
         "slot": pairing.slot,
         "slot_label": SLOT_LABELS.get(pairing.slot, pairing.slot),
         "status": "scheduled",
         "status_label": SCHEDULED_STATUS_LABEL,
         "published_at": None,
-        "home": {"team": {"name": _team_name(identities, pairing.home_season_entry_id)}},
-        "away": {"team": {"name": _team_name(identities, pairing.away_season_entry_id)}},
+        "home": {"team": _team_ref(identities, pairing.home_season_entry_id, seed_by_entry)},
+        "away": {"team": _team_ref(identities, pairing.away_season_entry_id, seed_by_entry)},
     }
 
 
@@ -137,6 +161,7 @@ def _finals_matchups(database, lifecycle, review_repo, identities, bracket_id, w
     """Bye + matchup cards for one *opened* finals week -- `round_` is the
     already-resolved `CompetitionRound` (its lifecycle row exists)."""
     pairings = FinalsBracketRepository(database).list_pairings(bracket_id, week_number=week_number)
+    seed_by_entry = _seed_positions(database, bracket_id)
     review = build_finals_round_review(lifecycle, review_repo, identities, round_id)
     review_by_matchup = {matchup.matchup_id: matchup for matchup in review["matchups"]}
     submissions = authoritative_submissions(database, round_)
@@ -147,7 +172,7 @@ def _finals_matchups(database, lifecycle, review_repo, identities, bracket_id, w
     matchups = []
     for pairing in pairings:
         if pairing.slot == "bye":
-            bye = {"team_name": _team_name(identities, pairing.home_season_entry_id)}
+            bye = _bye_ref(identities, pairing.home_season_entry_id, seed_by_entry)
             continue
         matchup_review = review_by_matchup.get(pairing.matchup_id) if pairing.matchup_id else None
         if matchup_review is None:
@@ -157,10 +182,30 @@ def _finals_matchups(database, lifecycle, review_repo, identities, bracket_id, w
             # `bbbffl_matchup` row (created by `open_finals_week`) is not
             # yet visible through `build_finals_round_review`. Show the
             # same team-names-only preview a not-yet-opened week shows.
-            matchups.append(_pairing_preview(pairing, identities))
+            matchups.append(_pairing_preview(pairing, identities, seed_by_entry))
             continue
         official = lifecycle.effective_result(pairing.matchup_id)
         score_state = match_score_state(matchup_review, round_.state, official)
+        home = _side(
+            matchup_review.home,
+            submissions.get(matchup_review.home.season_entry_id),
+            names,
+            official.home_score if official else None,
+            matchup_review.calculation_revision is not None,
+        )
+        away = _side(
+            matchup_review.away,
+            submissions.get(matchup_review.away.season_entry_id),
+            names,
+            official.away_score if official else None,
+            matchup_review.calculation_revision is not None,
+        )
+        # `_side` (shared with the ordinary Round Centre) resolves its own
+        # `team.name` -- ordinary matches have no seed concept, so the
+        # finals-only seed position is layered on afterwards here rather
+        # than inside that shared helper.
+        home["team"]["seed"] = seed_by_entry.get(matchup_review.home.season_entry_id)
+        away["team"]["seed"] = seed_by_entry.get(matchup_review.away.season_entry_id)
         matchups.append(
             {
                 "slot": pairing.slot,
@@ -168,20 +213,8 @@ def _finals_matchups(database, lifecycle, review_repo, identities, bracket_id, w
                 "status": score_state,
                 "status_label": MATCH_STATUS_LABELS[score_state],
                 "published_at": official.published_at if official is not None else None,
-                "home": _side(
-                    matchup_review.home,
-                    submissions.get(matchup_review.home.season_entry_id),
-                    names,
-                    official.home_score if official else None,
-                    matchup_review.calculation_revision is not None,
-                ),
-                "away": _side(
-                    matchup_review.away,
-                    submissions.get(matchup_review.away.season_entry_id),
-                    names,
-                    official.away_score if official else None,
-                    matchup_review.calculation_revision is not None,
-                ),
+                "home": home,
+                "away": away,
             }
         )
     return bye, matchups
@@ -197,13 +230,14 @@ def _finals_preview(database, identities, bracket_id, week_number):
     if bracket_id is None:
         return None, []
     pairings = FinalsBracketRepository(database).list_pairings(bracket_id, week_number=week_number)
+    seed_by_entry = _seed_positions(database, bracket_id)
     bye = None
     matchups = []
     for pairing in pairings:
         if pairing.slot == "bye":
-            bye = {"team_name": _team_name(identities, pairing.home_season_entry_id)}
+            bye = _bye_ref(identities, pairing.home_season_entry_id, seed_by_entry)
             continue
-        matchups.append(_pairing_preview(pairing, identities))
+        matchups.append(_pairing_preview(pairing, identities, seed_by_entry))
     return bye, matchups
 
 

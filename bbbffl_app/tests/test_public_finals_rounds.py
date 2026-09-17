@@ -32,7 +32,7 @@ from app.finals import FinalsBracketRepository
 from app.finals_preflight import open_finals_week
 from app.public_finals import build_public_season_sequence
 from tests.finals_helpers import accept_week_mapping, build_finals_ready_season, seed_official_result
-from tests.season_completion_helpers import build_completable_season
+from tests.season_completion_helpers import build_completable_season, seed_real_finals_grand_final_calculation
 
 ACTOR = ActorContext.anonymous_operator("test")
 
@@ -444,3 +444,141 @@ def test_season_landing_page_redirects_into_finals_once_round_20_is_final_and_we
     resp = public_client.get(f"/seasons/{season_id}", follow_redirects=False)
     assert resp.status_code == 302
     assert resp.headers["location"] == f"/seasons/{season_id}/rounds/21"
+
+
+# -- Codex P2 follow-up 1: positional/lineup evidence on finals matchups --
+
+
+def test_opened_finals_matchup_exposes_public_lineup_evidence_once_a_real_lineup_is_submitted(public_client):
+    """A finals matchup's `home`/`away` sides already carry the identical
+    public lineup-evidence shape (`app.public_rounds._side`) an ordinary
+    matchup's do -- this proves it survives end to end through the finals
+    read model once a real authoritative lineup/calculation exists, not
+    just structurally in isolation."""
+    built = build_completable_season(year=8060, database=public_client.app.state.database)
+    seed_real_finals_grand_final_calculation(built, 8060)
+    season_id = built["season"].season_id
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/24").json()
+    gf = body["matchups"][0]
+    assert gf["slot"] == "grand_final"
+    assert gf["home"]["lineup"] is not None
+    assert gf["away"]["lineup"] is not None
+
+    home_f1 = next(p for p in gf["home"]["lineup"]["players"] if p["position"] == "F1")
+    assert home_f1["player_name"] == "GF Player 0"
+    assert home_f1["effective_score"] is not None
+    away_f1 = next(p for p in gf["away"]["lineup"]["players"] if p["position"] == "F1")
+    assert away_f1["player_name"] == "GF Player 1"
+    # Vacant positions are still present (public-safe: "no player selected"
+    # is not itself sensitive), just with no player name.
+    vacant = next(p for p in gf["home"]["lineup"]["players"] if p["position"] != "F1")
+    assert vacant["player_name"] is None
+
+
+def test_finals_lineup_evidence_stays_public_safe_and_never_leaks_scorer_only_fields(public_client):
+    built = build_completable_season(year=8061, database=public_client.app.state.database)
+    seed_real_finals_grand_final_calculation(built, 8061)
+    season_id = built["season"].season_id
+
+    resp = public_client.get(f"/api/public/seasons/{season_id}/rounds/24")
+    payload = resp.text
+    for private_marker in (
+        "season_player_id",
+        "actor_id",
+        "actor_role",
+        "actor_type",
+        "calculation_fingerprint",
+        "dnp_ruling_reason",
+        "override",
+        "audit",
+        "input_fingerprint",
+        "rules_version_id",
+    ):
+        assert private_marker not in payload, f"unexpected private marker {private_marker!r} in public payload"
+
+
+def test_ordinary_matchup_lineup_evidence_shape_is_unaffected_by_the_finals_lineup_rendering_path(public_client):
+    built = build_completable_season(year=8062, database=public_client.app.state.database)
+    season_id = built["season"].season_id
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/1").json()
+    for matchup in body["matchups"]:
+        assert "lineup" in matchup["home"]
+        assert "lineup" in matchup["away"]
+
+
+def test_unpublished_finals_matchup_has_no_lineup_key_to_expand(public_client):
+    """The preview shape (a pairing not yet materialised into a real
+    matchup) has no `lineup` key at all -- the public template's expand
+    toggle checks for this exact distinction, never rendering an empty/
+    misleading "Lineups" section for a matchup that does not exist yet."""
+    built = build_finals_ready_season(year=8063, database=public_client.app.state.database)
+    _create_bracket(built)
+    season_id = built["season"].season_id
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/21").json()
+    for matchup in body["matchups"]:
+        assert "lineup" not in matchup["home"]
+        assert "lineup" not in matchup["away"]
+
+
+# -- Codex P2 follow-up 2: persisted bracket seed shown with finals teams --
+
+
+def test_bye_and_preview_pairings_carry_the_persisted_bracket_seed(public_client):
+    built = build_finals_ready_season(year=8070, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    season_id = built["season"].season_id
+    seed_rows = {row.season_entry_id: row.seed_position for row in _repo(built).list_seed_rows(bracket.bracket_id)}
+    pairings = {p.slot: p for p in _repo(built).list_pairings(bracket.bracket_id, week_number=1)}
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/21").json()
+    assert body["bye"]["seed"] == seed_rows[pairings["bye"].home_season_entry_id]
+    assert seed_rows[pairings["bye"].home_season_entry_id] == 1
+
+    for matchup in body["matchups"]:
+        # Every previewed seed traces back to the exact persisted
+        # finals_bracket_seed row for that slot's pairing -- never a
+        # fresh ladder computation.
+        pairing = pairings[matchup["slot"]]
+        assert matchup["home"]["team"]["seed"] == seed_rows[pairing.home_season_entry_id]
+        assert matchup["away"]["team"]["seed"] == seed_rows[pairing.away_season_entry_id]
+
+
+def test_opened_matchup_seed_matches_persisted_bracket_seed_not_a_live_recomputation(public_client):
+    built = build_finals_ready_season(year=8071, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    week1_round_id = _open_week1(built, bracket, year=8071)
+    season_id = built["season"].season_id
+
+    seed_rows = {row.season_entry_id: row.seed_position for row in _repo(built).list_seed_rows(bracket.bracket_id)}
+    pairings = {p.slot: p for p in _repo(built).list_pairings(bracket.bracket_id, week_number=1)}
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/{week1_round_id}").json()
+    qf = next(m for m in body["matchups"] if m["slot"] == "qf")
+    assert qf["home"]["team"]["seed"] == seed_rows[pairings["qf"].home_season_entry_id]
+    assert qf["away"]["team"]["seed"] == seed_rows[pairings["qf"].away_season_entry_id]
+
+
+def test_later_week_and_grand_final_seeds_reflect_the_original_frozen_bracket_seed(public_client):
+    """A team that has advanced to the Grand Final still shows the seed
+    position it was *originally* frozen at bracket creation -- never a
+    seed re-derived from having won its way there, and never the live/
+    current ladder (docs/2026-finals-superscore-design.md's "two truths":
+    replay evidence may intentionally differ from the mathematical
+    order)."""
+    built = build_completable_season(year=8072, database=public_client.app.state.database)
+    bracket = built["bracket"]
+    season_id = built["season"].season_id
+    seed_rows = {row.season_entry_id: row.seed_position for row in _repo(built).list_seed_rows(bracket.bracket_id)}
+    gf_pairing = built["grand_final_pairing"]
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/24").json()
+    gf = body["matchups"][0]
+    assert gf["home"]["team"]["seed"] == seed_rows[gf_pairing.home_season_entry_id]
+    assert gf["away"]["team"]["seed"] == seed_rows[gf_pairing.away_season_entry_id]
+    # Sanity: this is a real, non-trivial seed check -- both sides
+    # resolved to one of the five seeds that actually qualified.
+    assert gf["home"]["team"]["seed"] in range(1, 6)
+    assert gf["away"]["team"]["seed"] in range(1, 6)

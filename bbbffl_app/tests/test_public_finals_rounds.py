@@ -26,13 +26,21 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 from app.audit import ActorContext
+from app.calculations import MatchupCalculationService
 from app.finals import FinalsBracketRepository
 from app.finals_preflight import open_finals_week
+from app.lineups import POSITIONS
 from app.public_finals import build_public_season_sequence
+from app.season import _now
 from tests.finals_helpers import accept_week_mapping, build_finals_ready_season, seed_official_result
-from tests.season_completion_helpers import build_completable_season, seed_real_finals_grand_final_calculation
+from tests.season_completion_helpers import (
+    _Facts,
+    build_completable_season,
+    seed_real_finals_grand_final_calculation,
+)
 
 ACTOR = ActorContext.anonymous_operator("test")
 
@@ -582,3 +590,140 @@ def test_later_week_and_grand_final_seeds_reflect_the_original_frozen_bracket_se
     # resolved to one of the five seeds that actually qualified.
     assert gf["home"]["team"]["seed"] in range(1, 6)
     assert gf["away"]["team"]["seed"] in range(1, 6)
+
+
+# -- Codex P2 follow-up 3: a finals matchup's non-published status must
+# still be visible, never indistinguishable from an official result. The
+# fix lives in the template's `finalsMatchCard` (this codebase has no JS
+# test harness, matching every other public-route test here); these
+# assert the JSON DTO fields (`status`/`status_label`/`calculated_score`/
+# `official_score`/`published_at`) that fix now renders unconditionally
+# (`note = published ? ... : m.status_label`) rather than only for
+# `status === 'scheduled'` as before.
+
+
+def _seed_empty_lineup(database, round_id, competition_id, season_id, entry_id, *, label):
+    """An authoritative but entirely vacant lineup (every position
+    submitted with no player) -- the minimum `weekly_lineup`/
+    `weekly_lineup_submission`/`weekly_lineup_submission_slot` rows
+    `MatchupCalculationService._entry` requires to calculate an entry at
+    all (it refuses an entry with no effective submitted lineup outright,
+    never treating "nothing submitted yet" as "score zero"). Every slot
+    then legitimately scores zero, which is all a `calculated_live`/
+    `under_review` status test needs -- not a real scored lineup."""
+    now = _now()
+    lineup_id = f"{label}-lineup"
+    with database.engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO weekly_lineup (lineup_id,season_id,competition_id,bbbffl_round_id,season_entry_id,"
+                "draft_revision,effective_submission_version,created_at,updated_at) "
+                "VALUES (:l,:s,:c,:r,:e,1,1,:now,:now)"
+            ),
+            {"l": lineup_id, "s": season_id, "c": competition_id, "r": round_id, "e": entry_id, "now": now},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO weekly_lineup_submission (lineup_id,version,based_on_draft_revision,submitted_at,"
+                "actor_type,actor_role,source_type) VALUES (:l,1,1,:now,'coach','coach','coach')"
+            ),
+            {"l": lineup_id, "now": now},
+        )
+        for position in POSITIONS:
+            conn.execute(
+                text("INSERT INTO weekly_lineup_submission_slot VALUES (:l,1,:pos,NULL)"),
+                {"l": lineup_id, "pos": position},
+            )
+
+
+def _calculate_week1_without_publishing(built, bracket, week1_round_id):
+    database = built["database"]
+    season_id = built["season"].season_id
+    competition_id = built["finals_competition"].competition_id
+    pairings = {p.slot: p for p in _repo(built).list_pairings(bracket.bracket_id, week_number=1)}
+    entry_ids = {
+        pairings["qf"].home_season_entry_id,
+        pairings["qf"].away_season_entry_id,
+        pairings["ef"].home_season_entry_id,
+        pairings["ef"].away_season_entry_id,
+    }
+    for index, entry_id in enumerate(sorted(entry_ids)):
+        _seed_empty_lineup(database, week1_round_id, competition_id, season_id, entry_id, label=f"w1-{index}")
+    MatchupCalculationService(database, _Facts({})).calculate_round(week1_round_id)
+
+
+def test_calculated_live_finals_matchup_shows_its_score_with_a_not_official_status(public_client):
+    built = build_finals_ready_season(year=8080, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    week1_round_id = _open_week1(built, bracket, year=8080)
+    _calculate_week1_without_publishing(built, bracket, week1_round_id)
+    season_id = built["season"].season_id
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/21").json()
+    assert body["round_state"] == "open"
+    for matchup in body["matchups"]:
+        assert matchup["status"] == "calculated_live"
+        assert matchup["status_label"] == "Live calculated — not official"
+        assert matchup["published_at"] is None
+        assert matchup["home"]["calculated_score"] is not None
+        assert matchup["home"]["official_score"] is None
+
+
+def test_under_review_finals_matchup_shows_the_public_review_warning(public_client):
+    built = build_finals_ready_season(year=8081, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    week1_round_id = _open_week1(built, bracket, year=8081)
+    _calculate_week1_without_publishing(built, bracket, week1_round_id)
+    _repo(built).advance_week_to_review(bracket.bracket_id, 1, actor=ACTOR, reason="test: move to review")
+    season_id = built["season"].season_id
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/21").json()
+    assert body["round_state"] == "review"
+    for matchup in body["matchups"]:
+        assert matchup["status"] == "under_review"
+        assert matchup["status_label"] == "Under review — not official"
+        assert matchup["published_at"] is None
+        assert matchup["home"]["calculated_score"] is not None
+
+
+def test_published_official_finals_matchup_is_not_mislabelled_as_unofficial(public_client):
+    built = build_finals_ready_season(year=8082, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    week1_round_id = _open_week1(built, bracket, year=8082)
+    pairings = {p.slot: p for p in _repo(built).list_pairings(bracket.bracket_id, week_number=1)}
+    seed_official_result(built["database"], pairings["qf"].matchup_id, 90, 61)
+    season_id = built["season"].season_id
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/{week1_round_id}").json()
+    qf = next(m for m in body["matchups"] if m["slot"] == "qf")
+    assert qf["status"] == "official"
+    assert qf["status_label"] == "Official final"
+    assert qf["published_at"] is not None
+    assert qf["home"]["official_score"] is not None
+
+
+def test_mixed_states_within_the_same_finals_week_stay_distinguishable(public_client):
+    """One matchup already has an official published result while its
+    sibling in the same week only has a live calculation -- issue #213
+    Codex follow-up's exact failure scenario: without the fix, the
+    non-final matchup's card carried no visible status text at all,
+    making it indistinguishable at a glance from the published one."""
+    built = build_finals_ready_season(year=8083, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    week1_round_id = _open_week1(built, bracket, year=8083)
+    pairings = {p.slot: p for p in _repo(built).list_pairings(bracket.bracket_id, week_number=1)}
+    seed_official_result(built["database"], pairings["qf"].matchup_id, 90, 61)
+    _calculate_week1_without_publishing(built, bracket, week1_round_id)
+    season_id = built["season"].season_id
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/21").json()
+    qf = next(m for m in body["matchups"] if m["slot"] == "qf")
+    ef = next(m for m in body["matchups"] if m["slot"] == "ef")
+    assert qf["status"] == "official"
+    assert qf["status_label"] == "Official final"
+    assert qf["published_at"] is not None
+    assert ef["status"] == "calculated_live"
+    assert ef["status_label"] == "Live calculated — not official"
+    assert ef["published_at"] is None
+    assert qf["status"] != ef["status"]
+    assert qf["status_label"] != ef["status_label"]

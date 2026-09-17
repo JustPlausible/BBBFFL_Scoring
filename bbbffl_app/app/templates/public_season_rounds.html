@@ -107,8 +107,17 @@ function finalsMatchCard(m){
   } else {
     scoreline=`<div class="scoreline"><div><strong>${teamLabel(m.home.team)}</strong></div><span>v</span><div><strong>${teamLabel(m.away.team)}</strong></div></div>`;
   }
+  // The `.status` heading above carries the bracket slot label (e.g.
+  // "Qualifying Final"), not `m.status_label` -- unlike the ordinary
+  // `matchCard`, which has no slot to show there and uses that heading
+  // for status instead. Once a result is officially published the
+  // "Published ..." note already makes that unambiguous; until then
+  // (`calculated_live`/`under_review`/`upcoming`) `m.status_label` (e.g.
+  // "Live calculated — not official") must still be shown somewhere, or
+  // an unofficial score would appear indistinguishable from a published
+  // one (issue #213 Codex follow-up).
   let published=auTime(m.published_at);
-  let note=published?`<div class="note">Published ${esc(published)} (AEST/AEDT)</div>`:(m.status==='scheduled'?`<div class="note">${esc(m.status_label)}</div>`:'');
+  let note=published?`<div class="note">Published ${esc(published)} (AEST/AEDT)</div>`:`<div class="note">${esc(m.status_label)}</div>`;
   // `lineup` is only ever present on an *opened* matchup's side dict
   // (`app.public_finals._finals_matchups` -> `app.public_rounds._side`);
   // a not-yet-materialised preview side has no such key at all, so there

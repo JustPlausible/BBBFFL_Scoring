@@ -29,6 +29,8 @@ from pydantic import BaseModel
 
 from app.audit import ActorContext
 from app.authorization import Principal, require_admin_principal, resolve_principal
+from app.finals_participation import list_round_participant_entry_ids
+from app.finals_participation import stream_type as finals_stream_type
 from app.routes.auth import _verify_csrf
 
 router = APIRouter()
@@ -128,10 +130,40 @@ def set_represented_entry(
 
 
 @router.get("/api/context/entries")
-def representable_entries(season_id: str, request: Request, principal: Principal = Depends(_require_coach_session)):
+def representable_entries(
+    season_id: str,
+    request: Request,
+    round_id: str | None = None,
+    principal: Principal = Depends(_require_coach_session),
+):
+    """Issue #211 workflow improvement D: `round_id`, when supplied, narrows
+    the returned list to that round's actual active participants -- but
+    only for a `finals`-typed round, and only using the existing
+    `app.finals_participation.list_round_participant_entry_ids` fail-closed
+    read model (never a second, UI-only eligibility rule). A bye seed has
+    no active pairing for the week and is therefore correctly excluded --
+    it is shown as context/status elsewhere, never as a lineup-submission
+    task. An ordinary or `superscore` round's `round_id` (or one whose
+    season does not match `season_id`) leaves the season-wide list
+    unfiltered, exactly as before this parameter existed -- SuperScore
+    still lists all ten eligible entries every round, and ordinary-season
+    behaviour is unchanged."""
     entries = request.app.state.acting_context.representable_entries(
         principal.coach_id, principal.role.value, season_id
     )
+    if round_id is not None:
+        round_row = request.app.state.database.execute(
+            "SELECT r.competition_id, c.season_id FROM bbbffl_round r "
+            "JOIN competition_stream c ON c.competition_id=r.competition_id WHERE r.bbbffl_round_id=?",
+            (round_id,),
+        ).fetchone()
+        if (
+            round_row is not None
+            and round_row["season_id"] == season_id
+            and finals_stream_type(request.app.state.database, round_row["competition_id"]) == "finals"
+        ):
+            participant_ids = set(list_round_participant_entry_ids(request.app.state.database, round_id))
+            entries = [e for e in entries if e.season_entry_id in participant_ids]
     return [
         {"season_entry_id": e.season_entry_id, "team_name": e.team_name, "coach_display_name": e.coach_display_name}
         for e in entries

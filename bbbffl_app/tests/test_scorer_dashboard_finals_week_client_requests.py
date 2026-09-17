@@ -121,6 +121,82 @@ def test_render_finals_week_dashboard_does_not_throw_for_an_open_week_with_calcu
     _render_or_fail(payload, tmp_path, "harness_open")
 
 
+def _rendered_html(payload: dict, tmp_path: Path, name: str) -> str:
+    """Like `_render_or_fail`, but captures and returns the HTML actually
+    assigned to `#app`'s `innerHTML` -- issue #211 workflow improvement C's
+    regression coverage needs to inspect the *shape* rendered for
+    SuperScore, not just that rendering didn't throw."""
+    script = _extract_script()
+    harness = f"""
+const captured = {{}};
+globalThis.document = {{
+  querySelector: (sel) => {{
+    if (!captured[sel]) captured[sel] = {{ addEventListener: () => {{}} }};
+    return captured[sel];
+  }},
+  querySelectorAll: () => [],
+  getElementById: () => null,
+}};
+globalThis.window = {{ location: {{ href: 'http://test/scorer', search: '' }} }};
+globalThis.URLSearchParams = URLSearchParams;
+globalThis.URL = URL;
+globalThis.history = {{ replaceState: () => {{}} }};
+globalThis.fetch = async () => ({{ ok: true, json: async () => ({{}}) }});
+{script}
+const dashboard = {json.dumps(payload)};
+renderFinalsWeekDashboard(dashboard);
+console.log('HTML_START');
+console.log(captured['#app'].innerHTML);
+console.log('HTML_END');
+"""
+    script_path = tmp_path / f"{name}.js"
+    script_path.write_text(harness)
+    result = subprocess.run(["node", str(script_path)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+    stdout = result.stdout
+    return stdout.split("HTML_START\n", 1)[1].rsplit("HTML_END", 1)[0]
+
+
+def test_superscore_section_renders_a_compact_table_not_oversized_cards_but_keeps_expandable_detail(tmp_path):
+    """Issue #211 workflow improvement C: the previous one-oversized-card-
+    per-entry SuperScore layout must be replaced by a compact Finals-style
+    operational table (Team/State/Submission/Private draft/Locks/Review/
+    Score/Actions columns, mirroring the ordinary/Finals `teamRow`/
+    `lineupsHtml` table), while position/DNP/Interchange evidence stays
+    available beneath each row via the same expandable `<details>` panel
+    the former card already used -- entry-based throughout, never a
+    fabricated opponent/matchup."""
+    payload = _real_dashboard_payload(9703)
+    html = _rendered_html(payload, tmp_path, "harness_superscore_table")
+
+    superscore_section = html.split('id="superscore-heading"', 1)[1]
+    assert "<table>" in superscore_section
+    for header in ("Team", "State", "Submission", "Private draft", "Locks", "Review", "Score", "Actions"):
+        assert f">{header}<" in superscore_section
+    # The compact table replaces the bulky per-entry card wrapper -- never
+    # a `team-card` div inside the SuperScore section any more.
+    assert "team-card" not in superscore_section
+    # Expandable position/DNP/Interchange evidence is still present.
+    assert "Positions, DNP/interchange evidence and rulings" in superscore_section
+    assert "<details" in superscore_section
+    # No fabricated opponent/matchup column heading.
+    assert ">Opponent<" not in superscore_section
+
+
+def test_open_finals_week_button_stays_visible_while_superscore_open_is_still_pending(tmp_path):
+    """Issue #211 P1 (Codex review, round 2): once Finals has opened but a
+    concurrent SuperScore round is still unopened (e.g. after a
+    synchronisation/setup failure retryable via the paired action), the
+    dashboard must keep exposing the "Open finals week" button rather than
+    hiding it once `finals.lifecycle_state` itself reads 'open'."""
+    payload = _real_dashboard_payload(9704)
+    assert payload["finals"]["lifecycle_state"] == "open"
+    payload["finals"]["superscore_open_pending"] = True
+    html = _rendered_html(payload, tmp_path, "harness_pending_superscore")
+    finals_section = html.split('id="finals-heading"', 1)[1]
+    assert f'data-finals-action="{payload["finals"]["open_week_url"]}"' in finals_section
+
+
 def test_render_finals_week_dashboard_does_not_throw_before_the_week_has_opened(tmp_path):
     """The `!finals.available`-style branches (preflight not yet satisfied,
     SuperScore not yet configured for this week) are real, reachable states

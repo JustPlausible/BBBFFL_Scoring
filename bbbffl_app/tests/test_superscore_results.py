@@ -20,6 +20,7 @@ from app.superscore_results import (
     SuperScoreCalculationService,
     SuperScoreLeaderboardService,
 )
+from app.superscore_review import SuperScoreReviewRepository
 from tests.superscore_helpers import build_superscore_ready_season, open_superscore_round
 
 
@@ -81,6 +82,172 @@ def _ready(year=6200, database=None):
     lifecycle.transition(round_id, "live")
     lifecycle.transition(round_id, "review")
     return built, round_id, stats
+
+
+def _ready_with_interchange(year=6210, database=None):
+    """Issue #211 P1: one entry names a real, stat-bearing player in
+    ``Interchange`` (not just ``F1``), leaves ``F3`` entirely vacant (no
+    player selected at all) and names an unresolved player (no stat row
+    returned by evidence) in ``F2`` -- proving `_effective_entry`'s
+    `effective_entry` surfaces the submitted Interchange player's identity,
+    an ordinary/finals-style DNP recommendation for the unresolved named
+    slot, and a vacancy the Interchange can be assigned into, exactly like
+    the mature ordinary/finals scorer review (`app.round_review`) already
+    does for a matchup side -- never a SuperScore-specific reimplementation
+    or omission of any of the three."""
+    built = build_superscore_ready_season(year=year, **({"database": database} if database else {}))
+    db, round_id = built["database"], built["superscore_rounds"][1]
+    now, stats = _now(), {}
+    interchange_player_ids = {}
+    target_entry_id = built["entries"][0].season_entry_id
+    with db.engine.begin() as conn:
+        for index, entry in enumerate(built["entries"]):
+            lineup_id = f"ss-ic-lineup-{year}-{index}"
+            f1_canonical = 9_300_000 + year * 10 + index
+            f1_player_id = f"ss-ic-f1-{year}-{index}"
+            f2_canonical = 9_400_000 + year * 10 + index
+            f2_player_id = f"ss-ic-f2-{year}-{index}"
+            ic_canonical = 9_500_000 + year * 10 + index
+            ic_player_id = f"ss-ic-interchange-{year}-{index}"
+            for player_id, canonical, name in (
+                (f1_player_id, f1_canonical, f"SS F1 Player {index}"),
+                (f2_player_id, f2_canonical, f"SS F2 Player {index}"),
+                (ic_player_id, ic_canonical, f"SS Interchange Player {index}"),
+            ):
+                conn.execute(
+                    text(
+                        "INSERT INTO season_player_pool (season_player_id,season_id,canonical_player_id,display_name,afl_team_id,afl_team_name,eligible,source_provider,source_fetched_at,created_at,updated_at) "
+                        "VALUES (:p,:s,:c,:n,1,'Club A',TRUE,'test',:now,:now,:now)"
+                    ),
+                    {"p": player_id, "s": built["season"].season_id, "c": canonical, "n": name, "now": now},
+                )
+            conn.execute(
+                text(
+                    "INSERT INTO weekly_lineup (lineup_id,season_id,competition_id,bbbffl_round_id,season_entry_id,draft_revision,effective_submission_version,created_at,updated_at) VALUES (:l,:s,:c,:r,:e,1,1,:now,:now)"
+                ),
+                {
+                    "l": lineup_id,
+                    "s": built["season"].season_id,
+                    "c": built["superscore_stream"].competition_id,
+                    "r": round_id,
+                    "e": entry.season_entry_id,
+                    "now": now,
+                },
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO weekly_lineup_submission (lineup_id,version,based_on_draft_revision,submitted_at,actor_type,actor_role,source_type) VALUES (:l,1,1,:now,'coach','coach','coach')"
+                ),
+                {"l": lineup_id, "now": now},
+            )
+            for position in POSITIONS:
+                if position == "F1":
+                    selected = f1_player_id
+                elif position == "F2":
+                    selected = f2_player_id
+                elif position == "Interchange":
+                    selected = ic_player_id
+                else:
+                    selected = None  # F3 (and every other non-F1/F2/Interchange slot) is deliberately vacant.
+                conn.execute(
+                    text("INSERT INTO weekly_lineup_submission_slot VALUES (:l,1,:pos,:p)"),
+                    {"l": lineup_id, "pos": position, "p": selected},
+                )
+            stats[f1_canonical] = PlayerStatLine(f1_canonical, goals=index + 1)
+            # f2_canonical deliberately has no stat row at all -- an
+            # unresolved/no-evidence named player, not a played-with-stats one.
+            stats[ic_canonical] = PlayerStatLine(ic_canonical, goals=index + 5)
+            interchange_player_ids[entry.season_entry_id] = (ic_player_id, f"SS Interchange Player {index}")
+    open_superscore_round(db, round_id)
+    lifecycle = CompetitionLifecycleRepository(db)
+    lifecycle.transition(round_id, "live")
+    lifecycle.transition(round_id, "review")
+    return built, round_id, stats, target_entry_id, interchange_player_ids
+
+
+def test_calculated_entry_surfaces_the_submitted_interchange_player_not_no_player_assigned():
+    """Issue #211 P1 regression: before this fix, `_effective_entry` never
+    passed a `player_labels` map into `_side_review`, so every SuperScore
+    entry's Interchange (and every other slot) resolved to `(None, None)`
+    regardless of what was actually submitted -- the Scorer UI then always
+    rendered "no player assigned"/"assignment unresolved". A submitted,
+    stat-bearing Interchange player must surface its real name/club."""
+    built, round_id, stats, target_entry_id, interchange_player_ids = _ready_with_interchange()
+    service = SuperScoreCalculationService(built["database"], Facts(stats))
+    result = service.calculate_entry(round_id, target_entry_id)
+    effective_entry = result.snapshot["effective_entry"]
+    interchange = effective_entry["interchange"]
+    expected_player_id, expected_name = interchange_player_ids[target_entry_id]
+
+    assert interchange["season_player_id"] == expected_player_id
+    assert interchange["player_name"] == expected_name
+    assert interchange["player_name"] is not None
+    assert interchange["afl_club"] == "Club A"
+
+
+def test_calculated_entry_exposes_dnp_review_and_vacancy_recommendations_like_ordinary_finals():
+    """Issue #211 P1: the same evidence-classification/vacancy semantics
+    `app.round_review` already surfaces for an ordinary/finals matchup side
+    must also surface for a SuperScore entry -- a named player with no
+    resolvable evidence is flagged `review_required` (an ambiguous DNP
+    recommendation the Scorer must rule on), and an entirely vacant slot
+    (F3: no player selected at all) is reported as a vacancy the Scorer can
+    assign the Interchange into, driven by the identical shared
+    `app.round_review._side_review` this module now correctly feeds."""
+    built, round_id, stats, target_entry_id, _ = _ready_with_interchange(6211)
+    service = SuperScoreCalculationService(built["database"], Facts(stats))
+    result = service.calculate_entry(round_id, target_entry_id)
+    effective_entry = result.snapshot["effective_entry"]
+    slots_by_position = {slot["slot"]: slot for slot in effective_entry["slots"]}
+
+    f2 = slots_by_position["F2"]
+    assert f2["season_player_id"] is not None
+    assert f2["dnp_recommendation"] == "review_required"
+    assert f2["dnp_ruling"] is None
+
+    f3 = slots_by_position["F3"]
+    assert f3["season_player_id"] is None
+    assert f3["effective_source"] == "zero"
+
+    assert any("F3" in blocker for blocker in result.snapshot["review_blockers"])
+
+
+def test_scorer_interchange_ruling_assigns_the_vacant_position_and_recalculation_reflects_it():
+    """The full ordinary/finals-consistent ruling path: a Scorer resolves a
+    vacant position (F3) by recording an entry-scoped interchange ruling
+    (`app.superscore_review.SuperScoreReviewRepository`, the same repository
+    the Scorer dashboard's `/api/scorer/superscore/...` routes already use);
+    recalculating must then apply the Interchange player's *own* evidence to
+    F3, not a fabricated/zero score, and the Interchange's identity must
+    still be visible throughout."""
+    built, round_id, stats, target_entry_id, interchange_player_ids = _ready_with_interchange(6212)
+    review_repo = SuperScoreReviewRepository(built["database"])
+    actor = ActorContext.anonymous_operator("scorer")
+    version = review_repo.get_review_version(round_id, target_entry_id)
+    review_repo.record_interchange_ruling(
+        round_id,
+        target_entry_id,
+        "F3",
+        expected_review_version=version,
+        actor=actor,
+        reason="Interchange covers the vacant F3 slot",
+    )
+
+    service = SuperScoreCalculationService(built["database"], Facts(stats))
+    result = service.calculate_entry(round_id, target_entry_id)
+    effective_entry = result.snapshot["effective_entry"]
+    slots_by_position = {slot["slot"]: slot for slot in effective_entry["slots"]}
+    f3 = slots_by_position["F3"]
+    interchange = effective_entry["interchange"]
+    expected_player_id, expected_name = interchange_player_ids[target_entry_id]
+
+    assert f3["effective_source"] == "interchange"
+    assert f3["interchange_applied"] is True
+    assert f3["effective_score"] == interchange["potential_scores"]["F3"]
+    assert f3["effective_score"] > 0
+    assert interchange["target_position"] == "F3"
+    assert interchange["player_name"] == expected_name
+    assert interchange["season_player_id"] == expected_player_id
 
 
 def test_ten_entries_calculate_without_matchups_and_record_review_version():

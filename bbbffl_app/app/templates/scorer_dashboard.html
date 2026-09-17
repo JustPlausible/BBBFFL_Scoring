@@ -301,7 +301,12 @@ function finalsPreflightHtml(preflight){
 
 function finalsActionsHtml(finals){
   const actions=[];
-  if(finals.lifecycle_state==='not_created'||finals.lifecycle_state==='upcoming'){
+  // Issue #211 P1 (Codex review, round 2): keep the (paired) open-week
+  // button available whenever SuperScore's own open is still pending --
+  // not only while Finals itself reads not_created/upcoming -- so a
+  // post-Finals-open synchronisation/setup failure still leaves an
+  // operator a visible retry path back to `open_finals_and_superscore_week`.
+  if(finals.lifecycle_state==='not_created'||finals.lifecycle_state==='upcoming'||finals.superscore_open_pending){
     if(finals.open_week_actionable_by_you===false){
       actions.push(`<p class="muted">Requires <code>roundsetup.manage</code> authority, not held by your active role. A Secretary or Administrator can open: <a href="${esc(finals.open_week_url)}">${esc(finals.open_week_url)}</a></p>`);
     }else{
@@ -332,19 +337,37 @@ function renderFinalsSection(finals){
   </section>`;
 }
 
-function superscoreEntryHtml(entry,superscore){
+function superscoreEntryDetailHtml(entry){
   const ee=entry.effective_entry;
+  if(!ee)return '<p class="muted">Not yet calculated -- use Calculate to see position-level evidence.</p>';
   const urls={dnp:entry.ruling_url+'/dnp',interchange:entry.ruling_url+'/interchange',override:entry.ruling_url+'/override'};
-  const detail=ee?`<details class="diagnostics"><summary>Positions, DNP/interchange evidence and rulings</summary><div class="slots">${ee.slots.map(s=>slotHtml(s,urls,entry.review_version,entry.season_entry_id,null)).join('')}</div>${interchangeHtml(ee.interchange,urls,entry.season_entry_id,entry.review_version,null)}</details>`
-    :`<p class="muted">Not yet calculated -- use Calculate to see position-level evidence.</p>`;
-  return `<div class="team-card">
-    <h4>${esc(entry.team_name||'Unknown team')} <span class="state-badge submission-${esc(entry.submission_state)}">${esc(entry.submission_state.replace('_',' '))}</span></h4>
-    <div class="muted">${esc(entry.coach_name||'')}</div>
-    <div>Review status: <span class="pill">${esc(entry.review_status.replace('_',' '))}</span>${entry.rank?` · rank ${esc(entry.rank)}${entry.is_joint_winner?' (joint)':''}`:''}</div>
-    <div>Total score: ${entry.total_score==null?'—':esc(entry.total_score)}</div>
-    <div class="grid-links"><a href="${esc(entry.delegated_lineup_url)}">Delegated entry</a>${entry.correction_available?`<a href="${esc(entry.correction_url)}">Correct locked lineup</a>`:''}${entry.adjudication_available?`<a href="${esc(entry.adjudication_url)}">Adjudicate missed submission</a>`:''}</div>
-    ${detail}
-  </div>`;
+  return `<details class="diagnostics"><summary>Positions, DNP/interchange evidence and rulings</summary><div class="slots">${ee.slots.map(s=>slotHtml(s,urls,entry.review_version,entry.season_entry_id,null)).join('')}</div>${interchangeHtml(ee.interchange,urls,entry.season_entry_id,entry.review_version,null)}</details>`;
+}
+
+// Issue #211 workflow improvement C: a compact Finals-style operational
+// table (mirroring `teamRow`/`lineupsHtml` above) replaces the previous
+// one-oversized-card-per-entry layout -- entry-based, never a fabricated
+// opponent/matchup column -- while the exact same expandable
+// position/DNP/Interchange evidence+ruling panel (`superscoreEntryDetailHtml`,
+// unchanged from the former card's own `detail`) stays available beneath
+// each row.
+function superscoreEntryRow(entry){
+  const links=[];
+  if(entry.correction_available)links.push(`<a href="${esc(entry.correction_url)}">Correct locked lineup</a>`);
+  else links.push(`<span class="disabled">Correction n/a</span>`);
+  if(entry.adjudication_available)links.push(`<a href="${esc(entry.adjudication_url)}">Adjudicate missed submission</a>`);
+  links.push(`<a href="${esc(entry.delegated_lineup_url)}">Delegated entry</a>`);
+  return `<tr>
+    <td data-label="Team"><strong>${esc(entry.team_name||'Unknown team')}</strong><div class="muted">${esc(entry.coach_name||'')}</div></td>
+    <td data-label="State"><span class="state-badge submission-${esc(entry.submission_state)}">${esc(entry.submission_state.replace('_',' '))}</span></td>
+    <td data-label="Submission">${entry.submission_version?`v${esc(entry.submission_version)} · ${human(entry.submitted_at)}`:'None'}${entry.submission_source_type?` · ${esc(entry.submission_source_type)}`:''}</td>
+    <td data-label="Private draft">${entry.has_private_draft?`revision ${esc(entry.draft_revision)} · ${human(entry.draft_updated_at)}`:'None saved'}</td>
+    <td data-label="Locks">${lockSummaryLine(entry.lock_summary)}</td>
+    <td data-label="Review">${esc(entry.review_status.replace('_',' '))}${entry.rank?` · rank ${esc(entry.rank)}${entry.is_joint_winner?' (joint)':''}`:''}</td>
+    <td data-label="Score">${entry.total_score==null?'—':esc(entry.total_score)}</td>
+    <td data-label="Actions"><div class="grid-links">${links.join('')}</div></td>
+  </tr>
+  <tr class="detail-row"><td colspan="8">${superscoreEntryDetailHtml(entry)}</td></tr>`;
 }
 
 function superscoreSectionHtml(superscore){
@@ -358,7 +381,9 @@ function superscoreSectionHtml(superscore){
     <p class="muted">All ${esc(superscore.entry_count)} eligible season entries -- no opponent/matchup involved.</p>
     <div class="control"><button data-finals-action="${esc(superscore.calculate_url)}">Calculate / refresh all entries</button>${advanceButton}<input id="superscore-publish-reason" placeholder="Publish reason (optional)"><button class="primary" data-finals-publish="${esc(superscore.publish_url)}">Publish leaderboard</button></div>
     ${leaderboard?`<p class="ok">Published: leaderboard v${esc(leaderboard.version)} (${esc(leaderboard.published_at)})</p>`:'<p class="muted">No leaderboard published yet.</p>'}
-    <div class="cards">${superscore.entries.map(e=>superscoreEntryHtml(e,superscore)).join('')}</div>
+    <div class="table-scroll"><table><caption class="visually-hidden">SuperScore entry readiness</caption>
+      <thead><tr><th scope="col">Team</th><th scope="col">State</th><th scope="col">Submission</th><th scope="col">Private draft</th><th scope="col">Locks</th><th scope="col">Review</th><th scope="col">Score</th><th scope="col">Actions</th></tr></thead>
+      <tbody>${superscore.entries.map(superscoreEntryRow).join('')}</tbody></table></div>
   </section>`;
 }
 

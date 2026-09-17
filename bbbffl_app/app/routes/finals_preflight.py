@@ -14,7 +14,14 @@ from app.csrf import verify_token
 from app.finals import DownstreamPlayStateError, FinalsBracketError, FinalsBracketRepository, StaleFinalsResultError
 from app.finals_preflight import build_finals_week_preflight, open_finals_week
 from app.finals_review import correct_finals_result, publish_finals_round
+from app.finals_superscore_open import (
+    FrozenMappingDivergedError,
+    LockoutPlanDivergedError,
+    PairedOpenWeekError,
+    open_finals_and_superscore_week,
+)
 from app.routes.round_review import require_round_reviewer
+from app.superscore_round import SuperScoreRoundError
 
 router = APIRouter(prefix="/api/admin/finals")
 require_finals_operator = require_capability("roundsetup.manage")
@@ -97,6 +104,42 @@ def open_week(
     except KeyError as exc:
         raise HTTPException(404, "Unknown finals week") from exc
     return build_finals_week_preflight(request.app.state.database, bracket_id, week_number)
+
+
+@router.post("/{bracket_id}/weeks/{week_number}/open-paired")
+def open_week_paired(
+    bracket_id: str, week_number: int, request: Request, principal: Principal = Depends(require_finals_operator)
+):
+    """Issue #211 workflow improvement B: the single paired web "Open week"
+    action -- validates the finals/SuperScore pairing, synchronises SS's
+    lockout plan from the finals week, then opens each stream's own
+    lifecycle separately (`app.finals_superscore_open.
+    open_finals_and_superscore_week`). Never a third, combined lifecycle:
+    the response simply reports both streams' own independent state."""
+    _authorise_bracket(request, principal, bracket_id)
+    _csrf(request, principal)
+    try:
+        return open_finals_and_superscore_week(
+            request.app.state.database,
+            request.app.state.afl_client,
+            bracket_id,
+            week_number,
+            actor=_actor(principal),
+        )
+    except KeyError as exc:
+        raise HTTPException(404, "Unknown finals week") from exc
+    except PairedOpenWeekError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (FinalsBracketError, SuperScoreRoundError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (LockoutPlanDivergedError, FrozenMappingDivergedError) as exc:
+        # Issue #211 P2 (Codex review, round 2): both are expected,
+        # operator-resolvable "the SS lockout plan/mapping cannot be
+        # safely auto-synchronised" outcomes (a stale SS-only trigger key,
+        # an unreconcilable sequence cycle, or a frozen mapping divergence)
+        # -- without this, they fell through to an uncaught 500 instead of
+        # the actionable 409 every other paired-open conflict returns.
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.post("/{bracket_id}/weeks/{week_number}/publish")

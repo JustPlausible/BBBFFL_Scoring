@@ -332,6 +332,22 @@ FINALS_PREFLIGHT = {"app.finals_preflight"}
 # never needs to import its ordinary sibling's route.
 SCORER_DASHBOARD = {"app.scorer_dashboard", "app.finals_superscore_dashboard"}
 
+# Finals/SuperScore paired lockout-sync and "Open week" operator workflow
+# (issue #211 workflow improvements A/B): sits directly above `app.finals`/
+# `app.finals_preflight` (FINALS/FINALS_PREFLIGHT), `app.superscore_round`
+# (SUPERSCORE) *and* `app.lockouts` (LOCKOUTS) -- the trigger-derivation
+# logic here necessarily touches both SuperScore's own round/mapping model
+# and `app.lockouts.LockoutTriggerRepository`, which `app.superscore_round`
+# itself must never depend on (see this file's SUPERSCORE docstring), so it
+# lives one layer above both, the same shape
+# `app.finals_superscore_dashboard` (issue #208) already uses to compose
+# finals and SuperScore without either depending on the other. Meant to be
+# imported directly by its thin route (`app/routes/finals_preflight.py`),
+# exactly like `app.finals_preflight`/`app.round_preflight` -- but must
+# stay a sibling of the Grand Final vertical and must never depend on
+# routes or the composition root, and no lower layer may depend back on it.
+FINALS_SUPERSCORE_OPEN = {"app.finals_superscore_open"}
+
 # Administrator Dashboard (issue #148): a governance/readiness/navigation
 # aggregation read model that sits *above* both `app.season_centre` and
 # `app.scorer_dashboard` -- it composes `build_season_centre` (season
@@ -398,6 +414,7 @@ ALL_GROUPS = (
     | ROUND_PREFLIGHT
     | FINALS_PREFLIGHT
     | SCORER_DASHBOARD
+    | FINALS_SUPERSCORE_OPEN
     | ADMIN_DASHBOARD
     | ROUTES
     | COMPOSITION_ROOT
@@ -786,6 +803,22 @@ def test_scorer_decisions_stays_repository_agnostic(graph):
     shaped object a caller passes in (HTTP route, admin script, replay,
     test) rather than hard-wiring a persistence dependency."""
     assert graph["app.scorer_decisions"] == {"app.audit", "app.scoring"}
+
+
+def test_finals_superscore_open_is_an_application_service(graph):
+    """`app.finals_superscore_open` (issue #211 workflow improvements A/B)
+    sits above the season model, lockouts, finals, finals preflight and
+    SuperScore -- but must stay a sibling of the Grand Final vertical and
+    must never depend on routes or the composition root, exactly like
+    app.scorer_dashboard/app.finals_superscore_dashboard."""
+    forbidden = GRAND_FINAL_VERTICAL | ROUTES | COMPOSITION_ROOT
+    for module in sorted(FINALS_SUPERSCORE_OPEN):
+        offending = graph[module] & forbidden
+        assert not offending, f"{module} must not depend on {sorted(offending)}"
+
+    for module in sorted(SEASON_MODEL | LOCKOUTS | WEEKLY_SUBMISSION_SOURCES | FINALS | SUPERSCORE | FINALS_PREFLIGHT):
+        offending = graph[module] & FINALS_SUPERSCORE_OPEN
+        assert not offending, f"{module} must not depend on application orchestration {sorted(offending)}"
 
 
 def test_scorer_dashboard_is_an_application_service(graph):

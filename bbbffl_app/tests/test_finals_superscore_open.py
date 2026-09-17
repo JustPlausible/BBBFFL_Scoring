@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 
 from app.audit import ActorContext
 from app.competition_lifecycle import CompetitionLifecycleRepository
+from app.db import transaction
 from app.finals import FinalsBracketRepository
 from app.finals_preflight import open_finals_week
 from app.finals_superscore_open import (
@@ -47,6 +48,18 @@ class _StubRound:
         self.round_id = round_id
 
 
+class _StubMatch:
+    def __init__(self, match_id):
+        self.match_id = match_id
+
+
+# Issue #211 P1 (Codex review, round 4): `open_finals_and_superscore_week`
+# now validates each finals lockout trigger's configured AFL match IDs
+# against this round's real match list before opening -- covers every
+# literal match ID this test file's triggers configure by default.
+_DEFAULT_STUB_MATCH_IDS = (1111, 1112, 2222, 3333, 7777, 9999)
+
+
 class _StubAflClient:
     """`round_exists` (used by `AflApiReferenceValidator`, which
     `synchronise_lockout_plan_from_finals` builds internally) must resolve
@@ -54,13 +67,22 @@ class _StubAflClient:
     `get_rounds()` would otherwise make every SS mapping confirmation fail
     with "AFL season/round reference does not exist", even though the
     finals week's own mapping was already accepted through a real
-    validator (`tests.finals_helpers.accept_week_mapping`)."""
+    validator (`tests.finals_helpers.accept_week_mapping`).
 
-    def __init__(self, afl_round_id=8801):
+    `matches_by_round`, when given, overrides the default "every test
+    match ID is covered" behaviour with an explicit `{afl_round_id:
+    [match_id, ...]}` map -- needed to reproduce a trigger whose match IDs
+    are genuinely *not* part of a particular (e.g. newly-corrected) AFL
+    round's match list."""
+
+    def __init__(self, afl_round_id=8801, matches_by_round=None):
         self._afl_round_id = afl_round_id
+        self._matches_by_round = matches_by_round
 
     def get_matches(self, afl_round_id):
-        return []
+        if self._matches_by_round is not None:
+            return [_StubMatch(match_id) for match_id in self._matches_by_round.get(afl_round_id, [])]
+        return [_StubMatch(match_id) for match_id in _DEFAULT_STUB_MATCH_IDS]
 
     def get_rounds(self, afl_season_id):
         return [_StubRound(self._afl_round_id)]
@@ -488,6 +510,90 @@ def test_synchronise_lockout_plan_leaves_the_mapping_untouched_when_the_trigger_
     # never silently advanced toward finals' despite the overall failure.
     ss_mapping = RoundMappingRepository(database).resolve(built["ss1_round_id"])
     assert ss_mapping.afl_round_id == other_afl_round_id
+
+
+def test_synchronise_lockout_plan_refuses_to_revise_an_already_activated_ss_trigger():
+    """Issue #211 P1 (Codex review, round 4): `LockoutTriggerRepository.
+    configure()` permanently refuses to revise a trigger that has already
+    durably activated -- checked only at write time. Without preflighting
+    this, a plan with several pending changes could commit an earlier,
+    still-editable trigger before discovering a later one has already
+    irreversibly locked, leaving SS half-synchronised despite the
+    fail-closed contract. Must mutate nothing."""
+    database = _database_for_test(9517)
+    built = _seed(database, 9517, with_lockout_triggers=False)
+    afl_round_id = built["afl_round_id"]
+    trigger_repo = LockoutTriggerRepository(database)
+    trigger_repo.configure(built["week1_round_id"], "s1", "selective", 1, [1111], actor=ACTOR, reason="s1")
+    trigger_repo.configure(built["week1_round_id"], "main", "main", 2, [9999], actor=ACTOR, reason="main")
+
+    open_finals_and_superscore_week(database, _StubAflClient(afl_round_id), built["bracket"].bracket_id, 1, actor=ACTOR)
+    ss_triggers = {t.trigger_key: t for t in trigger_repo.list_triggers(built["ss1_round_id"])}
+    assert set(ss_triggers) == {"s1", "main"}
+
+    # SS's "s1" trigger has already durably activated -- test setup (a
+    # direct row insert mirroring what `app.lockouts.LockoutRepository.
+    # _materialize_round_triggers` would itself have written), not the
+    # code under test.
+    with transaction(database) as conn:
+        conn.execute(
+            "INSERT INTO bbbffl_round_lockout_trigger_activation "
+            "(trigger_id, revision, afl_match_id, observed_status, effective_lock_at, activation_reason, "
+            "evaluated_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                ss_triggers["s1"].trigger_id,
+                ss_triggers["s1"].revision,
+                1111,
+                "LIVE",
+                "2026-01-01T00:00:00+00:00",
+                "match_status_live",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+
+    # Finals changes "s1"'s match coverage -- SS can no longer safely
+    # mirror this since its own "s1" is already irreversibly locked.
+    trigger_repo.configure(built["week1_round_id"], "s1", "selective", 1, [1112], actor=ACTOR, reason="s1 changed")
+
+    with pytest.raises(LockoutPlanDivergedError, match="s1"):
+        synchronise_lockout_plan_from_finals(
+            database, KnownRound({(9517, afl_round_id)}), built["ss1_round_id"], actor=ACTOR
+        )
+
+    # Nothing mutated: SS's "s1" trigger still has its original match ids.
+    unchanged = trigger_repo.get(built["ss1_round_id"], "s1")
+    assert unchanged.afl_match_ids == (1111,)
+
+
+def test_paired_open_rejects_a_finals_trigger_whose_match_ids_are_not_in_the_currently_mapped_round():
+    """Issue #211 P1 (Codex review, round 4): a main trigger merely
+    *existing* is not enough -- if finals' mapping was corrected to a
+    different AFL round after its triggers were configured against the
+    old one (the supported pre-open `RoundMappingRepository.correct`
+    path), those triggers' match IDs can reference a round they no longer
+    belong to and can never activate on either stream. Must fail closed
+    and mutate nothing."""
+    database = _database_for_test(9518)
+    built = _seed(database, 9518)
+    afl_round_id = built["afl_round_id"]
+    other_afl_round_id = afl_round_id + 1
+
+    RoundMappingRepository(database).correct(
+        built["week1_round_id"],
+        9518,
+        other_afl_round_id,
+        KnownRound({(9518, afl_round_id), (9518, other_afl_round_id)}),
+        reason="finals week remapped to a different AFL round",
+    )
+
+    stub = _StubAflClient(other_afl_round_id, matches_by_round={afl_round_id: [9999], other_afl_round_id: [5555]})
+    with pytest.raises(PairedOpenWeekError, match="match"):
+        open_finals_and_superscore_week(database, stub, built["bracket"].bracket_id, 1, actor=ACTOR)
+
+    lifecycle = CompetitionLifecycleRepository(database)
+    assert lifecycle.get_round(built["week1_round_id"]) is None
+    assert lifecycle.get_round(built["ss1_round_id"]) is None
 
 
 def test_open_paired_route_returns_409_not_500_for_a_diverged_lockout_plan(finals_client):

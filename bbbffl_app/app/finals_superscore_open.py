@@ -93,6 +93,7 @@ action; the underlying domain model is exactly as separate as it was
 before this module existed.
 """
 
+from app.afl_client import AflApiError
 from app.audit import ActorContext, append_event
 from app.competition_lifecycle import CompetitionLifecycleRepository
 from app.db import transaction
@@ -218,18 +219,31 @@ def _plan_trigger_sync(ss_round_id, finals_triggers, ss_triggers_by_key):
     return ordered
 
 
-def _validate_trigger_sync_plan(ss_round_id, finals_triggers, ss_triggers_by_key):
+def _validate_trigger_sync_plan(ss_round_id, finals_triggers, ss_triggers_by_key, activated_ss_trigger_ids):
     """The trigger half of `synchronise_lockout_plan_from_finals`'s
     validation -- computes what would need to change and a safe write
-    order for it, entirely from already-fetched data: no database access,
-    no mutation of any kind. Issue #211 P2 (Codex review, round 3): called
-    *before* `confirm_afl_mapping` mutates SS's mapping, so a
-    `LockoutPlanDivergedError` raised here (an obsolete SS-only trigger
-    key, or a genuine sequence-reordering/ordering-rule cycle) leaves
-    nothing at all mutated yet -- previously this validation only ran
-    *after* the mapping had already been committed, silently violating
-    that same error's own documented nothing-mutated contract whenever the
-    mapping itself also needed correcting."""
+    order for it, entirely from already-fetched data: no database access
+    of its own, no mutation of any kind. Issue #211 P2 (Codex review,
+    round 3): called *before* `confirm_afl_mapping` mutates SS's mapping,
+    so a `LockoutPlanDivergedError` raised here (an obsolete SS-only
+    trigger key, an already-activated trigger that still needs changing,
+    or a genuine sequence-reordering/ordering-rule cycle) leaves nothing
+    at all mutated yet -- previously this validation only ran *after* the
+    mapping had already been committed, silently violating that same
+    error's own documented nothing-mutated contract whenever the mapping
+    itself also needed correcting.
+
+    `activated_ss_trigger_ids` is the caller's pre-fetched set of SS
+    `trigger_id`s that have already durably activated (`bbbffl_round_
+    lockout_trigger_activation`) -- passed in rather than queried here so
+    this function stays pure/no-I/O. Issue #211 P1 (Codex review, round
+    4): `LockoutTriggerRepository.configure()` permanently refuses to
+    revise an activated trigger (`TriggerAlreadyActivatedError`), checked
+    only at write time -- without checking this up front too, a plan with
+    several pending changes could commit an earlier, still-editable
+    trigger before discovering a later one has already irreversibly
+    locked, again leaving SS half-synchronised despite this function's
+    fail-closed contract."""
     obsolete_keys = sorted(set(ss_triggers_by_key) - {t.trigger_key for t in finals_triggers})
     if obsolete_keys:
         raise LockoutPlanDivergedError(
@@ -253,6 +267,19 @@ def _validate_trigger_sync_plan(ss_round_id, finals_triggers, ss_triggers_by_key
             unchanged_trigger_keys.append(trigger.trigger_key)
         else:
             pending_keys.add(trigger.trigger_key)
+
+    activated_pending_keys = sorted(
+        key
+        for key in pending_keys
+        if ss_triggers_by_key.get(key) is not None and ss_triggers_by_key[key].trigger_id in activated_ss_trigger_ids
+    )
+    if activated_pending_keys:
+        raise LockoutPlanDivergedError(
+            f"SS round {ss_round_id} cannot be synchronised automatically: trigger key(s) {activated_pending_keys} "
+            "have already activated (irreversibly locked) on SS, but the concurrent finals plan now differs for "
+            "them. LockoutTriggerRepository.configure permanently refuses to revise an activated trigger -- "
+            "reconcile this divergence directly before synchronisation can proceed."
+        )
 
     # Plan every pending trigger's safe application order *before* writing
     # anything -- see `_plan_trigger_sync`'s own docstring for why this
@@ -338,7 +365,25 @@ def synchronise_lockout_plan_from_finals(
     trigger_repo = LockoutTriggerRepository(database)
     finals_triggers = trigger_repo.list_triggers(finals_round_id)
     ss_triggers_by_key = {t.trigger_key: t for t in trigger_repo.list_triggers(ss_round_id)}
-    ordered_plan, unchanged_trigger_keys = _validate_trigger_sync_plan(ss_round_id, finals_triggers, ss_triggers_by_key)
+    # Issue #211 P1 (Codex review, round 4): pre-fetched here (read-only,
+    # before any write) rather than inside `_validate_trigger_sync_plan`
+    # itself, which stays pure/no-I/O -- see that function's own docstring.
+    ss_trigger_ids = [t.trigger_id for t in ss_triggers_by_key.values()]
+    activated_ss_trigger_ids = (
+        {
+            row["trigger_id"]
+            for row in database.execute(
+                "SELECT trigger_id FROM bbbffl_round_lockout_trigger_activation "
+                f"WHERE trigger_id IN ({','.join('?' * len(ss_trigger_ids))})",
+                tuple(ss_trigger_ids),
+            ).fetchall()
+        }
+        if ss_trigger_ids
+        else set()
+    )
+    ordered_plan, unchanged_trigger_keys = _validate_trigger_sync_plan(
+        ss_round_id, finals_triggers, ss_triggers_by_key, activated_ss_trigger_ids
+    )
 
     ss_mapping = confirm_afl_mapping(
         database,
@@ -454,6 +499,50 @@ def open_finals_and_superscore_week(
             raise PairedOpenWeekError(
                 f"finals week {week_number} has no configured main/remaining lockout trigger; configure the "
                 "finals lockout plan before opening this pairing."
+            )
+
+        # Issue #211 P1 (Codex review, round 4): a main trigger merely
+        # *existing* is not enough -- the supported pre-open mapping-
+        # correction path (`app.round_preflight.accept_preflight_mapping`)
+        # can move finals onto a different AFL round while leaving its
+        # already-configured triggers' `afl_match_ids` unchanged, and
+        # neither `build_finals_week_preflight` nor `LockoutTriggerRepository
+        # .configure` validate a trigger's match IDs against the mapped
+        # round's real evidence. A trigger referencing match IDs outside
+        # the round it's actually mapped to can never activate -- silently
+        # leaving both streams' selections without a working lockout, not
+        # merely finals'. Validated against the exact AFL round finals is
+        # (or is about to be) mapped onto, mirroring `resolve_concurrent_
+        # finals_afl_mapping`'s own frozen-vs-head distinction.
+        if finals_already_open:
+            frozen_finals = database.execute(
+                "SELECT afl_round_id FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?", (finals_round_id,)
+            ).fetchone()
+            coverage_afl_round_id = frozen_finals["afl_round_id"] if frozen_finals is not None else None
+        else:
+            coverage_mapping = RoundMappingRepository(database).resolve(finals_round_id)
+            coverage_afl_round_id = coverage_mapping.afl_round_id if coverage_mapping is not None else None
+        if coverage_afl_round_id is None:
+            raise PairedOpenWeekError(
+                f"finals week {week_number} has no accepted AFL-round mapping yet; accept one before opening "
+                "this pairing."
+            )
+        try:
+            valid_match_ids = {match.match_id for match in afl_client.get_matches(coverage_afl_round_id)}
+        except AflApiError as exc:
+            raise PairedOpenWeekError(
+                f"could not verify finals week {week_number}'s lockout trigger match coverage against AFL round "
+                f"{coverage_afl_round_id}: {exc}"
+            ) from exc
+        stale_trigger_keys = sorted(
+            t.trigger_key for t in finals_triggers if not set(t.afl_match_ids) <= valid_match_ids
+        )
+        if stale_trigger_keys:
+            raise PairedOpenWeekError(
+                f"finals week {week_number} has lockout trigger(s) {stale_trigger_keys} whose configured AFL match "
+                f"IDs are not part of AFL round {coverage_afl_round_id}'s current match list -- they can never "
+                "activate against the currently mapped round; reconfigure the finals lockout plan before opening "
+                "this pairing."
             )
 
     default_reason = reason or (

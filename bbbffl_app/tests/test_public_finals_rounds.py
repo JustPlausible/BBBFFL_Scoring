@@ -727,3 +727,39 @@ def test_mixed_states_within_the_same_finals_week_stay_distinguishable(public_cl
     assert ef["published_at"] is None
     assert qf["status"] != ef["status"]
     assert qf["status_label"] != ef["status_label"]
+
+
+# -- Codex P2 follow-up 4: finals pages must keep refreshing after the
+# initial render, since a finals round_id has no per-matchup polling
+# detail page to fall back on. This codebase has no JS test harness (see
+# follow-up 3's comment above), so this asserts what is actually
+# testable: the finals round-number page is wired with the same
+# `poll_interval_seconds` context value `public_round_centre.html`'s own
+# polling page already uses, scoped only to the finals branch -- the
+# ordinary page/API surface stays byte-for-byte unaffected.
+
+
+def test_finals_round_page_is_wired_with_the_poll_interval_for_client_side_refresh(public_client):
+    built = build_finals_ready_season(year=8090, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    _open_week1(built, bracket, year=8090)
+    season_id = built["season"].season_id
+    poll_interval_seconds = public_client.app.state.settings.poll_interval_seconds
+
+    page = public_client.get(f"/seasons/{season_id}/rounds/21")
+    assert page.status_code == 200
+    assert f"pollIntervalMs={poll_interval_seconds}*1000" in page.text
+    assert "finalsPollTimer=setInterval(render" in page.text
+
+
+def test_ordinary_round_page_rendering_is_unaffected_by_the_finals_poll_wiring(public_client):
+    built = build_completable_season(year=8091, database=public_client.app.state.database)
+    season_id = built["season"].season_id
+
+    page = public_client.get(f"/seasons/{season_id}/rounds/1")
+    assert page.status_code == 200
+    # The poll-interval value is now always passed to the template (the
+    # same context shape as public_round_centre.html's), but an ordinary
+    # round never enters the finals branch that actually starts polling.
+    poll_interval_seconds = public_client.app.state.settings.poll_interval_seconds
+    assert f"pollIntervalMs={poll_interval_seconds}*1000" in page.text

@@ -208,7 +208,20 @@ def season_round_browser_page(season_id: str, round_number: int, request: Reques
     return templates.TemplateResponse(
         request,
         "public_season_rounds.html",
-        {"season_id": season_id, "round_number": round_number},
+        {
+            "season_id": season_id,
+            "round_number": round_number,
+            # A finals week has no per-matchup polling detail page of its
+            # own to fall back on (unlike an ordinary round's matches,
+            # which link to public_round_centre.html) -- issue #213 Codex
+            # follow-up: without this, a spectator watching an in-progress
+            # finals week never sees a later calculation, review
+            # transition, published result or SuperScore publication
+            # without a manual reload. Passed through unconditionally
+            # (identical to public_round_centre.html's own context); the
+            # template only actually polls on a finals round_number.
+            "poll_interval_seconds": request.app.state.settings.poll_interval_seconds,
+        },
     )
 
 

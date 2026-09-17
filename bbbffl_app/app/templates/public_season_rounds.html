@@ -49,6 +49,8 @@
 <script>
 const season={{ season_id|tojson }};
 let roundNumber={{ round_number|tojson }};
+const pollIntervalMs={{ poll_interval_seconds|tojson }}*1000;
+let finalsPollTimer=null;
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 // Australian local time only -- public BBBFFL pages never show raw UTC
 // outside diagnostics (issue #161); the JSON API still carries UTC ISO
@@ -193,6 +195,18 @@ async function render(){
       ssSection.style.display='';
       ssSection.innerHTML=superscoreSection(round.superscore);
       ladderSection.style.display='none';
+      // A finals week has no per-matchup polling detail page of its own
+      // to fall back on (a direct finals round_id URL redirects back to
+      // this same page) -- unlike an ordinary round's matches, which
+      // link out to public_round_centre.html's own polling `load()`.
+      // Re-run this same render on the configured interval so a later
+      // calculation, review transition, published result or SuperScore
+      // publication appears without a manual reload (issue #213 Codex
+      // follow-up). Guarded so repeated finals renders (this interval's
+      // own later ticks) never stack a second timer.
+      if(finalsPollTimer===null){
+        finalsPollTimer=setInterval(render, Math.max(pollIntervalMs,5000));
+      }
     } else {
       document.querySelector('#matches').innerHTML=round.matchups.map(m=>matchCard(m, round.round_id)).join('');
       ssSection.style.display='none';

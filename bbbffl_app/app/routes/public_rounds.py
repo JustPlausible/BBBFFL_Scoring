@@ -211,6 +211,14 @@ def season_round_browser_page(season_id: str, round_number: int, request: Reques
         {
             "season_id": season_id,
             "round_number": round_number,
+            # Known here without any client-side fetch (a round_number's
+            # stream never changes) -- passed straight through so the
+            # template can decide whether to poll *before* its first
+            # fetch even runs, rather than only after that fetch has
+            # already succeeded (issue #213 Codex follow-up: scheduling
+            # the poll timer only on the success path meant a transient
+            # first-load failure left the page stuck with no retry).
+            "stream": index["rounds"][round_number - 1]["stream"],
             # A finals week has no per-matchup polling detail page of its
             # own to fall back on (unlike an ordinary round's matches,
             # which link to public_round_centre.html) -- issue #213 Codex

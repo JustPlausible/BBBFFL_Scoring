@@ -737,6 +737,12 @@ def test_mixed_states_within_the_same_finals_week_stay_distinguishable(public_cl
 # `poll_interval_seconds` context value `public_round_centre.html`'s own
 # polling page already uses, scoped only to the finals branch -- the
 # ordinary page/API surface stays byte-for-byte unaffected.
+#
+# Codex follow-up 5: the poll timer must be schedulable even if the
+# page's very first fetch fails -- `stream` (and therefore
+# `isFinalsRound`) is resolved server-side from the URL alone, and the
+# timer is scheduled unconditionally at the bottom of the script, never
+# only inside render()'s own success path.
 
 
 def test_finals_round_page_is_wired_with_the_poll_interval_for_client_side_refresh(public_client):
@@ -749,7 +755,12 @@ def test_finals_round_page_is_wired_with_the_poll_interval_for_client_side_refre
     page = public_client.get(f"/seasons/{season_id}/rounds/21")
     assert page.status_code == 200
     assert f"pollIntervalMs={poll_interval_seconds}*1000" in page.text
-    assert "finalsPollTimer=setInterval(render" in page.text
+    assert "isFinalsRound=" in page.text
+    assert "'finals'==='finals'" in page.text.replace('"', "'")
+    # Scheduled unconditionally at the bottom of the script -- never
+    # inside render()'s own try block -- so a failed first fetch still
+    # gets retried.
+    assert "if(isFinalsRound){\n  setInterval(render" in page.text
 
 
 def test_ordinary_round_page_rendering_is_unaffected_by_the_finals_poll_wiring(public_client):
@@ -758,8 +769,27 @@ def test_ordinary_round_page_rendering_is_unaffected_by_the_finals_poll_wiring(p
 
     page = public_client.get(f"/seasons/{season_id}/rounds/1")
     assert page.status_code == 200
-    # The poll-interval value is now always passed to the template (the
-    # same context shape as public_round_centre.html's), but an ordinary
-    # round never enters the finals branch that actually starts polling.
+    # The poll-interval value and the isFinalsRound flag are now always
+    # passed to the template (the same context shape as
+    # public_round_centre.html's), but an ordinary round resolves
+    # isFinalsRound to false and never schedules the poll timer.
     poll_interval_seconds = public_client.app.state.settings.poll_interval_seconds
     assert f"pollIntervalMs={poll_interval_seconds}*1000" in page.text
+    assert "'ordinary'==='finals'" in page.text.replace('"', "'")
+
+
+def test_finals_round_page_resolves_isFinalsRound_before_any_client_fetch_could_run(public_client):
+    """The whole point of Codex follow-up 5: `isFinalsRound` must be
+    knowable from the server-rendered page alone, never derived from a
+    fetch response -- proven here by asserting it appears as a plain
+    literal assignment before the first `fetch(` call in the script."""
+    built = build_finals_ready_season(year=8092, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    _open_week1(built, bracket, year=8092)
+    season_id = built["season"].season_id
+
+    page = public_client.get(f"/seasons/{season_id}/rounds/21")
+    script = page.text
+    is_finals_index = script.index("isFinalsRound=")
+    first_fetch_index = script.index("fetch(")
+    assert is_finals_index < first_fetch_index

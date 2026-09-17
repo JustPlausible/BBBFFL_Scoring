@@ -640,15 +640,21 @@ def test_paired_open_rejects_stale_cached_match_evidence_when_validating_trigger
     assert lifecycle.get_round(built["ss1_round_id"]) is None
 
 
-def test_apply_trigger_sync_translates_a_concurrent_activation_mid_loop_into_lockout_plan_diverged():
-    """Issue #211 P1 (Codex review, round 5): a live lockout evaluation can
+def test_apply_trigger_sync_rolls_back_the_whole_plan_on_a_concurrent_activation_mid_loop():
+    """Issue #211 P1 (Codex review, round 6): a live lockout evaluation can
     activate a still-pending SS trigger in the narrow window between
     `_validate_trigger_sync_plan`'s own activation read and this loop's
-    write for it -- `LockoutTriggerRepository.configure` itself then
-    raises `TriggerAlreadyActivatedError`. It must never leak out
-    uncaught; it must translate into the same `LockoutPlanDivergedError`
-    every other unresolvable divergence already raises, and every trigger
-    already applied earlier in the same call stays genuinely committed."""
+    write for it -- `LockoutTriggerRepository._configure_locked` itself
+    then raises `TriggerAlreadyActivatedError`. Round 5 translated this
+    into `LockoutPlanDivergedError` but left whatever had already been
+    written independently committed; round 6 correctly rejected that --
+    the newly-activated trigger's configuration is now permanently
+    frozen and can never converge with finals' current plan, so that
+    "partial" result was not actually recoverable by retrying. Every
+    write in the same call must now share one transaction: the whole
+    plan rolls back together, translated into the same
+    `LockoutPlanDivergedError` every other unresolvable divergence
+    already raises."""
     from app.finals_superscore_open import _apply_trigger_sync, _validate_trigger_sync_plan
 
     database = _database_for_test(9522)
@@ -692,13 +698,14 @@ def test_apply_trigger_sync_translates_a_concurrent_activation_mid_loop_into_loc
             ),
         )
 
-    with pytest.raises(LockoutPlanDivergedError, match="main"):
+    with pytest.raises(LockoutPlanDivergedError, match="concurrently"):
         _apply_trigger_sync(trigger_repo, built["ss1_round_id"], ordered_plan, ss_triggers_by_key, 1, ACTOR, "resync")
 
-    # "s1" (ordered before "main") was already safely applied and committed.
+    # Nothing was applied: "s1" (ordered before "main") was rolled back
+    # together with "main", even though its own write would otherwise
+    # have succeeded on its own.
     s1 = trigger_repo.get(built["ss1_round_id"], "s1")
-    assert s1.afl_match_ids == (1112,)
-    # "main" itself was never written -- still its original match ids.
+    assert s1.afl_match_ids == (1111,)
     main = trigger_repo.get(built["ss1_round_id"], "main")
     assert main.afl_match_ids == (9999,)
 

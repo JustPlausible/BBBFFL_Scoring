@@ -296,54 +296,54 @@ def _apply_trigger_sync(
     trigger_repo, ss_round_id, ordered_plan, ss_triggers_by_key, ss_mapping_revision, actor, reason
 ):
     """Replays an already-validated `_validate_trigger_sync_plan` order as
-    real `configure()` writes -- called only once that validation (and,
-    ahead of it, the mapping confirmation) has already succeeded.
+    real writes -- called only once that validation (and, ahead of it, the
+    mapping confirmation) has already succeeded.
 
-    Issue #211 P1 (Codex review, round 5): `_validate_trigger_sync_plan`'s
-    own activation check reads activation state once, before any of these
-    writes -- each `configure()` call below still commits its own separate
-    transaction (see `LockoutTriggerRepository.configure`'s own docstring:
-    it deliberately does not nest inside a caller's transaction), so a
-    *live* lockout evaluation activating one of these still-pending
-    triggers in the narrow window between that read and this write reaches
-    `configure()`'s own activation check and still raises
-    `TriggerAlreadyActivatedError` here -- this codebase's own documented
-    position on an equally narrow window (`app.lockouts`'s "Historical
-    irreversibility" section: "an eventual-consistency gap, never a
-    correctness one") is not to serialise an entire round's lockout
-    evaluation against every configuration write, which would need new
-    locking primitives no other caller of `LockoutTriggerRepository` uses.
-    Every trigger already written by this loop remains genuinely correct
-    and committed (each was independently validated and applied under its
-    own lock); translating this into the same `LockoutPlanDivergedError`
-    every other unresolvable-here divergence already raises -- rather than
-    letting `TriggerAlreadyActivatedError` leak out uncaught -- keeps the
-    route's existing 409 handling correct and gives the operator a clear,
-    safely-retryable next step (synchronisation is idempotent against
-    whatever has already been applied)."""
+    Issue #211 P1 (Codex review, round 6): every write in `ordered_plan`
+    is applied here via `LockoutTriggerRepository._configure_locked`
+    against *one shared transaction*, not `configure()`'s own
+    independent-per-call one. `_validate_trigger_sync_plan`'s own
+    activation check reads activation state once, before any of these
+    writes -- a *live* lockout evaluation activating one of these
+    still-pending triggers in the narrow window between that read and
+    this write still reaches `_configure_locked`'s own activation check
+    and still raises `TriggerAlreadyActivatedError`, but because every
+    write in this call shares one transaction, that failure now rolls
+    back every write this call already made too (issue #211 P1, Codex
+    review, round 5, first attempted this with each write independently
+    committed and a translated, "safely retryable" error -- round 6
+    correctly rejected that: the newly-activated trigger's configuration
+    is now *permanently* frozen and can never converge with finals'
+    current plan, so a partially-applied result besides it was not
+    actually recoverable by retrying, only by an operator reconciling the
+    divergence directly). Translating `TriggerAlreadyActivatedError` into
+    the same `LockoutPlanDivergedError` every other unresolvable
+    divergence already raises keeps the route's existing 409 handling
+    correct."""
     synced_trigger_keys: list[str] = []
-    for trigger in ordered_plan:
-        existing = ss_triggers_by_key.get(trigger.trigger_key)
-        try:
-            trigger_repo.configure(
-                ss_round_id,
-                trigger.trigger_key,
-                trigger.trigger_type,
-                trigger.sequence,
-                list(trigger.afl_match_ids),
-                actor=actor,
-                reason=reason,
-                expected_revision=existing.revision if existing is not None else 0,
-                expected_mapping_revision=ss_mapping_revision,
-            )
-        except TriggerAlreadyActivatedError as exc:
-            raise LockoutPlanDivergedError(
-                f"SS round {ss_round_id} cannot finish synchronising: trigger key {trigger.trigger_key!r} "
-                "activated concurrently, between this synchronisation's own validation and this write. Trigger(s) "
-                f"{synced_trigger_keys} were already safely applied before this happened; re-run synchronisation "
-                f"to reconcile {trigger.trigger_key!r} directly. ({exc})"
-            ) from exc
-        synced_trigger_keys.append(trigger.trigger_key)
+    try:
+        with transaction(trigger_repo.database) as conn:
+            for trigger in ordered_plan:
+                existing = ss_triggers_by_key.get(trigger.trigger_key)
+                trigger_repo._configure_locked(
+                    conn,
+                    ss_round_id,
+                    trigger.trigger_key,
+                    trigger.trigger_type,
+                    trigger.sequence,
+                    tuple(trigger.afl_match_ids),
+                    actor=actor,
+                    reason=reason,
+                    expected_revision=existing.revision if existing is not None else 0,
+                    expected_mapping_revision=ss_mapping_revision,
+                )
+                synced_trigger_keys.append(trigger.trigger_key)
+    except TriggerAlreadyActivatedError as exc:
+        raise LockoutPlanDivergedError(
+            f"SS round {ss_round_id} cannot be synchronised automatically: a trigger activated concurrently, "
+            "between this synchronisation's own validation and its writes -- nothing from this synchronisation "
+            f"attempt was applied (rolled back together). Reconcile the resulting divergence directly. ({exc})"
+        ) from exc
     return synced_trigger_keys
 
 

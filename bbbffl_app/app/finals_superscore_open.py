@@ -98,7 +98,7 @@ from contextlib import nullcontext
 from app.afl_client import AflApiError
 from app.audit import ActorContext, append_event
 from app.competition_lifecycle import CompetitionLifecycleRepository
-from app.db import transaction
+from app.db import _for_update_suffix, transaction
 from app.finals import FinalsBracketRepository
 from app.finals_preflight import build_finals_week_preflight, open_finals_week
 from app.lockouts import LockoutTriggerRepository, TriggerAlreadyActivatedError
@@ -293,58 +293,102 @@ def _validate_trigger_sync_plan(ss_round_id, finals_triggers, ss_triggers_by_key
 
 
 def _apply_trigger_sync(
-    trigger_repo, ss_round_id, ordered_plan, ss_triggers_by_key, ss_mapping_revision, actor, reason
+    conn, trigger_repo, ss_round_id, ordered_plan, ss_triggers_by_key, ss_mapping_revision, actor, reason
 ):
-    """Replays an already-validated `_validate_trigger_sync_plan` order as
-    real writes -- called only once that validation (and, ahead of it, the
-    mapping confirmation) has already succeeded.
-
-    Issue #211 P1 (Codex review, round 6): every write in `ordered_plan`
-    is applied here via `LockoutTriggerRepository._configure_locked`
-    against *one shared transaction*, not `configure()`'s own
-    independent-per-call one. `_validate_trigger_sync_plan`'s own
-    activation check reads activation state once, before any of these
-    writes -- a *live* lockout evaluation activating one of these
-    still-pending triggers in the narrow window between that read and
-    this write still reaches `_configure_locked`'s own activation check
-    and still raises `TriggerAlreadyActivatedError`, but because every
-    write in this call shares one transaction, that failure now rolls
-    back every write this call already made too (issue #211 P1, Codex
-    review, round 5, first attempted this with each write independently
-    committed and a translated, "safely retryable" error -- round 6
-    correctly rejected that: the newly-activated trigger's configuration
-    is now *permanently* frozen and can never converge with finals'
-    current plan, so a partially-applied result besides it was not
-    actually recoverable by retrying, only by an operator reconciling the
-    divergence directly). Translating `TriggerAlreadyActivatedError` into
-    the same `LockoutPlanDivergedError` every other unresolvable
-    divergence already raises keeps the route's existing 409 handling
-    correct."""
+    """Applies an already-validated `_validate_trigger_sync_plan` order as
+    real writes, all against `conn` -- an already-open transaction the
+    caller (`_synchronise_triggers_locked`) has locked and read/validated
+    within, so every write here shares that one transaction rather than
+    `configure()`'s own independent-per-call one (issue #211 P1, Codex
+    review, round 6: a `TriggerAlreadyActivatedError` raised partway
+    through by `_configure_locked`'s own at-write-time check now rolls
+    every write this call already made back too, via that shared
+    transaction -- round 5 first tried translating that error while
+    leaving earlier writes independently committed, which round 6
+    correctly rejected: the newly-activated trigger's configuration is
+    now *permanently* frozen and can never converge with finals' current
+    plan, so that "partial" result was not actually recoverable by
+    retrying, only by an operator reconciling the divergence directly)."""
     synced_trigger_keys: list[str] = []
+    for trigger in ordered_plan:
+        existing = ss_triggers_by_key.get(trigger.trigger_key)
+        trigger_repo._configure_locked(
+            conn,
+            ss_round_id,
+            trigger.trigger_key,
+            trigger.trigger_type,
+            trigger.sequence,
+            tuple(trigger.afl_match_ids),
+            actor=actor,
+            reason=reason,
+            expected_revision=existing.revision if existing is not None else 0,
+            expected_mapping_revision=ss_mapping_revision,
+        )
+        synced_trigger_keys.append(trigger.trigger_key)
+    return synced_trigger_keys
+
+
+def _synchronise_triggers_locked(
+    database, trigger_repo, ss_round_id, finals_round_id, ss_mapping_revision, actor, reason
+):
+    """The actual, race-safe trigger synchronisation: reads SS's and
+    finals' current trigger sets, validates/plans, and writes -- all
+    under one transaction that locks SS's round row *first*, before any
+    of those reads. Issue #211 P1 (Codex review, round 7): the caller
+    (`synchronise_lockout_plan_from_finals`) also runs an unlocked
+    pre-check, purely as a fast-fail for the ordinary, uncontended case
+    so an already-broken plan never wastes a mapping mutation (issue #211
+    P2, Codex review, round 3) -- but that pre-check's read is not itself
+    protected by any lock, so a genuinely concurrent trigger change (a
+    different operator's `configure()` call, or one inserting a brand-new
+    SS-only trigger) landing in the narrow window right after it returns
+    would otherwise go undetected: `ordered_plan` would still reflect the
+    stale snapshot, and the actual writes below would silently miss it.
+    Any concurrent `configure()`/`_configure_locked` call for this same
+    SS round must itself acquire this exact round-row lock first (see
+    `LockoutTriggerRepository.configure`'s own docstring), so once this
+    transaction holds it, nothing else can change the trigger set this
+    function reads until this transaction ends -- this is the read that
+    actually decides what gets written, never the caller's own earlier,
+    merely-advisory one. A concurrent trigger *activation*
+    (`app.lockouts`'s own `_materialize_round_triggers`, which locks only
+    one trigger's own header row, not this round-level one) discovered
+    while writing is still handled exactly as `_apply_trigger_sync`'s own
+    docstring describes: the whole transaction rolls back together."""
     try:
-        with transaction(trigger_repo.database) as conn:
-            for trigger in ordered_plan:
-                existing = ss_triggers_by_key.get(trigger.trigger_key)
-                trigger_repo._configure_locked(
-                    conn,
-                    ss_round_id,
-                    trigger.trigger_key,
-                    trigger.trigger_type,
-                    trigger.sequence,
-                    tuple(trigger.afl_match_ids),
-                    actor=actor,
-                    reason=reason,
-                    expected_revision=existing.revision if existing is not None else 0,
-                    expected_mapping_revision=ss_mapping_revision,
-                )
-                synced_trigger_keys.append(trigger.trigger_key)
+        with transaction(database) as conn:
+            conn.execute(
+                "SELECT 1 FROM bbbffl_round WHERE bbbffl_round_id=?" + _for_update_suffix(database),
+                (ss_round_id,),
+            )
+            finals_triggers = trigger_repo.list_triggers(finals_round_id)
+            ss_triggers_by_key = {t.trigger_key: t for t in trigger_repo.list_triggers(ss_round_id)}
+            ss_trigger_ids = [t.trigger_id for t in ss_triggers_by_key.values()]
+            activated_ss_trigger_ids = (
+                {
+                    row["trigger_id"]
+                    for row in conn.execute(
+                        "SELECT trigger_id FROM bbbffl_round_lockout_trigger_activation "
+                        f"WHERE trigger_id IN ({','.join('?' * len(ss_trigger_ids))})",
+                        tuple(ss_trigger_ids),
+                    ).fetchall()
+                }
+                if ss_trigger_ids
+                else set()
+            )
+            ordered_plan, unchanged_trigger_keys = _validate_trigger_sync_plan(
+                ss_round_id, finals_triggers, ss_triggers_by_key, activated_ss_trigger_ids
+            )
+            synced_trigger_keys = _apply_trigger_sync(
+                conn, trigger_repo, ss_round_id, ordered_plan, ss_triggers_by_key, ss_mapping_revision, actor, reason
+            )
     except TriggerAlreadyActivatedError as exc:
         raise LockoutPlanDivergedError(
             f"SS round {ss_round_id} cannot be synchronised automatically: a trigger activated concurrently, "
             "between this synchronisation's own validation and its writes -- nothing from this synchronisation "
             f"attempt was applied (rolled back together). Reconcile the resulting divergence directly. ({exc})"
         ) from exc
-    return synced_trigger_keys
+    return synced_trigger_keys, unchanged_trigger_keys
 
 
 def synchronise_lockout_plan_from_finals(
@@ -389,18 +433,20 @@ def synchronise_lockout_plan_from_finals(
         or existing_ss_mapping.afl_round_id != finals_mapping.afl_round_id
     )
 
-    # Issue #211 P2 (Codex review, round 3): validate the *entire* trigger
-    # plan -- including the obsolete-key/cycle checks -- before mutating
-    # the mapping below. See `_validate_trigger_sync_plan`'s own docstring:
-    # raising `LockoutPlanDivergedError` only after `confirm_afl_mapping`
-    # had already committed left the mapping silently advanced despite
-    # that error's own nothing-mutated contract.
+    # Issue #211 P2 (Codex review, round 3): an unlocked pre-check of the
+    # *entire* trigger plan -- including the obsolete-key/cycle/activation
+    # checks -- before mutating the mapping below, purely as a fast-fail
+    # for the ordinary, uncontended case: raising `LockoutPlanDivergedError`
+    # only after `confirm_afl_mapping` had already committed left the
+    # mapping silently advanced despite that error's own nothing-mutated
+    # contract. This read is not itself protected by any lock, though --
+    # see `_synchronise_triggers_locked`'s own docstring (issue #211 P1,
+    # Codex review, round 7) for why the real, race-safe decision is the
+    # fresh, locked re-read/re-validation that function performs, never
+    # this one.
     trigger_repo = LockoutTriggerRepository(database)
     finals_triggers = trigger_repo.list_triggers(finals_round_id)
     ss_triggers_by_key = {t.trigger_key: t for t in trigger_repo.list_triggers(ss_round_id)}
-    # Issue #211 P1 (Codex review, round 4): pre-fetched here (read-only,
-    # before any write) rather than inside `_validate_trigger_sync_plan`
-    # itself, which stays pure/no-I/O -- see that function's own docstring.
     ss_trigger_ids = [t.trigger_id for t in ss_triggers_by_key.values()]
     activated_ss_trigger_ids = (
         {
@@ -414,9 +460,7 @@ def synchronise_lockout_plan_from_finals(
         if ss_trigger_ids
         else set()
     )
-    ordered_plan, unchanged_trigger_keys = _validate_trigger_sync_plan(
-        ss_round_id, finals_triggers, ss_triggers_by_key, activated_ss_trigger_ids
-    )
+    _validate_trigger_sync_plan(ss_round_id, finals_triggers, ss_triggers_by_key, activated_ss_trigger_ids)
 
     ss_mapping = confirm_afl_mapping(
         database,
@@ -428,8 +472,8 @@ def synchronise_lockout_plan_from_finals(
         reason=default_reason,
     )
 
-    synced_trigger_keys = _apply_trigger_sync(
-        trigger_repo, ss_round_id, ordered_plan, ss_triggers_by_key, ss_mapping.revision, actor, default_reason
+    synced_trigger_keys, unchanged_trigger_keys = _synchronise_triggers_locked(
+        database, trigger_repo, ss_round_id, finals_round_id, ss_mapping.revision, actor, default_reason
     )
 
     changed = mapping_synced or bool(synced_trigger_keys)

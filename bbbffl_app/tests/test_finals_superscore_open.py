@@ -34,7 +34,7 @@ from app.finals_superscore_open import (
     open_finals_and_superscore_week,
     synchronise_lockout_plan_from_finals,
 )
-from app.lockouts import LockoutTriggerRepository
+from app.lockouts import LockoutTriggerRepository, TriggerAlreadyActivatedError
 from app.round_mapping import RoundMappingRepository
 from app.superscore_round import confirm_afl_mapping, ensure_round, ensure_stream, setup_round
 from tests.finals_helpers import KnownRound, accept_week_mapping
@@ -698,8 +698,11 @@ def test_apply_trigger_sync_rolls_back_the_whole_plan_on_a_concurrent_activation
             ),
         )
 
-    with pytest.raises(LockoutPlanDivergedError, match="concurrently"):
-        _apply_trigger_sync(trigger_repo, built["ss1_round_id"], ordered_plan, ss_triggers_by_key, 1, ACTOR, "resync")
+    with pytest.raises(TriggerAlreadyActivatedError):
+        with transaction(database) as conn:
+            _apply_trigger_sync(
+                conn, trigger_repo, built["ss1_round_id"], ordered_plan, ss_triggers_by_key, 1, ACTOR, "resync"
+            )
 
     # Nothing was applied: "s1" (ordered before "main") was rolled back
     # together with "main", even though its own write would otherwise
@@ -708,6 +711,43 @@ def test_apply_trigger_sync_rolls_back_the_whole_plan_on_a_concurrent_activation
     assert s1.afl_match_ids == (1111,)
     main = trigger_repo.get(built["ss1_round_id"], "main")
     assert main.afl_match_ids == (9999,)
+
+
+def test_synchronise_lockout_plan_locked_recheck_catches_a_trigger_added_after_the_prechecks_read(monkeypatch):
+    """Issue #211 P1 (Codex review, round 7): `synchronise_lockout_plan_
+    from_finals` runs an unlocked pre-check (purely a fast-fail before
+    `confirm_afl_mapping` mutates the mapping) before the real, locked
+    decision `_synchronise_triggers_locked` makes. A genuinely concurrent
+    trigger change landing in the narrow window right after that
+    pre-check's own read must still be caught by the fresh, locked
+    re-read/re-validation -- not silently missed because the pre-check's
+    now-stale snapshot was reused for the actual write decision."""
+    database = _database_for_test(9523)
+    built = _seed(database, 9523)
+    afl_round_id = built["afl_round_id"]
+    ss_round_id = built["ss1_round_id"]
+    open_finals_week(database, built["bracket"].bracket_id, 1, actor=ACTOR)
+
+    real_list_triggers = LockoutTriggerRepository.list_triggers
+    calls = {"ss_reads": 0}
+
+    def _spy(self, bbbffl_round_id):
+        result = real_list_triggers(self, bbbffl_round_id)
+        if bbbffl_round_id == ss_round_id:
+            calls["ss_reads"] += 1
+            if calls["ss_reads"] == 1:
+                # Simulate a concurrent operator adding a stale SS-only
+                # trigger right after the pre-check's own read returns --
+                # test setup, not the code under test.
+                self.configure(
+                    ss_round_id, "concurrent-stale", "selective", 0, [7777], actor=ACTOR, reason="concurrent change"
+                )
+        return result
+
+    monkeypatch.setattr(LockoutTriggerRepository, "list_triggers", _spy)
+
+    with pytest.raises(LockoutPlanDivergedError, match="concurrent-stale"):
+        synchronise_lockout_plan_from_finals(database, KnownRound({(9523, afl_round_id)}), ss_round_id, actor=ACTOR)
 
 
 def test_open_paired_route_returns_409_not_500_for_a_diverged_lockout_plan(finals_client):

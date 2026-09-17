@@ -91,6 +91,36 @@ own entity id -- there is no shared lifecycle row and no fabricated joint
 transition. "Paired" describes only this operator workflow's single web
 action; the underlying domain model is exactly as separate as it was
 before this module existed.
+
+## Current operational constraint (issue #214)
+
+`_synchronise_triggers_locked` serialises the trigger-plan read/validate/
+write against both rounds' own row locks (issue #211, Codex review,
+rounds 6-8), but that boundary does not yet also cover `confirm_afl_mapping`
+(SS's mutable mapping head) or SS's *frozen* `bbbffl_round_lifecycle`
+mapping (only ever written once, by `app.superscore_round.setup_round` ->
+`create_non_ordinary_round`). A `setup_round()` freezing SS's mapping
+concurrently with this module's own unlocked `frozen_round` pre-check in
+`synchronise_lockout_plan_from_finals`, or a mapping correction committing
+just before the final locked trigger recheck detects a concurrent trigger
+divergence, are both real, narrow, low-likelihood races this module does
+not yet close -- see issue #214 for the full analysis and the desired
+broader transaction-boundary redesign (mapping + frozen lifecycle state +
+trigger plan, all one serialised decision). Deliberately not chased
+further here: closing it needs a higher-level orchestration boundary
+across `app.round_mapping`, `app.competition_lifecycle` and
+`app.lockouts` together, not another piecemeal per-repository lock.
+
+**Until #214 lands, treat paired Finals/SuperScore opening as a
+single-operator administrative action**: do not run it concurrently with
+a separate `setup_round()`, mapping correction, or lockout-trigger
+configuration call for either member of the same paired week. This
+matches the current 2026 replay's actual operating model (one operator,
+sequential administrative actions), under which this module's fixed races
+(issue #211, Codex review, rounds 2-8: frozen-mapping divergence,
+main-trigger/coverage validation, activation preflight, stale-evidence
+rejection, atomic multi-trigger writes, and the two round-lock TOCTOU
+closures) are the ones that actually matter.
 """
 
 from contextlib import nullcontext

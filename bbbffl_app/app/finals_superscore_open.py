@@ -93,13 +93,15 @@ action; the underlying domain model is exactly as separate as it was
 before this module existed.
 """
 
+from contextlib import nullcontext
+
 from app.afl_client import AflApiError
 from app.audit import ActorContext, append_event
 from app.competition_lifecycle import CompetitionLifecycleRepository
 from app.db import transaction
 from app.finals import FinalsBracketRepository
 from app.finals_preflight import build_finals_week_preflight, open_finals_week
-from app.lockouts import LockoutTriggerRepository
+from app.lockouts import LockoutTriggerRepository, TriggerAlreadyActivatedError
 from app.round_mapping import AflApiReferenceValidator, AflReferenceValidator, RoundMappingRepository
 from app.superscore_round import confirm_afl_mapping, open_round, resolve_concurrent_finals_afl_mapping, setup_round
 
@@ -295,21 +297,52 @@ def _apply_trigger_sync(
 ):
     """Replays an already-validated `_validate_trigger_sync_plan` order as
     real `configure()` writes -- called only once that validation (and,
-    ahead of it, the mapping confirmation) has already succeeded."""
+    ahead of it, the mapping confirmation) has already succeeded.
+
+    Issue #211 P1 (Codex review, round 5): `_validate_trigger_sync_plan`'s
+    own activation check reads activation state once, before any of these
+    writes -- each `configure()` call below still commits its own separate
+    transaction (see `LockoutTriggerRepository.configure`'s own docstring:
+    it deliberately does not nest inside a caller's transaction), so a
+    *live* lockout evaluation activating one of these still-pending
+    triggers in the narrow window between that read and this write reaches
+    `configure()`'s own activation check and still raises
+    `TriggerAlreadyActivatedError` here -- this codebase's own documented
+    position on an equally narrow window (`app.lockouts`'s "Historical
+    irreversibility" section: "an eventual-consistency gap, never a
+    correctness one") is not to serialise an entire round's lockout
+    evaluation against every configuration write, which would need new
+    locking primitives no other caller of `LockoutTriggerRepository` uses.
+    Every trigger already written by this loop remains genuinely correct
+    and committed (each was independently validated and applied under its
+    own lock); translating this into the same `LockoutPlanDivergedError`
+    every other unresolvable-here divergence already raises -- rather than
+    letting `TriggerAlreadyActivatedError` leak out uncaught -- keeps the
+    route's existing 409 handling correct and gives the operator a clear,
+    safely-retryable next step (synchronisation is idempotent against
+    whatever has already been applied)."""
     synced_trigger_keys: list[str] = []
     for trigger in ordered_plan:
         existing = ss_triggers_by_key.get(trigger.trigger_key)
-        trigger_repo.configure(
-            ss_round_id,
-            trigger.trigger_key,
-            trigger.trigger_type,
-            trigger.sequence,
-            list(trigger.afl_match_ids),
-            actor=actor,
-            reason=reason,
-            expected_revision=existing.revision if existing is not None else 0,
-            expected_mapping_revision=ss_mapping_revision,
-        )
+        try:
+            trigger_repo.configure(
+                ss_round_id,
+                trigger.trigger_key,
+                trigger.trigger_type,
+                trigger.sequence,
+                list(trigger.afl_match_ids),
+                actor=actor,
+                reason=reason,
+                expected_revision=existing.revision if existing is not None else 0,
+                expected_mapping_revision=ss_mapping_revision,
+            )
+        except TriggerAlreadyActivatedError as exc:
+            raise LockoutPlanDivergedError(
+                f"SS round {ss_round_id} cannot finish synchronising: trigger key {trigger.trigger_key!r} "
+                "activated concurrently, between this synchronisation's own validation and this write. Trigger(s) "
+                f"{synced_trigger_keys} were already safely applied before this happened; re-run synchronisation "
+                f"to reconcile {trigger.trigger_key!r} directly. ({exc})"
+            ) from exc
         synced_trigger_keys.append(trigger.trigger_key)
     return synced_trigger_keys
 
@@ -527,13 +560,33 @@ def open_finals_and_superscore_week(
                 f"finals week {week_number} has no accepted AFL-round mapping yet; accept one before opening "
                 "this pairing."
             )
-        try:
-            valid_match_ids = {match.match_id for match in afl_client.get_matches(coverage_afl_round_id)}
-        except AflApiError as exc:
+        # Issue #211 P1 (Codex review, round 5): a resilient production
+        # `afl_client` can serve this `get_matches` call from its own
+        # last-known-good cache during a live AFL-API outage, returning
+        # successfully rather than raising -- validating coverage against
+        # that stale a list could approve trigger match IDs no longer
+        # actually in the mapped round's fixture. Wrapped in the same
+        # `evidence_batch()`/`is_evidence_fresh()` freshness scope
+        # `app.round_preflight.configure_preflight_trigger` already uses
+        # for its own membership check, rejecting a stale read outright.
+        evidence_batch = getattr(afl_client, "evidence_batch", None)
+        scope = evidence_batch() if callable(evidence_batch) else nullcontext(afl_client)
+        with scope as evidence:
+            try:
+                matches = afl_client.get_matches(coverage_afl_round_id)
+            except AflApiError as exc:
+                raise PairedOpenWeekError(
+                    f"could not verify finals week {week_number}'s lockout trigger match coverage against AFL "
+                    f"round {coverage_afl_round_id}: {exc}"
+                ) from exc
+            freshness = getattr(evidence, "is_evidence_fresh", None)
+            fresh = freshness() if callable(freshness) else True
+        if not fresh:
             raise PairedOpenWeekError(
-                f"could not verify finals week {week_number}'s lockout trigger match coverage against AFL round "
-                f"{coverage_afl_round_id}: {exc}"
-            ) from exc
+                f"finals week {week_number}'s mapped AFL match evidence is being served from a stale cache; "
+                "refresh live evidence before opening this pairing."
+            )
+        valid_match_ids = {match.match_id for match in matches}
         stale_trigger_keys = sorted(
             t.trigger_key for t in finals_triggers if not set(t.afl_match_ids) <= valid_match_ids
         )

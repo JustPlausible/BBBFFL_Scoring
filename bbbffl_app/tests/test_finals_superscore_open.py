@@ -88,6 +88,28 @@ class _StubAflClient:
         return [_StubRound(self._afl_round_id)]
 
 
+class _StaleEvidenceBatch:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def is_evidence_fresh(self):
+        return False
+
+
+class _StaleAflClient(_StubAflClient):
+    """Issue #211 P1 (Codex review, round 5): a resilient production
+    `afl_client` exposes `evidence_batch()`, whose returned context
+    manager's `is_evidence_fresh()` reports whether a read taken inside it
+    came from a live call or a stale fallback cache -- this stub always
+    reports stale, regardless of what `get_matches` itself returns."""
+
+    def evidence_batch(self):
+        return _StaleEvidenceBatch()
+
+
 def _seed(database, year, *, with_ss1=True, with_finals_mapping=True, with_lockout_triggers=True):
     built = build_2026_replay_season(database=database, year=year)
     from app.season import SeasonRepository
@@ -594,6 +616,91 @@ def test_paired_open_rejects_a_finals_trigger_whose_match_ids_are_not_in_the_cur
     lifecycle = CompetitionLifecycleRepository(database)
     assert lifecycle.get_round(built["week1_round_id"]) is None
     assert lifecycle.get_round(built["ss1_round_id"]) is None
+
+
+def test_paired_open_rejects_stale_cached_match_evidence_when_validating_trigger_coverage():
+    """Issue #211 P1 (Codex review, round 5): a resilient production
+    `afl_client` can serve `get_matches` from its own last-known-good
+    cache during a live AFL-API outage, returning successfully rather
+    than raising -- validating trigger match coverage against that stale
+    a read could wrongly approve match IDs no longer actually in the
+    mapped round's real fixture. Must fail closed on stale evidence, the
+    same way `app.round_preflight.configure_preflight_trigger` already
+    does for its own membership check."""
+    database = _database_for_test(9521)
+    built = _seed(database, 9521)
+    afl_round_id = built["afl_round_id"]
+
+    stub = _StaleAflClient(afl_round_id)
+    with pytest.raises(PairedOpenWeekError, match="stale cache"):
+        open_finals_and_superscore_week(database, stub, built["bracket"].bracket_id, 1, actor=ACTOR)
+
+    lifecycle = CompetitionLifecycleRepository(database)
+    assert lifecycle.get_round(built["week1_round_id"]) is None
+    assert lifecycle.get_round(built["ss1_round_id"]) is None
+
+
+def test_apply_trigger_sync_translates_a_concurrent_activation_mid_loop_into_lockout_plan_diverged():
+    """Issue #211 P1 (Codex review, round 5): a live lockout evaluation can
+    activate a still-pending SS trigger in the narrow window between
+    `_validate_trigger_sync_plan`'s own activation read and this loop's
+    write for it -- `LockoutTriggerRepository.configure` itself then
+    raises `TriggerAlreadyActivatedError`. It must never leak out
+    uncaught; it must translate into the same `LockoutPlanDivergedError`
+    every other unresolvable divergence already raises, and every trigger
+    already applied earlier in the same call stays genuinely committed."""
+    from app.finals_superscore_open import _apply_trigger_sync, _validate_trigger_sync_plan
+
+    database = _database_for_test(9522)
+    built = _seed(database, 9522, with_lockout_triggers=False)
+    afl_round_id = built["afl_round_id"]
+    trigger_repo = LockoutTriggerRepository(database)
+    trigger_repo.configure(built["week1_round_id"], "s1", "selective", 1, [1111], actor=ACTOR, reason="s1")
+    trigger_repo.configure(built["week1_round_id"], "main", "main", 2, [9999], actor=ACTOR, reason="main")
+
+    open_finals_and_superscore_week(database, _StubAflClient(afl_round_id), built["bracket"].bracket_id, 1, actor=ACTOR)
+    ss_triggers_by_key = {t.trigger_key: t for t in trigger_repo.list_triggers(built["ss1_round_id"])}
+
+    # Finals changes both triggers' match coverage -- neither has
+    # activated on SS yet, and neither needs a sequence change.
+    trigger_repo.configure(built["week1_round_id"], "s1", "selective", 1, [1112], actor=ACTOR, reason="s1 changed")
+    trigger_repo.configure(built["week1_round_id"], "main", "main", 2, [8888], actor=ACTOR, reason="main changed")
+    finals_triggers = trigger_repo.list_triggers(built["week1_round_id"])
+
+    ordered_plan, _unchanged = _validate_trigger_sync_plan(
+        built["ss1_round_id"], finals_triggers, ss_triggers_by_key, set()
+    )
+    assert [t.trigger_key for t in ordered_plan] == ["s1", "main"]
+
+    # Simulate a concurrent lockout evaluation activating "main" *after*
+    # validation already ran but *before* this loop reaches its own write
+    # for it -- test setup (a direct row insert), not the code under test.
+    with transaction(database) as conn:
+        conn.execute(
+            "INSERT INTO bbbffl_round_lockout_trigger_activation "
+            "(trigger_id, revision, afl_match_id, observed_status, effective_lock_at, activation_reason, "
+            "evaluated_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                ss_triggers_by_key["main"].trigger_id,
+                ss_triggers_by_key["main"].revision,
+                9999,
+                "LIVE",
+                "2026-01-01T00:00:00+00:00",
+                "match_status_live",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+
+    with pytest.raises(LockoutPlanDivergedError, match="main"):
+        _apply_trigger_sync(trigger_repo, built["ss1_round_id"], ordered_plan, ss_triggers_by_key, 1, ACTOR, "resync")
+
+    # "s1" (ordered before "main") was already safely applied and committed.
+    s1 = trigger_repo.get(built["ss1_round_id"], "s1")
+    assert s1.afl_match_ids == (1112,)
+    # "main" itself was never written -- still its original match ids.
+    main = trigger_repo.get(built["ss1_round_id"], "main")
+    assert main.afl_match_ids == (9999,)
 
 
 def test_open_paired_route_returns_409_not_500_for_a_diverged_lockout_plan(finals_client):

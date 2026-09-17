@@ -149,11 +149,11 @@ class LockoutPlanDivergedError(Exception):
 
 
 def _plan_trigger_sync(ss_round_id, finals_triggers, ss_triggers_by_key):
-    """Pure, no-I/O planning pass for `_sync_triggers` -- determines
-    *every* trigger that needs writing and a safe application order for
-    all of them, without touching the database. Issue #211 P1 (Codex
-    review, round 2): the previous version interleaved this planning with
-    the actual `configure()` writes, one multi-pass loop at a time -- each
+    """Pure, no-I/O planning pass for `_validate_trigger_sync_plan` --
+    determines a safe application order for every given trigger, without
+    touching the database. Issue #211 P1 (Codex review, round 2): the
+    previous version interleaved this planning with the actual
+    `configure()` writes, one multi-pass loop at a time -- each
     `configure()` call commits its own transaction, so a later pass
     discovering a genuine, unresolvable cycle (e.g. a two-key sequence
     swap) still left every trigger *already* applied in an earlier pass
@@ -161,21 +161,48 @@ def _plan_trigger_sync(ss_round_id, finals_triggers, ss_triggers_by_key):
     contract for a plan a real operator could construct (a free move
     alongside a genuine swap). Planning the whole move graph first, purely
     in memory, means a cycle is detected and raised *before* any write
-    happens at all -- the only write phase left (`_sync_triggers` below)
-    replays an already-fully-validated, guaranteed-resolvable order."""
-    simulated_sequences = {key: trigger.sequence for key, trigger in ss_triggers_by_key.items()}
-    ordered: list[tuple] = []
+    happens at all -- the only write phase left (`_apply_trigger_sync`
+    below) replays an already-fully-validated, guaranteed-resolvable
+    order.
+
+    Issue #211 P1 (Codex review, round 3): modelling only sequence
+    occupancy is not enough -- `LockoutTriggerRepository.configure()`
+    also enforces that a selective trigger's sequence precede every main
+    trigger's, and a main trigger's sequence follow every selective
+    trigger's, checked against whatever is *currently persisted* at write
+    time. A plan this function judged occupancy-safe could still have a
+    real `configure()` call rejected by that ordering rule partway
+    through, exactly as fail-unsafe as the cycle case above. Tracking each
+    simulated trigger's `(trigger_type, sequence)` and re-checking both
+    ordering rules before treating a move as applicable -- not just
+    whether its target sequence is free -- catches that here too, and can
+    itself require reordering the plan (e.g. moving `main` out of the way
+    before a selective trigger can move past its old position) exactly as
+    the occupancy check already does."""
+    simulated = {key: (trigger.trigger_type, trigger.sequence) for key, trigger in ss_triggers_by_key.items()}
+    ordered: list = []
     remaining = list(finals_triggers)
     progressed = True
     while remaining and progressed:
         progressed = False
         still_remaining = []
         for trigger in remaining:
-            occupied = {seq for key, seq in simulated_sequences.items() if key != trigger.trigger_key}
+            others = {key: state for key, state in simulated.items() if key != trigger.trigger_key}
+            occupied = {seq for _type, seq in others.values()}
             if trigger.sequence in occupied:
                 still_remaining.append(trigger)
                 continue
-            simulated_sequences[trigger.trigger_key] = trigger.sequence
+            if trigger.trigger_type == "selective":
+                main_sequences = [seq for ttype, seq in others.values() if ttype == "main"]
+                if main_sequences and trigger.sequence >= min(main_sequences):
+                    still_remaining.append(trigger)
+                    continue
+            elif trigger.trigger_type == "main":
+                selective_sequences = [seq for ttype, seq in others.values() if ttype == "selective"]
+                if selective_sequences and trigger.sequence <= max(selective_sequences):
+                    still_remaining.append(trigger)
+                    continue
+            simulated[trigger.trigger_key] = (trigger.trigger_type, trigger.sequence)
             ordered.append(trigger)
             progressed = True
         remaining = still_remaining
@@ -191,14 +218,18 @@ def _plan_trigger_sync(ss_round_id, finals_triggers, ss_triggers_by_key):
     return ordered
 
 
-def _sync_triggers(trigger_repo, ss_round_id, finals_triggers, ss_triggers_by_key, ss_mapping_revision, actor, reason):
-    """The trigger half of `synchronise_lockout_plan_from_finals` -- see
-    that function's docstring and this module's own for the full
-    rationale. Issue #211 P1 (Codex review): fails closed, mutating
-    nothing, rather than silently leaving a stale SS-only trigger active
-    or attempting a reorder that could transiently violate
-    `LockoutTriggerRepository.configure`'s own sequence-uniqueness/
-    ordering rules."""
+def _validate_trigger_sync_plan(ss_round_id, finals_triggers, ss_triggers_by_key):
+    """The trigger half of `synchronise_lockout_plan_from_finals`'s
+    validation -- computes what would need to change and a safe write
+    order for it, entirely from already-fetched data: no database access,
+    no mutation of any kind. Issue #211 P2 (Codex review, round 3): called
+    *before* `confirm_afl_mapping` mutates SS's mapping, so a
+    `LockoutPlanDivergedError` raised here (an obsolete SS-only trigger
+    key, or a genuine sequence-reordering/ordering-rule cycle) leaves
+    nothing at all mutated yet -- previously this validation only ran
+    *after* the mapping had already been committed, silently violating
+    that same error's own documented nothing-mutated contract whenever the
+    mapping itself also needed correcting."""
     obsolete_keys = sorted(set(ss_triggers_by_key) - {t.trigger_key for t in finals_triggers})
     if obsolete_keys:
         raise LockoutPlanDivergedError(
@@ -229,7 +260,15 @@ def _sync_triggers(trigger_repo, ss_round_id, finals_triggers, ss_triggers_by_ke
     ordered_plan = _plan_trigger_sync(
         ss_round_id, [t for t in finals_triggers if t.trigger_key in pending_keys], ss_triggers_by_key
     )
+    return ordered_plan, unchanged_trigger_keys
 
+
+def _apply_trigger_sync(
+    trigger_repo, ss_round_id, ordered_plan, ss_triggers_by_key, ss_mapping_revision, actor, reason
+):
+    """Replays an already-validated `_validate_trigger_sync_plan` order as
+    real `configure()` writes -- called only once that validation (and,
+    ahead of it, the mapping confirmation) has already succeeded."""
     synced_trigger_keys: list[str] = []
     for trigger in ordered_plan:
         existing = ss_triggers_by_key.get(trigger.trigger_key)
@@ -245,8 +284,7 @@ def _sync_triggers(trigger_repo, ss_round_id, finals_triggers, ss_triggers_by_ke
             expected_mapping_revision=ss_mapping_revision,
         )
         synced_trigger_keys.append(trigger.trigger_key)
-
-    return synced_trigger_keys, unchanged_trigger_keys
+    return synced_trigger_keys
 
 
 def synchronise_lockout_plan_from_finals(
@@ -290,6 +328,18 @@ def synchronise_lockout_plan_from_finals(
         existing_ss_mapping.afl_season_id != finals_mapping.afl_season_id
         or existing_ss_mapping.afl_round_id != finals_mapping.afl_round_id
     )
+
+    # Issue #211 P2 (Codex review, round 3): validate the *entire* trigger
+    # plan -- including the obsolete-key/cycle checks -- before mutating
+    # the mapping below. See `_validate_trigger_sync_plan`'s own docstring:
+    # raising `LockoutPlanDivergedError` only after `confirm_afl_mapping`
+    # had already committed left the mapping silently advanced despite
+    # that error's own nothing-mutated contract.
+    trigger_repo = LockoutTriggerRepository(database)
+    finals_triggers = trigger_repo.list_triggers(finals_round_id)
+    ss_triggers_by_key = {t.trigger_key: t for t in trigger_repo.list_triggers(ss_round_id)}
+    ordered_plan, unchanged_trigger_keys = _validate_trigger_sync_plan(ss_round_id, finals_triggers, ss_triggers_by_key)
+
     ss_mapping = confirm_afl_mapping(
         database,
         validator,
@@ -300,12 +350,8 @@ def synchronise_lockout_plan_from_finals(
         reason=default_reason,
     )
 
-    trigger_repo = LockoutTriggerRepository(database)
-    finals_triggers = trigger_repo.list_triggers(finals_round_id)
-    ss_triggers_by_key = {t.trigger_key: t for t in trigger_repo.list_triggers(ss_round_id)}
-
-    synced_trigger_keys, unchanged_trigger_keys = _sync_triggers(
-        trigger_repo, ss_round_id, finals_triggers, ss_triggers_by_key, ss_mapping.revision, actor, default_reason
+    synced_trigger_keys = _apply_trigger_sync(
+        trigger_repo, ss_round_id, ordered_plan, ss_triggers_by_key, ss_mapping.revision, actor, default_reason
     )
 
     changed = mapping_synced or bool(synced_trigger_keys)

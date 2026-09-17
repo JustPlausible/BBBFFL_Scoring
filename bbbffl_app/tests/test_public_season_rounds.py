@@ -92,12 +92,18 @@ def test_round_index_lists_every_fixture_round_with_definitions_layered_on(seaso
     assert body["default_round_number"] == 1
 
     first = body["rounds"][0]
+    # Issue #213 additively extends every round entry with `stream`/
+    # `week_number` so the same list can carry finals weeks alongside
+    # ordinary rounds -- an ordinary round is always `stream: "ordinary"`,
+    # `week_number: None`.
     assert first == {
         "round_number": 1,
         "label": "Round 1",
         "round_id": round_row.bbbffl_round_id,
         "state": "final",
         "published": True,
+        "stream": "ordinary",
+        "week_number": None,
     }
     later = body["rounds"][5]
     assert later["round_number"] == 6
@@ -105,6 +111,7 @@ def test_round_index_lists_every_fixture_round_with_definitions_layered_on(seaso
     assert later["round_id"] is None
     assert later["state"] == "scheduled"
     assert later["published"] is False
+    assert later["stream"] == "ordinary"
 
 
 def test_default_round_is_the_most_recently_published_round(season_client):

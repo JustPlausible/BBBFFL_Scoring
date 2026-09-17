@@ -750,6 +750,51 @@ def test_synchronise_lockout_plan_locked_recheck_catches_a_trigger_added_after_t
         synchronise_lockout_plan_from_finals(database, KnownRound({(9523, afl_round_id)}), ss_round_id, actor=ACTOR)
 
 
+def test_synchronise_lockout_plan_locked_recheck_uses_the_fresh_finals_trigger_state_not_the_prechecks_stale_one(
+    monkeypatch,
+):
+    """Issue #211 P1 (Codex review, round 8): round 7 only guaranteed SS's
+    own trigger read was fresh under lock -- a finals trigger revised in
+    the same narrow window (via `app.round_preflight.
+    configure_preflight_trigger`, itself layered over the same
+    `LockoutTriggerRepository.configure`) must be reflected too, not
+    silently missed because the pre-check's earlier, unlocked read of
+    *finals'* trigger set was reused for the actual write decision."""
+    database = _database_for_test(9524)
+    built = _seed(database, 9524, with_lockout_triggers=False)
+    afl_round_id = built["afl_round_id"]
+    ss_round_id = built["ss1_round_id"]
+    finals_round_id = built["week1_round_id"]
+    LockoutTriggerRepository(database).configure(finals_round_id, "main", "main", 1, [9999], actor=ACTOR, reason="main")
+    open_finals_week(database, built["bracket"].bracket_id, 1, actor=ACTOR)
+
+    real_list_triggers = LockoutTriggerRepository.list_triggers
+    calls = {"finals_reads": 0}
+
+    def _spy(self, bbbffl_round_id):
+        result = real_list_triggers(self, bbbffl_round_id)
+        if bbbffl_round_id == finals_round_id:
+            calls["finals_reads"] += 1
+            if calls["finals_reads"] == 1:
+                # Simulate a concurrent scorer revising finals' main
+                # trigger right after the pre-check's own read returns --
+                # test setup, not the code under test.
+                self.configure(
+                    finals_round_id, "main", "main", 1, [8888], actor=ACTOR, reason="concurrent finals revision"
+                )
+        return result
+
+    monkeypatch.setattr(LockoutTriggerRepository, "list_triggers", _spy)
+
+    result = synchronise_lockout_plan_from_finals(
+        database, KnownRound({(9524, afl_round_id)}), ss_round_id, actor=ACTOR
+    )
+    assert result["synced_trigger_keys"] == ["main"]
+
+    ss_main = LockoutTriggerRepository(database).get(ss_round_id, "main")
+    assert ss_main.afl_match_ids == (8888,)
+
+
 def test_open_paired_route_returns_409_not_500_for_a_diverged_lockout_plan(finals_client):
     """Issue #211 P2 (Codex review, round 2): `LockoutPlanDivergedError`
     reaching this route must translate to the same 409 every other

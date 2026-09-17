@@ -333,7 +333,7 @@ def _synchronise_triggers_locked(
 ):
     """The actual, race-safe trigger synchronisation: reads SS's and
     finals' current trigger sets, validates/plans, and writes -- all
-    under one transaction that locks SS's round row *first*, before any
+    under one transaction that locks *both* round rows first, before any
     of those reads. Issue #211 P1 (Codex review, round 7): the caller
     (`synchronise_lockout_plan_from_finals`) also runs an unlocked
     pre-check, purely as a fast-fail for the ordinary, uncontended case
@@ -344,19 +344,37 @@ def _synchronise_triggers_locked(
     SS-only trigger) landing in the narrow window right after it returns
     would otherwise go undetected: `ordered_plan` would still reflect the
     stale snapshot, and the actual writes below would silently miss it.
-    Any concurrent `configure()`/`_configure_locked` call for this same
-    SS round must itself acquire this exact round-row lock first (see
+    Any concurrent `configure()`/`_configure_locked` call for either round
+    must itself acquire that exact round's own row lock first (see
     `LockoutTriggerRepository.configure`'s own docstring), so once this
-    transaction holds it, nothing else can change the trigger set this
-    function reads until this transaction ends -- this is the read that
-    actually decides what gets written, never the caller's own earlier,
-    merely-advisory one. A concurrent trigger *activation*
-    (`app.lockouts`'s own `_materialize_round_triggers`, which locks only
-    one trigger's own header row, not this round-level one) discovered
-    while writing is still handled exactly as `_apply_trigger_sync`'s own
-    docstring describes: the whole transaction rolls back together."""
+    transaction holds both, nothing else can change either trigger set
+    this function reads until this transaction ends -- this is the read
+    that actually decides what gets written, never the caller's own
+    earlier, merely-advisory one.
+
+    Issue #211 P1 (Codex review, round 8): round 7 locked only SS's round
+    -- a scorer revising a *finals* trigger (via `app.round_preflight.
+    configure_preflight_trigger`, itself layered over this same
+    `LockoutTriggerRepository.configure`) immediately after this read
+    could still leave this transaction copying an already-stale finals
+    snapshot onto SS. Locking finals' round row too, in a fixed order
+    (finals, then SS -- nothing else in this codebase locks both a finals
+    and a SuperScore round together, so picking one order and always
+    using it is what keeps this from ever deadlocking against itself),
+    closes that the same way the SS-side lock already closes the
+    SS-side one.
+
+    A concurrent trigger *activation* (`app.lockouts`'s own
+    `_materialize_round_triggers`, which locks only one trigger's own
+    header row, not either round-level one) discovered while writing is
+    still handled exactly as `_apply_trigger_sync`'s own docstring
+    describes: the whole transaction rolls back together."""
     try:
         with transaction(database) as conn:
+            conn.execute(
+                "SELECT 1 FROM bbbffl_round WHERE bbbffl_round_id=?" + _for_update_suffix(database),
+                (finals_round_id,),
+            )
             conn.execute(
                 "SELECT 1 FROM bbbffl_round WHERE bbbffl_round_id=?" + _for_update_suffix(database),
                 (ss_round_id,),

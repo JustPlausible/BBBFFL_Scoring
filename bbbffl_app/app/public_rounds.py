@@ -119,6 +119,36 @@ def authoritative_submissions(database, round_):
     return result
 
 
+# Shared across app.public_rounds and app.public_finals (issue #213) --
+# every stream reads a matchup's status off the identical
+# lifecycle/calculation-state machine (lifecycle.effective_result +
+# MatchupReview.calculation_revision + round_.state), so both public
+# builders resolve the same five states to the same wording rather than
+# each carrying its own copy.
+MATCH_STATUS_LABELS = {
+    "upcoming": "Upcoming — score not available",
+    "calculated_live": "Live calculated — not official",
+    "under_review": "Under review — not official",
+    "official": "Official final",
+    "corrected_official": "Corrected official final",
+}
+
+
+def match_score_state(matchup, round_state, official):
+    """The shared status resolution `build_public_round` and
+    `app.public_finals`'s finals-matchup builder both need: official/
+    corrected-official once a result is published, else upcoming/live/
+    under-review from the round's own lifecycle state -- stream-agnostic,
+    reused rather than duplicated."""
+    if official is not None:
+        return "corrected_official" if official.version > 1 else "official"
+    if matchup.calculation_revision is None:
+        return "upcoming"
+    if round_state == "review":
+        return "under_review"
+    return "calculated_live"
+
+
 def build_public_round(database, lifecycle, review_repo, identities, round_id):
     """Return the dedicated public DTO for one persisted ordinary round."""
     round_ = lifecycle.get_round(round_id)
@@ -132,25 +162,12 @@ def build_public_round(database, lifecycle, review_repo, identities, round_id):
     matchups = []
     for matchup in review.matchups:
         official = lifecycle.effective_result(matchup.matchup_id)
-        if official is not None:
-            score_state = "corrected_official" if official.version > 1 else "official"
-        elif matchup.calculation_revision is None:
-            score_state = "upcoming"
-        elif round_.state == "review":
-            score_state = "under_review"
-        else:
-            score_state = "calculated_live"
+        score_state = match_score_state(matchup, round_.state, official)
         matchups.append(
             {
                 "order": matchup.matchup_order,
                 "status": score_state,
-                "status_label": {
-                    "upcoming": "Upcoming — score not available",
-                    "calculated_live": "Live calculated — not official",
-                    "under_review": "Under review — not official",
-                    "official": "Official final",
-                    "corrected_official": "Corrected official final",
-                }[score_state],
+                "status_label": MATCH_STATUS_LABELS[score_state],
                 # UTC on the wire, always -- public templates render this in
                 # Australian local time and keep the raw UTC value only for
                 # diagnostics (issue #161).
@@ -173,6 +190,7 @@ def build_public_round(database, lifecycle, review_repo, identities, round_id):
         )
     return {
         "season_id": round_.season_id,
+        "stream": "ordinary",
         "round_id": round_.bbbffl_round_id,
         "round_number": round_.fixture_round_number,
         "round_state": round_.state,
@@ -191,6 +209,21 @@ def _ordinary_competition_id(database, season_id):
         (season_id,),
     ).fetchone()
     return row["competition_id"] if row else None
+
+
+def round_stream_type(database, round_id):
+    """`competition_stream.stream_type` ('ordinary'/'finals'/'superscore')
+    for a `bbbffl_round_id`, or ``None`` if it does not exist -- the one
+    place the public routing layer (`app.routes.public`) decides which
+    stream-specific builder a round_id resolves through, mirroring
+    `app.scorer_dashboard.round_stream_type`'s identical Scorer-side
+    lookup without importing that Scorer-only module here."""
+    row = database.execute(
+        "SELECT c.stream_type FROM bbbffl_round r JOIN competition_stream c ON c.competition_id=r.competition_id "
+        "WHERE r.bbbffl_round_id=?",
+        (round_id,),
+    ).fetchone()
+    return row["stream_type"] if row else None
 
 
 def _round_definition(database, competition_id, round_number):
@@ -288,6 +321,7 @@ def _build_round_preview(identities, fixtures, season_id, round_number):
     matchups = fixtures.list_matchups(season_id, round_number) if draw is not None and draw.state == "frozen" else []
     return {
         "season_id": season_id,
+        "stream": "ordinary",
         "round_id": None,
         "round_number": round_number,
         "round_state": "scheduled",

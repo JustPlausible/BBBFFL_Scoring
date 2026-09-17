@@ -199,6 +199,20 @@ SEASON_COMPLETION = {"app.season_awards", "app.season_completion", "app.season_a
 # routes may import it, while it never depends on HTTP or the composition root.
 PUBLIC_READ_MODEL = {"app.public_rounds"}
 
+# Anonymous finals-phase presentation/read service (issue #213): the same
+# allow-listed-DTO shape as `app.public_rounds` (PUBLIC_READ_MODEL), one
+# layer above it -- it reuses `app.public_rounds`'s stream-agnostic helpers
+# (`_side`/`_round_definition`/`_select_default_round_number`/
+# `match_score_state`, etc.) rather than duplicating them, and reaches into
+# `app.finals`/`app.finals_review` (FINALS) for the persisted bracket/
+# pairing/review model and `app.superscore_results` (SUPERSCORE) for the
+# published SuperScore leaderboard -- never a scorer-only table, and never
+# the ordinary-only `app.round_review.build_round_review`. Routes may
+# import it exactly like `app.public_rounds`; it never depends on HTTP or
+# the composition root, and no lower layer (PUBLIC_READ_MODEL, FINALS,
+# SUPERSCORE) may depend back on it.
+PUBLIC_FINALS_READ_MODEL = {"app.public_finals"}
+
 # Opening Round deferred-selection configuration/nomination/locking (issue
 # #69): sits above *both* the season model and lockouts -- it reuses
 # app.lockouts.resolve_match/MatchResolutionError for AFL match resolution
@@ -404,6 +418,7 @@ ALL_GROUPS = (
     | SUPERSCORE
     | SEASON_COMPLETION
     | PUBLIC_READ_MODEL
+    | PUBLIC_FINALS_READ_MODEL
     | OPENING_ROUND
     | AUTH
     | COACH_LINEUP

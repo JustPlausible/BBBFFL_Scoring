@@ -1,0 +1,446 @@
+"""Issue #213: the public Round Centre extended from Round 20 through
+Finals Week 1, Finals Week 2, the Preliminary Final and the Grand Final,
+with each finals week's concurrent SuperScore round rendered beneath it.
+
+Covers the season navigation sequence (round selector, previous/next,
+direct `bbbffl_round_id` URLs, season context retention) as JSON-level
+regression coverage over the ordering/helper logic itself
+(`app.public_finals.build_public_season_sequence` and the route-level
+prev/next resolution in `app.routes.public_rounds.round_by_number`) --
+never only HTML-template snapshots -- plus finals bracket/bye rendering,
+Grand Final rendering, concurrent SS1-4 leaderboard rendering, and the
+unpublished-state safety boundary. `tests/test_public_season_rounds.py`
+already covers the ordinary-only surface and is deliberately left
+unmodified except for the one exact-shape assertion issue #213's additive
+`stream`/`week_number` fields touch.
+
+Built on `tests.finals_helpers.build_finals_ready_season` (a fully-
+finalised 20-round ordinary season plus a `finals` stream, bracket not yet
+created) and `tests.season_completion_helpers.build_completable_season`
+(the same, driven all the way through a published Grand Final and four
+published SuperScore leaderboards) -- never a fresh simulation of either.
+"""
+
+import tempfile
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.audit import ActorContext
+from app.finals import FinalsBracketRepository
+from app.finals_preflight import open_finals_week
+from app.public_finals import build_public_season_sequence
+from tests.finals_helpers import accept_week_mapping, build_finals_ready_season, seed_official_result
+from tests.season_completion_helpers import build_completable_season
+
+ACTOR = ActorContext.anonymous_operator("test")
+
+
+@pytest.fixture
+def public_client(monkeypatch):
+    db_path = Path(tempfile.mkstemp(suffix=".db")[1])
+    monkeypatch.setenv("BBBFFL_DATABASE_URL", f"sqlite:///{db_path}")
+    monkeypatch.setenv("BBBFFL_ENVIRONMENT", "test")
+    monkeypatch.delenv("BBBFFL_ADMIN_TOKEN", raising=False)
+
+    from app.main import app
+
+    with TestClient(app) as client:
+        yield client
+    db_path.unlink(missing_ok=True)
+
+
+def _repo(built):
+    return FinalsBracketRepository(built["database"])
+
+
+def _create_bracket(built, *, reason="test bracket creation"):
+    return _repo(built).create_bracket(
+        built["season"].season_id,
+        built["finals_competition"].competition_id,
+        built["ordinary_competition_id"],
+        actor=ACTOR,
+        reason=reason,
+    )["bracket"]
+
+
+def _open_week1(built, bracket, *, year):
+    round_id = _repo(built).get_week_round_id(bracket.bracket_id, 1)
+    accept_week_mapping(built["database"], round_id, year=year, afl_round_id=9101)
+    open_finals_week(built["database"], bracket.bracket_id, 1, actor=ACTOR)
+    return round_id
+
+
+# -- Navigation ordering / helper logic (JSON-level, never HTML snapshots) --
+
+
+def test_season_sequence_is_ordinary_only_when_no_finals_stream_exists(public_client):
+    from tests.test_competition_lifecycle import operational
+
+    lifecycle, round_one, entries = operational(public_client.app.state.database, 8001)
+    sequence = build_public_season_sequence(
+        public_client.app.state.database, public_client.app.state.seasons, entries[0].season_id
+    )
+    assert len(sequence["rounds"]) == 20
+    assert sequence["finals_competition_id"] is None
+    assert all(r["stream"] == "ordinary" for r in sequence["rounds"])
+
+
+def test_season_sequence_appends_four_scheduled_finals_slots_once_the_stream_exists(public_client):
+    built = build_finals_ready_season(year=8002, database=public_client.app.state.database)
+    sequence = build_public_season_sequence(
+        built["database"], public_client.app.state.seasons, built["season"].season_id
+    )
+    assert len(sequence["rounds"]) == 24
+    finals_slots = sequence["rounds"][20:]
+    assert [r["round_number"] for r in finals_slots] == [21, 22, 23, 24]
+    assert [r["week_number"] for r in finals_slots] == [1, 2, 3, 4]
+    assert [r["label"] for r in finals_slots] == [
+        "Finals Week 1",
+        "Finals Week 2",
+        "Preliminary Final",
+        "Grand Final",
+    ]
+    # No bracket exists yet -- every finals slot is a scheduled
+    # placeholder with no linkable round_id, exactly like an ordinary
+    # round nobody has opened yet.
+    assert all(r["stream"] == "finals" for r in finals_slots)
+    assert all(r["round_id"] is None for r in finals_slots)
+    assert all(r["state"] == "scheduled" for r in finals_slots)
+    # Round 20 is already final (build_finals_ready_season finalises the
+    # whole ordinary competition) but no finals week has opened yet, so
+    # the default round stays the most recently published ordinary round.
+    assert sequence["default_round_number"] == 20
+
+
+def test_season_sequence_reveals_finals_week1_round_id_once_opened_and_tracks_default_round(public_client):
+    built = build_finals_ready_season(year=8003, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    week1_round_id = _open_week1(built, bracket, year=8003)
+
+    sequence = build_public_season_sequence(
+        built["database"], public_client.app.state.seasons, built["season"].season_id
+    )
+    week1 = sequence["rounds"][20]
+    assert week1["round_id"] == week1_round_id
+    assert week1["state"] == "open"
+    assert week1["published"] is False
+    # An opened, not-yet-final finals week is "in progress" -- the season
+    # landing page should now track into it, exactly like an opened
+    # ordinary round would.
+    assert sequence["default_round_number"] == 21
+
+
+# -- Previous/Next and direct-URL navigation (issue #213's explicit asks) --
+
+
+def test_next_from_round_20_reaches_finals_week_1(public_client):
+    built = build_finals_ready_season(year=8010, database=public_client.app.state.database)
+    season_id = built["season"].season_id
+    resp = public_client.get(f"/api/public/seasons/{season_id}/rounds/20")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["next_round_number"] == 21
+    assert body["stream"] == "ordinary"
+
+
+def test_previous_from_finals_week_1_returns_to_round_20(public_client):
+    built = build_finals_ready_season(year=8011, database=public_client.app.state.database)
+    season_id = built["season"].season_id
+    resp = public_client.get(f"/api/public/seasons/{season_id}/rounds/21")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["prev_round_number"] == 20
+    assert body["stream"] == "finals"
+    assert body["week_number"] == 1
+    assert body["label"] == "Finals Week 1"
+
+
+def test_finals_weeks_1_through_4_traverse_naturally_in_both_directions(public_client):
+    built = build_completable_season(year=8012, database=public_client.app.state.database)
+    season_id = built["season"].season_id
+
+    forward = [20]
+    n = 20
+    for _ in range(5):
+        resp = public_client.get(f"/api/public/seasons/{season_id}/rounds/{n}")
+        body = resp.json()
+        n = body["next_round_number"]
+        if n is None:
+            break
+        forward.append(n)
+    assert forward == [20, 21, 22, 23, 24]
+
+    backward = [24]
+    n = 24
+    for _ in range(5):
+        resp = public_client.get(f"/api/public/seasons/{season_id}/rounds/{n}")
+        body = resp.json()
+        n = body["prev_round_number"]
+        if n is None or n == 20:
+            backward.append(n)
+            break
+        backward.append(n)
+    assert backward == [24, 23, 22, 21, 20]
+
+    # Grand Final is the end of the season sequence.
+    gf = public_client.get(f"/api/public/seasons/{season_id}/rounds/24").json()
+    assert gf["next_round_number"] is None
+    assert gf["label"] == "Grand Final"
+
+
+def test_round_pulldown_lists_finals_weeks_in_season_context(public_client):
+    built = build_finals_ready_season(year=8013, database=public_client.app.state.database)
+    season_id = built["season"].season_id
+    resp = public_client.get(f"/api/public/seasons/{season_id}/rounds")
+    assert resp.status_code == 200
+    rounds = resp.json()["rounds"]
+    assert len(rounds) == 24
+    labels = [r["label"] for r in rounds[20:]]
+    assert labels == ["Finals Week 1", "Finals Week 2", "Preliminary Final", "Grand Final"]
+    assert [r["round_number"] for r in rounds[20:]] == [21, 22, 23, 24]
+
+
+def test_direct_finals_round_id_resolves_through_the_json_api_without_substituting_round_20(public_client):
+    built = build_finals_ready_season(year=8014, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    week1_round_id = _open_week1(built, bracket, year=8014)
+    season_id = built["season"].season_id
+
+    resp = public_client.get(f"/api/public/seasons/{season_id}/rounds/{week1_round_id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["stream"] == "finals"
+    assert body["week_number"] == 1
+    assert body["round_id"] == week1_round_id
+    assert body["season_id"] == season_id
+
+
+def test_direct_finals_round_id_page_redirects_to_its_canonical_numbered_url_preserving_season_context(
+    public_client,
+):
+    built = build_finals_ready_season(year=8015, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    week1_round_id = _open_week1(built, bracket, year=8015)
+    season_id = built["season"].season_id
+
+    resp = public_client.get(f"/seasons/{season_id}/rounds/{week1_round_id}", follow_redirects=False)
+    assert resp.status_code == 302
+    assert resp.headers["location"] == f"/seasons/{season_id}/rounds/21"
+
+
+def test_a_finals_round_from_another_season_404s_rather_than_leaking_across_seasons(public_client):
+    built_a = build_finals_ready_season(year=8016, database=public_client.app.state.database)
+    bracket_a = _create_bracket(built_a)
+    week1_round_id = _open_week1(built_a, bracket_a, year=8016)
+
+    built_b = build_finals_ready_season(year=8017, database=public_client.app.state.database)
+    other_season_id = built_b["season"].season_id
+
+    resp = public_client.get(f"/api/public/seasons/{other_season_id}/rounds/{week1_round_id}")
+    assert resp.status_code == 404
+
+
+# -- Finals bracket rendering: bye, matchups, later weeks, Grand Final -----
+
+
+def test_week1_bye_and_two_matchups_render_before_any_results_are_in(public_client):
+    built = build_finals_ready_season(year=8020, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    _open_week1(built, bracket, year=8020)
+    season_id = built["season"].season_id
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/21").json()
+    assert body["bye"] is not None
+    assert body["bye"]["team_name"]
+    assert len(body["matchups"]) == 2
+    slots = {m["slot"] for m in body["matchups"]}
+    assert slots == {"qf", "ef"}
+    labels = {m["slot"] for m in body["matchups"]}
+    assert "qf" in labels and "ef" in labels
+    for matchup in body["matchups"]:
+        assert matchup["home"]["team"]["name"]
+        assert matchup["away"]["team"]["name"]
+        # No results seeded yet -- never a fabricated score.
+        assert matchup["status"] in ("upcoming", "scheduled")
+
+
+def test_week1_matchup_shows_official_score_once_published(public_client):
+    built = build_finals_ready_season(year=8021, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    _open_week1(built, bracket, year=8021)
+    pairings = {p.slot: p for p in _repo(built).list_pairings(bracket.bracket_id, week_number=1)}
+    seed_official_result(built["database"], pairings["qf"].matchup_id, 105, 88)
+    season_id = built["season"].season_id
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/21").json()
+    qf = next(m for m in body["matchups"] if m["slot"] == "qf")
+    assert qf["status"] == "official"
+    assert qf["home"]["official_score"] == 105 or qf["away"]["official_score"] == 105
+
+
+def test_later_week_finals_rendering_shows_second_semi_and_first_semi(public_client):
+    built = build_completable_season(year=8022, database=public_client.app.state.database)
+    season_id = built["season"].season_id
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/22").json()
+    assert body["label"] == "Finals Week 2"
+    assert body["week_number"] == 2
+    slots = {m["slot"] for m in body["matchups"]}
+    assert slots == {"second_semi", "first_semi"}
+    assert all(m["status"] in ("official", "corrected_official") for m in body["matchups"])
+
+
+def test_preliminary_final_rendering(public_client):
+    built = build_completable_season(year=8023, database=public_client.app.state.database)
+    season_id = built["season"].season_id
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/23").json()
+    assert body["label"] == "Preliminary Final"
+    assert len(body["matchups"]) == 1
+    assert body["matchups"][0]["slot"] == "preliminary"
+    assert body["bye"] is None
+
+
+def test_grand_final_rendering_reuses_the_established_matchup_result_shape(public_client):
+    built = build_completable_season(year=8024, database=public_client.app.state.database)
+    season_id = built["season"].season_id
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/24").json()
+    assert body["label"] == "Grand Final"
+    assert body["published"] is True
+    assert len(body["matchups"]) == 1
+    gf = body["matchups"][0]
+    assert gf["slot"] == "grand_final"
+    assert gf["status"] in ("official", "corrected_official")
+    # The same public matchup-result shape ordinary/finals matchups already
+    # share (app.public_rounds._side) -- team name plus official score,
+    # the same fields the Grand Final trial layout renders.
+    assert gf["home"]["team"]["name"]
+    assert gf["away"]["team"]["name"]
+    assert gf["home"]["official_score"] is not None
+    assert gf["away"]["official_score"] is not None
+
+
+# -- Concurrent SuperScore section -----------------------------------------
+
+
+def test_concurrent_ss1_through_ss4_published_leaderboards_render_all_ten_entries(public_client):
+    built = build_completable_season(year=8030, database=public_client.app.state.database)
+    season_id = built["season"].season_id
+
+    for round_number, week_number in ((21, 1), (22, 2), (23, 3), (24, 4)):
+        body = public_client.get(f"/api/public/seasons/{season_id}/rounds/{round_number}").json()
+        ss = body["superscore"]
+        assert ss["available"] is True
+        assert ss["published"] is True
+        assert ss["week_number"] == week_number
+        assert ss["round_label"] == f"SuperScore {week_number}"
+        assert len(ss["entries"]) == 10
+        for entry in ss["entries"]:
+            assert entry["team_name"]
+            assert entry["rank"] >= 1
+            assert isinstance(entry["total_score"], (int, float))
+        # Public-safe only -- never a scorer-only/internal field.
+        for entry in ss["entries"]:
+            assert "input_snapshot" not in entry
+            assert "effective_entry" not in entry
+            assert "review_version" not in entry
+
+
+def test_superscore_not_configured_shows_a_safe_pending_state(public_client):
+    built = build_finals_ready_season(year=8031, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    _open_week1(built, bracket, year=8031)
+    season_id = built["season"].season_id
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/21").json()
+    ss = body["superscore"]
+    assert ss["available"] is False
+    assert ss["published"] is False
+    assert ss["entries"] == []
+
+
+# -- Unpublished-state safety: no scorer-only/private content leaks -------
+
+
+def test_unpublished_finals_week_never_leaks_scorer_only_state(public_client):
+    built = build_finals_ready_season(year=8040, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    _open_week1(built, bracket, year=8040)
+    season_id = built["season"].season_id
+
+    resp = public_client.get(f"/api/public/seasons/{season_id}/rounds/21")
+    payload = resp.text
+    for private_marker in (
+        "dnp_ruling",
+        "override",
+        "audit",
+        "rulings",
+        "lockout",
+        "draft_revision",
+        "snapshot",
+        "bracket_id",
+    ):
+        # `bracket_id` itself is fine to expose (it is not sensitive), so
+        # only assert the genuinely scorer-only markers never appear.
+        if private_marker == "bracket_id":
+            continue
+        assert private_marker not in payload, f"unexpected private marker {private_marker!r} in public payload"
+
+
+def test_unpublished_matchup_never_exposes_lineup_evidence_before_it_is_opened(public_client):
+    built = build_finals_ready_season(year=8041, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    season_id = built["season"].season_id
+
+    # Bracket exists (Week 1's pairing is determined) but nothing has been
+    # opened yet -- team names only, never a lineup/score.
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/21").json()
+    assert body["round_state"] == "scheduled"
+    assert body["published"] is False
+    for matchup in body["matchups"]:
+        assert matchup["status"] == "scheduled"
+        assert "official_score" not in matchup["home"]
+    assert bracket.bracket_id  # sanity: the bracket really was created
+
+
+# -- Ordinary Round Centre / pulldown / ladder navigation stay unchanged --
+
+
+def test_ordinary_round_and_ladder_navigation_unaffected_by_a_coexisting_finals_stream(public_client):
+    built = build_completable_season(year=8050, database=public_client.app.state.database)
+    season_id = built["season"].season_id
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/1").json()
+    assert body["stream"] == "ordinary"
+    assert len(body["matchups"]) == 5
+
+    ladder = public_client.get(f"/api/public/seasons/{season_id}/rounds/1/ladder")
+    assert ladder.status_code == 200
+    assert "rows" in ladder.json()
+
+    page = public_client.get(f"/seasons/{season_id}/rounds/1")
+    assert page.status_code == 200
+
+
+def test_ladder_endpoints_refuse_a_finals_round_rather_than_fabricating_one(public_client):
+    built = build_finals_ready_season(year=8051, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    week1_round_id = _open_week1(built, bracket, year=8051)
+    season_id = built["season"].season_id
+
+    assert public_client.get(f"/api/public/seasons/{season_id}/rounds/21/ladder").status_code == 404
+    assert public_client.get(f"/api/public/seasons/{season_id}/rounds/{week1_round_id}/ladder").status_code == 404
+
+
+def test_season_landing_page_redirects_into_finals_once_round_20_is_final_and_week1_opens(public_client):
+    built = build_finals_ready_season(year=8052, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    _open_week1(built, bracket, year=8052)
+    season_id = built["season"].season_id
+
+    resp = public_client.get(f"/seasons/{season_id}", follow_redirects=False)
+    assert resp.status_code == 302
+    assert resp.headers["location"] == f"/seasons/{season_id}/rounds/21"

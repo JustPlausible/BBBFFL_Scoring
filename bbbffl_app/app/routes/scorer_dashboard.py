@@ -128,6 +128,14 @@ def _annotate_finals_week_actionability(dashboard: dict, principal: Principal) -
     finals = dashboard.get("finals")
     if finals is not None and finals.get("available"):
         finals["open_week_actionable_by_you"] = principal_has_capability(principal, "roundsetup.manage")
+        # Issue #216: bracket progression (preview/apply) is reached
+        # through the same `/api/admin/finals/...` router as "Open finals
+        # week", gated behind the identical `roundsetup.manage` capability
+        # -- a Replay Operator who can view this dashboard still cannot
+        # advance the bracket and must be told so rather than shown a
+        # button that will 403.
+        if finals.get("progression") is not None:
+            finals["progression"]["actionable_by_you"] = principal_has_capability(principal, "roundsetup.manage")
 
 
 @router.get("")

@@ -14,6 +14,7 @@ from app.csrf import verify_token
 from app.finals import DownstreamPlayStateError, FinalsBracketError, FinalsBracketRepository, StaleFinalsResultError
 from app.finals_preflight import build_finals_week_preflight, open_finals_week
 from app.finals_review import correct_finals_result, publish_finals_round
+from app.finals_superscore_dashboard import build_finals_progression_preview
 from app.finals_superscore_open import (
     FrozenMappingDivergedError,
     LockoutPlanDivergedError,
@@ -242,6 +243,26 @@ def correct_result(
     }
 
 
+@router.get("/{bracket_id}/advance/{from_week}/preview")
+def preview_advance(
+    bracket_id: str,
+    from_week: int,
+    request: Request,
+    principal: Principal = Depends(require_finals_operator),
+):
+    """Issue #216: a read-only HTTP wrapper around `FinalsBracketRepository.
+    preview_advance_bracket` (previously reachable only from the CLI) --
+    the Scorer UI's "Preview bracket progression" step. Never mutates;
+    `advance_week` below remains the one apply path, unchanged, so a
+    preview and its later apply can never diverge into two progression
+    implementations."""
+    bracket = _authorise_bracket(request, principal, bracket_id)
+    season = request.app.state.seasons.get_season(bracket.season_id)
+    return build_finals_progression_preview(
+        request.app.state.database, request.app.state.identities, season, bracket_id, from_week
+    )
+
+
 @router.post("/{bracket_id}/advance/{from_week}")
 def advance_week(
     bracket_id: str,
@@ -269,7 +290,18 @@ def advance_week(
         # preview and apply request produced an uncaught 500 instead of the
         # advertised 409, despite the transaction having safely rolled back.
         raise HTTPException(409, str(exc)) from exc
-    return {"bracket_id": bracket_id, **{k: v for k, v in result.items() if k != "bracket_id"}}
+    # Issue #216: the Scorer UI's post-apply navigation needs the newly
+    # prepared week's own round_id to jump straight to it -- `finals_bracket_
+    # week` rows for every week are materialised at bracket creation
+    # (`FinalsBracketRepository.create_bracket`), so this is always
+    # resolvable the instant `advance_bracket` returns, never a second
+    # progression write.
+    target_round_id = repo.get_week_round_id(bracket_id, result["target_week"])
+    return {
+        "bracket_id": bracket_id,
+        "target_round_id": target_round_id,
+        **{k: v for k, v in result.items() if k != "bracket_id"},
+    }
 
 
 @router.post("/{bracket_id}/rewind/{from_week}")

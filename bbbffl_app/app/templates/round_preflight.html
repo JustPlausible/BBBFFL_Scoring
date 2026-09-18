@@ -35,7 +35,7 @@ ${d.mapping_recommendation?`<div class="item recommend"><strong>Recommended (adv
 </form></section>
 <section class="card ${d.afl_evidence_fresh?'':'warn'}"><h2>Relevant AFL matches (scheduled-start order)</h2>${d.afl_evidence_fresh?'':'<p><strong>Stale cached evidence — diagnostic only. Opening is blocked.</strong></p>'}${d.afl_matches.map(match).join('')||'<p class="muted">Matches cannot be shown until mapping evidence resolves.</p>'}</section>
 <section class="card"><h2>Lockout plan</h2><p class="muted">Selecting from the mapped matches above is authoritative once submitted; the activating AFL-match relationship remains authoritative and server-validated.</p>
-${d.lockout_triggers.map(t=>`<div class="item"><strong>${e(t.trigger_type==='main'?'Main / remaining lockout':'Selective lockout')} · ${e(t.trigger_key)}</strong> <span class="pill">sequence ${e(t.sequence)}</span> <span class="pill">revision ${e(t.revision)}</span><p>${e(t.scope)}${t.participating_clubs?.length?` — ${t.participating_clubs.map(e).join(', ')}`:''}</p><p><span class="pill ${t.activation.activated?'on':'pending'}">BBBFFL lockout ${t.activation.activated?`ACTIVATED (${e(t.activation.activation_reason)} at ${e(t.activation.effective_lock_at)})`:'not yet activated'}</span></p>${t.activating_matches.map(m=>m.unresolved?`<span class="bad">Unresolved AFL Match ${e(m.match_id)}</span>`:match(m)).join('')}${t.activation.activated?'':`<p><button type="button" class="remove-trigger" data-key="${e(t.trigger_key)}">Remove this trigger</button></p>`}</div>`).join('')||'<p>No triggers configured.</p>'}
+${d.lockout_triggers.map(t=>`<div class="item"><strong>${e(t.trigger_type==='main'?'Main / remaining lockout':'Selective lockout')} · ${e(t.trigger_key)}</strong> <span class="pill">sequence ${e(t.sequence)}</span> <span class="pill">revision ${e(t.revision)}</span><p>${e(t.scope)}${t.participating_clubs?.length?` — ${t.participating_clubs.map(e).join(', ')}`:''}</p><p><span class="pill ${t.activation.activated?'on':'pending'}">BBBFFL lockout ${t.activation.activated?`ACTIVATED (${e(t.activation.activation_reason)} at ${e(t.activation.effective_lock_at)})`:'not yet activated'}</span></p>${t.activating_matches.map(m=>m.unresolved?`<span class="bad">Unresolved AFL Match ${e(m.match_id)}</span>`:match(m)).join('')}${t.activation.activated?'':`<p><button type="button" class="remove-trigger" data-key="${e(t.trigger_key)}" data-revision="${e(t.revision)}">Remove this trigger</button></p>`}</div>`).join('')||'<p>No triggers configured.</p>'}
 ${d.lockout_recommendation?`<div class="item recommend"><strong>Recommended plan (advisory only, never auto-persisted):</strong>${d.lockout_recommendation.stages.map(s=>`<p>${e(s.trigger_type==='main'?'Main/remaining':'Selective')} · matches ${s.afl_match_ids.map(e).join(', ')} — ${e(s.evidence)} <button type="button" class="use-lockout-stage" data-stage='${JSON.stringify(s).replace(/'/g,"&#39;")}'>Use this stage</button></p>`).join('')}</div>`:''}
 <form id="trigger" class="actions">
 <label>Key<input name="key" placeholder="early-1 or main" required></label>
@@ -52,7 +52,7 @@ document.querySelector('#mapping').onsubmit=map;document.querySelector('#trigger
 document.querySelector('select[name="season_select"]').onchange=onSeasonChange;
 document.querySelector('#use-mapping-recommendation')?.addEventListener('click',useMappingRecommendation);
 document.querySelectorAll('.use-lockout-stage').forEach(b=>b.addEventListener('click',()=>useLockoutStage(JSON.parse(b.dataset.stage))));
-document.querySelectorAll('.remove-trigger').forEach(b=>b.addEventListener('click',()=>removeTrigger(b.dataset.key)));
+document.querySelectorAll('.remove-trigger').forEach(b=>b.addEventListener('click',()=>removeTrigger(b.dataset.key,+b.dataset.revision)));
 }
 async function onSeasonChange(x){
   const seasonId=x.target.value,roundSelect=document.querySelector('select[name="round_select"]');
@@ -129,12 +129,12 @@ async function trigger(x){
     msg('Lockout trigger NOT persisted — '+x.message+' '+reloadNotice(reloaded))
   }
 }
-async function removeTrigger(key){
+async function removeTrigger(key,expectedRevision){
   const reason=prompt(`Remove trigger "${key}"? This leaves the round without it -- enter a reason (required):`);
   if(reason===null)return;
   if(!reason.trim()){msg('Trigger NOT removed — a reason is required.');return}
   try{
-    render(await api(`/api/admin/round-preflight/${roundId}/lockout-trigger/${encodeURIComponent(key)}/remove`,{reason}));
+    render(await api(`/api/admin/round-preflight/${roundId}/lockout-trigger/${encodeURIComponent(key)}/remove`,{reason,expected_revision:expectedRevision}));
     msg(`Lockout trigger "${key}" removed.`,true)
   }catch(x){
     const reloaded=await reloadAfterFailure();

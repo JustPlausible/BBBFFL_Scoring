@@ -403,7 +403,7 @@ def _apply_trigger_sync(
     return synced_trigger_keys
 
 
-def _apply_trigger_removals(conn, trigger_repo, ss_round_id, keys_to_remove, actor, reason):
+def _apply_trigger_removals(conn, trigger_repo, ss_round_id, keys_to_remove, ss_triggers_by_key, actor, reason):
     """Issue #219: mirrors onto SS every trigger key `_validate_trigger_
     sync_plan` determined was removed from the concurrent finals plan --
     against the same already-locked `conn` `_apply_trigger_sync` writes
@@ -413,10 +413,26 @@ def _apply_trigger_removals(conn, trigger_repo, ss_round_id, keys_to_remove, act
     itself. Applied *before* `_apply_trigger_sync` -- a removal only ever
     frees a sequence, never conflicts with one, so ordering it first is
     always safe and is what lets a pending configure change reuse a
-    just-freed sequence in the same synchronisation call."""
+    just-freed sequence in the same synchronisation call.
+
+    Passes each key's already-read revision through as `expected_revision`
+    -- mirroring `_apply_trigger_sync`'s identical use of `existing.
+    revision` -- so a genuinely concurrent change to SS's own trigger
+    between this transaction's own read and this write (not otherwise
+    possible once the round-row lock `_remove_locked` now takes is held,
+    but kept for the same defence-in-depth reason `_apply_trigger_sync`
+    already carries it) surfaces as `StaleTriggerRevisionError` rather than
+    silently applying against a superseded row."""
     removed_trigger_keys: list[str] = []
     for trigger_key in keys_to_remove:
-        trigger_repo._remove_locked(conn, ss_round_id, trigger_key, actor=actor, reason=reason)
+        trigger_repo._remove_locked(
+            conn,
+            ss_round_id,
+            trigger_key,
+            actor=actor,
+            reason=reason,
+            expected_revision=ss_triggers_by_key[trigger_key].revision,
+        )
         removed_trigger_keys.append(trigger_key)
     return removed_trigger_keys
 
@@ -502,7 +518,7 @@ def _synchronise_triggers_locked(
                 ss_round_id, finals_triggers, ss_triggers_by_key, activated_ss_trigger_ids, finals_removed_keys
             )
             removed_trigger_keys = _apply_trigger_removals(
-                conn, trigger_repo, ss_round_id, keys_to_remove, actor, reason
+                conn, trigger_repo, ss_round_id, keys_to_remove, ss_triggers_by_key, actor, reason
             )
             synced_trigger_keys = _apply_trigger_sync(
                 conn, trigger_repo, ss_round_id, ordered_plan, ss_triggers_by_key, ss_mapping_revision, actor, reason

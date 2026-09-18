@@ -936,6 +936,7 @@ class LockoutTriggerRepository:
         *,
         actor: ActorContext = ActorContext.anonymous_operator("admin"),
         reason: str,
+        expected_revision: int | None = None,
     ) -> None:
         """The safe Scorer-facing correction path (issue #219) for a
         trigger that should never have been created -- e.g. an unnecessary
@@ -960,19 +961,60 @@ class LockoutTriggerRepository:
         Refuses (`TriggerAlreadyActivatedError`) once the trigger has
         activated -- identical to `replace`/`configure`'s own irreversibility
         rule, enforced under the same row lock, never bypassed by this
-        being a distinct method."""
+        being a distinct method.
+
+        `expected_revision`, when supplied, is checked atomically under
+        that same lock -- mirroring `configure`'s own optimistic-concurrency
+        guard (Codex review, PR #220): without it, a Scorer viewing a stale
+        preflight page (revision 1) could remove a trigger a concurrent
+        operator has since reconfigured (revision 2), silently discarding
+        that newer configuration under the stale operator's own removal
+        reason. A mismatch raises `StaleTriggerRevisionError` instead,
+        exactly as a stale `configure` submission would."""
         if not reason or not reason.strip():
             raise ValueError("removing a trigger requires an explicit, substantive reason")
         with transaction(self.database) as conn:
-            self._remove_locked(conn, bbbffl_round_id, trigger_key, actor=actor, reason=reason)
+            self._remove_locked(
+                conn, bbbffl_round_id, trigger_key, actor=actor, reason=reason, expected_revision=expected_revision
+            )
 
-    def _remove_locked(self, conn, bbbffl_round_id: str, trigger_key: str, *, actor: ActorContext, reason: str) -> None:
+    def _remove_locked(
+        self,
+        conn,
+        bbbffl_round_id: str,
+        trigger_key: str,
+        *,
+        actor: ActorContext,
+        reason: str,
+        expected_revision: int | None = None,
+    ) -> None:
         """The validated removal write `remove()` performs, factored out to
         run against an already-open, already-locked transaction/connection
         -- used by `app.finals_superscore_open`'s trigger synchronisation
         to remove an obsolete SS-side trigger key in the exact same
         transaction as everything else it applies, mirroring how
-        `_configure_locked` already serves `_apply_trigger_sync`."""
+        `_configure_locked` already serves `_apply_trigger_sync`.
+
+        Locks the parent `bbbffl_round` row before the trigger's own header
+        row -- the identical lock order `_configure_locked`/
+        `_materialize_round_triggers` already use (Codex review, PR #220):
+        without it, a concurrent `_materialize_round_triggers` call could
+        lock the round, read this trigger as still active (`removed_at IS
+        NULL`) under that lock, then block on the header lock this method
+        holds -- and once this removal commits and releases it, resume and
+        durably activate a trigger that had already been removed, since its
+        per-trigger loop never re-checks `removed_at` after acquiring the
+        header lock (it only ever expects an *activated* trigger to already
+        be excluded, via the activation-row check, not a *removed* one).
+        Serializing on the same parent lock closes this the same way it
+        already closes the zero-trigger/configure race `configure`'s own
+        docstring describes: whichever of removal or materialization
+        acquires the round lock first now runs to completion (commit)
+        before the other can even begin its own trigger read."""
+        conn.execute(
+            "SELECT 1 FROM bbbffl_round WHERE bbbffl_round_id=?" + _for_update_suffix(self.database),
+            (bbbffl_round_id,),
+        )
         head = conn.execute(
             "SELECT * FROM bbbffl_round_lockout_trigger WHERE bbbffl_round_id=? AND trigger_key=?"
             + _for_update_suffix(self.database),
@@ -980,6 +1022,12 @@ class LockoutTriggerRepository:
         ).fetchone()
         if not head:
             raise KeyError((bbbffl_round_id, trigger_key))
+        if expected_revision is not None and head["current_revision"] != expected_revision:
+            raise StaleTriggerRevisionError(
+                f"Trigger {trigger_key!r} has changed since it was loaded (expected revision "
+                f"{expected_revision}, current revision {head['current_revision']}). Reload the current "
+                "authoritative lockout plan before deciding."
+            )
         if head["removed_at"] is not None:
             raise TriggerAlreadyRemovedError(f"trigger {trigger_key!r} has already been removed")
         if conn.execute(

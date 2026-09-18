@@ -14,6 +14,7 @@ import pytest
 
 import app.lockouts as lockouts_module
 from app.afl_client import Match, Team
+from app.audit import ActorContext
 from app.lineups import WeeklyLineupRepository
 from app.lockouts import (
     InvalidSelectionError,
@@ -99,6 +100,74 @@ def test_materialize_round_triggers_acquires_header_locks_one_at_a_time_in_sorte
     ]
     assert header_locks == ["trigger-a", "trigger-z"]
     assert timeline[0] == "provider", "provider retrieval must finish before the parent FOR UPDATE"
+
+
+def test_remove_locked_acquires_the_round_lock_before_the_trigger_header_lock(monkeypatch):
+    """Codex review (PR #220, P1): without the parent round-row lock held
+    first, a concurrent `_materialize_round_triggers` call (which itself
+    always locks the round before any trigger header, per the test above)
+    could lock the round, read this trigger as still active under that
+    lock, then block on the header lock `_remove_locked` holds -- and once
+    removal commits and releases it, resume and durably activate an
+    already-removed trigger, since its per-trigger loop never re-checks
+    `removed_at` after acquiring the header lock. Acquiring the identical
+    round-then-header lock order closes this: whichever of removal or
+    materialization acquires the round lock first now fully commits before
+    the other can even begin its own read."""
+
+    class Result:
+        def __init__(self, row=None, rows=()):
+            self.row = row
+            self.rows = list(rows)
+
+        def fetchone(self):
+            return self.row
+
+        def fetchall(self):
+            return self.rows
+
+    calls = []
+
+    class Connection:
+        def execute(self, statement, parameters=()):
+            calls.append(statement)
+            if statement.startswith("SELECT * FROM bbbffl_round_lockout_trigger WHERE"):
+                return Result(
+                    row={
+                        "trigger_id": "trigger-1",
+                        "bbbffl_round_id": "round-1",
+                        "trigger_key": "early-1",
+                        "current_revision": 1,
+                        "removed_at": None,
+                    }
+                )
+            if statement.startswith("SELECT 1 FROM bbbffl_round_lockout_trigger_activation"):
+                return Result(row=None)
+            if statement.startswith("SELECT r.trigger_type, r.sequence FROM"):
+                return Result(row={"trigger_type": "selective", "sequence": 1})
+            if statement.startswith("SELECT afl_match_id FROM"):
+                return Result(rows=[])
+            return Result()
+
+    @contextmanager
+    def fake_transaction(_database):
+        yield Connection()
+
+    database = SimpleNamespace(engine=SimpleNamespace(dialect=SimpleNamespace(name="postgresql")))
+    monkeypatch.setattr(lockouts_module, "transaction", fake_transaction)
+    monkeypatch.setattr(lockouts_module, "append_event", lambda *args, **kwargs: None)
+
+    LockoutTriggerRepository(database).remove(
+        "round-1", "early-1", actor=ActorContext.anonymous_operator("test"), reason="test removal"
+    )
+
+    round_lock_index = next(i for i, s in enumerate(calls) if s.startswith("SELECT 1 FROM bbbffl_round WHERE"))
+    header_lock_index = next(
+        i for i, s in enumerate(calls) if s.startswith("SELECT * FROM bbbffl_round_lockout_trigger WHERE")
+    )
+    assert round_lock_index < header_lock_index, "the parent round row must be locked before the trigger header"
+    assert calls[round_lock_index].endswith("FOR UPDATE")
+    assert calls[header_lock_index].endswith("FOR UPDATE")
 
 
 def test_materialize_round_triggers_rejects_facts_from_a_mapping_changed_before_the_round_lock(monkeypatch):

@@ -26,6 +26,7 @@ from app.finals_superscore_open import (
 from app.lockouts import (
     LockoutRepository,
     LockoutTriggerRepository,
+    StaleTriggerRevisionError,
     TriggerAlreadyActivatedError,
     TriggerAlreadyRemovedError,
 )
@@ -96,6 +97,36 @@ def test_removing_an_already_removed_trigger_is_rejected_not_a_silent_no_op():
     triggers.remove(round_.bbbffl_round_id, "early-1", actor=ACTOR, reason="unnecessary")
     with pytest.raises(TriggerAlreadyRemovedError):
         triggers.remove(round_.bbbffl_round_id, "early-1", actor=ACTOR, reason="again")
+
+
+def test_removal_rejects_a_stale_revision_without_mutating_the_current_configuration():
+    """Codex review (PR #220, P1): a Scorer viewing a stale preflight page
+    (revision 1) must never remove a trigger a concurrent operator has
+    since reconfigured (revision 2) -- the identical optimistic-concurrency
+    guard `configure` already enforces."""
+    db = migrated_connection()
+    round_, _entries = configured(db, 2615)
+    triggers = LockoutTriggerRepository(db)
+    triggers.create(round_.bbbffl_round_id, "early-1", "selective", 1, [9001], actor=ACTOR, reason="mistaken early")
+    triggers.replace(
+        round_.bbbffl_round_id,
+        "early-1",
+        trigger_type="selective",
+        sequence=1,
+        afl_match_ids=[9002],
+        actor=ACTOR,
+        reason="a concurrent operator retargeted it",
+    )
+    with pytest.raises(StaleTriggerRevisionError):
+        triggers.remove(round_.bbbffl_round_id, "early-1", actor=ACTOR, reason="stale removal", expected_revision=1)
+
+    still_active = triggers.get(round_.bbbffl_round_id, "early-1")
+    assert still_active.removed_at is None
+    assert still_active.afl_match_ids == (9002,), "the newer configuration must survive a stale removal attempt"
+
+    # The matching (current) revision is accepted.
+    triggers.remove(round_.bbbffl_round_id, "early-1", actor=ACTOR, reason="now-correct removal", expected_revision=2)
+    assert triggers.get(round_.bbbffl_round_id, "early-1").removed_at is not None
 
 
 def test_removal_after_activation_is_rejected():
@@ -279,6 +310,35 @@ def test_remove_trigger_route_requires_a_reason(preflight_client):
     )
     assert response.status_code == 400
     assert "reason" in response.json()["detail"]
+
+
+def test_remove_trigger_route_rejects_a_stale_revision(preflight_client):
+    """Codex review (PR #220, P1): mirrors `configure_trigger`'s own
+    `expected_revision` guard, at the HTTP boundary."""
+    _operator(preflight_client)
+    db = preflight_client.app.state.database
+    round_, _entries = configured(db, 2616)
+    LockoutTriggerRepository(db).create(
+        round_.bbbffl_round_id, "early-1", "selective", 1, [9001], actor=ACTOR, reason="mistaken early"
+    )
+    LockoutTriggerRepository(db).replace(
+        round_.bbbffl_round_id,
+        "early-1",
+        trigger_type="selective",
+        sequence=1,
+        afl_match_ids=[9003],
+        actor=ACTOR,
+        reason="a concurrent operator retargeted it",
+    )
+    response = preflight_client.post(
+        f"/api/admin/round-preflight/{round_.bbbffl_round_id}/lockout-trigger/early-1/remove",
+        json={"reason": "stale removal", "expected_revision": 1},
+    )
+    assert response.status_code == 409
+    assert "changed since it was loaded" in response.json()["detail"]
+    still_active = LockoutTriggerRepository(db).get(round_.bbbffl_round_id, "early-1")
+    assert still_active.removed_at is None
+    assert still_active.afl_match_ids == (9003,)
 
 
 def test_remove_trigger_route_409s_once_activated(preflight_client):

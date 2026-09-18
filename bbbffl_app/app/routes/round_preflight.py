@@ -53,6 +53,11 @@ class TriggerRequest(BaseModel):
 
 class TriggerRemoveRequest(BaseModel):
     reason: str
+    # Optimistic concurrency, mirroring TriggerRequest's own field: the
+    # trigger's revision the caller last observed, or omit to skip the
+    # check (Codex review, PR #220 -- without it, a stale preflight view
+    # could remove a trigger a concurrent operator has since reconfigured).
+    expected_revision: int | None = None
 
 
 def _actor(principal):
@@ -210,7 +215,11 @@ def remove_trigger(
     unnecessary, unactivated lockout trigger -- e.g. a mistaken selective
     trigger created alongside `main`. Never available once the trigger has
     activated (`TriggerAlreadyActivatedError`, 409) or for a trigger key
-    already removed (`TriggerAlreadyRemovedError`, 409)."""
+    already removed (`TriggerAlreadyRemovedError`, 409). `expected_revision`
+    (Codex review, PR #220), when supplied, rejects a stale preflight
+    view's removal of a trigger a concurrent operator has since
+    reconfigured (`StaleTriggerRevisionError`, 409) -- the identical
+    concurrency guard `configure_trigger` above already applies."""
     _authorise(request, principal, round_id)
     _csrf(request, principal)
     try:
@@ -220,7 +229,10 @@ def remove_trigger(
             trigger_key,
             reason=payload.reason,
             actor=_actor(principal),
+            expected_revision=payload.expected_revision,
         )
+    except StaleTriggerRevisionError as exc:
+        raise HTTPException(409, str(exc)) from exc
     except (TriggerAlreadyActivatedError, TriggerAlreadyRemovedError) as exc:
         raise HTTPException(409, str(exc)) from exc
     except KeyError as exc:

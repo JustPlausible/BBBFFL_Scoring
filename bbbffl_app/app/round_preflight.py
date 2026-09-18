@@ -192,7 +192,7 @@ def configure_preflight_trigger(database, round_id, payload, afl_client, *, acto
     )
 
 
-def remove_preflight_trigger(database, round_id, trigger_key, *, actor, reason):
+def remove_preflight_trigger(database, round_id, trigger_key, *, actor, reason, expected_revision=None):
     """The safe Scorer-facing correction path for an unnecessary,
     unactivated lockout trigger (issue #219) -- e.g. a mistaken selective
     trigger created alongside `main`, which the domain previously had no
@@ -201,8 +201,15 @@ def remove_preflight_trigger(database, round_id, trigger_key, *, actor, reason):
     Repository.remove`, the one place activation-irreversibility and audit
     history are enforced; this function adds no rule of its own and works
     identically for an ordinary or a finals round, exactly like `configure_
-    preflight_trigger` -- both are round-stream-agnostic."""
-    return LockoutTriggerRepository(database).remove(round_id, trigger_key, actor=actor, reason=reason)
+    preflight_trigger` -- both are round-stream-agnostic.
+
+    `expected_revision`, mirroring `configure_preflight_trigger`'s own
+    optimistic-concurrency parameter (Codex review, PR #220): a stale
+    preflight view must never remove a trigger a concurrent operator has
+    since reconfigured to a different revision."""
+    return LockoutTriggerRepository(database).remove(
+        round_id, trigger_key, actor=actor, reason=reason, expected_revision=expected_revision
+    )
 
 
 def open_preflight_round(lifecycle, round_id, *, actor):

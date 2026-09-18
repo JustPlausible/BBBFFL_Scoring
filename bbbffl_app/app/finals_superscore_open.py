@@ -368,7 +368,14 @@ def _validate_trigger_sync_plan(
 
 
 def _apply_trigger_sync(
-    conn, trigger_repo, ss_round_id, ordered_plan, ss_triggers_by_key, ss_mapping_revision, actor, reason
+    conn,
+    trigger_repo,
+    ss_round_id,
+    ordered_plan,
+    ss_triggers_including_removed_by_key,
+    ss_mapping_revision,
+    actor,
+    reason,
 ):
     """Applies an already-validated `_validate_trigger_sync_plan` order as
     real writes, all against `conn` -- an already-open transaction the
@@ -383,10 +390,22 @@ def _apply_trigger_sync(
     correctly rejected: the newly-activated trigger's configuration is
     now *permanently* frozen and can never converge with finals' current
     plan, so that "partial" result was not actually recoverable by
-    retrying, only by an operator reconciling the divergence directly)."""
+    retrying, only by an operator reconciling the divergence directly).
+
+    `ss_triggers_including_removed_by_key` (issue #219, Codex review,
+    PR #220, P1, round 2) -- unlike `ss_triggers_by_key` elsewhere in this
+    module, which is deliberately active-only for obsolete/pending/
+    ordering decisions -- includes a removed SS trigger too, so
+    `expected_revision` here always reflects a key's *real* current row
+    (whether active or removed), never a value that collapses "removed"
+    to the same 0 a truly-never-created key would also present (see
+    `_configure_locked`'s own docstring for why that distinction matters).
+    Safe to resolve this way specifically because it is read fresh, inside
+    the same already-locked transaction as this write -- never a separate,
+    racy round-trip the way an interactive HTTP submission would be."""
     synced_trigger_keys: list[str] = []
     for trigger in ordered_plan:
-        existing = ss_triggers_by_key.get(trigger.trigger_key)
+        existing = ss_triggers_including_removed_by_key.get(trigger.trigger_key)
         trigger_repo._configure_locked(
             conn,
             ss_round_id,
@@ -501,6 +520,19 @@ def _synchronise_triggers_locked(
                 if t.removed_at is not None
             }
             ss_triggers_by_key = {t.trigger_key: t for t in trigger_repo.list_triggers(ss_round_id)}
+            # Issue #219, Codex review (PR #220, P1, round 2): a *second*
+            # read, still inside this same lock, that also includes a
+            # removed SS trigger -- `_apply_trigger_sync` needs each
+            # pending key's *real* current row (active or removed) to
+            # compute a correct `expected_revision`, never the same 0 a
+            # truly-never-created key would also present (see
+            # `_configure_locked`'s own docstring). `ss_triggers_by_key`
+            # itself stays active-only -- every other decision here
+            # (obsolete/pending/unchanged/ordering) is correctly scoped to
+            # the round's *active* plan only.
+            ss_triggers_including_removed_by_key = {
+                t.trigger_key: t for t in trigger_repo.list_triggers(ss_round_id, include_removed=True)
+            }
             ss_trigger_ids = [t.trigger_id for t in ss_triggers_by_key.values()]
             activated_ss_trigger_ids = (
                 {
@@ -521,7 +553,14 @@ def _synchronise_triggers_locked(
                 conn, trigger_repo, ss_round_id, keys_to_remove, ss_triggers_by_key, actor, reason
             )
             synced_trigger_keys = _apply_trigger_sync(
-                conn, trigger_repo, ss_round_id, ordered_plan, ss_triggers_by_key, ss_mapping_revision, actor, reason
+                conn,
+                trigger_repo,
+                ss_round_id,
+                ordered_plan,
+                ss_triggers_including_removed_by_key,
+                ss_mapping_revision,
+                actor,
+                reason,
             )
     except (TriggerAlreadyActivatedError, TriggerAlreadyRemovedError) as exc:
         raise LockoutPlanDivergedError(

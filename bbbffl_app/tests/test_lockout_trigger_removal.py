@@ -215,16 +215,21 @@ def test_audit_and_revision_history_is_preserved_when_removing_a_trigger():
 
     removed = triggers.list_triggers(round_.bbbffl_round_id, include_removed=True)
     early = next(t for t in removed if t.trigger_key == "early-1")
-    # Revision is untouched by removal -- it is still whatever `create`
-    # left it at, not bumped or reset.
-    assert early.revision == removed_revision_before
-    # Every revision this trigger key ever had is still directly readable.
+    # Removal advances the revision too (Codex review, PR #220, P1, round
+    # 3) -- a genuine generation bump, not a rewrite: the duplicated
+    # revision carries the exact same configuration `replace` last left
+    # (asserted below via `afl_match_ids`), so nothing about *what* was
+    # configured is lost or altered, only that a new revision now records
+    # "and then removed".
+    assert early.revision == removed_revision_before + 1
+    # Every revision this trigger key ever had is still directly readable,
+    # including the one removal itself added.
     history = db.execute(
         "SELECT revision, trigger_type, sequence FROM bbbffl_round_lockout_trigger_revision "
         "WHERE trigger_id=? ORDER BY revision",
         (early.trigger_id,),
     ).fetchall()
-    assert [row["revision"] for row in history] == [1, 2]
+    assert [row["revision"] for row in history] == [1, 2, 3]
 
     events = AuditEventRepository(db).list_events()
     trigger_events = [e for e in events if e.entity_id == early.trigger_id]
@@ -240,16 +245,23 @@ def test_audit_and_revision_history_is_preserved_when_removing_a_trigger():
 
 
 def test_reconfiguring_a_removed_trigger_key_un_removes_it():
-    """`expected_revision=0` here mirrors what every real active-plan
-    caller (the preflight UI, Finals-to-SuperScore sync) actually computes
-    for a key `list_triggers` shows as absent -- not the trigger's raw,
-    frozen `current_revision` (Codex review, PR #220, P1)."""
+    """A client that has *actually observed* the removed row (via `get`/
+    `list_triggers(include_removed=True)`, never merely assumed the key is
+    absent) can reuse it by submitting its real, post-removal revision --
+    which removal itself advances (Codex review, PR #220, P1, round 3),
+    so `expected_revision=0` (what a caller who never saw the trigger at
+    all would submit) is deliberately *not* accepted here; see
+    `test_configure_treats_an_unobserved_absence_as_genuinely_stale_once_a_trigger_has_been_removed`
+    for that distinction."""
     db = migrated_connection()
     round_, _entries = configured(db, 2610)
     triggers = LockoutTriggerRepository(db)
     triggers.create(round_.bbbffl_round_id, "early-1", "selective", 1, [9001], actor=ACTOR, reason="mistaken early")
     triggers.remove(round_.bbbffl_round_id, "early-1", actor=ACTOR, reason="unnecessary")
     assert [t.trigger_key for t in triggers.list_triggers(round_.bbbffl_round_id)] == []
+    removed = next(
+        t for t in triggers.list_triggers(round_.bbbffl_round_id, include_removed=True) if t.trigger_key == "early-1"
+    )
 
     triggers.configure(
         round_.bbbffl_round_id,
@@ -259,12 +271,46 @@ def test_reconfiguring_a_removed_trigger_key_un_removes_it():
         [9005],
         actor=ACTOR,
         reason="actually needed after all",
-        expected_revision=0,
+        expected_revision=removed.revision,
     )
     active = triggers.list_triggers(round_.bbbffl_round_id)
     assert [t.trigger_key for t in active] == ["early-1"]
     assert active[0].removed_at is None
     assert active[0].afl_match_ids == (9005,)
+
+
+def test_configure_treats_an_unobserved_absence_as_genuinely_stale_once_a_trigger_has_been_removed():
+    """Codex review (PR #220, P1, round 3): the ABA hole a prior fix left
+    open -- a client that loaded the round *before* `early-1` ever existed
+    (and therefore, like any client that has never seen the key, would
+    naturally submit `expected_revision=0`) must not be able to silently
+    resurrect it merely because a concurrent create-then-remove cycle
+    happened to also leave it "absent" from the active plan. Removal
+    advancing the revision (not reusing/freezing the pre-removal number,
+    and never resetting to 0) means 0 can only ever match a key that
+    genuinely never had a row at all."""
+    db = migrated_connection()
+    round_, _entries = configured(db, 2619)
+    triggers = LockoutTriggerRepository(db)
+    triggers.create(round_.bbbffl_round_id, "early-1", "selective", 1, [9001], actor=ACTOR, reason="created by B")
+    triggers.remove(round_.bbbffl_round_id, "early-1", actor=ACTOR, reason="removed by B")
+    assert [t.trigger_key for t in triggers.list_triggers(round_.bbbffl_round_id)] == []
+
+    with pytest.raises(StaleTriggerRevisionError):
+        triggers.configure(
+            round_.bbbffl_round_id,
+            "early-1",
+            "selective",
+            1,
+            [9001],
+            actor=ACTOR,
+            reason="A, unaware early-1 was ever created or removed",
+            expected_revision=0,
+        )
+    still_removed = next(
+        t for t in triggers.list_triggers(round_.bbbffl_round_id, include_removed=True) if t.trigger_key == "early-1"
+    )
+    assert still_removed.removed_at is not None
 
 
 def test_configure_rejects_a_stale_expected_revision_that_ignores_a_concurrent_removal():

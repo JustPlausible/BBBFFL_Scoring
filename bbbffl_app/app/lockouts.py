@@ -860,28 +860,33 @@ class LockoutTriggerRepository:
         # is free for reuse and it no longer constrains selective-precedes-
         # main ordering.
         existing = next((row for row in rows if row["trigger_key"] == trigger_key), None)
-        # Codex review (PR #220, P1): `current_revision` does not change
-        # when a trigger is removed, but every caller that computes
-        # `expected_revision` from an *active*-plan read (`list_triggers`'s
-        # own default, which every production caller -- the preflight UI,
-        # Finals-to-SuperScore sync -- uses) sees a removed trigger as
-        # simply absent, and would therefore compute 0, not its frozen raw
-        # revision. Comparing against the raw revision here would either
-        # silently let a stale, removal-unaware submission clear a
-        # concurrent removal (the submitter's `expected_revision` still
-        # matching the untouched raw revision), or spuriously reject the
-        # documented "reconfigure un-removes it" path with a
-        # `StaleTriggerRevisionError` its own `expected_revision=0` should
-        # have satisfied. A removed header's *effective* revision for this
-        # comparison is therefore 0 -- identical to a trigger key that was
-        # never created at all -- while the real, monotonic `current_
-        # revision` below (used for the actual bump) is never reset.
-        existing_active = existing if (existing is not None and existing["removed_at"] is None) else None
-        effective_revision = existing_active["current_revision"] if existing_active is not None else 0
-        if expected_revision is not None and effective_revision != expected_revision:
+        # Codex review (PR #220, P1, round 2): always compares the row's
+        # real, tamper-evident `current_revision` -- never a value that
+        # collapses "removed" to the same 0 a truly-never-created key would
+        # also present. A prior version of this check treated a removed
+        # header as effectively absent (0) so a caller's naturally-computed
+        # "this key doesn't exist" `expected_revision` would still succeed
+        # -- but that made "never existed" indistinguishable from "existed,
+        # then someone removed it", an ABA hole: a client that loaded state
+        # *before* a key was ever created, then submitted after a
+        # concurrent create-then-remove cycle, would still match 0 and
+        # silently resurrect the removed trigger, undoing that removal
+        # decision it never even observed. Comparing the real revision
+        # closes this: only a caller that actually observed the removed
+        # row (via `get`/`list_triggers(include_removed=True)`, which
+        # reports its true, frozen `current_revision`) can knowingly
+        # reconfigure/un-remove it by submitting that same value. The
+        # Finals-to-SuperScore sync path resolves this safely and
+        # automatically because it reads each trigger's current row --
+        # active or removed -- fresh, inside the same locked transaction
+        # as the write it informs (see `_apply_trigger_sync`'s own
+        # `ss_triggers_including_removed_by_key`), never a separate,
+        # racy round-trip the way an interactive HTTP submission is.
+        current_revision = existing["current_revision"] if existing is not None else 0
+        if expected_revision is not None and current_revision != expected_revision:
             raise StaleTriggerRevisionError(
                 f"Trigger {trigger_key!r} has changed since it was loaded (expected revision "
-                f"{expected_revision}, current revision {effective_revision}). Reload the current authoritative "
+                f"{expected_revision}, current revision {current_revision}). Reload the current authoritative "
                 "lockout plan before deciding."
             )
         others = [row for row in rows if row["trigger_key"] != trigger_key and row["removed_at"] is None]
@@ -1076,9 +1081,38 @@ class LockoutTriggerRepository:
             ).fetchall()
         ]
         now = _now()
+        # Codex review (PR #220, P1, round 3): removal advances `current_
+        # revision` too -- by duplicating the unchanged configuration
+        # (identical trigger_type/sequence/match_ids) into a new revision
+        # row, never by reusing the old revision number -- so the optimistic-
+        # concurrency counter `_configure_locked`'s comparison reads is a
+        # genuine, tamper-evident generation: "removed at revision N+1" is
+        # never the same number as "never created" (0) *or* the trigger's
+        # own pre-removal revision N, closing the ABA hole either of those
+        # collisions would otherwise open (a stale client holding N, or one
+        # that never observed the trigger at all and assumes 0, must not be
+        # able to match the post-removal state by coincidence). The
+        # configuration itself is untouched -- this is a pure status/
+        # generation bump, not a new decision -- so duplicating it (rather
+        # than, say, nulling it out) keeps `get`/`list_triggers(include_
+        # removed=True)` reporting exactly what was removed at its own
+        # current revision, consistent with every other revision read.
+        new_revision = head["current_revision"] + 1
+        self._insert_revision(
+            conn,
+            head["trigger_id"],
+            new_revision,
+            current["trigger_type"],
+            current["sequence"],
+            match_ids,
+            actor,
+            reason,
+            now,
+        )
         conn.execute(
-            "UPDATE bbbffl_round_lockout_trigger SET removed_at=?, removed_by=?, removed_reason=? WHERE trigger_id=?",
-            (now, actor.actor_id, reason, head["trigger_id"]),
+            "UPDATE bbbffl_round_lockout_trigger SET current_revision=?, removed_at=?, removed_by=?, "
+            "removed_reason=? WHERE trigger_id=?",
+            (new_revision, now, actor.actor_id, reason, head["trigger_id"]),
         )
         append_event(
             conn,
@@ -1086,7 +1120,7 @@ class LockoutTriggerRepository:
             action=LOCKOUT_TRIGGER_REMOVED,
             entity_type=ENTITY_TYPE_LOCKOUT_TRIGGER,
             entity_id=head["trigger_id"],
-            entity_version=str(head["current_revision"]),
+            entity_version=str(new_revision),
             reason=reason,
             after_state={
                 "trigger_type": current["trigger_type"],

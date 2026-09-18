@@ -85,6 +85,19 @@ audit/history display. Reconfiguring the same trigger key afterwards (via
 once the trigger has activated -- see "Historical lock irreversibility"
 below.
 
+Removal also advances the trigger's own `revision` counter (Codex review,
+PR #220): it duplicates the unchanged configuration -- identical
+`trigger_type`/`sequence`/`afl_match_ids` -- into a new revision row
+rather than reusing the pre-removal number, so `expected_revision`'s
+optimistic-concurrency comparison (below) never conflates "this key was
+never created at all" (0) with "it existed and was later removed" (some
+real, non-zero revision). A caller that wants to reconfigure/un-remove a
+key it has actually observed as removed (via `get`/`list_triggers(include_
+removed=True)`) submits that trigger's own current revision, exactly like
+reconfiguring any other existing trigger; a caller that never observed the
+key at all still submits 0, and 0 only ever matches a genuinely
+never-created key.
+
 ## Player -> AFL match resolution
 
 `app.lockouts.resolve_match(afl_team_id, matches)` matches a selected

@@ -585,30 +585,31 @@ def _build_finals_section(
     }
 
 
-def _entry_action_required(review_status: str, adjudication_available: bool, effective_entry: dict | None) -> bool:
+def _entry_action_required(review_status: str, adjudication_available: bool, review_blockers: list | None) -> bool:
     """Whether a SuperScore entry's collapsed row (issue #216) should
     visibly flag scorer attention -- derived only from facts the existing
-    DNP/vacancy/Interchange review/readiness model already computes: this
-    dashboard's own `review_status`/`adjudication_available`, and each
-    slot's `dnp_recommendation`/`dnp_ruling` in `effective_entry` (the
-    identical `actionable` test `scorer_dashboard.html`'s `slotHtml`
-    already applies when the row is expanded -- never a second, divergent
-    rule). Once published, an entry's rulings are frozen and no further
-    scorer action is possible from this dashboard."""
+    review/readiness model already computes: this dashboard's own
+    `review_status`/`adjudication_available`, and `review_blockers` --
+    `app.superscore_results._effective_entry`/`_side_review`'s own
+    authoritative blocker list, persisted verbatim on the calculation
+    snapshot and the exact list `SuperScoreLeaderboardService.publish`
+    itself refuses to publish through
+    (`app/superscore_results.py::_assemble_entry`). Codex review, PR #217
+    (P2): an earlier version of this function re-scanned only starter-slot
+    `dnp_recommendation`/`dnp_ruling` pairs, which misses a vacant-starter-
+    with-unresolved-Interchange-assignment blocker `_side_review` also
+    raises -- consuming the authoritative list directly (never a second,
+    partial reconstruction of the DNP/vacancy/Interchange business rules
+    here) covers every blocker category by construction. Once published,
+    an entry's rulings are frozen and no further scorer action is possible
+    from this dashboard."""
     if review_status == "published":
         return False
     if review_status in ("not_submitted", "stale_calculation"):
         return True
     if adjudication_available:
         return True
-    if effective_entry is not None:
-        for slot in effective_entry.get("slots") or ():
-            if slot.get("dnp_ruling") is None and slot.get("dnp_recommendation") in (
-                "review_required",
-                "recommend_dnp",
-            ):
-                return True
-    return False
+    return bool(review_blockers)
 
 
 def _build_superscore_section(database, identities, afl_client, season, week_number, superscore_round_id):
@@ -689,6 +690,7 @@ def _build_superscore_section(database, identities, afl_client, season, week_num
         else:
             total_score = None
         effective_entry = snapshot["effective_entry"] if snapshot is not None else None
+        review_blockers = snapshot.get("review_blockers") if snapshot is not None else None
         entries.append(
             {
                 **team,
@@ -700,7 +702,7 @@ def _build_superscore_section(database, identities, afl_client, season, week_num
                 "effective_entry": effective_entry,
                 "ruling_url": SUPERSCORE_RULING_URL.format(round_id=superscore_round_id, season_entry_id=entry_id),
                 "action_required": _entry_action_required(
-                    review_status, team["adjudication_available"], effective_entry
+                    review_status, team["adjudication_available"], review_blockers
                 ),
             }
         )

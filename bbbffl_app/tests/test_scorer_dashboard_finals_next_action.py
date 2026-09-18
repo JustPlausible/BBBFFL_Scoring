@@ -19,6 +19,7 @@ from app.coach_lineup import CoachLineupService
 from app.competition_lifecycle import CompetitionLifecycleRepository
 from app.finals import FinalsBracketRepository
 from app.finals_preflight import open_finals_week
+from app.finals_superscore_dashboard import _entry_action_required
 from app.identity import IdentityRepository
 from app.round_review import RoundReviewRepository
 from app.scorer_dashboard import build_scorer_dashboard, season_round_options
@@ -462,3 +463,26 @@ def test_finals_and_superscore_both_final_reports_the_week_as_published(dashboar
     body = response.json()["dashboard"]
     assert body["superscore"]["lifecycle_state"] == "final"
     assert body["next_action"]["code"] == "finals_week_published"
+
+
+def test_entry_action_required_consumes_the_authoritative_review_blockers_list():
+    """Codex review (PR #217, P2): a vacant starter slot with a real,
+    available Interchange candidate but no recorded assignment ruling is a
+    genuine publish-blocking condition (`app.round_review._side_review`'s
+    own `review_blockers`, the exact list `SuperScoreLeaderboardService.
+    publish` refuses to publish through) even when no starter slot itself
+    carries an unresolved DNP recommendation. An earlier version of
+    `_entry_action_required` only re-scanned starter-slot `dnp_ruling`/
+    `dnp_recommendation` pairs and missed this blocker class entirely --
+    it must instead consume the authoritative `review_blockers` list
+    directly, covering every blocker category by construction."""
+    unresolved = ["Team X F3: interchange recommendation unresolved for vacant position(s) F3"]
+    assert _entry_action_required("calculated", False, unresolved) is True
+    assert _entry_action_required("calculated", False, []) is False
+    assert _entry_action_required("calculated", False, None) is False
+    # Published entries are frozen -- never flagged regardless of blockers.
+    assert _entry_action_required("published", False, unresolved) is False
+    # Pre-calculation states are unaffected by this change.
+    assert _entry_action_required("not_submitted", False, None) is True
+    assert _entry_action_required("stale_calculation", False, None) is True
+    assert _entry_action_required("calculated", True, None) is True

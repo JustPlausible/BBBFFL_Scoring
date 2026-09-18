@@ -301,6 +301,23 @@ def test_ordinary_dashboard_reports_finals_complete_once_every_week_is_published
     assert dashboard["next_action"]["code"] == "finals_complete"
 
 
+def test_ordinary_dashboard_bridge_does_not_skip_a_published_week_with_incomplete_superscore():
+    """Codex review (PR #217, P2): the ordinary-dashboard Finals-phase
+    bridge must not silently `continue` past a `final` finals week whose
+    concurrent SuperScore round still needs review/publication -- mirrors
+    the equivalent fix already made to the composed Finals-week
+    dashboard's own next-action guidance (`_finals_week_next_action`)."""
+    built = _open_finals_week1_and_superscore1(year=2818)
+    database = built["database"]
+    mark_finals_round_final(database, built["week1_round_id"])
+
+    dashboard = _dashboard(database, built["season"].season_id)
+    assert dashboard["next_action"]["code"] == "finals_week_superscore_incomplete"
+    assert dashboard["next_action"]["url"] == (
+        f"/scorer?season_id={built['season'].season_id}&round_id={built['week1_round_id']}"
+    )
+
+
 # -- 6. Collapsed SuperScore rows expose required attention -----------------
 
 

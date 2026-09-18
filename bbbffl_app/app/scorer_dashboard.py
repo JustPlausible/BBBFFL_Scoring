@@ -725,10 +725,36 @@ def _finals_phase_next_action(database, lifecycle, season_id: str) -> dict | Non
         round_id = bracket_repo.get_week_round_id(bracket_id, week_number)
         persisted = lifecycle.get_round(round_id)
         state = persisted.state if persisted else "not_created"
-        if state == "final":
-            continue
         week_label = WEEK_LABELS.get(week_number, f"Finals Week {week_number}")
         dashboard_url = SCORER_DASHBOARD_URL.format(season_id=season_id, round_id=round_id)
+        if state == "final":
+            # Codex review (PR #217, P2): Finals reaching `final` says
+            # nothing about the concurrent SuperScore round's own,
+            # independent review/publication lifecycle -- the composed
+            # Finals-week dashboard's own next-action guidance already
+            # accounts for this; this ordinary-dashboard bridge must not
+            # silently skip past a published week whose SuperScore round
+            # still needs attention.
+            ss_row = database.execute(
+                "SELECT sr.bbbffl_round_id FROM bbbffl_round sr "
+                "JOIN competition_stream sc ON sc.competition_id=sr.competition_id "
+                "WHERE sc.season_id=? AND sc.stream_type='superscore' AND sr.round_key=?",
+                (season_id, f"ss{week_number}"),
+            ).fetchone()
+            if ss_row is not None:
+                ss_persisted = lifecycle.get_round(ss_row["bbbffl_round_id"])
+                ss_state = ss_persisted.state if ss_persisted else "not_created"
+                if ss_state != "final":
+                    return NextAction(
+                        "finals_week_superscore_incomplete",
+                        CATEGORY_DECISION_REQUIRED,
+                        f"{week_label} published -- SuperScore still needs attention",
+                        f"Finals for {week_label} is published, but the concurrent SuperScore round is still "
+                        f"{ss_state}; continue its review/publication workflow.",
+                        dashboard_url,
+                        capability="round.review",
+                    ).__dict__
+            continue
         if state in ("not_created", "upcoming"):
             preflight = build_finals_week_preflight(database, bracket_id, week_number)
             blockers = preflight["readiness"]["blockers"]

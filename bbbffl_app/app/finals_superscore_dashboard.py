@@ -139,6 +139,18 @@ def build_finals_progression_preview(database, identities, season, bracket_id: s
         "new_pairings": [],
         "elimination": None,
     }
+    if from_week not in (1, 2, 3):
+        # Codex review (PR #217, P2): `FinalsBracketRepository.
+        # preview_advance_bracket` (unlike `advance_bracket`) does not
+        # itself validate `from_week` -- its internal derivation treats any
+        # value other than 1 or 2 as week 3, so an out-of-range request
+        # (e.g. 4, once the bracket has already reached the Grand Final)
+        # could return a misleadingly "ready" report mislabelled as
+        # targeting a week beyond the Grand Final, which `advance_bracket`
+        # would then reject. Mirror `advance_bracket`'s own range check
+        # here, before ever calling the domain preview.
+        report["diagnostic"] = f"from_week must be 1, 2, or 3 (received {from_week})"
+        return report
     entry_names = {entry.season_entry_id: entry.team_name for entry in identities.list_entries(season.season_id)}
     try:
         preview = FinalsBracketRepository(database).preview_advance_bracket(bracket_id, from_week)

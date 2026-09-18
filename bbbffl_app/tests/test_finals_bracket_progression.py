@@ -186,3 +186,42 @@ def test_preview_then_apply_with_the_preview_own_expected_versions_succeeds(fina
     )
     assert apply.status_code == 200, apply.text
     assert len(repo.list_pairings(bracket.bracket_id, week_number=2)) == 2
+
+
+def test_preview_rejects_an_out_of_range_from_week_instead_of_a_misleading_ready_report(finals_client):
+    """Codex review (PR #217, P2): `FinalsBracketRepository.preview_advance_
+    bracket`'s internal derivation treats any `from_week` other than 1 or 2
+    as week 3 -- once the bracket has reached the Grand Final, an
+    out-of-range `from_week=4` request would otherwise return a `ready`
+    report mislabelled as targeting a week beyond the Grand Final, which
+    `advance_bracket` itself would then reject with a 409/ValueError."""
+    _built, bracket = _seed_bracket(finals_client, year=2708)
+    database = finals_client.app.state.database
+    repo = FinalsBracketRepository(database)
+    finals_client.post(f"/api/admin/finals/{bracket.bracket_id}/weeks/1/open")
+    week1 = {p.slot: p for p in repo.list_pairings(bracket.bracket_id, week_number=1)}
+    seed_official_result(database, week1["qf"].matchup_id, 100, 50)
+    seed_official_result(database, week1["ef"].matchup_id, 50, 100)
+    repo.advance_bracket(bracket.bracket_id, 1, actor=ACTOR, reason="advance from week 1")
+
+    finals_client.post(f"/api/admin/finals/{bracket.bracket_id}/weeks/2/open")
+    week2 = {p.slot: p for p in repo.list_pairings(bracket.bracket_id, week_number=2)}
+    seed_official_result(database, week2["second_semi"].matchup_id, 100, 50)
+    seed_official_result(database, week2["first_semi"].matchup_id, 100, 50)
+    repo.advance_bracket(bracket.bracket_id, 2, actor=ACTOR, reason="advance from week 2")
+
+    finals_client.post(f"/api/admin/finals/{bracket.bracket_id}/weeks/3/open")
+    week3 = {p.slot: p for p in repo.list_pairings(bracket.bracket_id, week_number=3)}
+    seed_official_result(database, week3["preliminary"].matchup_id, 100, 50)
+    repo.advance_bracket(bracket.bracket_id, 3, actor=ACTOR, reason="advance from week 3")
+    assert len(repo.list_pairings(bracket.bracket_id, week_number=4)) == 1
+
+    response = finals_client.get(f"/api/admin/finals/{bracket.bracket_id}/advance/4/preview")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["ready"] is False
+    assert "from_week must be 1, 2, or 3" in body["diagnostic"]
+    assert body["new_pairings"] == []
+
+    apply = finals_client.post(f"/api/admin/finals/{bracket.bracket_id}/advance/4", params={"reason": "should fail"})
+    assert apply.status_code in (400, 409, 422)

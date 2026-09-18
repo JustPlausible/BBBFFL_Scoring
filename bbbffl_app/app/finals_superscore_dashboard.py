@@ -57,6 +57,7 @@ from app.scorer_dashboard import (
     CATEGORY_DECISION_REQUIRED,
     CATEGORY_WAITING,
     NO_AUTHORITATIVE_SUBMISSION_STATES,
+    SCORER_DASHBOARD_URL,
     NextAction,
     compute_round_readiness,
     round_stream_type,
@@ -247,19 +248,20 @@ def build_finals_week_dashboard(database, lifecycle, identities, round_review_re
         "week_label": WEEK_LABELS.get(week_number, f"Finals Week {week_number}"),
         "round_options": round_options,
         "round": None,
-        "next_action": _finals_week_next_action(finals_section, superscore_section),
+        "next_action": _finals_week_next_action(finals_section, superscore_section, season.season_id),
         "finals": finals_section,
         "superscore": superscore_section,
     }
 
 
-def _finals_week_next_action(finals_section: dict, superscore_section: dict) -> dict:
+def _finals_week_next_action(finals_section: dict, superscore_section: dict, season_id: str) -> dict:
     """The Finals-week composed dashboard's own "next safe action" (issue
     #216), mirroring `app.scorer_dashboard._determine_next_action`'s
     vocabulary and category conventions for the ordinary dashboard rather
-    than inventing a parallel one. Reads only facts `finals_section`
-    already computed (lifecycle state, preflight readiness, the
-    `progression` block above) -- never a fresh domain read of its own."""
+    than inventing a parallel one. Reads only facts `finals_section`/
+    `superscore_section` already computed (lifecycle state, preflight
+    readiness, the `progression`/`blocked_by_week` blocks above) -- never a
+    fresh domain read of its own."""
     if not finals_section.get("available"):
         return NextAction(
             "finals_not_available",
@@ -272,6 +274,7 @@ def _finals_week_next_action(finals_section: dict, superscore_section: dict) -> 
     state = finals_section["lifecycle_state"]
     week_label = finals_section["week_label"]
     progression = finals_section.get("progression")
+    blocked_by_week = finals_section.get("blocked_by_week")
 
     if progression is not None and progression["reason"] == "pairing_missing":
         return NextAction(
@@ -285,6 +288,22 @@ def _finals_week_next_action(finals_section: dict, superscore_section: dict) -> 
         ).__dict__
 
     if state in ("not_created", "upcoming"):
+        # Codex review (PR #217, P2): a bracket-progression preview can only
+        # ever succeed once the *prior* week is `final` -- when this week's
+        # own pairing is missing because that prior week is still
+        # incomplete, direct the operator to finish it (with a direct link)
+        # rather than to a preflight blocker list that never explains what
+        # "satisfy every blocker" actually requires here.
+        if blocked_by_week is not None:
+            return NextAction(
+                "finals_prior_week_incomplete",
+                CATEGORY_BLOCKING,
+                f"Complete {blocked_by_week['week_label']} first",
+                f"{week_label} has no pairing yet because {blocked_by_week['week_label']} is still "
+                f"{blocked_by_week['state']}; finish and publish it before {week_label} can be prepared.",
+                SCORER_DASHBOARD_URL.format(season_id=season_id, round_id=blocked_by_week["round_id"]),
+                capability="round.review",
+            ).__dict__
         preflight = finals_section.get("preflight")
         if preflight is not None and preflight["readiness"]["safe_to_open"]:
             suffix = " (and its concurrent SuperScore round)" if superscore_section.get("available") else ""
@@ -334,6 +353,22 @@ def _finals_week_next_action(finals_section: dict, superscore_section: dict) -> 
                 f"{progression['target_week_label']}.",
                 None,
                 capability="roundsetup.manage",
+            ).__dict__
+        # Codex review (PR #217, P2): Finals and SuperScore have separate
+        # review/publication lifecycles -- Finals reaching `final` says
+        # nothing about whether the concurrent SuperScore round has also
+        # been calculated/reviewed/published, so this must not report the
+        # week as fully done while SuperScore work remains.
+        if superscore_section.get("available") and superscore_section.get("lifecycle_state") != "final":
+            ss_state = superscore_section["lifecycle_state"]
+            return NextAction(
+                "finals_week_superscore_incomplete",
+                CATEGORY_DECISION_REQUIRED,
+                f"{week_label} published -- SuperScore still needs attention",
+                f"Finals for {week_label} is published, but the concurrent SuperScore round is still "
+                f"{ss_state}; continue its review/publication workflow below.",
+                None,
+                capability="round.review",
             ).__dict__
         return NextAction(
             "finals_week_published",
@@ -452,24 +487,44 @@ def _build_finals_section(
     # operator is looking at, in whichever of the two directions is
     # relevant -- never a silent auto-advance:
     #   - this week itself has no pairing yet (`week_number > 1` and no
-    #     bye/matchups were derived) -- the operator opened/selected a week
-    #     before the prior week's result(s) were progressed;
+    #     bye/matchups were derived) *and* the prior week is actually
+    #     `final` -- the operator opened/selected the now-ready-to-progress
+    #     week before running that progression;
     #   - or this week just published and the *next* week's pairing has not
     #     been derived yet -- the natural "what's next" nudge right after
     #     the week an operator just finished.
+    # Codex review (PR #217, P2): a progression preview/apply can only ever
+    # succeed once the *source* week is `final` (`FinalsBracketRepository.
+    # advance_bracket`'s own precondition) -- since every week's round now
+    # exists from bracket creation (issue #216's own selector work), an
+    # operator can reach an unmaterialised week whose predecessor is still
+    # `not_created`/`upcoming`/`open`/`live`. Advertising bracket
+    # progression as the next safe action there would send them to a
+    # preview that can only report a diagnostic; `blocked_by_week` instead
+    # names the prior week to actually finish first.
     progression = None
+    blocked_by_week = None
     if week_number > 1 and bye is None and not matchups:
         from_week = week_number - 1
-        progression = {
-            "reason": "pairing_missing",
-            "from_week": from_week,
-            "from_week_label": WEEK_LABELS.get(from_week, f"Finals Week {from_week}"),
-            "from_week_state": _week_lifecycle_state(database, bracket_id, from_week),
-            "target_week": week_number,
-            "target_week_label": WEEK_LABELS.get(week_number, f"Finals Week {week_number}"),
-            "preview_url": FINALS_ADVANCE_PREVIEW_URL.format(bracket_id=bracket_id, from_week=from_week),
-            "apply_url": FINALS_ADVANCE_URL.format(bracket_id=bracket_id, from_week=from_week),
-        }
+        from_week_state = _week_lifecycle_state(database, bracket_id, from_week)
+        if from_week_state == "final":
+            progression = {
+                "reason": "pairing_missing",
+                "from_week": from_week,
+                "from_week_label": WEEK_LABELS.get(from_week, f"Finals Week {from_week}"),
+                "from_week_state": from_week_state,
+                "target_week": week_number,
+                "target_week_label": WEEK_LABELS.get(week_number, f"Finals Week {week_number}"),
+                "preview_url": FINALS_ADVANCE_PREVIEW_URL.format(bracket_id=bracket_id, from_week=from_week),
+                "apply_url": FINALS_ADVANCE_URL.format(bracket_id=bracket_id, from_week=from_week),
+            }
+        else:
+            blocked_by_week = {
+                "week_number": from_week,
+                "week_label": WEEK_LABELS.get(from_week, f"Finals Week {from_week}"),
+                "state": from_week_state,
+                "round_id": bracket_repo.get_week_round_id(bracket_id, from_week),
+            }
     elif lifecycle_state == "final" and week_number in (1, 2, 3):
         next_pairings = bracket_repo.list_pairings(bracket_id, week_number=week_number + 1)
         if not next_pairings:
@@ -502,6 +557,7 @@ def _build_finals_section(
         "lockout_evidence_unavailable": readiness["lockout_evidence_error"],
         "superscore_open_pending": superscore_open_pending,
         "progression": progression,
+        "blocked_by_week": blocked_by_week,
         "open_week_url": (
             FINALS_OPEN_PAIRED_URL.format(bracket_id=bracket_id, week_number=week_number)
             if superscore_round_id is not None

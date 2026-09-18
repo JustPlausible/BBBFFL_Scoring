@@ -80,6 +80,11 @@ def test_pairing_missing_progression_renders_a_preview_button_and_next_action_ca
     built, bracket = _bracket_with_mappings(year=2820)
     database = built["database"]
     _open_and_seed_week1(built, bracket, qf_result=(100, 50), ef_result=(50, 100))
+    week1_round_id = FinalsBracketRepository(database).get_week_round_id(bracket.bracket_id, 1)
+    # Codex review (PR #217, P2): the progression cue only applies once the
+    # source week is genuinely `final` -- mark it so here, matching the
+    # domain's own `advance_bracket` precondition.
+    mark_finals_round_final(database, week1_round_id)
     week2_round_id = FinalsBracketRepository(database).get_week_round_id(bracket.bracket_id, 2)
 
     dashboard = build_finals_week_dashboard(
@@ -102,6 +107,35 @@ def test_pairing_missing_progression_renders_a_preview_button_and_next_action_ca
     # Not yet fetched -- the confirm/apply control must not appear until
     # the operator has explicitly requested and seen the preview.
     assert "Confirm and advance bracket" not in html
+
+
+def test_pairing_missing_without_a_final_source_week_never_renders_a_progression_button(tmp_path):
+    """Codex review (PR #217, P2): a progression preview/apply can only
+    ever succeed once the source week is `final` -- while Finals Week 1 is
+    still `open`, selecting Finals Week 2 (pairing missing) must not offer
+    "Preview bracket progression" at all, only guidance to finish Week 1."""
+    built, bracket = _bracket_with_mappings(year=2823)
+    database = built["database"]
+    _open_and_seed_week1(built, bracket, qf_result=(100, 50), ef_result=(50, 100))
+    week2_round_id = FinalsBracketRepository(database).get_week_round_id(bracket.bracket_id, 2)
+
+    dashboard = build_finals_week_dashboard(
+        database,
+        CompetitionLifecycleRepository(database),
+        IdentityRepository(database),
+        RoundReviewRepository(database),
+        _StubAflClient(),
+        built["season"],
+        week2_round_id,
+    )
+    payload = jsonable_encoder(dashboard)
+    assert payload["finals"]["progression"] is None
+    assert payload["finals"]["blocked_by_week"]["week_label"] == "Finals Week 1"
+    assert payload["next_action"]["code"] == "finals_prior_week_incomplete"
+
+    html = _rendered_html(payload, tmp_path, "harness_blocked_by_prior_week")
+    assert "Preview bracket progression" not in html
+    assert "Complete Finals Week 1 first" in html
 
 
 def test_ready_to_progress_after_publication_renders_a_preview_button(tmp_path):

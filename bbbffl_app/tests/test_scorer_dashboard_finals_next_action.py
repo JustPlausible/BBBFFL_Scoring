@@ -205,6 +205,7 @@ def test_replay_operator_sees_progression_but_not_as_actionable_for_them(dashboa
     database = client.app.state.database
     built, bracket = _bracket_with_mappings(year=2813, database=database)
     _open_and_seed_week1(built, bracket, qf_result=(100, 50), ef_result=(50, 100))
+    mark_finals_round_final(database, FinalsBracketRepository(database).get_week_round_id(bracket.bracket_id, 1))
     week2_round_id = FinalsBracketRepository(database).get_week_round_id(bracket.bracket_id, 2)
     operator = Principal(Role.REPLAY_OPERATOR, display_name="Operator")
     client.app.dependency_overrides[require_scorer_dashboard] = lambda: operator
@@ -340,3 +341,107 @@ def test_published_superscore_entries_are_never_flagged_action_required(dashboar
     entries = response.json()["dashboard"]["superscore"]["entries"]
     assert all(e["review_status"] == "published" for e in entries)
     assert all(e["action_required"] is False for e in entries)
+
+
+# -- Codex review, PR #217 (P2): gate progression on the source week being
+# ready, and account for unfinished SuperScore work before calling a
+# published Finals week "done".
+
+
+def test_pairing_missing_without_a_final_source_week_points_to_completing_it_instead(dashboard_client):
+    """A progression preview/apply can only ever succeed once the source
+    week is genuinely `final` (`FinalsBracketRepository.advance_bracket`'s
+    own precondition). Since the round selector now exposes every finals
+    week from bracket creation, an operator can select Finals Week 2 while
+    Finals Week 1 is still merely `open` -- the dashboard must not offer a
+    progression action that can only report a diagnostic, and must instead
+    point at finishing Week 1."""
+    client = dashboard_client
+    database = client.app.state.database
+    built, bracket = _bracket_with_mappings(year=2815, database=database)
+    _open_and_seed_week1(built, bracket, qf_result=(100, 50), ef_result=(50, 100))
+    week1_round_id = FinalsBracketRepository(database).get_week_round_id(bracket.bracket_id, 1)
+    week2_round_id = FinalsBracketRepository(database).get_week_round_id(bracket.bracket_id, 2)
+    _admin(client)
+
+    response = client.get(
+        "/api/scorer/dashboard", params={"season_id": built["season"].season_id, "round_id": week2_round_id}
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()["dashboard"]
+    assert body["finals"]["progression"] is None
+    blocked_by = body["finals"]["blocked_by_week"]
+    assert blocked_by["week_number"] == 1
+    assert blocked_by["week_label"] == "Finals Week 1"
+    assert blocked_by["state"] == "open"
+    assert blocked_by["round_id"] == week1_round_id
+    next_action = body["next_action"]
+    assert next_action["code"] == "finals_prior_week_incomplete"
+    assert next_action["url"] == f"/scorer?season_id={built['season'].season_id}&round_id={week1_round_id}"
+
+
+def test_finals_published_but_superscore_incomplete_is_not_reported_as_fully_done(dashboard_client):
+    """Finals and SuperScore have independent review/publication
+    lifecycles -- Finals reaching `final` must not report the whole week
+    as "published" while the concurrent SuperScore round still needs
+    calculation/review/publication."""
+    client = dashboard_client
+    database = client.app.state.database
+    built = _open_finals_week1_and_superscore1(year=2816, database=database)
+    bracket = built["bracket"]
+    repo = FinalsBracketRepository(database)
+    pairings = {p.slot: p for p in repo.list_pairings(bracket.bracket_id, week_number=1)}
+    seed_official_result(database, pairings["qf"].matchup_id, 100, 50)
+    seed_official_result(database, pairings["ef"].matchup_id, 50, 100)
+    # Materialise Week 2's pairing so Finals Week 1's own next action isn't
+    # instead "ready to progress the bracket" -- this test isolates the
+    # SuperScore-incompleteness gap specifically.
+    repo.advance_bracket(bracket.bracket_id, 1, actor=ACTOR, reason="materialise week 2 for SS-incomplete test")
+    mark_finals_round_final(database, built["week1_round_id"])
+    _admin(client)
+
+    response = client.get(
+        "/api/scorer/dashboard", params={"season_id": built["season"].season_id, "round_id": built["week1_round_id"]}
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()["dashboard"]
+    assert body["finals"]["lifecycle_state"] == "final"
+    assert body["finals"]["progression"] is None
+    assert body["superscore"]["available"] is True
+    assert body["superscore"]["lifecycle_state"] != "final"
+    assert body["next_action"]["code"] == "finals_week_superscore_incomplete"
+
+
+def test_finals_and_superscore_both_final_reports_the_week_as_published(dashboard_client):
+    """The positive counterpart: once SuperScore is also published, the
+    week-level next action reverts to the simple "published" advisory."""
+    client = dashboard_client
+    database = client.app.state.database
+    built = _open_finals_week1_and_superscore1(year=2817, database=database)
+    bracket = built["bracket"]
+    repo = FinalsBracketRepository(database)
+    pairings = {p.slot: p for p in repo.list_pairings(bracket.bracket_id, week_number=1)}
+    seed_official_result(database, pairings["qf"].matchup_id, 100, 50)
+    seed_official_result(database, pairings["ef"].matchup_id, 50, 100)
+    repo.advance_bracket(bracket.bracket_id, 1, actor=ACTOR, reason="materialise week 2 for SS-complete test")
+    mark_finals_round_final(database, built["week1_round_id"])
+
+    service = CoachLineupService(database, afl_client=_StubAflClient())
+    for entry_obj in built["entries"]:
+        coach_id = _coach_id(database, entry_obj.season_entry_id)
+        entry = service.resolve(coach_id, built["season"].season_id, built["ss1_round_id"])
+        draft = service.ensure_draft(built["season"].season_id, built["ss1_round_id"], entry)
+        service.submit(draft, submission_version=0, coach_id=coach_id)
+    advance_round_to_review(database, built["ss1_round_id"], actor=ACTOR, reason="advance for publish")
+    SuperScoreLeaderboardService(database, _StubAflClient()).publish(
+        built["ss1_round_id"], actor=ACTOR, reason="publish for test"
+    )
+    _admin(client)
+
+    response = client.get(
+        "/api/scorer/dashboard", params={"season_id": built["season"].season_id, "round_id": built["week1_round_id"]}
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()["dashboard"]
+    assert body["superscore"]["lifecycle_state"] == "final"
+    assert body["next_action"]["code"] == "finals_week_published"

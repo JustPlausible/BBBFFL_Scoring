@@ -434,6 +434,84 @@ def test_lockout_trigger_activation_table_is_immutable(tmp_path):
             conn.execute(text("DELETE FROM bbbffl_round_lockout_trigger_activation"))
 
 
+def test_upgrade_through_lockout_trigger_removal_preserves_a_populated_database(tmp_path):
+    """Issue #219, Codex review (PR #220, P1): the 0034 batch rebuild of
+    `bbbffl_round_lockout_trigger` (to add the removal columns/CHECK
+    constraint) must succeed against a *populated* SQLite database --
+    every real 2026 replay database this migration actually runs against.
+    Every configured trigger has a referencing `bbbffl_round_lockout_
+    trigger_revision` row (`ON DELETE RESTRICT`), so the rebuild's own
+    `DROP TABLE` of the old parent fails FK enforcement unless suspended
+    for it, exactly like 0027/0029 already had to for their own rebuilds."""
+    from tests.test_competition_lifecycle import operational
+
+    url = _url(tmp_path / "lockout-trigger-removal-populated.db")
+    migrate(url, "0033_season_award")
+    connection = connect(url)
+    _, round_, _entries = operational(connection, 2026, 3)
+    # Raw inserts, matching the pre-0034 schema exactly (no `removed_at`/
+    # `removed_by`/`removed_reason` columns yet) -- `LockoutTriggerRepository`
+    # itself already assumes the 0034 schema and cannot be used to seed a
+    # database still sitting at 0033.
+    with connection.engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO bbbffl_round_lockout_trigger VALUES (:id, :round, :key, :rev, :created)"),
+            {"id": "t1", "round": round_.bbbffl_round_id, "key": "main", "rev": 1, "created": "2026-01-01T00:00:00Z"},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO bbbffl_round_lockout_trigger_revision VALUES "
+                "(:id, :rev, :type, :seq, :created, :by, :reason)"
+            ),
+            {
+                "id": "t1",
+                "rev": 1,
+                "type": "main",
+                "seq": 1,
+                "created": "2026-01-01T00:00:00Z",
+                "by": None,
+                "reason": None,
+            },
+        )
+        conn.execute(
+            text("INSERT INTO bbbffl_round_lockout_trigger_match VALUES (:id, :rev, :match)"),
+            {"id": "t1", "rev": 1, "match": 1},
+        )
+
+    migrate(url)  # to head (0034) -- must not raise
+    engine = create_engine(url)
+    columns = {c["name"] for c in inspect(engine).get_columns("bbbffl_round_lockout_trigger")}
+    assert {"removed_at", "removed_by", "removed_reason"} <= columns
+    with engine.begin() as conn:
+        assert conn.execute(text("SELECT trigger_key FROM bbbffl_round_lockout_trigger")).scalar_one() == "main"
+
+
+def test_lockout_trigger_removal_downgrade_refuses_loss_of_a_removed_trigger(tmp_path):
+    """Issue #219, Codex review (PR #220, P1): the pre-0034 schema cannot
+    represent a removed trigger at all -- downgrading past 0034 after a
+    real removal would silently discard `removed_at`/`removed_reason`,
+    and the prior application would then see that trigger's preserved
+    header/current_revision as active again, resurrecting a deliberately
+    reversed decision."""
+    from app.audit import ActorContext
+    from app.lockouts import LockoutTriggerRepository
+    from tests.test_competition_lifecycle import operational
+
+    url = _url(tmp_path / "lockout-trigger-removal-downgrade.db")
+    migrate(url)
+    connection = connect(url)
+    _, round_, _entries = operational(connection, 2026, 4)
+    triggers = LockoutTriggerRepository(connection)
+    triggers.create(round_.bbbffl_round_id, "early-1", "selective", 1, [1], reason="fixture")
+    triggers.create(round_.bbbffl_round_id, "main", "main", 2, [2], reason="fixture")
+
+    triggers.remove(
+        round_.bbbffl_round_id, "early-1", actor=ActorContext.anonymous_operator("test"), reason="unnecessary"
+    )
+    with pytest.raises(RuntimeError, match="0034 downgrade refused"):
+        downgrade(url, "0033_season_award")
+
+
 def test_upgrade_from_lineup_correction_head_adds_adjudication_and_draft_provenance_schema(tmp_path):
     """Issue #146."""
     url = _url(tmp_path / "adjudication-upgrade.db")

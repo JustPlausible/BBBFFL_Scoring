@@ -35,7 +35,16 @@ def upgrade():
     # plain `op.add_column`/`op.create_check_constraint`, matching this
     # migration series' established convention (e.g. 0025, 0029) --
     # SQLite's ALTER TABLE cannot add a CHECK constraint to an existing
-    # table directly.
+    # table directly. On a populated SQLite database (every real 2026
+    # replay database this migration must actually run against), the
+    # batch rebuild's own `DROP TABLE bbbffl_round_lockout_trigger` fails
+    # FK enforcement unless it is suspended for these statements -- every
+    # configured trigger has a referencing `bbbffl_round_lockout_trigger_
+    # revision` row (`ON DELETE RESTRICT`) -- see the matching comment/
+    # pattern in 0027 and 0029 (Codex review, PR #220, P1).
+    bind = op.get_bind()
+    if bind.dialect.name == "sqlite":
+        op.execute("PRAGMA foreign_keys=OFF")
     with op.batch_alter_table("bbbffl_round_lockout_trigger") as batch:
         batch.add_column(sa.Column("removed_at", sa.Text(), nullable=True))
         batch.add_column(sa.Column("removed_by", sa.Text(), nullable=True))
@@ -45,11 +54,33 @@ def upgrade():
             "(removed_at IS NULL AND removed_by IS NULL AND removed_reason IS NULL) OR "
             "(removed_at IS NOT NULL AND removed_reason IS NOT NULL)",
         )
+    if bind.dialect.name == "sqlite":
+        op.execute("PRAGMA foreign_keys=ON")
 
 
 def downgrade():
+    # Codex review (PR #220, P1): the pre-0034 schema has no removal
+    # concept at all -- downgrading past this migration after any trigger
+    # has actually been removed would silently discard `removed_at`/
+    # `removed_by`/`removed_reason`, and the prior application would then
+    # see that trigger's preserved header/current_revision as active again
+    # (able to activate/score against), resurrecting a decision an operator
+    # deliberately reversed. Refused exactly like this migration series'
+    # other irreversible-history downgrades (e.g. 0033's `season_award`).
+    bind = op.get_bind()
+    if bind.execute(
+        sa.text("SELECT COUNT(*) FROM bbbffl_round_lockout_trigger WHERE removed_at IS NOT NULL")
+    ).scalar_one():
+        raise RuntimeError(
+            "0034 downgrade refused: one or more lockout triggers have been removed; the pre-0034 schema "
+            "cannot represent that fact and downgrading would silently resurrect them as active"
+        )
+    if bind.dialect.name == "sqlite":
+        op.execute("PRAGMA foreign_keys=OFF")
     with op.batch_alter_table("bbbffl_round_lockout_trigger") as batch:
         batch.drop_constraint("ck_lockout_trigger_removal_all_or_none", type_="check")
         batch.drop_column("removed_reason")
         batch.drop_column("removed_by")
         batch.drop_column("removed_at")
+    if bind.dialect.name == "sqlite":
+        op.execute("PRAGMA foreign_keys=ON")

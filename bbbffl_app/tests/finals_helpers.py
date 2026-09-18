@@ -110,6 +110,73 @@ def seed_finals_seeding_snapshot_row(database, season_id: str, competition_id: s
             )
 
 
+def publish_finals_week_with_vacant_lineups(
+    database, afl_client, bracket, week_number: int, season_id: str, *, actor, reason: str | None = None
+):
+    """Issue #216: submits a fully-vacant (every position `None`, a valid
+    deliberate submission -- see `app.routes.coach_lineup`'s vacancy-
+    confirmation convention, exactly as `tests.test_coach_lineup_finals_
+    superscore` already relies on) lineup for every non-bye participant in
+    one finals week, then drives that week the whole way through `open ->
+    live -> review -> final` via the real `FinalsBracketRepository.
+    advance_week_to_review`/`app.finals_review.publish_finals_round`
+    pipeline -- never a hand-crafted lifecycle row. For tests that need a
+    finals week to reach a genuinely-persisted `final` state (the actual
+    trigger the Scorer bracket-progression UI reads) without each building
+    its own real per-player scoring fixture."""
+    from app.coach_lineup import CoachLineupService
+    from app.competition_lifecycle import CompetitionLifecycleRepository
+    from app.finals import FinalsBracketRepository
+    from app.finals_review import publish_finals_round
+    from app.identity import IdentityRepository
+    from app.round_review import RoundReviewRepository
+
+    repo = FinalsBracketRepository(database)
+    round_id = repo.get_week_round_id(bracket.bracket_id, week_number)
+    pairings = repo.list_pairings(bracket.bracket_id, week_number=week_number)
+    participant_entry_ids = sorted(
+        {p.home_season_entry_id for p in pairings if p.slot != "bye"}
+        | {p.away_season_entry_id for p in pairings if p.slot != "bye" and p.away_season_entry_id}
+    )
+    service = CoachLineupService(database, afl_client=afl_client)
+    for entry_id in participant_entry_ids:
+        coach_row = database.execute(
+            "SELECT coach_id FROM season_entry_coach_history WHERE season_entry_id=? AND ended_at IS NULL",
+            (entry_id,),
+        ).fetchone()
+        entry = service.resolve(coach_row["coach_id"], season_id, round_id)
+        draft = service.ensure_draft(season_id, round_id, entry)
+        service.submit(draft, submission_version=0, coach_id=coach_row["coach_id"])
+
+    default_reason = reason or f"issue #216 test publish -- finals week {week_number}"
+    repo.advance_week_to_review(bracket.bracket_id, week_number, actor=actor, reason=default_reason)
+    lifecycle = CompetitionLifecycleRepository(database)
+    round_review_repo = RoundReviewRepository(database)
+    identities = IdentityRepository(database)
+    return publish_finals_round(
+        database, afl_client, lifecycle, round_review_repo, identities, round_id, actor=actor, reason=default_reason
+    )
+
+
+def mark_finals_round_final(database, round_id: str) -> None:
+    """Directly sets a finals week's already-persisted round lifecycle to
+    `final` -- exactly the same raw-SQL technique `correct_official_result`
+    below already uses to reach a `final` finals round for tests. For tests
+    that need to exercise logic gated on that persisted lifecycle fact
+    (e.g. the Scorer bracket-progression cue, issue #216) without each
+    building a full lineup-driven `advance_week_to_review`/`publish_finals_
+    round` fixture -- `app.finals`'s own bracket-advance reads never depend
+    on round-level state at all, only on `bbbffl_matchup`/`bbbffl_official_
+    result`, so this never changes what `advance_bracket` itself would do.
+    `round_id` must already have a persisted lifecycle row (the week has
+    been opened)."""
+    with database.engine.begin() as conn:
+        conn.execute(
+            text("UPDATE bbbffl_round_lifecycle SET state='final' WHERE bbbffl_round_id=:round_id"),
+            {"round_id": round_id},
+        )
+
+
 def correct_official_result(database, matchup_id: str, home_score, away_score, *, reason: str):
     """The normal audited correction boundary Steve's confirmed policy
     refers to -- `CompetitionLifecycleRepository.correct_matchup_result`

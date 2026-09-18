@@ -87,6 +87,13 @@ LINEUP_CORRECTION_URL = "/scorer/lineup-correction/{round_id}"
 LINEUP_ADJUDICATION_URL = "/scorer/lineup-adjudication/{round_id}"
 DELEGATED_LINEUP_URL = "/operations/rounds/{round_id}/lineup"
 PUBLIC_ROUND_CENTRE_URL = "/seasons/{season_id}/rounds/{round_id}"
+# Issue #216: the Scorer dashboard's own page, deep-linked to a specific
+# round -- both ordinary and finals/superscore round_ids resolve here
+# (`app.routes.scorer_dashboard.get_dashboard` dispatches on stream type),
+# so this is the one URL "prepare/open the next thing" guidance ever needs
+# to hand back, whether that next thing is an ordinary round or a finals
+# week.
+SCORER_DASHBOARD_URL = "/scorer?season_id={season_id}&round_id={round_id}"
 
 
 @dataclass(frozen=True)
@@ -202,7 +209,46 @@ def _round_option(row: dict) -> dict:
         "round_label": row["round_label"],
         "sequence": row["sequence"],
         "state": row["round_state"] or "not_created",
+        "stream": "ordinary",
     }
+
+
+def season_round_options(database, season_id: str) -> list[dict]:
+    """The complete Scorer Round selector sequence for one season (issue
+    #216): every ordinary round (unchanged, `ordinary_rounds_with_lifecycle`
+    order) followed by each Finals week's own round, in week order --
+    "Finals Week 1", "Finals Week 2", "Preliminary Final", "Grand Final" --
+    once a finals bracket exists for this season. Never a UUID the
+    operator must already know, and never a separate SS1-4 entry: picking
+    a finals week's `bbbffl_round_id` here already routes (`app.routes.
+    scorer_dashboard.get_dashboard`'s existing stream dispatch, issue #208)
+    to the composed Finals+SuperScore dashboard, which carries the
+    concurrent SuperScore round itself. Shared by both `build_scorer_
+    dashboard` and `app.finals_superscore_dashboard.build_finals_week_
+    dashboard` so the selector is identical regardless of which round is
+    currently open (issue #153: the two dashboards must never disagree
+    about which rounds exist)."""
+    options = [_round_option(row) for row in ordinary_rounds_with_lifecycle(database, season_id)]
+    finals_rows = database.execute(
+        "SELECT w.bbbffl_round_id, w.week_number, w.label round_label, l.state round_state "
+        "FROM finals_bracket_week w "
+        "JOIN finals_bracket b ON b.bracket_id=w.bracket_id "
+        "LEFT JOIN bbbffl_round_lifecycle l ON l.bbbffl_round_id=w.bbbffl_round_id "
+        "WHERE b.season_id=? "
+        "ORDER BY w.week_number",
+        (season_id,),
+    ).fetchall()
+    options += [
+        {
+            "bbbffl_round_id": row["bbbffl_round_id"],
+            "round_label": row["round_label"],
+            "sequence": None,
+            "state": row["round_state"] or "not_created",
+            "stream": "finals",
+        }
+        for row in finals_rows
+    ]
+    return options
 
 
 def _entry_ids_for_round(database, identities, season_id: str, competition_id: str, round_id: str) -> list[str]:
@@ -655,8 +701,84 @@ def _sort_key(item: dict) -> tuple:
     return (CATEGORY_ORDER.index(item["category"]), item.get("title") or "")
 
 
+def _finals_phase_next_action(database, lifecycle, season_id: str) -> dict | None:
+    """Bridges ordinary-season completion into the Finals phase (issue
+    #216): `_determine_next_action`'s existing `final`/no-next-ordinary-
+    round branch used to dead-end at "season complete" the instant Round
+    20 published, even once a finals bracket existed and had its own next
+    safe action waiting -- an operator had to already know the finals
+    bracket/week UUIDs to continue. Returns `None` (defer to the ordinary
+    "season complete" advisory, unchanged) when this season has no finals
+    bracket at all -- creating one is a separate, existing workflow this
+    issue does not reopen. Reuses exactly the same persisted lifecycle/
+    preflight facts the finals-week dashboard itself reads, never a
+    parallel lifecycle model."""
+    from app.finals import WEEK_LABELS, FinalsBracketRepository
+    from app.finals_preflight import build_finals_week_preflight
+
+    bracket_row = database.execute("SELECT bracket_id FROM finals_bracket WHERE season_id=?", (season_id,)).fetchone()
+    if bracket_row is None:
+        return None
+    bracket_id = bracket_row["bracket_id"]
+    bracket_repo = FinalsBracketRepository(database)
+    for week_number in (1, 2, 3, 4):
+        round_id = bracket_repo.get_week_round_id(bracket_id, week_number)
+        persisted = lifecycle.get_round(round_id)
+        state = persisted.state if persisted else "not_created"
+        if state == "final":
+            continue
+        week_label = WEEK_LABELS.get(week_number, f"Finals Week {week_number}")
+        dashboard_url = SCORER_DASHBOARD_URL.format(season_id=season_id, round_id=round_id)
+        if state in ("not_created", "upcoming"):
+            preflight = build_finals_week_preflight(database, bracket_id, week_number)
+            blockers = preflight["readiness"]["blockers"]
+            if any(b["code"] == "pairing_missing" for b in blockers):
+                return NextAction(
+                    "finals_bracket_progression_required",
+                    CATEGORY_BLOCKING,
+                    f"Progress the bracket to prepare {week_label}",
+                    f"{week_label} has no pairing yet; preview and apply bracket progression from the prior "
+                    "finals week's result(s).",
+                    dashboard_url,
+                    capability="roundsetup.manage",
+                ).__dict__
+            if preflight["readiness"]["safe_to_open"]:
+                return NextAction(
+                    "finals_week_ready_to_open",
+                    CATEGORY_BLOCKING,
+                    f"Open {week_label}",
+                    f"{week_label} preflight is satisfied; open the finals week.",
+                    dashboard_url,
+                    capability="roundsetup.manage",
+                ).__dict__
+            return NextAction(
+                "finals_week_preflight_incomplete",
+                CATEGORY_BLOCKING,
+                f"Complete {week_label} preflight",
+                f"Accept the AFL mapping and satisfy every preflight blocker before {week_label} can open.",
+                dashboard_url,
+                capability="roundsetup.manage",
+            ).__dict__
+        return NextAction(
+            "finals_week_in_progress",
+            CATEGORY_ADVISORY,
+            f"{week_label} in progress",
+            f"{week_label} is {state}; open the Finals + SuperScore Scorer view to continue.",
+            dashboard_url,
+        ).__dict__
+    return NextAction(
+        "finals_complete",
+        CATEGORY_ADVISORY,
+        "Finals complete",
+        "Every finals week is published. No further finals action is required from the Scorer dashboard.",
+        None,
+    ).__dict__
+
+
 def _determine_next_action(
     *,
+    database,
+    lifecycle,
     lifecycle_state: str,
     preflight: dict | None,
     trigger_rows: list[dict],
@@ -872,6 +994,9 @@ def _determine_next_action(
                 PREFLIGHT_URL.format(round_id=next_round_id),
                 capability="roundsetup.manage",
             ).__dict__
+        finals_next_action = _finals_phase_next_action(database, lifecycle, season_id)
+        if finals_next_action is not None:
+            return finals_next_action
         return NextAction(
             "published_season_complete",
             CATEGORY_ADVISORY,
@@ -998,7 +1123,7 @@ def build_scorer_dashboard(
 
     rounds = ordinary_rounds_with_lifecycle(database, season_id)
     selected = select_current_round(rounds, round_id)
-    round_options = [_round_option(row) for row in rounds]
+    round_options = season_round_options(database, season_id)
     season_view = {"season_id": season.season_id, "year": season.year, "label": season.label}
 
     if selected is None:
@@ -1260,6 +1385,8 @@ def _build_round_dashboard(
         None,
     )
     next_action = _determine_next_action(
+        database=database,
+        lifecycle=lifecycle,
         lifecycle_state=lifecycle_state,
         preflight=preflight,
         trigger_rows=trigger_rows,

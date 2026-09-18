@@ -75,6 +75,9 @@ th{color:#8b949e;font-weight:600}
 .diagnostics>summary{cursor:pointer;color:#79c0ff;font-weight:600}
 .stream-section{margin:22px 0}
 .stream-section>h2{margin-top:0}
+.action-badge{display:inline-block;background:#f85149;color:#1a0f0f;font-weight:700;padding:2px 8px;border-radius:999px;font-size:.78rem}
+tr.action-required td:first-child{border-left:4px solid #f85149}
+.progression{border-left:5px solid #d29922}
 @media(max-width:640px){
   header,main{padding:10px}
   table thead{display:none}
@@ -130,8 +133,16 @@ function renderContext(ctx){
 }
 
 function renderSelectors(seasons,dashboard){
+  // Issue #216: the unified round selector now carries both ordinary
+  // rounds and every Finals week -- `dashboardRoundId` already knows how
+  // to resolve "the round currently on screen" for either an ordinary
+  // (`dashboard.round`) or a composed finals-week (`dashboard.finals`/
+  // `dashboard.superscore`) payload, so reuse it here instead of the
+  // ordinary-only `dashboard.round.bbbffl_round_id` check that previously
+  // left a selected finals week unhighlighted in its own dropdown.
+  const selectedRoundId=dashboardRoundId(dashboard);
   const seasonOptions=seasons.map(s=>`<option value="${esc(s.season_id)}" ${s.season_id===current.season_id?'selected':''}>${esc(s.label)} (${esc(s.year)})</option>`).join('');
-  const roundOptions=(dashboard&&dashboard.round_options||[]).map(r=>`<option value="${esc(r.bbbffl_round_id)}" ${dashboard.round&&r.bbbffl_round_id===dashboard.round.bbbffl_round_id?'selected':''}>${esc(r.round_label)} · ${esc(r.state)}</option>`).join('');
+  const roundOptions=(dashboard&&dashboard.round_options||[]).map(r=>`<option value="${esc(r.bbbffl_round_id)}" ${r.bbbffl_round_id===selectedRoundId?'selected':''}>${esc(r.round_label)} · ${esc(r.state)}</option>`).join('');
   document.querySelector('#selectors').innerHTML=`
     ${seasons.length>1?`<label>Season <select id="season-select" aria-label="Select season">${seasonOptions}</select></label>`:''}
     ${dashboard&&dashboard.round_options&&dashboard.round_options.length?`<label>Round <select id="round-select" aria-label="Select round">${roundOptions}</select></label>`:''}`;
@@ -231,6 +242,21 @@ function workflowLinkOrNote(item){
   return `<a class="item-link" href="${esc(item.url)}">Open workflow →</a>`;
 }
 
+// Issue #216: shared "Next safe action" card, previously only rendered
+// inline for the ordinary dashboard -- the finals-week composed dashboard
+// now carries its own `next_action` (`app.finals_superscore_dashboard.
+// _finals_week_next_action`) in the identical shape/category vocabulary,
+// so both surfaces render it the same way.
+function nextActionHtml(na,headingId){
+  if(!na)return '';
+  return `<section class="card next-action category-${esc(na.category)}" aria-labelledby="${esc(headingId)}">
+    <h2 id="${esc(headingId)}">Next safe action</h2>
+    <p style="font-size:1.05rem;font-weight:700">${esc(na.title)}</p>
+    <p>${esc(na.detail)}</p>
+    ${workflowLinkOrNote(na)}
+  </section>`;
+}
+
 function attentionGroup(category,label,items){
   if(!items.length)return '';
   const open=category!=='completed'&&category!=='advisory';
@@ -299,6 +325,38 @@ function finalsPreflightHtml(preflight){
   return `<p><span class="pill ${preflight.readiness.safe_to_open?'state-open':'state-upcoming'}">${preflight.readiness.safe_to_open?'Ready to open':'Not yet ready to open'}</span></p>${blockers}`;
 }
 
+// -- Bracket progression preview/apply (issue #216): the existing
+// `FinalsBracketRepository.preview_advance_bracket`/`advance_bracket`
+// domain path (issue #190/#201), previously reachable only from the CLI,
+// surfaced as an explicit "preview, then confirm" web workflow -- never a
+// silent auto-advance merely because a finals week published.
+
+function progressionPreviewBodyHtml(preview){
+  if(!preview.ready){
+    return `<p class="warn">⚠ ${esc(preview.diagnostic)}</p>`;
+  }
+  const pairings=preview.new_pairings.map(p=>`<div class="team-card"><h4>${esc(p.slot_label)}</h4><div>${esc(p.home_team_name||'Unknown team')} v ${esc(p.away_team_name||'Unknown team')}</div></div>`).join('');
+  const elimination=preview.elimination?`<p class="muted">Eliminated: <strong>${esc(preview.elimination.team_name||'Unknown team')}</strong> (${esc(preview.elimination.stage)})</p>`:'';
+  return `<div class="cards">${pairings}</div>${elimination}
+    <p class="muted">Source result version(s) locked for this progression (re-checked on confirm): <code>${esc(JSON.stringify(preview.expected_versions))}</code></p>
+    <div class="control"><input id="progression-reason" placeholder="Reason (required)"><button class="primary" data-progression-apply>Confirm and advance bracket to ${esc(preview.target_week_label)}</button></div>`;
+}
+
+function progressionHtml(progression){
+  if(!progression)return '';
+  const heading=progression.reason==='pairing_missing'
+    ?`${esc(progression.from_week_label)} is ${esc(progression.from_week_state)}, but ${esc(progression.target_week_label)} has no pairing yet.`
+    :`${esc(progression.from_week_label)} is published. Progress the bracket to prepare ${esc(progression.target_week_label)}.`;
+  if(progression.actionable_by_you===false){
+    return `<div class="card progression"><p class="warn">⚠ ${heading}</p><p class="muted">Requires <code>roundsetup.manage</code> authority, not held by your active role. A Secretary or Administrator can preview and apply: <a href="${esc(progression.preview_url)}">${esc(progression.preview_url)}</a></p></div>`;
+  }
+  return `<div class="card progression">
+    <p class="warn">⚠ ${heading}</p>
+    <div class="control"><button data-progression-preview>Preview bracket progression</button></div>
+    <div class="progression-preview" hidden></div>
+  </div>`;
+}
+
 function finalsActionsHtml(finals){
   const actions=[];
   // Issue #211 P1 (Codex review, round 2): keep the (paired) open-week
@@ -330,6 +388,7 @@ function renderFinalsSection(finals){
     ${bye}
     <div class="cards">${matchupSummaries||'<p class="muted">No finals pairing for this week yet.</p>'}</div>
     ${finals.preflight?finalsPreflightHtml(finals.preflight):''}
+    ${progressionHtml(finals.progression)}
     ${finalsActionsHtml(finals)}
     ${finals.review?finalsReviewHtml(finals):''}
     <h3>Finals lineup readiness (${finals.lineups.length} participating teams)</h3>
@@ -357,8 +416,14 @@ function superscoreEntryRow(entry){
   else links.push(`<span class="disabled">Correction n/a</span>`);
   if(entry.adjudication_available)links.push(`<a href="${esc(entry.adjudication_url)}">Adjudicate missed submission</a>`);
   links.push(`<a href="${esc(entry.delegated_lineup_url)}">Delegated entry</a>`);
-  return `<tr>
-    <td data-label="Team"><strong>${esc(entry.team_name||'Unknown team')}</strong><div class="muted">${esc(entry.coach_name||'')}</div></td>
+  // Issue #216: `action_required` is computed server-side (`app.finals_
+  // superscore_dashboard._entry_action_required`) from the existing SS
+  // DNP/vacancy/Interchange review/readiness model -- this row only
+  // renders the flag it is handed, never infers it independently.
+  const rowClass=entry.action_required?' class="action-required"':'';
+  const actionBadge=entry.action_required?' <span class="action-badge" title="Requires DNP/vacancy/Interchange ruling">⚠ Action required</span>':'';
+  return `<tr${rowClass}>
+    <td data-label="Team"><strong>${esc(entry.team_name||'Unknown team')}</strong>${actionBadge}<div class="muted">${esc(entry.coach_name||'')}</div></td>
     <td data-label="State"><span class="state-badge submission-${esc(entry.submission_state)}">${esc(entry.submission_state.replace('_',' '))}</span></td>
     <td data-label="Submission">${entry.submission_version?`v${esc(entry.submission_version)} · ${human(entry.submitted_at)}`:'None'}${entry.submission_source_type?` · ${esc(entry.submission_source_type)}`:''}</td>
     <td data-label="Private draft">${entry.has_private_draft?`revision ${esc(entry.draft_revision)} · ${human(entry.draft_updated_at)}`:'None saved'}</td>
@@ -390,6 +455,7 @@ function superscoreSectionHtml(superscore){
 function renderFinalsWeekDashboard(dashboard){
   document.querySelector('#app').innerHTML=`
     <section class="card"><h2>${esc(dashboard.season.label)} · ${esc(dashboard.week_label)}</h2><p class="muted">Concurrent finals + SuperScore operator surface for this AFL finals week (issue #208).</p></section>
+    ${nextActionHtml(dashboard.next_action,'finals-next-action-heading')}
     <div class="stream-section">${renderFinalsSection(dashboard.finals)}</div>
     <div class="stream-section">${superscoreSectionHtml(dashboard.superscore)}</div>`;
   wireFinalsWeek(dashboard);
@@ -454,6 +520,49 @@ function wireFinalsWeek(dashboard){
       season_entry_id:b.dataset.entry,position:b.dataset.slot,override_score:inputs[0].value===''?null:+inputs[0].value,reason:inputs[1].value,expected_review_version:+b.dataset.ver
     });
   });
+  wireProgression(dashboard.finals&&dashboard.finals.available?dashboard.finals.progression:null);
+}
+
+// Issue #216: preview (`GET .../advance/{from_week}/preview`, read-only)
+// then explicit confirm-and-apply (`POST .../advance/{from_week}`, the
+// existing, unmodified domain/HTTP advance path) -- never applied without
+// the operator first seeing the human-readable preview and entering a
+// reason. Closed over the `progression` object straight from the
+// dashboard payload rather than round-tripping it through a DOM data
+// attribute.
+function wireProgression(progression){
+  const previewButton=document.querySelector('[data-progression-preview]');
+  if(!previewButton||!progression)return;
+  previewButton.onclick=async()=>{
+    const out=document.querySelector('.progression-preview');
+    try{
+      const preview=await api(progression.preview_url);
+      out.hidden=false;
+      out.innerHTML=progressionPreviewBodyHtml(preview);
+      wireProgressionApply(out,progression.apply_url,preview);
+    }catch(e){
+      msg('Unable to preview bracket progression: '+e.message);
+    }
+  };
+}
+
+function wireProgressionApply(container,applyUrl,preview){
+  const applyButton=container.querySelector('[data-progression-apply]');
+  if(!applyButton)return;
+  applyButton.onclick=()=>{
+    const reasonInput=container.querySelector('#progression-reason');
+    const reason=reasonInput&&reasonInput.value?reasonInput.value:'';
+    if(!reason)return alert('A reason is required to advance the bracket.');
+    const qs=new URLSearchParams({reason,expected_versions:JSON.stringify(preview.expected_versions)});
+    api2(`${applyUrl}?${qs}`,{},'POST').then(result=>{
+      // Issue #216: jump straight to the newly prepared next finals week
+      // rather than reloading the (now-superseded) week just progressed
+      // from -- `target_round_id` names it directly, no CLI/UUID lookup.
+      current.round_id=result.target_round_id||current.round_id;
+      updateUrlParams(current.season_id,current.round_id);
+      return load();
+    }).catch(e=>load().then(()=>msg('Bracket progression failed: '+e.message)));
+  };
 }
 
 function renderDashboard(dashboard){
@@ -469,12 +578,7 @@ function renderDashboard(dashboard){
       <p><span class="pill state-${esc(r.state)}">${esc(r.state)}</span> AFL season ${esc(r.afl_season_id??'—')} / round ${esc(r.afl_round_id??'—')} (mapping revision ${esc(r.mapping_revision??'—')})</p>
       <div class="grid-links"><a href="${esc(r.public_round_centre_url)}">Public Round Centre</a><a href="${esc(r.round_centre_url)}">Scorer Round Centre</a><a href="${esc(r.preflight_url)}">Round Preflight</a></div>
     </section>
-    <section class="card next-action category-${esc(na.category)}" aria-labelledby="next-action-heading">
-      <h2 id="next-action-heading">Next safe action</h2>
-      <p style="font-size:1.05rem;font-weight:700">${esc(na.title)}</p>
-      <p>${esc(na.detail)}</p>
-      ${workflowLinkOrNote(na)}
-    </section>
+    ${nextActionHtml(na,'next-action-heading')}
     <section class="card" aria-labelledby="attention-heading">
       <h2 id="attention-heading">Scorer attention queue</h2>
       ${attentionHtml(dashboard.attention)}

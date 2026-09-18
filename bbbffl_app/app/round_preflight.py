@@ -18,7 +18,13 @@ from contextlib import nullcontext
 
 from app.afl_client import is_recognized_match_status, normalize_match_status
 from app.finals import SLOT_LABELS, WEEK_LABELS, FinalsBracketRepository
-from app.lockouts import LockoutTriggerRepository, StaleTriggerRevisionError, TriggerValidationError
+from app.lockouts import (
+    LockoutTriggerRepository,
+    StaleTriggerRevisionError,
+    TriggerAlreadyActivatedError,
+    TriggerAlreadyRemovedError,
+    TriggerValidationError,
+)
 from app.opening_round import (
     OpeningRoundNominationRepository,
     OpeningRoundRuleRepository,
@@ -39,12 +45,15 @@ from app.round_mapping import (
 __all__ = [
     "StaleMappingRevisionError",
     "StaleTriggerRevisionError",
+    "TriggerAlreadyActivatedError",
+    "TriggerAlreadyRemovedError",
     "TriggerValidationError",
     "accept_preflight_mapping",
     "build_round_preflight",
     "configure_preflight_trigger",
     "open_preflight_round",
     "recommend_lockout_plan",
+    "remove_preflight_trigger",
 ]
 
 
@@ -181,6 +190,19 @@ def configure_preflight_trigger(database, round_id, payload, afl_client, *, acto
         expected_revision=payload.expected_revision,
         expected_mapping_revision=mapping.revision,
     )
+
+
+def remove_preflight_trigger(database, round_id, trigger_key, *, actor, reason):
+    """The safe Scorer-facing correction path for an unnecessary,
+    unactivated lockout trigger (issue #219) -- e.g. a mistaken selective
+    trigger created alongside `main`, which the domain previously had no
+    supported way to remove (only to revise/retarget via `configure_
+    preflight_trigger` above). Delegates entirely to `LockoutTrigger
+    Repository.remove`, the one place activation-irreversibility and audit
+    history are enforced; this function adds no rule of its own and works
+    identically for an ordinary or a finals round, exactly like `configure_
+    preflight_trigger` -- both are round-stream-agnostic."""
+    return LockoutTriggerRepository(database).remove(round_id, trigger_key, actor=actor, reason=reason)
 
 
 def open_preflight_round(lifecycle, round_id, *, actor):

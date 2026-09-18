@@ -229,7 +229,13 @@ from typing import Protocol
 from sqlalchemy.exc import IntegrityError
 
 from app.afl_client import AflApiError, Match, is_recognized_match_status, normalize_match_status
-from app.audit import ENTITY_TYPE_LOCKOUT_TRIGGER, LOCKOUT_TRIGGER_CONFIGURED, ActorContext, append_event
+from app.audit import (
+    ENTITY_TYPE_LOCKOUT_TRIGGER,
+    LOCKOUT_TRIGGER_CONFIGURED,
+    LOCKOUT_TRIGGER_REMOVED,
+    ActorContext,
+    append_event,
+)
 from app.db import _for_update_suffix, transaction
 from app.lineups import POSITIONS
 from app.season import _id, _now
@@ -308,6 +314,13 @@ class TriggerValidationError(LockoutIntegrityError):
     round, so this can never be bypassed by a stale/racing snapshot."""
 
 
+class TriggerAlreadyRemovedError(LockoutIntegrityError):
+    """An attempt was made to remove a trigger key that has already been
+    removed (issue #219) -- distinct from `KeyError` (the trigger key never
+    existed at all), so a double-submitted removal is reported clearly
+    rather than silently treated as a no-op."""
+
+
 class StaleTriggerRevisionError(RuntimeError):
     """A trigger configuration was submitted against a revision that is no
     longer current for that trigger key -- checked atomically under the
@@ -372,6 +385,15 @@ class LockoutTrigger:
     created_at: str
     created_by: str | None
     reason: str | None
+    # Issue #219: a header-level fact, exactly like activation -- set only
+    # by `LockoutTriggerRepository.remove`, never by `create`/`replace`/
+    # `configure` (which instead clear it, see `_configure_locked`, when a
+    # previously-removed trigger key is reconfigured). `list_triggers`
+    # excludes a removed trigger by default; pass `include_removed=True` to
+    # see it (e.g. for audit/history display).
+    removed_at: str | None = None
+    removed_by: str | None = None
+    removed_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -634,7 +656,8 @@ class LockoutTriggerRepository:
             trigger_id, revision, now = _id(), 1, _now()
             try:
                 conn.execute(
-                    "INSERT INTO bbbffl_round_lockout_trigger VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO bbbffl_round_lockout_trigger "
+                    "(trigger_id, bbbffl_round_id, trigger_key, current_revision, created_at) VALUES (?, ?, ?, ?, ?)",
                     (trigger_id, bbbffl_round_id, trigger_key, revision, now),
                 )
             except IntegrityError as exc:
@@ -815,12 +838,20 @@ class LockoutTriggerRepository:
                     "Reload the current authoritative mapping and matches before configuring this trigger."
                 )
         rows = conn.execute(
-            "SELECT t.trigger_id, t.trigger_key, t.current_revision, r.trigger_type, r.sequence "
+            "SELECT t.trigger_id, t.trigger_key, t.current_revision, t.removed_at, r.trigger_type, r.sequence "
             "FROM bbbffl_round_lockout_trigger t "
             "JOIN bbbffl_round_lockout_trigger_revision r ON r.trigger_id=t.trigger_id AND r.revision=t.current_revision "
             "WHERE t.bbbffl_round_id=?" + _for_update_suffix(self.database),
             (bbbffl_round_id,),
         ).fetchall()
+        # `existing` is found regardless of removed status -- reconfiguring
+        # a previously-removed trigger key (issue #219) reuses its header
+        # row and implicitly un-removes it (see the UPDATE below), exactly
+        # like `create`/`replace` always reused an unactivated trigger's
+        # row rather than erroring. `others`, used for the sequence/
+        # ordering checks below, excludes a removed trigger -- its sequence
+        # is free for reuse and it no longer constrains selective-precedes-
+        # main ordering.
         existing = next((row for row in rows if row["trigger_key"] == trigger_key), None)
         current_revision = existing["current_revision"] if existing else 0
         if expected_revision is not None and current_revision != expected_revision:
@@ -829,7 +860,7 @@ class LockoutTriggerRepository:
                 f"{expected_revision}, current revision {current_revision}). Reload the current authoritative "
                 "lockout plan before deciding."
             )
-        others = [row for row in rows if row["trigger_key"] != trigger_key]
+        others = [row for row in rows if row["trigger_key"] != trigger_key and row["removed_at"] is None]
         if sequence in {row["sequence"] for row in others}:
             raise TriggerValidationError(f"Sequence {sequence} is already used by another trigger in this round.")
         selective_sequences = [row["sequence"] for row in others if row["trigger_type"] == "selective"]
@@ -864,15 +895,22 @@ class LockoutTriggerRepository:
         if existing is not None:
             trigger_id = existing["trigger_id"]
             revision = existing["current_revision"] + 1
+            # Issue #219: reconfiguring a trigger key always leaves it
+            # active, whether or not it was previously removed -- clearing
+            # the removal fact here (a no-op when it was never set) is what
+            # lets an operator legitimately reuse a trigger key after
+            # removing it, without a separate "un-remove" action.
             conn.execute(
-                "UPDATE bbbffl_round_lockout_trigger SET current_revision=? WHERE trigger_id=?",
+                "UPDATE bbbffl_round_lockout_trigger SET current_revision=?, removed_at=NULL, removed_by=NULL, "
+                "removed_reason=NULL WHERE trigger_id=?",
                 (revision, trigger_id),
             )
         else:
             trigger_id, revision = _id(), 1
             try:
                 conn.execute(
-                    "INSERT INTO bbbffl_round_lockout_trigger VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO bbbffl_round_lockout_trigger "
+                    "(trigger_id, bbbffl_round_id, trigger_key, current_revision, created_at) VALUES (?, ?, ?, ?, ?)",
                     (trigger_id, bbbffl_round_id, trigger_key, revision, now),
                 )
             except IntegrityError as exc:
@@ -891,9 +929,109 @@ class LockoutTriggerRepository:
             after_state={"trigger_type": trigger_type, "sequence": sequence, "afl_match_ids": list(match_ids)},
         )
 
+    def remove(
+        self,
+        bbbffl_round_id: str,
+        trigger_key: str,
+        *,
+        actor: ActorContext = ActorContext.anonymous_operator("admin"),
+        reason: str,
+    ) -> None:
+        """The safe Scorer-facing correction path (issue #219) for a
+        trigger that should never have been created -- e.g. an unnecessary
+        selective trigger mistakenly added alongside `main` -- removed
+        entirely from the round's active plan before it activates, leaving
+        a valid remaining plan (main-only, if `main` is the only trigger
+        left).
+
+        Only ever a header-level fact, exactly like activation
+        (`bbbffl_round_lockout_trigger_activation`), never a delete of the
+        trigger's row or any of its revision/match history: `get`/
+        `list_triggers(include_removed=True)` can still read exactly what
+        was removed, when, by whom, and why, alongside every configuration
+        revision that preceded it. `list_triggers`'s own default view (used
+        by lockout evaluation, the Scorer dashboard/preflight display, and
+        Finals-to-SuperScore synchronisation) excludes it, so a removed
+        trigger is never evaluated for activation and never reappears as
+        part of the round's plan -- reconfiguring the same `trigger_key`
+        again (via `configure`) implicitly un-removes it (see
+        `_configure_locked`).
+
+        Refuses (`TriggerAlreadyActivatedError`) once the trigger has
+        activated -- identical to `replace`/`configure`'s own irreversibility
+        rule, enforced under the same row lock, never bypassed by this
+        being a distinct method."""
+        if not reason or not reason.strip():
+            raise ValueError("removing a trigger requires an explicit, substantive reason")
+        with transaction(self.database) as conn:
+            self._remove_locked(conn, bbbffl_round_id, trigger_key, actor=actor, reason=reason)
+
+    def _remove_locked(self, conn, bbbffl_round_id: str, trigger_key: str, *, actor: ActorContext, reason: str) -> None:
+        """The validated removal write `remove()` performs, factored out to
+        run against an already-open, already-locked transaction/connection
+        -- used by `app.finals_superscore_open`'s trigger synchronisation
+        to remove an obsolete SS-side trigger key in the exact same
+        transaction as everything else it applies, mirroring how
+        `_configure_locked` already serves `_apply_trigger_sync`."""
+        head = conn.execute(
+            "SELECT * FROM bbbffl_round_lockout_trigger WHERE bbbffl_round_id=? AND trigger_key=?"
+            + _for_update_suffix(self.database),
+            (bbbffl_round_id, trigger_key),
+        ).fetchone()
+        if not head:
+            raise KeyError((bbbffl_round_id, trigger_key))
+        if head["removed_at"] is not None:
+            raise TriggerAlreadyRemovedError(f"trigger {trigger_key!r} has already been removed")
+        if conn.execute(
+            "SELECT 1 FROM bbbffl_round_lockout_trigger_activation WHERE trigger_id=?",
+            (head["trigger_id"],),
+        ).fetchone():
+            raise TriggerAlreadyActivatedError(
+                f"trigger {trigger_key!r} has already activated; its configuration is now permanently frozen "
+                "and can never be removed"
+            )
+        current = conn.execute(
+            "SELECT r.trigger_type, r.sequence FROM bbbffl_round_lockout_trigger_revision r "
+            "WHERE r.trigger_id=? AND r.revision=?",
+            (head["trigger_id"], head["current_revision"]),
+        ).fetchone()
+        match_ids = [
+            r["afl_match_id"]
+            for r in conn.execute(
+                "SELECT afl_match_id FROM bbbffl_round_lockout_trigger_match WHERE trigger_id=? AND revision=? "
+                "ORDER BY afl_match_id",
+                (head["trigger_id"], head["current_revision"]),
+            ).fetchall()
+        ]
+        now = _now()
+        conn.execute(
+            "UPDATE bbbffl_round_lockout_trigger SET removed_at=?, removed_by=?, removed_reason=? WHERE trigger_id=?",
+            (now, actor.actor_id, reason, head["trigger_id"]),
+        )
+        append_event(
+            conn,
+            actor=actor,
+            action=LOCKOUT_TRIGGER_REMOVED,
+            entity_type=ENTITY_TYPE_LOCKOUT_TRIGGER,
+            entity_id=head["trigger_id"],
+            entity_version=str(head["current_revision"]),
+            reason=reason,
+            after_state={
+                "trigger_type": current["trigger_type"],
+                "sequence": current["sequence"],
+                "afl_match_ids": match_ids,
+                "removed": True,
+            },
+        )
+
+    _TRIGGER_COLUMNS = (
+        "t.trigger_id, t.bbbffl_round_id, t.trigger_key, r.revision, r.trigger_type, r.sequence, r.created_at, "
+        "r.created_by, r.reason, t.removed_at, t.removed_by, t.removed_reason"
+    )
+
     def get(self, bbbffl_round_id: str, trigger_key: str) -> LockoutTrigger | None:
         row = self.database.execute(
-            "SELECT t.trigger_id, t.bbbffl_round_id, t.trigger_key, r.revision, r.trigger_type, r.sequence, r.created_at, r.created_by, r.reason "
+            f"SELECT {self._TRIGGER_COLUMNS} "
             "FROM bbbffl_round_lockout_trigger t "
             "JOIN bbbffl_round_lockout_trigger_revision r ON r.trigger_id=t.trigger_id AND r.revision=t.current_revision "
             "WHERE t.bbbffl_round_id=? AND t.trigger_key=?",
@@ -903,14 +1041,25 @@ class LockoutTriggerRepository:
             return None
         return self._to_trigger(row)
 
-    def list_triggers(self, bbbffl_round_id: str) -> list[LockoutTrigger]:
-        rows = self.database.execute(
-            "SELECT t.trigger_id, t.bbbffl_round_id, t.trigger_key, r.revision, r.trigger_type, r.sequence, r.created_at, r.created_by, r.reason "
+    def list_triggers(self, bbbffl_round_id: str, *, include_removed: bool = False) -> list[LockoutTrigger]:
+        """Every trigger currently configured for this round, in
+        `(sequence, trigger_key)` order. Excludes a removed trigger (issue
+        #219) by default -- this is what every "current active plan"
+        consumer (lockout evaluation/materialization, the Scorer dashboard/
+        preflight display, Finals-to-SuperScore synchronisation) wants:
+        a removed trigger can never activate and is no longer part of the
+        plan, even though its own row/revision/audit history remains fully
+        readable via `get`/`include_removed=True`."""
+        query = (
+            f"SELECT {self._TRIGGER_COLUMNS} "
             "FROM bbbffl_round_lockout_trigger t "
             "JOIN bbbffl_round_lockout_trigger_revision r ON r.trigger_id=t.trigger_id AND r.revision=t.current_revision "
-            "WHERE t.bbbffl_round_id=? ORDER BY r.sequence, t.trigger_key",
-            (bbbffl_round_id,),
-        ).fetchall()
+            "WHERE t.bbbffl_round_id=?"
+        )
+        if not include_removed:
+            query += " AND t.removed_at IS NULL"
+        query += " ORDER BY r.sequence, t.trigger_key"
+        rows = self.database.execute(query, (bbbffl_round_id,)).fetchall()
         return [self._to_trigger(row) for row in rows]
 
     def _to_trigger(self, row) -> LockoutTrigger:
@@ -932,13 +1081,16 @@ class LockoutTriggerRepository:
             row["created_at"],
             row["created_by"],
             row["reason"],
+            row["removed_at"],
+            row["removed_by"],
+            row["removed_reason"],
         )
 
     def _reject_duplicate_main(self, conn, bbbffl_round_id, *, exclude_trigger_key):
         rows = conn.execute(
             "SELECT t.trigger_key FROM bbbffl_round_lockout_trigger t "
             "JOIN bbbffl_round_lockout_trigger_revision r ON r.trigger_id=t.trigger_id AND r.revision=t.current_revision "
-            "WHERE t.bbbffl_round_id=? AND r.trigger_type='main'",
+            "WHERE t.bbbffl_round_id=? AND r.trigger_type='main' AND t.removed_at IS NULL",
             (bbbffl_round_id,),
         ).fetchall()
         others = [r["trigger_key"] for r in rows if r["trigger_key"] != exclude_trigger_key]
@@ -1554,10 +1706,14 @@ class LockoutRepository:
             # order; sorting its returned rows afterwards is too late. Read
             # identifiers unlocked, then acquire each header lock in the
             # same deterministic order used by finals rewind.
+            # Issue #219: a removed trigger is excluded here -- it can
+            # never activate, exactly as if it had never been configured at
+            # all -- mirroring `list_triggers`'s own default exclusion.
             trigger_ids = sorted(
                 r["trigger_id"]
                 for r in conn.execute(
-                    "SELECT trigger_id FROM bbbffl_round_lockout_trigger WHERE bbbffl_round_id=?", (bbbffl_round_id,)
+                    "SELECT trigger_id FROM bbbffl_round_lockout_trigger WHERE bbbffl_round_id=? AND removed_at IS NULL",
+                    (bbbffl_round_id,),
                 ).fetchall()
             )
             if not trigger_ids:
@@ -1642,7 +1798,8 @@ class LockoutRepository:
     # -- Internals: evaluation -----------------------------------------------
     def _trigger_coverage(self, conn, bbbffl_round_id: str) -> TriggerCoverage:
         configured = conn.execute(
-            "SELECT 1 FROM bbbffl_round_lockout_trigger WHERE bbbffl_round_id=?", (bbbffl_round_id,)
+            "SELECT 1 FROM bbbffl_round_lockout_trigger WHERE bbbffl_round_id=? AND removed_at IS NULL",
+            (bbbffl_round_id,),
         ).fetchone()
         if not configured:
             return TriggerCoverage(configured=False, locked_match_ids=frozenset(), main_activated=False)

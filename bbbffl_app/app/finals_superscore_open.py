@@ -131,7 +131,7 @@ from app.competition_lifecycle import CompetitionLifecycleRepository
 from app.db import _for_update_suffix, transaction
 from app.finals import FinalsBracketRepository
 from app.finals_preflight import build_finals_week_preflight, open_finals_week
-from app.lockouts import LockoutTriggerRepository, TriggerAlreadyActivatedError
+from app.lockouts import LockoutTriggerRepository, TriggerAlreadyActivatedError, TriggerAlreadyRemovedError
 from app.round_mapping import AflApiReferenceValidator, AflReferenceValidator, RoundMappingRepository
 from app.superscore_round import confirm_afl_mapping, open_round, resolve_concurrent_finals_afl_mapping, setup_round
 
@@ -172,13 +172,24 @@ class LockoutPlanDivergedError(Exception):
     reconciled with the finals week's current one -- nothing was mutated;
     an operator must resolve the divergence directly (e.g. via
     `app.lockouts.LockoutTriggerRepository`/the round-preflight lockout
-    form) before synchronisation can proceed. Raised for two distinct
-    reasons (see `synchronise_lockout_plan_from_finals`): an obsolete SS
-    trigger key the finals plan no longer has (the repository has no
-    delete/deactivate primitive to reconcile it automatically), or a
-    genuine sequence-reordering cycle (e.g. two trigger keys swapping
-    sequences) that cannot be applied one trigger at a time without a
-    transient collision."""
+    form) before synchronisation can proceed. Raised for three distinct
+    reasons (see `synchronise_lockout_plan_from_finals`): an SS trigger key
+    with no corresponding key at all on the finals side, whether still
+    configured or removed there (never created on finals, e.g. an SS-only
+    trigger an operator configured directly -- genuinely nothing to
+    reconcile automatically); an obsolete SS trigger key the finals plan
+    removed (issue #219) that has itself already activated on SS, so it can
+    never be removed to match; or a genuine sequence-reordering cycle (e.g.
+    two trigger keys swapping sequences) that cannot be applied one trigger
+    at a time without a transient collision.
+
+    Issue #219: an SS trigger key the finals plan simply no longer has
+    *because it was explicitly removed there* is no longer one of these
+    unresolvable cases -- `LockoutTriggerRepository.remove` gives this
+    synchronisation a safe way to mirror that removal onto SS automatically
+    (see `_validate_trigger_sync_plan`'s `keys_to_remove`), rather than
+    failing closed the way an SS-only key with no finals counterpart at all
+    still correctly does."""
 
 
 def _plan_trigger_sync(ss_round_id, finals_triggers, ss_triggers_by_key):
@@ -251,7 +262,9 @@ def _plan_trigger_sync(ss_round_id, finals_triggers, ss_triggers_by_key):
     return ordered
 
 
-def _validate_trigger_sync_plan(ss_round_id, finals_triggers, ss_triggers_by_key, activated_ss_trigger_ids):
+def _validate_trigger_sync_plan(
+    ss_round_id, finals_triggers, ss_triggers_by_key, activated_ss_trigger_ids, finals_removed_keys=frozenset()
+):
     """The trigger half of `synchronise_lockout_plan_from_finals`'s
     validation -- computes what would need to change and a safe write
     order for it, entirely from already-fetched data: no database access
@@ -275,14 +288,39 @@ def _validate_trigger_sync_plan(ss_round_id, finals_triggers, ss_triggers_by_key
     several pending changes could commit an earlier, still-editable
     trigger before discovering a later one has already irreversibly
     locked, again leaving SS half-synchronised despite this function's
-    fail-closed contract."""
-    obsolete_keys = sorted(set(ss_triggers_by_key) - {t.trigger_key for t in finals_triggers})
-    if obsolete_keys:
+    fail-closed contract.
+
+    `finals_removed_keys` (issue #219) is the caller's pre-fetched set of
+    trigger keys that exist on the finals side but have been explicitly
+    removed there (`LockoutTriggerRepository.remove`) -- distinct from a
+    key finals never had at all. An SS trigger key absent from `finals_
+    triggers` (already active-only) *and* present in `finals_removed_keys`
+    is mirrored onto SS as a removal (`keys_to_remove`, returned below)
+    rather than raising: this is exactly what lets a Scorer's pre-
+    activation Finals correction (e.g. dropping a mistaken `early-1`)
+    propagate onto the concurrent SS round automatically, per issue #219's
+    "Finals remains authoritative ... existing synchronisation" requirement,
+    without reopening the unrelated "SS carries a trigger key finals never
+    had" case, which still fails closed exactly as before."""
+    finals_active_keys = {t.trigger_key for t in finals_triggers}
+    obsolete_keys = set(ss_triggers_by_key) - finals_active_keys
+    keys_to_remove = sorted(obsolete_keys & set(finals_removed_keys))
+    truly_obsolete_keys = sorted(obsolete_keys - set(finals_removed_keys))
+    if truly_obsolete_keys:
         raise LockoutPlanDivergedError(
-            f"SS round {ss_round_id} has lockout trigger key(s) {obsolete_keys} that no longer exist in the "
-            "concurrent finals week's current plan. LockoutTriggerRepository has no delete/deactivate primitive, "
-            "so a stale trigger can never be silently dropped here -- reconcile it directly (e.g. repoint it via "
-            "the round-preflight lockout form) before synchronisation can proceed."
+            f"SS round {ss_round_id} has lockout trigger key(s) {truly_obsolete_keys} that no longer exist in the "
+            "concurrent finals week's current plan (and were never removed there either). Reconcile it directly "
+            "(e.g. repoint it via the round-preflight lockout form) before synchronisation can proceed."
+        )
+    activated_removal_keys = sorted(
+        key for key in keys_to_remove if ss_triggers_by_key[key].trigger_id in activated_ss_trigger_ids
+    )
+    if activated_removal_keys:
+        raise LockoutPlanDivergedError(
+            f"SS round {ss_round_id} cannot be synchronised automatically: trigger key(s) {activated_removal_keys} "
+            "were removed from the concurrent finals plan, but have already activated (irreversibly locked) on "
+            "SS -- an activated trigger can never be removed. Reconcile this divergence directly before "
+            "synchronisation can proceed."
         )
 
     pending_keys = set()
@@ -316,10 +354,17 @@ def _validate_trigger_sync_plan(ss_round_id, finals_triggers, ss_triggers_by_key
     # Plan every pending trigger's safe application order *before* writing
     # anything -- see `_plan_trigger_sync`'s own docstring for why this
     # must happen up front rather than interleaved with the writes below.
+    # `keys_to_remove` are excluded from the simulated SS state here --
+    # they are applied (see `_apply_trigger_sync`'s sibling below) before
+    # any configure-sync write, so their sequences are genuinely free for a
+    # pending trigger to reuse by the time this plan actually runs, not
+    # still "occupied" by a trigger about to disappear.
     ordered_plan = _plan_trigger_sync(
-        ss_round_id, [t for t in finals_triggers if t.trigger_key in pending_keys], ss_triggers_by_key
+        ss_round_id,
+        [t for t in finals_triggers if t.trigger_key in pending_keys],
+        {key: value for key, value in ss_triggers_by_key.items() if key not in keys_to_remove},
     )
-    return ordered_plan, unchanged_trigger_keys
+    return ordered_plan, unchanged_trigger_keys, keys_to_remove
 
 
 def _apply_trigger_sync(
@@ -356,6 +401,24 @@ def _apply_trigger_sync(
         )
         synced_trigger_keys.append(trigger.trigger_key)
     return synced_trigger_keys
+
+
+def _apply_trigger_removals(conn, trigger_repo, ss_round_id, keys_to_remove, actor, reason):
+    """Issue #219: mirrors onto SS every trigger key `_validate_trigger_
+    sync_plan` determined was removed from the concurrent finals plan --
+    against the same already-locked `conn` `_apply_trigger_sync` writes
+    into, so a `TriggerAlreadyActivatedError` discovered here (a concurrent
+    activation between validation and this write) rolls back everything
+    this synchronisation call has done, exactly like `_apply_trigger_sync`
+    itself. Applied *before* `_apply_trigger_sync` -- a removal only ever
+    frees a sequence, never conflicts with one, so ordering it first is
+    always safe and is what lets a pending configure change reuse a
+    just-freed sequence in the same synchronisation call."""
+    removed_trigger_keys: list[str] = []
+    for trigger_key in keys_to_remove:
+        trigger_repo._remove_locked(conn, ss_round_id, trigger_key, actor=actor, reason=reason)
+        removed_trigger_keys.append(trigger_key)
+    return removed_trigger_keys
 
 
 def _synchronise_triggers_locked(
@@ -410,6 +473,17 @@ def _synchronise_triggers_locked(
                 (ss_round_id,),
             )
             finals_triggers = trigger_repo.list_triggers(finals_round_id)
+            # Issue #219: `include_removed=True` here (unlike every other
+            # `list_triggers` call in this module) is deliberate -- this is
+            # the one place that needs to distinguish "finals never had
+            # this key" from "finals had it and explicitly removed it",
+            # exactly the distinction `_validate_trigger_sync_plan` uses to
+            # decide whether an obsolete SS key is safe to auto-remove.
+            finals_removed_keys = {
+                t.trigger_key
+                for t in trigger_repo.list_triggers(finals_round_id, include_removed=True)
+                if t.removed_at is not None
+            }
             ss_triggers_by_key = {t.trigger_key: t for t in trigger_repo.list_triggers(ss_round_id)}
             ss_trigger_ids = [t.trigger_id for t in ss_triggers_by_key.values()]
             activated_ss_trigger_ids = (
@@ -424,19 +498,23 @@ def _synchronise_triggers_locked(
                 if ss_trigger_ids
                 else set()
             )
-            ordered_plan, unchanged_trigger_keys = _validate_trigger_sync_plan(
-                ss_round_id, finals_triggers, ss_triggers_by_key, activated_ss_trigger_ids
+            ordered_plan, unchanged_trigger_keys, keys_to_remove = _validate_trigger_sync_plan(
+                ss_round_id, finals_triggers, ss_triggers_by_key, activated_ss_trigger_ids, finals_removed_keys
+            )
+            removed_trigger_keys = _apply_trigger_removals(
+                conn, trigger_repo, ss_round_id, keys_to_remove, actor, reason
             )
             synced_trigger_keys = _apply_trigger_sync(
                 conn, trigger_repo, ss_round_id, ordered_plan, ss_triggers_by_key, ss_mapping_revision, actor, reason
             )
-    except TriggerAlreadyActivatedError as exc:
+    except (TriggerAlreadyActivatedError, TriggerAlreadyRemovedError) as exc:
         raise LockoutPlanDivergedError(
-            f"SS round {ss_round_id} cannot be synchronised automatically: a trigger activated concurrently, "
-            "between this synchronisation's own validation and its writes -- nothing from this synchronisation "
-            f"attempt was applied (rolled back together). Reconcile the resulting divergence directly. ({exc})"
+            f"SS round {ss_round_id} cannot be synchronised automatically: a trigger activated or was removed "
+            "concurrently, between this synchronisation's own validation and its writes -- nothing from this "
+            f"synchronisation attempt was applied (rolled back together). Reconcile the resulting divergence "
+            f"directly. ({exc})"
         ) from exc
-    return synced_trigger_keys, unchanged_trigger_keys
+    return synced_trigger_keys, unchanged_trigger_keys, removed_trigger_keys
 
 
 def synchronise_lockout_plan_from_finals(
@@ -494,6 +572,11 @@ def synchronise_lockout_plan_from_finals(
     # this one.
     trigger_repo = LockoutTriggerRepository(database)
     finals_triggers = trigger_repo.list_triggers(finals_round_id)
+    finals_removed_keys = {
+        t.trigger_key
+        for t in trigger_repo.list_triggers(finals_round_id, include_removed=True)
+        if t.removed_at is not None
+    }
     ss_triggers_by_key = {t.trigger_key: t for t in trigger_repo.list_triggers(ss_round_id)}
     ss_trigger_ids = [t.trigger_id for t in ss_triggers_by_key.values()]
     activated_ss_trigger_ids = (
@@ -508,7 +591,9 @@ def synchronise_lockout_plan_from_finals(
         if ss_trigger_ids
         else set()
     )
-    _validate_trigger_sync_plan(ss_round_id, finals_triggers, ss_triggers_by_key, activated_ss_trigger_ids)
+    _validate_trigger_sync_plan(
+        ss_round_id, finals_triggers, ss_triggers_by_key, activated_ss_trigger_ids, finals_removed_keys
+    )
 
     ss_mapping = confirm_afl_mapping(
         database,
@@ -520,11 +605,11 @@ def synchronise_lockout_plan_from_finals(
         reason=default_reason,
     )
 
-    synced_trigger_keys, unchanged_trigger_keys = _synchronise_triggers_locked(
+    synced_trigger_keys, unchanged_trigger_keys, removed_trigger_keys = _synchronise_triggers_locked(
         database, trigger_repo, ss_round_id, finals_round_id, ss_mapping.revision, actor, default_reason
     )
 
-    changed = mapping_synced or bool(synced_trigger_keys)
+    changed = mapping_synced or bool(synced_trigger_keys) or bool(removed_trigger_keys)
     with transaction(database) as conn:
         append_event(
             conn,
@@ -538,6 +623,7 @@ def synchronise_lockout_plan_from_finals(
                 "finals_round_id": finals_round_id,
                 "synced_trigger_keys": synced_trigger_keys,
                 "unchanged_trigger_keys": unchanged_trigger_keys,
+                "removed_trigger_keys": removed_trigger_keys,
                 "mapping_synced": mapping_synced,
             },
             payload={"changed": changed},
@@ -548,6 +634,7 @@ def synchronise_lockout_plan_from_finals(
         "mapping_synced": mapping_synced,
         "synced_trigger_keys": synced_trigger_keys,
         "unchanged_trigger_keys": unchanged_trigger_keys,
+        "removed_trigger_keys": removed_trigger_keys,
         "changed": changed,
     }
 

@@ -673,7 +673,7 @@ def test_apply_trigger_sync_rolls_back_the_whole_plan_on_a_concurrent_activation
     trigger_repo.configure(built["week1_round_id"], "main", "main", 2, [8888], actor=ACTOR, reason="main changed")
     finals_triggers = trigger_repo.list_triggers(built["week1_round_id"])
 
-    ordered_plan, _unchanged = _validate_trigger_sync_plan(
+    ordered_plan, _unchanged, _removed = _validate_trigger_sync_plan(
         built["ss1_round_id"], finals_triggers, ss_triggers_by_key, set()
     )
     assert [t.trigger_key for t in ordered_plan] == ["s1", "main"]
@@ -731,8 +731,8 @@ def test_synchronise_lockout_plan_locked_recheck_catches_a_trigger_added_after_t
     real_list_triggers = LockoutTriggerRepository.list_triggers
     calls = {"ss_reads": 0}
 
-    def _spy(self, bbbffl_round_id):
-        result = real_list_triggers(self, bbbffl_round_id)
+    def _spy(self, bbbffl_round_id, *, include_removed=False):
+        result = real_list_triggers(self, bbbffl_round_id, include_removed=include_removed)
         if bbbffl_round_id == ss_round_id:
             calls["ss_reads"] += 1
             if calls["ss_reads"] == 1:
@@ -771,8 +771,8 @@ def test_synchronise_lockout_plan_locked_recheck_uses_the_fresh_finals_trigger_s
     real_list_triggers = LockoutTriggerRepository.list_triggers
     calls = {"finals_reads": 0}
 
-    def _spy(self, bbbffl_round_id):
-        result = real_list_triggers(self, bbbffl_round_id)
+    def _spy(self, bbbffl_round_id, *, include_removed=False):
+        result = real_list_triggers(self, bbbffl_round_id, include_removed=include_removed)
         if bbbffl_round_id == finals_round_id:
             calls["finals_reads"] += 1
             if calls["finals_reads"] == 1:

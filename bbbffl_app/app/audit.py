@@ -135,6 +135,13 @@ PLAYER_RELEASED = "ownership.player.released"
 LINEUP_SUBMITTED = "lineup.submission.created"
 LOCKOUT_TRIGGER_CONFIGURED = "lockout.trigger.configured"
 
+# Issue #219: a Scorer-facing pre-activation correction removing an
+# unnecessary trigger from a round's lockout plan entirely (distinct from
+# LOCKOUT_TRIGGER_CONFIGURED, which always records a create/replace of a
+# trigger's active configuration, never its removal). Never recorded for an
+# already-activated trigger -- see `LockoutTriggerRepository.remove`.
+LOCKOUT_TRIGGER_REMOVED = "lockout.trigger.removed"
+
 # Issue #137: authorised Scorer/Admin correction of an already-locked
 # weekly lineup. Never repurposes LINEUP_SUBMITTED -- a correction is a
 # materially distinct, more narrowly-authorised event that must remain

@@ -71,6 +71,20 @@ via `app.audit.LOCKOUT_TRIGGER_CONFIGURED`). `LockoutTriggerRepository` is
 the persistence/service boundary a later commissioner/scorer management UI
 would call -- no UI is built in this issue.
 
+Issue #219 adds one further pre-activation correction primitive:
+`LockoutTriggerRepository.remove` drops a trigger key out of a round's
+*active* plan entirely (e.g. an unnecessary selective trigger mistakenly
+created alongside `main`) -- a header-level fact, exactly like activation,
+audited separately (`app.audit.LOCKOUT_TRIGGER_REMOVED`) and never a
+delete of the trigger's row or its `create`/`replace` revision history.
+`list_triggers` excludes a removed trigger by default (so it is never
+evaluated for activation and never shown as part of the round's plan);
+`list_triggers(include_removed=True)`, or `get`, still return it for
+audit/history display. Reconfiguring the same trigger key afterwards (via
+`configure`) implicitly un-removes it. Refused, exactly like `replace`,
+once the trigger has activated -- see "Historical lock irreversibility"
+below.
+
 ## Player -> AFL match resolution
 
 `app.lockouts.resolve_match(afl_team_id, matches)` matches a selected
@@ -152,13 +166,13 @@ true rather than aspirational:
 Once a trigger has activated, that fact is durably recorded in
 `bbbffl_round_lockout_trigger_activation` (PK `trigger_id`; immutable via
 the same trigger-based enforcement as `weekly_lineup_submission`/
-`weekly_lineup_lock`). `LockoutTriggerRepository.replace` then permanently
-refuses to change that trigger's configuration
-(`TriggerAlreadyActivatedError`), so the set of AFL matches an activated
-trigger covers can never change afterwards, and a later upstream schedule/
-status correction to one of those matches cannot un-fire it either --
-activation evidence, once written, is never recomputed against fresh
-`matches` data.
+`weekly_lineup_lock`). `LockoutTriggerRepository.replace` (and, issue
+#219, `.remove`) then permanently refuse to change or remove that
+trigger's configuration (`TriggerAlreadyActivatedError`), so the set of
+AFL matches an activated trigger covers can never change afterwards, and
+a later upstream schedule/status correction to one of those matches
+cannot un-fire it either -- activation evidence, once written, is never
+recomputed against fresh `matches` data.
 
 ### 2. Player-level
 
@@ -437,7 +451,9 @@ upstream-fact observations: recording an already-authoritative AFL/trigger
 fact is not itself a privileged decision. `LockoutTriggerRepository.create`/
 `.replace` **are** audited (`app.audit.LOCKOUT_TRIGGER_CONFIGURED`), since
 configuring the lockout plan is itself a privileged BBBFFL competition
-decision, not an observation.
+decision, not an observation. `.remove` (issue #219) is audited separately
+(`app.audit.LOCKOUT_TRIGGER_REMOVED`) for the same reason -- removing a
+trigger from the active plan is equally a privileged decision.
 
 ## Deliberately vacant positions (issue #98, revised by issue #155)
 

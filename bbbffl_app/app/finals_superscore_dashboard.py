@@ -221,9 +221,17 @@ def build_finals_week_dashboard(database, lifecycle, identities, round_review_re
             return None
         week_number = int(round_key_row["round_key"][2:])
         superscore_round_id = round_id
+        # Issue #219: resolved through the finals week's own round's
+        # `competition_stream.season_id` -- the same authoritative source
+        # `round_stream_type`/this function's own season check above use --
+        # rather than `finals_bracket.season_id` directly, so this lookup
+        # can never disagree with the season this dashboard was already
+        # confirmed to belong to.
         bracket_row = database.execute(
             "SELECT w.bracket_id, w.bbbffl_round_id finals_round_id FROM finals_bracket_week w "
-            "JOIN finals_bracket b ON b.bracket_id=w.bracket_id WHERE b.season_id=? AND w.week_number=?",
+            "JOIN bbbffl_round r ON r.bbbffl_round_id=w.bbbffl_round_id "
+            "JOIN competition_stream c ON c.competition_id=r.competition_id "
+            "WHERE c.season_id=? AND w.week_number=?",
             (season.season_id, week_number),
         ).fetchone()
         bracket_id = bracket_row["bracket_id"] if bracket_row else None

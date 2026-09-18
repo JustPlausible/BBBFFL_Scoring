@@ -713,8 +713,15 @@ class LockoutTriggerRepository:
             if trigger_type == "main":
                 self._reject_duplicate_main(conn, bbbffl_round_id, exclude_trigger_key=trigger_key)
             revision, now = head["current_revision"] + 1, _now()
+            # Issue #219: clears any prior removal, exactly like `_configure_
+            # locked`'s identical UPDATE -- a no-op when it was never set.
+            # Without this, `replace`-ing a removed trigger's configuration
+            # would bump its revision while leaving it excluded from `list_
+            # triggers`'s active-plan view, an inconsistent state no caller
+            # of `replace` intends.
             conn.execute(
-                "UPDATE bbbffl_round_lockout_trigger SET current_revision=? WHERE trigger_id=?",
+                "UPDATE bbbffl_round_lockout_trigger SET current_revision=?, removed_at=NULL, removed_by=NULL, "
+                "removed_reason=NULL WHERE trigger_id=?",
                 (revision, head["trigger_id"]),
             )
             self._insert_revision(
@@ -853,11 +860,28 @@ class LockoutTriggerRepository:
         # is free for reuse and it no longer constrains selective-precedes-
         # main ordering.
         existing = next((row for row in rows if row["trigger_key"] == trigger_key), None)
-        current_revision = existing["current_revision"] if existing else 0
-        if expected_revision is not None and current_revision != expected_revision:
+        # Codex review (PR #220, P1): `current_revision` does not change
+        # when a trigger is removed, but every caller that computes
+        # `expected_revision` from an *active*-plan read (`list_triggers`'s
+        # own default, which every production caller -- the preflight UI,
+        # Finals-to-SuperScore sync -- uses) sees a removed trigger as
+        # simply absent, and would therefore compute 0, not its frozen raw
+        # revision. Comparing against the raw revision here would either
+        # silently let a stale, removal-unaware submission clear a
+        # concurrent removal (the submitter's `expected_revision` still
+        # matching the untouched raw revision), or spuriously reject the
+        # documented "reconfigure un-removes it" path with a
+        # `StaleTriggerRevisionError` its own `expected_revision=0` should
+        # have satisfied. A removed header's *effective* revision for this
+        # comparison is therefore 0 -- identical to a trigger key that was
+        # never created at all -- while the real, monotonic `current_
+        # revision` below (used for the actual bump) is never reset.
+        existing_active = existing if (existing is not None and existing["removed_at"] is None) else None
+        effective_revision = existing_active["current_revision"] if existing_active is not None else 0
+        if expected_revision is not None and effective_revision != expected_revision:
             raise StaleTriggerRevisionError(
                 f"Trigger {trigger_key!r} has changed since it was loaded (expected revision "
-                f"{expected_revision}, current revision {current_revision}). Reload the current authoritative "
+                f"{expected_revision}, current revision {effective_revision}). Reload the current authoritative "
                 "lockout plan before deciding."
             )
         others = [row for row in rows if row["trigger_key"] != trigger_key and row["removed_at"] is None]

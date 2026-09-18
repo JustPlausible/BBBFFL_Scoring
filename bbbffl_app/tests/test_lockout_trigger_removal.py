@@ -240,6 +240,10 @@ def test_audit_and_revision_history_is_preserved_when_removing_a_trigger():
 
 
 def test_reconfiguring_a_removed_trigger_key_un_removes_it():
+    """`expected_revision=0` here mirrors what every real active-plan
+    caller (the preflight UI, Finals-to-SuperScore sync) actually computes
+    for a key `list_triggers` shows as absent -- not the trigger's raw,
+    frozen `current_revision` (Codex review, PR #220, P1)."""
     db = migrated_connection()
     round_, _entries = configured(db, 2610)
     triggers = LockoutTriggerRepository(db)
@@ -248,12 +252,70 @@ def test_reconfiguring_a_removed_trigger_key_un_removes_it():
     assert [t.trigger_key for t in triggers.list_triggers(round_.bbbffl_round_id)] == []
 
     triggers.configure(
-        round_.bbbffl_round_id, "early-1", "selective", 1, [9005], actor=ACTOR, reason="actually needed after all"
+        round_.bbbffl_round_id,
+        "early-1",
+        "selective",
+        1,
+        [9005],
+        actor=ACTOR,
+        reason="actually needed after all",
+        expected_revision=0,
     )
     active = triggers.list_triggers(round_.bbbffl_round_id)
     assert [t.trigger_key for t in active] == ["early-1"]
     assert active[0].removed_at is None
     assert active[0].afl_match_ids == (9005,)
+
+
+def test_configure_rejects_a_stale_expected_revision_that_ignores_a_concurrent_removal():
+    """Codex review (PR #220, P1): removal never changes `current_
+    revision`, so a caller still holding the trigger's pre-removal revision
+    (unaware it was removed) must not be able to silently clear that
+    removal by submitting the same (now-stale, in effective terms)
+    revision it last observed while the trigger was active."""
+    db = migrated_connection()
+    round_, _entries = configured(db, 2617)
+    triggers = LockoutTriggerRepository(db)
+    triggers.create(round_.bbbffl_round_id, "early-1", "selective", 1, [9001], actor=ACTOR, reason="mistaken early")
+    triggers.remove(round_.bbbffl_round_id, "early-1", actor=ACTOR, reason="unnecessary", expected_revision=1)
+
+    with pytest.raises(StaleTriggerRevisionError):
+        triggers.configure(
+            round_.bbbffl_round_id,
+            "early-1",
+            "selective",
+            1,
+            [9001],
+            actor=ACTOR,
+            reason="stale operator unaware of the removal",
+            expected_revision=1,
+        )
+    all_including_removed = triggers.list_triggers(round_.bbbffl_round_id, include_removed=True)
+    assert next(t for t in all_including_removed if t.trigger_key == "early-1").removed_at is not None
+
+
+def test_replace_also_clears_a_prior_removal():
+    """The same reconfigure-un-removes behaviour `configure` has must hold
+    for `replace` too -- both are trigger-header reconfiguration paths."""
+    db = migrated_connection()
+    round_, _entries = configured(db, 2618)
+    triggers = LockoutTriggerRepository(db)
+    triggers.create(round_.bbbffl_round_id, "early-1", "selective", 1, [9001], actor=ACTOR, reason="mistaken early")
+    triggers.remove(round_.bbbffl_round_id, "early-1", actor=ACTOR, reason="unnecessary")
+
+    triggers.replace(
+        round_.bbbffl_round_id,
+        "early-1",
+        trigger_type="selective",
+        sequence=1,
+        afl_match_ids=[9006],
+        actor=ACTOR,
+        reason="actually needed after all",
+    )
+    active = triggers.list_triggers(round_.bbbffl_round_id)
+    assert [t.trigger_key for t in active] == ["early-1"]
+    assert active[0].removed_at is None
+    assert active[0].afl_match_ids == (9006,)
 
 
 # -- HTTP: the round-preflight Scorer-facing correction route ---------------
@@ -507,3 +569,49 @@ def test_an_ss_only_trigger_with_no_finals_counterpart_still_fails_closed_alongs
 
     with pytest.raises(LockoutPlanDivergedError, match="ss-only"):
         synchronise_lockout_plan_from_finals(database, validator, ss1_round_id, actor=FINALS_ACTOR)
+
+
+def test_re_adding_a_removed_finals_trigger_synchronises_onto_ss_without_a_stale_revision_error():
+    """Codex review (PR #220, P1): once a Finals trigger key has been
+    removed (and mirrored as removed onto SS, issue #219), later
+    reconfiguring the *same* key on Finals again must synchronise onto SS
+    cleanly -- SS's own trigger sync computes `expected_revision=0` for a
+    key its active-plan read shows as absent, which must match, not
+    collide with the header's frozen pre-removal revision."""
+    from app.superscore_round import confirm_afl_mapping, setup_round
+    from tests.finals_helpers import KnownRound
+    from tests.test_finals_superscore_open import _database_for_test, _seed
+
+    database = _database_for_test(2623)
+    built = _seed(database, 2623, with_lockout_triggers=False)
+    week1_round_id = built["week1_round_id"]
+    ss1_round_id = built["ss1_round_id"]
+    afl_round_id = built["afl_round_id"]
+    trigger_repo = LockoutTriggerRepository(database)
+    trigger_repo.configure(week1_round_id, "early-1", "selective", 1, [1111], actor=FINALS_ACTOR, reason="early match")
+    trigger_repo.configure(week1_round_id, "main", "main", 2, [9999], actor=FINALS_ACTOR, reason="main")
+    open_finals_week(database, built["bracket"].bracket_id, 1, actor=FINALS_ACTOR)
+
+    validator = KnownRound({(2623, afl_round_id)})
+    confirm_afl_mapping(database, validator, ss1_round_id, 2623, afl_round_id, reason="initial SS mapping")
+    setup_round(database, ss1_round_id, reason="SS round setup")
+    synchronise_lockout_plan_from_finals(database, validator, ss1_round_id, actor=FINALS_ACTOR)
+    assert {t.trigger_key for t in trigger_repo.list_triggers(ss1_round_id)} == {"early-1", "main"}
+
+    # Remove it on Finals -- mirrored onto SS automatically.
+    trigger_repo.remove(week1_round_id, "early-1", actor=FINALS_ACTOR, reason="thought it was unnecessary")
+    synchronise_lockout_plan_from_finals(database, validator, ss1_round_id, actor=FINALS_ACTOR)
+    assert {t.trigger_key for t in trigger_repo.list_triggers(ss1_round_id)} == {"main"}
+
+    # Reconsidered: reconfigure the same key on Finals again (un-removes
+    # it there) and re-synchronise -- must not raise.
+    trigger_repo.configure(
+        week1_round_id, "early-1", "selective", 1, [2222], actor=FINALS_ACTOR, reason="actually needed after all"
+    )
+    sync = synchronise_lockout_plan_from_finals(database, validator, ss1_round_id, actor=FINALS_ACTOR)
+    assert sync["synced_trigger_keys"] == ["early-1"]
+
+    ss_active = {t.trigger_key: t for t in trigger_repo.list_triggers(ss1_round_id)}
+    assert set(ss_active) == {"early-1", "main"}
+    assert ss_active["early-1"].afl_match_ids == (2222,)
+    assert ss_active["early-1"].removed_at is None

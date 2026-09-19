@@ -57,6 +57,7 @@ from app.scorer_dashboard import (
     CATEGORY_DECISION_REQUIRED,
     CATEGORY_WAITING,
     NO_AUTHORITATIVE_SUBMISSION_STATES,
+    PREFLIGHT_URL,
     SCORER_DASHBOARD_URL,
     NextAction,
     compute_round_readiness,
@@ -335,12 +336,20 @@ def _finals_week_next_action(finals_section: dict, superscore_section: dict, sea
                 None,
                 capability="roundsetup.manage",
             ).__dict__
+        # Issue #221: a direct link into this finals week's own stream-aware
+        # preflight page (`/admin/round-preflight/{finals_round_id}`) --
+        # generic for every finals week, not a Grand-Final-only special
+        # case -- so the operator never has to already know or separately
+        # discover that finals AFL mapping/lockout-trigger configuration
+        # lives on the same page an ordinary round already uses. Preflight
+        # configuration itself is never duplicated here: this dashboard
+        # only links to it.
         return NextAction(
             "finals_week_preflight_incomplete",
             CATEGORY_BLOCKING,
             f"Complete {week_label} preflight",
             f"Satisfy every preflight blocker before {week_label} can open.",
-            None,
+            PREFLIGHT_URL.format(round_id=finals_section["round_id"]),
             capability="roundsetup.manage",
         ).__dict__
 

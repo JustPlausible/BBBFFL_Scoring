@@ -788,12 +788,20 @@ def _finals_phase_next_action(database, lifecycle, season_id: str) -> dict | Non
                     dashboard_url,
                     capability="roundsetup.manage",
                 ).__dict__
+            # Issue #221: a direct link straight into this finals week's own
+            # stream-aware preflight page -- generic for every finals week,
+            # not a Grand-Final-only special case -- rather than only the
+            # Scorer dashboard URL, which required the operator to already
+            # know (or separately discover) that AFL mapping/lockout-trigger
+            # configuration for a finals round happens on the exact same
+            # `/admin/round-preflight/{round_id}` page an ordinary round
+            # uses.
             return NextAction(
                 "finals_week_preflight_incomplete",
                 CATEGORY_BLOCKING,
                 f"Complete {week_label} preflight",
                 f"Accept the AFL mapping and satisfy every preflight blocker before {week_label} can open.",
-                dashboard_url,
+                PREFLIGHT_URL.format(round_id=round_id),
                 capability="roundsetup.manage",
             ).__dict__
         return NextAction(

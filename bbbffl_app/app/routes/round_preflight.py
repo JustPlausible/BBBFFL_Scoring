@@ -4,7 +4,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from app.audit import ActorContext
-from app.authorization import Principal, require_capability, require_role_covers_season
+from app.authorization import Principal, Role, require_capability, require_role_covers_season, resolve_principal
 from app.config import BASE_DIR
 from app.csrf import issue_token, verify_token
 from app.round_preflight import (
@@ -84,23 +84,80 @@ def _view(request, round_id):
 
 
 def _available_rounds(request, principal):
-    """Recognisable, active-context-filtered navigation into preflight."""
-    rows = request.app.state.database.execute(
+    """Recognisable, active-context-filtered navigation into preflight.
+
+    Issue #221 extends this through the Finals bracket: once a season has
+    one, its Finals Week 1, Finals Week 2, Preliminary Final and Grand
+    Final each list here too, immediately after that same season's Rounds
+    1-N -- using `finals_bracket_week.label`, the identical human-readable
+    label `app.scorer_dashboard.season_round_options` already surfaces on
+    the Scorer Round selector, never a second naming scheme. Every entry's
+    `preflight_url` routes straight to its own `/admin/round-preflight/
+    {bbbffl_round_id}` -- the same stream-aware page (`app.round_preflight.
+    build_round_preflight`) an ordinary round already used -- so no UUID
+    ever needs to be separately known or entered."""
+    database = request.app.state.database
+    ordinary_rows = database.execute(
         "SELECT r.bbbffl_round_id, r.label round_label, r.sequence, c.label competition_label, "
         "c.stream_key, c.season_id, s.year, s.label season_label "
         "FROM bbbffl_round r JOIN competition_stream c ON c.competition_id=r.competition_id "
         "JOIN bbbffl_season s ON s.season_id=c.season_id WHERE c.stream_type='ordinary' "
         "ORDER BY s.year DESC, c.stream_key, r.sequence"
     ).fetchall()
+    finals_rows = database.execute(
+        "SELECT w.bbbffl_round_id, w.week_number, w.label round_label, c.label competition_label, "
+        "c.stream_key, c.season_id, s.year, s.label season_label "
+        "FROM finals_bracket_week w "
+        "JOIN bbbffl_round r ON r.bbbffl_round_id=w.bbbffl_round_id "
+        "JOIN competition_stream c ON c.competition_id=r.competition_id "
+        "JOIN bbbffl_season s ON s.season_id=c.season_id "
+        "ORDER BY s.year DESC, c.stream_key, w.week_number"
+    ).fetchall()
+
+    # Grouped per season -- rather than one global ORDER BY across both
+    # queries -- so every season's own Finals weeks always list immediately
+    # after that same season's Rounds 1-N, never interleaved with another
+    # season's rounds. `s.year DESC` alone still decides the order between
+    # seasons, exactly as the single-query ordinary-only listing did before.
+    seasons: dict[str, dict] = {}
+    season_order: list[str] = []
+    for row in ordinary_rows:
+        if row["season_id"] not in seasons:
+            seasons[row["season_id"]] = {"year": row["year"], "ordinary": [], "finals": []}
+            season_order.append(row["season_id"])
+        seasons[row["season_id"]]["ordinary"].append(row)
+    for row in finals_rows:
+        if row["season_id"] not in seasons:
+            seasons[row["season_id"]] = {"year": row["year"], "ordinary": [], "finals": []}
+            season_order.append(row["season_id"])
+        seasons[row["season_id"]]["finals"].append(row)
+    season_order.sort(key=lambda season_id: seasons[season_id]["year"], reverse=True)
+
     available = []
-    for row in rows:
+    for season_id in season_order:
         try:
-            require_role_covers_season(request, principal, row["season_id"])
+            require_role_covers_season(request, principal, season_id)
         except HTTPException as exc:
             if exc.status_code == 403:
                 continue
             raise
-        available.append({**dict(row), "preflight_url": f"/admin/round-preflight/{row['bbbffl_round_id']}"})
+        for row in seasons[season_id]["ordinary"]:
+            available.append(
+                {
+                    **dict(row),
+                    "round_type": "ordinary",
+                    "preflight_url": f"/admin/round-preflight/{row['bbbffl_round_id']}",
+                }
+            )
+        for row in seasons[season_id]["finals"]:
+            available.append(
+                {
+                    **dict(row),
+                    "round_type": "finals",
+                    "sequence": None,
+                    "preflight_url": f"/admin/round-preflight/{row['bbbffl_round_id']}",
+                }
+            )
     return available
 
 
@@ -259,9 +316,27 @@ def open_round(round_id: str, request: Request, principal: Principal = Depends(r
 
 
 @page_router.get("/admin/round-preflight/{round_id}", response_class=HTMLResponse)
-def page(round_id: str, request: Request):
+def page(round_id: str, request: Request, principal: Principal = Depends(resolve_principal)):
     token = issue_token(request.app.state.settings.session_secret)
-    response = templates.TemplateResponse(request, "round_preflight.html", {"round_id": round_id, "csrf_token": token})
+    # Issue #221 review (Codex, P2): the page's own "Back to Scorer
+    # dashboard" return link must never promise a destination the current
+    # active role cannot actually reach -- `/api/scorer/dashboard` admits
+    # only Scorer/Replay-Operator/Administrator (`app.routes.scorer_
+    # dashboard.require_scorer_dashboard`), and a Secretary (who holds
+    # `roundsetup.manage` and can reach this very preflight page) is
+    # deliberately excluded from it. Mirrors that exact role set rather
+    # than widening Scorer dashboard access, which is a separate decision
+    # outside this navigation fix's scope.
+    can_view_scorer_dashboard = principal.role in (Role.SCORER, Role.REPLAY_OPERATOR, Role.ADMIN)
+    response = templates.TemplateResponse(
+        request,
+        "round_preflight.html",
+        {
+            "round_id": round_id,
+            "csrf_token": token,
+            "can_view_scorer_dashboard": can_view_scorer_dashboard,
+        },
+    )
     response.set_cookie(
         "bbbffl_csrf",
         token,

@@ -694,6 +694,22 @@ def synchronise_lockout_plan_from_finals(
     }
 
 
+def _authoritative_season_id(database, round_id: str) -> str | None:
+    """The single authority for which season a round belongs to
+    (`competition_stream.season_id`, via the round's own competition) --
+    never `finals_bracket.season_id`, a second, independently-set reference
+    that can in principle disagree with it (issue #219; see also
+    `app.scorer_dashboard.season_round_options` and
+    `app.finals_superscore_dashboard.build_finals_week_dashboard`, which
+    resolve a Finals/SuperScore round's season the same way)."""
+    row = database.execute(
+        "SELECT c.season_id FROM bbbffl_round r JOIN competition_stream c ON c.competition_id=r.competition_id "
+        "WHERE r.bbbffl_round_id=?",
+        (round_id,),
+    ).fetchone()
+    return row["season_id"] if row else None
+
+
 def _resolve_superscore_round_id(database, season_id: str, week_number: int) -> str | None:
     row = database.execute(
         "SELECT sr.bbbffl_round_id FROM bbbffl_round sr "
@@ -718,10 +734,18 @@ def open_finals_and_superscore_week(
     if bracket is None:
         raise PairedOpenWeekError(f"unknown finals bracket {bracket_id}")
     finals_round_id = bracket_repo.get_week_round_id(bracket_id, week_number)
-    superscore_round_id = _resolve_superscore_round_id(database, bracket.season_id, week_number)
+    # Issue #219 review (P1): pair on the Finals round's own authoritative
+    # season, not `bracket.season_id` -- a second, independently-set
+    # reference that can disagree with it. Using the stale/wrong season here
+    # could pair-open a *different* season's SuperScore round than the one
+    # the dashboard just displayed for this exact bracket/week.
+    finals_season_id = _authoritative_season_id(database, finals_round_id)
+    superscore_round_id = (
+        _resolve_superscore_round_id(database, finals_season_id, week_number) if finals_season_id else None
+    )
     if superscore_round_id is None:
         raise PairedOpenWeekError(
-            f"no SuperScore round is configured for week {week_number} of season {bracket.season_id}; "
+            f"no SuperScore round is configured for week {week_number} of season {finals_season_id}; "
             "cannot pair-open with the finals week"
         )
 

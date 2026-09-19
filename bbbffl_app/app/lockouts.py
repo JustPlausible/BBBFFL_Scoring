@@ -649,6 +649,7 @@ class LockoutTriggerRepository:
         """Create a brand-new trigger slot for this round. `trigger_key` is
         a stable, caller-chosen identity (e.g. "early-1", "main") unique
         within the round, addressed again by `replace`/`get`."""
+        trigger_key = self._validated_trigger_key(trigger_key)
         match_ids = self._validated_matches(trigger_type, afl_match_ids)
         with transaction(self.database) as conn:
             if trigger_type == "main":
@@ -694,6 +695,7 @@ class LockoutTriggerRepository:
         revision points (e.g. `app.round_mapping`)."""
         if not reason:
             raise ValueError("replacing a trigger's configuration requires a reason")
+        trigger_key = self._validated_trigger_key(trigger_key)
         match_ids = self._validated_matches(trigger_type, afl_match_ids)
         with transaction(self.database) as conn:
             head = conn.execute(
@@ -782,6 +784,7 @@ class LockoutTriggerRepository:
         for one round through this transaction regardless of how many
         triggers currently exist (issue #152 review, second pass, P1).
         """
+        trigger_key = self._validated_trigger_key(trigger_key)
         match_ids = self._validated_matches(trigger_type, afl_match_ids)
         with transaction(self.database) as conn:
             self._configure_locked(
@@ -1204,6 +1207,27 @@ class LockoutTriggerRepository:
             raise LockoutIntegrityError(
                 f"round {bbbffl_round_id} already has a main trigger ({others[0]!r}); a round has at most one"
             )
+
+    @staticmethod
+    def _validated_trigger_key(trigger_key: str) -> str:
+        """Issue #219 review (P2): `trigger_key` is embedded as a raw path
+        segment in the round-preflight HTTP API's removal route (`POST
+        .../lockout-trigger/{trigger_key}/remove`). A key containing '/'
+        decodes into multiple path segments before FastAPI's routing ever
+        sees it (a URL-encoded '/' is decoded before route matching), so
+        such a key could be configured but never removed through that
+        route; '.'/'..' segments can similarly be normalized away by an
+        HTTP client or intermediary before reaching the server. Rejecting
+        these at configuration time (the one place every trigger_key
+        enters the system) guarantees every accepted key remains
+        addressable/removable through the HTTP surface forever."""
+        if not trigger_key or not trigger_key.strip():
+            raise ValueError("a trigger key must be a non-empty string")
+        if "/" in trigger_key or trigger_key in (".", ".."):
+            raise ValueError(
+                f"trigger key {trigger_key!r} is not a valid identifier (must not contain '/' or be '.'/'..')"
+            )
+        return trigger_key
 
     @staticmethod
     def _validated_matches(trigger_type, afl_match_ids) -> tuple[int, ...]:

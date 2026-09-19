@@ -498,6 +498,40 @@ def test_trigger_create_rejects_duplicate_key_and_empty_or_duplicate_matches():
         triggers.create(round_.bbbffl_round_id, "bad-type", "early", 1, [EARLY_MATCH_ID])
 
 
+def test_trigger_key_must_remain_a_single_url_path_segment():
+    """Codex review (PR #220, P2): `trigger_key` is embedded as a raw path
+    segment in the round-preflight HTTP removal route (`POST
+    .../lockout-trigger/{trigger_key}/remove`). A key containing '/' would
+    decode into multiple path segments before FastAPI's routing ever sees
+    it -- `encodeURIComponent` on the client produces `%2F`, but ASGI
+    decodes the path before route matching, so the request 404s and such a
+    trigger could be configured but never removed through that route.
+    Rejecting these (and '.'/'..', which a client or intermediary could
+    similarly normalize away) at every entry point (`create`/`replace`/
+    `configure`) guarantees every accepted key stays removable."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    triggers = LockoutTriggerRepository(db)
+    for bad_key in ("early/1", "/main", "main/", ".", ".."):
+        with pytest.raises(ValueError, match="not a valid identifier"):
+            triggers.create(round_.bbbffl_round_id, bad_key, "selective", 1, [EARLY_MATCH_ID])
+    with pytest.raises(ValueError, match="non-empty"):
+        triggers.create(round_.bbbffl_round_id, "", "selective", 1, [EARLY_MATCH_ID])
+
+    with pytest.raises(ValueError, match="not a valid identifier"):
+        triggers.replace(
+            round_.bbbffl_round_id,
+            "early/1",
+            trigger_type="selective",
+            sequence=1,
+            afl_match_ids=[EARLY_MATCH_ID],
+            reason="x",
+        )
+    with pytest.raises(ValueError, match="not a valid identifier"):
+        triggers.configure(
+            round_.bbbffl_round_id, "early/2", "selective", 2, [LATE_MATCH_ID], reason="configure early/2"
+        )
+
+
 def test_trigger_rejects_a_second_main_and_replace_into_a_second_main():
     db, _, round_, entries, scope, pool, ownership = context()
     triggers = LockoutTriggerRepository(db)

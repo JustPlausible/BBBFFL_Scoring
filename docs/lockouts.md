@@ -71,6 +71,14 @@ via `app.audit.LOCKOUT_TRIGGER_CONFIGURED`). `LockoutTriggerRepository` is
 the persistence/service boundary a later commissioner/scorer management UI
 would call -- no UI is built in this issue.
 
+`trigger_key` must be a single, literal URL path segment forever (no `/`,
+and never `.`/`..`): rejected at every entry point (`create`/`replace`/
+`configure`, Codex review, PR #220) rather than only at the HTTP layer,
+since it is embedded raw in the round-preflight removal route's path
+(`POST .../lockout-trigger/{trigger_key}/remove`) and a key an ASGI router
+could never re-address would be configurable but permanently unremovable
+through that surface.
+
 Issue #219 adds one further pre-activation correction primitive:
 `LockoutTriggerRepository.remove` drops a trigger key out of a round's
 *active* plan entirely (e.g. an unnecessary selective trigger mistakenly

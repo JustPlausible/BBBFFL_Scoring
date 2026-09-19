@@ -215,6 +215,42 @@ def test_paired_open_is_idempotent_once_both_streams_are_already_open():
     assert result["superscore_state"] == "open"
 
 
+def test_paired_open_resolves_the_ss_round_through_the_finals_rounds_own_authoritative_season_not_a_corrupted_bracket_season_id():
+    """Issue #219 review (P1): resolving which SuperScore round to pair
+    with must go through the finals round's own authoritative
+    `competition_stream.season_id` (the same authority `app.
+    scorer_dashboard.season_round_options` and `app.
+    finals_superscore_dashboard.build_finals_week_dashboard` were fixed to
+    use), never `finals_bracket.season_id` directly -- a second,
+    independently-set reference that can disagree with it. Season A has no
+    SS round of its own; season B does. Corrupting season A's bracket's
+    `season_id` to point at season B must not make the paired-open action
+    silently resolve and attempt to pair season A's finals week with
+    season B's *unrelated* SS round -- it must fail closed exactly as it
+    would with no corruption present (season A genuinely has no SS round),
+    never touching season B's round at all."""
+    database = _database_for_test(9560)
+    built_a = _seed(database, 9560, with_ss1=False)
+    built_b = _seed(database, 9561)
+
+    # A plain `database.execute(...)` runs on its own short-lived pooled
+    # connection and is never committed (see `app.db.DatabaseConnection`) --
+    # this write must actually persist so the corruption below is real, not
+    # a silently-rolled-back no-op that would make this test vacuously pass
+    # regardless of the fix.
+    with transaction(database) as conn:
+        conn.execute(
+            "UPDATE finals_bracket SET season_id=? WHERE bracket_id=?",
+            (built_b["season"].season_id, built_a["bracket"].bracket_id),
+        )
+
+    with pytest.raises(PairedOpenWeekError, match="no SuperScore round"):
+        open_finals_and_superscore_week(database, _StubAflClient(), built_a["bracket"].bracket_id, 1, actor=ACTOR)
+
+    lifecycle = CompetitionLifecycleRepository(database)
+    assert lifecycle.get_round(built_b["ss1_round_id"]) is None
+
+
 def test_paired_open_rejects_a_finals_plan_with_no_main_trigger():
     """Issue #211 P1 (Codex review): `build_finals_week_preflight` never
     requires a configured lockout plan at all -- opening this pairing with

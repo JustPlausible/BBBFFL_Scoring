@@ -24,6 +24,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.authorization import Principal, Role
+from app.db import transaction
 from app.finals import FinalsBracketRepository
 from app.finals_preflight import open_finals_week
 from tests.test_finals import ACTOR, _advance_to_week3, _advance_week1, _bracket_with_mappings
@@ -193,9 +194,15 @@ def test_season_round_options_scopes_finals_rows_through_the_round_competition_s
     # exactly what `finals_bracket.season_id` being trusted as authority
     # over the selector's own listing would silently mis-scope against).
     other_season = SeasonRepository(database).create_season(9606, "Unrelated season")
-    database.execute(
-        "UPDATE finals_bracket SET season_id=? WHERE bracket_id=?", (other_season.season_id, bracket.bracket_id)
-    )
+    # A plain `database.execute(...)` runs on its own short-lived pooled
+    # connection and is never committed (see `app.db.DatabaseConnection`) --
+    # this write must actually persist so the corruption below is real, not
+    # a silently-rolled-back no-op that would make this test vacuously pass
+    # regardless of the fix.
+    with transaction(database) as conn:
+        conn.execute(
+            "UPDATE finals_bracket SET season_id=? WHERE bracket_id=?", (other_season.season_id, bracket.bracket_id)
+        )
 
     after = season_round_options(database, season_id)
     finals_labels_after = {o["round_label"] for o in after if o["stream"] == "finals"}

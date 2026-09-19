@@ -100,12 +100,16 @@ Record any `superscore.leaderboard.corrected` event here too.
 
 | Field | Value |
 |---|---|
-| `preview_complete_season` (`scripts.season_completion_2026 preview`) result | `<ready: true/false, diagnostic>` |
-| `complete_season` run (`scripts.season_completion_2026 complete`) | `<PASS/PENDING>` |
-| `completed_season_version` | `<...>` |
-| `completion_event_id` (`season.completed`) | `<...>` |
-| Premiership award id / season_entry_id | `<...>` / `<...>` |
-| Wooden spoon award id / season_entry_id | `<...>` / `<...>` |
+| `preview_complete_season` (`scripts.season_completion_2026 preview`) result | `ready: true`, diagnostic `null` after the replay season was explicitly transitioned `setup -> active` during closeout |
+| `complete_season` run (`scripts.season_completion_2026 complete`) | **PASS** — 2026-09-19 |
+| `completed_season_version` | `3` |
+| `completion_event_id` (`season.completed`) | `9cd65eee-d6ec-43b5-bcb7-23b275ac227a` |
+| Premiership award id / season_entry_id | `53c3e248-ecba-4684-a01d-fe72ed34dda3` / `9434d644-a90e-4df2-89e6-b770b0c492df` (Evil Absolutes) |
+| Wooden spoon award id / season_entry_id | `f99b3e49-54bc-4196-9d99-1826e116312f` / `cd58f124-d5d9-4201-b12d-e2aff0ada108` (The Plague) |
+
+### Closeout lifecycle finding
+
+The first completion preview correctly refused with `season must be active to complete (currently 'setup')`. The historical replay bootstrap had left the season lifecycle in `setup` even though the full operational replay had proceeded. Before completion, the operator used the supported `SeasonRepository.transition_lifecycle` path with an audited replay-operator reason to transition the season `setup -> active`; the season became version 2. A second completion preview then returned `ready: true` with all four Finals and all four SuperScore rounds `final`. This is retained as a replay finding: future/live season setup should make activation an explicit operational gate rather than discovering it at closeout.
 
 ## Final archival checkpoint (issue #194, step 7 -- only after the row above)
 
@@ -115,15 +119,16 @@ verify` has printed a successful report.** Its `completed_season_version`/
 
 | Field | Value |
 |---|---|
-| `verify` run and passed | `<PASS/PENDING>` |
-| `completed_season_version` (from `verify`, must match the row above) | `<...>` |
-| `completion_event_id` (from `verify`, must match the row above) | `<...>` |
-| Paired database backup taken (after `verify` passed) | `<PASS/PENDING>` |
-| Backup filename (private, not committed) | `<...>` |
-| Backup SHA-256 (private, not committed) | `<...>` |
-| Checkpoint JSON filename (private, not committed) | `<...>` |
-| Checkpoint JSON SHA-256 (private, not committed) | `<...>` |
-| `pg_restore --list` readability check | `<PASS/PENDING>` |
+| `verify` run and passed | **PASS** — 2026-09-19T09:27:07.499114+00:00 |
+| `completed_season_version` (from `verify`, must match the row above) | `3` |
+| `completion_event_id` (from `verify`, must match the row above) | `9cd65eee-d6ec-43b5-bcb7-23b275ac227a` |
+| Completion event occurred at | `2026-09-19T09:24:39.991606+00:00` |
+| Paired database backup taken (after `verify` passed) | **PASS** — 2026-09-19T09:28:07Z |
+| Backup filename (private, not committed) | retained privately; not committed |
+| Backup SHA-256 (private, not committed) | verified `OK`; retained privately |
+| Checkpoint JSON filename (private, not committed) | retained privately; not committed |
+| Checkpoint JSON SHA-256 (private, not committed) | verified `OK`; retained privately |
+| `pg_restore --list` readability check | **PASS** |
 
 This is the terminal recovery point for the completed 2026 season, retained
 alongside the first-half/second-half checkpoints as historical league

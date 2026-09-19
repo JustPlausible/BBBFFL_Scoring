@@ -202,6 +202,16 @@ def test_coach_can_manage_their_own_shortlist_via_http(client):
     assert len(added.json()["items"]) == 1
     assert added.json()["items"][0]["display_name"] == players[0].display_name
 
+    # Codex review, PR #225 (P2): a coach managing their own shortlist is
+    # a genuine self-action -- the audit event must record
+    # actor_type="coach", never "anonymous_operator" (reserved for the
+    # shared-token/delegated-role proxy surface).
+    from app.audit import AuditEventRepository
+
+    events = AuditEventRepository(client.app.state.database).list_events(action="shortlist.player.added")
+    matching = [e for e in events if e.entity_id == entry_a.season_entry_id]
+    assert matching and matching[-1].actor_type == "coach"
+
 
 def test_coach_cannot_read_or_mutate_another_coachs_shortlist(client):
     season, entry_a, entry_b, players = _seed_http_season(client.app, year=4102)

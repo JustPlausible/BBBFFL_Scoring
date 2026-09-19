@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from app.audit import ActorContext
+from app.audit import ActorContext, AuditEventRepository
 from app.season import SeasonRepository
 from tests.midseason_draft_helpers import build_season
 
@@ -152,9 +152,16 @@ def test_coach_can_make_their_own_midseason_selection(midseason_client):
 
     # Codex review, PR #225 (P2): a coach's own self-service pick must
     # never be labelled a Scorer/Admin proxy entry -- `pick_view` treats
-    # only a non-"coach" completion actor_role as a genuine proxy.
+    # only a non-"coach" completion actor_type as a genuine proxy, and the
+    # audit event itself must record the coach as the real actor_type
+    # (never anonymous_operator, reserved for the proxy surface).
     completed = next(p for p in body["completed_picks"] if p["draft_pick_id"] == board["current_pick"]["draft_pick_id"])
     assert completed["proxy"] is None
+    events = AuditEventRepository(client.app.state.database).list_events(action="draft.pick.completed")
+    event = next(e for e in events if e.entity_id == board["current_pick"]["draft_pick_id"])
+    assert event.actor_type == "coach"
+    coach = client.app.state.identities.get_current_coach(worst.season_entry_id)
+    assert event.actor_id == coach.coach_id
 
     squad = ctx["ownership"].current_squad(worst.season_entry_id)
     assert chosen["season_player_id"] in {row.season_player_id for row in squad}

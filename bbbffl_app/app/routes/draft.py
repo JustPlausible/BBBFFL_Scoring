@@ -38,6 +38,7 @@ from pydantic import BaseModel
 from app.audit import ActorContext
 from app.authorization import (
     Principal,
+    Role,
     require_capability,
     require_entry_context,
     require_role_covers_season,
@@ -84,6 +85,16 @@ def _scorer_actor(scorer_name: str | None) -> ActorContext:
 
 
 def _pick_actor(principal: Principal, legacy_scorer_name: str | None) -> ActorContext:
+    # Codex review, PR #225 (P2): `app.audit`'s actor contract requires a
+    # genuine coach self-action to use `actor_type="coach"`
+    # (`ActorContext.coach`), never `anonymous_operator` -- that type is
+    # reserved for the shared-token/delegated-role proxy surface and "must
+    # never be used for an authenticated coach's own action" (see
+    # app/audit.py's module docstring). Before issue #181 granted Coach
+    # `draft.participate`, this branch was only ever reached by a
+    # delegated (Scorer/Secretary/Admin/Replay Operator) active role.
+    if principal.role is Role.COACH and principal.coach_id is not None:
+        return ActorContext.coach(principal.coach_id)
     if principal.coach_id is not None:
         return ActorContext(
             actor_type="anonymous_operator",

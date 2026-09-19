@@ -304,16 +304,25 @@ async function renderPlayers(query) {
   }
   const filter = document.getElementById('availability-filter').value;
   const players = await api(`${API}/players?q=${encodeURIComponent(query || '')}&availability=${encodeURIComponent(filter)}`);
-  results.innerHTML = players.map(p => `
+  // Codex review, PR #225 (P2): a signed-in coach (or a delegated role
+  // representing a specific entry) can only ever submit for
+  // MY_SEASON_ENTRY_ID -- require_entry_context refuses anything else with
+  // a 404, so showing a "Draft" button while a *different* team is on the
+  // clock would always fail. `MY_SEASON_ENTRY_ID` is null for the legacy
+  // shared-token path (full proxy authority, no owned-entry concept), so
+  // this never hides the button from that path.
+  const canPick = !MY_SEASON_ENTRY_ID || MY_SEASON_ENTRY_ID === board.current_pick.current_season_entry_id;
+  const readOnlyNote = canPick ? '' : `<p class="muted">It is ${escapeHtml(board.current_pick.current_team_name)}'s turn. You can browse, but only that team (or a Scorer/Admin) can select right now.</p>`;
+  results.innerHTML = readOnlyNote + (players.map(p => `
     <div class="player-row">
       <div class="player-details">
         <span><strong>${escapeHtml(p.display_name || 'Name unavailable')}</strong><br><span class="muted">${p.total_points != null ? `${escapeHtml(p.stats_label)}: ${p.total_points} pts (${p.games_played} gm, avg ${p.average_points})` : `${escapeHtml(p.stats_label || '')} data unavailable`}</span></span>
         <span>${p.afl_team_name ? escapeHtml(p.afl_team_name) : '<span class="diagnostic">AFL club unavailable</span>'}</span>
         <span class="state-${escapeHtml(p.availability)}">${p.availability === 'owned' ? `Owned — ${escapeHtml(p.owner_team_name || p.owner_season_entry_id)}` : p.availability === 'available' ? 'Available' : 'Unresolved / not selectable'}${p.diagnostic ? `<br><span class="diagnostic">${escapeHtml(p.diagnostic)}</span>` : ''}</span>
       </div>
-      ${p.availability === 'available' ? `<button class="primary pick-btn" data-player="${escapeHtml(p.season_player_id)}">Draft for ${escapeHtml(board.current_pick.current_team_name)}</button>` : ''}
+      ${p.availability === 'available' && canPick ? `<button class="primary pick-btn" data-player="${escapeHtml(p.season_player_id)}">Draft for ${escapeHtml(board.current_pick.current_team_name)}</button>` : ''}
     </div>
-  `).join('') || '<p class="muted">No matching season players.</p>';
+  `).join('') || '<p class="muted">No matching season players.</p>');
   document.querySelectorAll('.pick-btn').forEach(btn => {
     btn.onclick = () => {
       const selectedPlayer = players.find(player => player.season_player_id === btn.dataset.player);

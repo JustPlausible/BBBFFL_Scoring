@@ -23,7 +23,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from app.audit import ActorContext
-from app.authorization import Principal, require_capability, require_entry_context
+from app.authorization import Principal, Role, require_capability, require_entry_context
 from app.config import BASE_DIR
 from app.draft_board import player_browse_view
 
@@ -50,6 +50,14 @@ class ReorderRequest(BaseModel):
 
 
 def _actor(principal: Principal) -> ActorContext:
+    # Codex review, PR #225 (P2): a coach managing their own shortlist is a
+    # genuine self-action -- `actor_type="coach"` (`ActorContext.coach`),
+    # never `anonymous_operator`, which is reserved for the shared-token/
+    # delegated-role proxy surface (see app/audit.py's module docstring).
+    # A Scorer/Admin supporting a coach's shortlist is still the delegated
+    # proxy case (its own active role is never "coach").
+    if principal.role is Role.COACH and principal.coach_id is not None:
+        return ActorContext.coach(principal.coach_id)
     return ActorContext(actor_type="anonymous_operator", actor_id=principal.coach_id, actor_role=principal.role.value)
 
 

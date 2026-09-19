@@ -58,6 +58,16 @@ participate = require_capability("midseason_draft.participate")
 
 
 def _actor(principal: Principal, legacy_name: str | None = None) -> ActorContext:
+    # Codex review, PR #225 (P2): a genuine Coach self-service action
+    # (currently only `submit_pick`, via `midseason_draft.participate`)
+    # must use `actor_type="coach"` (`ActorContext.coach`), never
+    # `anonymous_operator` -- that type is reserved for the shared-token/
+    # delegated-role proxy surface (see app/audit.py's module docstring).
+    # Every other caller of this helper is gated behind
+    # `midseason_draft.manage`, which Coach never holds, so this branch
+    # only ever fires for the one genuinely coach-reachable endpoint.
+    if principal.role is Role.COACH and principal.coach_id is not None:
+        return ActorContext.coach(principal.coach_id)
     return ActorContext(
         actor_type="anonymous_operator",
         actor_id=principal.coach_id or legacy_name,

@@ -113,8 +113,16 @@ def pick_view(request, pick, cache: dict, player_cache: dict, event_cache: dict)
     # Completion provenance is bulk-loaded once by `build_board`. Current and
     # upcoming picks cannot have a completion event, so never query for it.
     event = event_cache.get(pick.draft_pick_id) if pick.completed_at else None
+    # A completed pick's audit event exists for *every* selection, coach
+    # self-service included (issue #181, Codex review on PR #225, P2) --
+    # `actor_role` is only ever "coach" for a Coach acting as themselves
+    # (a delegated proxy always records its own active role: scorer/
+    # secretary/admin/replay_operator; see `require_entry_context`), so
+    # only a non-"coach" actor role is a genuine proxy entry worth
+    # surfacing here.
+    is_proxy = event is not None and event.actor_role != "coach"
     actor_name = None
-    if event and event.actor_id:
+    if is_proxy and event.actor_id:
         actor = request.app.state.identities.get_coach(event.actor_id)
         actor_name = actor.display_name if actor else event.actor_id
     return {
@@ -139,7 +147,7 @@ def pick_view(request, pick, cache: dict, player_cache: dict, event_cache: dict)
                 "reason": event.reason,
                 "on_behalf_of_team": current_identity["team_name"],
             }
-            if event
+            if is_proxy
             else None
         ),
     }

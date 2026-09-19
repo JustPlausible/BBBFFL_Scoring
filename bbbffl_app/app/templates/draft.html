@@ -58,7 +58,7 @@
     <h1>BBBFFL {{ "Mid-season" if draft_kind == "midseason" else "Preseason" }} Draft</h1>
   </div>
   <div id="shortlist-banner" class="block" style="display:none;">
-    <strong>Your shortlist suggestion:</strong> <span id="shortlist-suggestion-text"></span>
+    <span id="shortlist-suggestion-line" style="display:none;"><strong>Your shortlist suggestion:</strong> <span id="shortlist-suggestion-text"></span> — </span>
     <a id="shortlist-link" href="#">Manage your shortlist →</a>
   </div>
   <div class="token-bar">
@@ -372,20 +372,27 @@ on('reopen-btn', () => {
 // enforces that no other team's preferences are ever readable, so this is
 // convenience display, not a second authorization layer.
 async function refreshShortlistBanner(board) {
+  // Codex review, PR #225 (P2): the "Manage your shortlist" link is this
+  // page's only entry point to the shortlist -- it must stay visible even
+  // with no suggestion yet (a first-time coach), or the feature is
+  // undiscoverable without already knowing/typing its URL. Only the
+  // suggestion text itself is conditional.
   const banner = document.getElementById('shortlist-banner');
+  const suggestionLine = document.getElementById('shortlist-suggestion-line');
   if (!MY_SEASON_ENTRY_ID) { banner.style.display = 'none'; return; }
   document.getElementById('shortlist-link').href = `/shortlist/${MY_SEASON_ENTRY_ID}`;
+  banner.style.display = '';
   try {
     const result = await api(`/api/shortlist/${MY_SEASON_ENTRY_ID}/suggestion`);
     if (result.suggestion) {
       document.getElementById('shortlist-suggestion-text').textContent =
         `${result.suggestion.display_name}${result.suggestion.afl_team_name ? ' (' + result.suggestion.afl_team_name + ')' : ''}`;
-      banner.style.display = '';
+      suggestionLine.style.display = '';
     } else {
-      banner.style.display = 'none';
+      suggestionLine.style.display = 'none';
     }
   } catch (e) {
-    banner.style.display = 'none';
+    suggestionLine.style.display = 'none';
   }
 }
 

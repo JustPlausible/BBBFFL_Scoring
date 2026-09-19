@@ -150,6 +150,12 @@ def test_coach_can_make_their_own_midseason_selection(midseason_client):
     assert "trades" not in body
     assert body["status"]["completed_picks"] == 1
 
+    # Codex review, PR #225 (P2): a coach's own self-service pick must
+    # never be labelled a Scorer/Admin proxy entry -- `pick_view` treats
+    # only a non-"coach" completion actor_role as a genuine proxy.
+    completed = next(p for p in body["completed_picks"] if p["draft_pick_id"] == board["current_pick"]["draft_pick_id"])
+    assert completed["proxy"] is None
+
     squad = ctx["ownership"].current_squad(worst.season_entry_id)
     assert chosen["season_player_id"] in {row.season_player_id for row in squad}
 
@@ -271,6 +277,15 @@ def test_scorer_admin_proxy_pick_still_works_without_a_coach_session(midseason_c
         },
     )
     assert response.status_code == 200, response.text
+    completed = next(
+        p for p in response.json()["completed_picks"] if p["draft_pick_id"] == current_pick["draft_pick_id"]
+    )
+    assert completed["proxy"] == {
+        "operator_name": "Scorer Sam",
+        "operator_role": "admin",
+        "reason": "coach unavailable, proxy entry",
+        "on_behalf_of_team": current_pick["current_team_name"],
+    }
 
 
 def test_status_response_is_human_readable(midseason_client):

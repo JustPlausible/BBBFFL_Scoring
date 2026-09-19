@@ -50,6 +50,27 @@ from tests.test_finals import ACTOR, _advance_to_week3, _advance_week1, _create,
 from tests.test_scorer_dashboard_finals_superscore import _StubAflClient
 
 
+def _login(client, email, password):
+    """The full coach-session login flow (login -> account CSRF -> cookies/
+    headers) `tests.test_round_preflight`'s authenticated happy-path test
+    already uses -- factored out so more than one test here can act as a
+    non-admin, season-scoped role without repeating this boilerplate."""
+    login_page = client.get("/login")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text).group(1)
+    login = client.post(
+        "/login",
+        data={"email": email, "password": password, "csrf_token": token},
+        cookies=login_page.cookies,
+        follow_redirects=False,
+    )
+    session = login.cookies["bbbffl_session"]
+    account = client.get("/account", cookies={"bbbffl_session": session})
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', account.text).group(1)
+    cookies = {"bbbffl_session": session, "bbbffl_csrf": account.cookies["bbbffl_csrf"]}
+    headers = {"X-CSRF-Token": csrf}
+    return cookies, headers
+
+
 def _dashboard(database, season_id, *, round_id=None):
     return build_scorer_dashboard(
         database,
@@ -257,23 +278,7 @@ def test_finals_navigation_respects_season_scoped_authorisation(nav_client):
         actor=ActorContext.anonymous_operator("admin"),
     )
 
-    login_page = client.get("/login")
-    token = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text).group(1)
-    login = client.post(
-        "/login",
-        data={
-            "email": "scoped-secretary@example.com",
-            "password": "correct horse battery staple",
-            "csrf_token": token,
-        },
-        cookies=login_page.cookies,
-        follow_redirects=False,
-    )
-    session = login.cookies["bbbffl_session"]
-    account = client.get("/account", cookies={"bbbffl_session": session})
-    csrf = re.search(r'name="csrf_token" value="([^"]+)"', account.text).group(1)
-    cookies = {"bbbffl_session": session, "bbbffl_csrf": account.cookies["bbbffl_csrf"]}
-    headers = {"X-CSRF-Token": csrf}
+    cookies, headers = _login(client, "scoped-secretary@example.com", "correct horse battery staple")
     assert (
         client.post("/api/context/role", json={"role": "secretary"}, cookies=cookies, headers=headers).status_code
         == 200
@@ -300,7 +305,9 @@ def test_round_preflight_page_offers_a_return_link_back_to_the_scorer_dashboard(
     naturally back to the same Finals Scorer context and continue with the
     existing paired `Open finals week` action -- reusing the existing
     `/scorer?season_id=...&round_id=...` navigation pattern (`app.
-    scorer_dashboard.SCORER_DASHBOARD_URL`) rather than a new workflow."""
+    scorer_dashboard.SCORER_DASHBOARD_URL`) rather than a new workflow.
+    Default test-mode principal (no admin token configured) resolves to
+    Administrator, which can view the Scorer dashboard."""
     client = nav_client
     database = client.app.state.database
     built = build_finals_ready_season(database=database, year=2940)
@@ -312,6 +319,11 @@ def test_round_preflight_page_offers_a_return_link_back_to_the_scorer_dashboard(
     assert "Back to Scorer dashboard" in page.text
     assert "/scorer?season_id=" in page.text
     assert "round_id=" in page.text
+    # The page renders unconditionally for every role (this shell performs
+    # no server-side gate of its own -- the JSON APIs it calls do), so the
+    # link markup itself is always present in source; the actual runtime
+    # decision is this flag, rendered server-side from the active role.
+    assert "canViewScorerDashboard=true" in page.text
 
     # The JSON the page's own script consumes carries everything the return
     # link is built from -- the round's season_id alongside its own id --
@@ -320,3 +332,44 @@ def test_round_preflight_page_offers_a_return_link_back_to_the_scorer_dashboard(
     assert view.status_code == 200
     assert view.json()["round"]["season_id"] == built["season"].season_id
     assert view.json()["round"]["bbbffl_round_id"] == week1_round_id
+
+
+def test_round_preflight_page_hides_the_return_link_for_a_role_that_cannot_view_the_scorer_dashboard(nav_client):
+    """Codex review, PR #222 (P2): a Secretary holds `roundsetup.manage`
+    and can reach this very preflight page (and the extended Finals
+    index), but `/api/scorer/dashboard` admits only Scorer/Replay-Operator/
+    Administrator (`app.routes.scorer_dashboard.require_scorer_dashboard`)
+    -- the return link must never promise a destination this role cannot
+    actually reach."""
+    client = nav_client
+    database = client.app.state.database
+    built = build_finals_ready_season(database=database, year=2941)
+    bracket = _create(built)["bracket"]
+    week1_round_id = _repo(built).get_week_round_id(bracket.bracket_id, 1)
+
+    operator = client.app.state.identities.create_coach(
+        "Preflight-only Secretary", email="preflight-secretary@example.com"
+    )
+    client.app.state.credentials.set_password(
+        operator.coach_id, "correct horse battery staple", actor=ActorContext.anonymous_operator("admin")
+    )
+    client.app.state.role_grants.grant(
+        operator.coach_id,
+        "secretary",
+        season_id=built["season"].season_id,
+        actor=ActorContext.anonymous_operator("admin"),
+    )
+    cookies, headers = _login(client, "preflight-secretary@example.com", "correct horse battery staple")
+    assert (
+        client.post("/api/context/role", json={"role": "secretary"}, cookies=cookies, headers=headers).status_code
+        == 200
+    )
+
+    # The Secretary can still reach preflight itself -- roundsetup.manage
+    # is unaffected -- only the misleading return link is suppressed.
+    view = client.get(f"/api/admin/round-preflight/{week1_round_id}", cookies=cookies)
+    assert view.status_code == 200
+
+    page = client.get(f"/admin/round-preflight/{week1_round_id}", cookies=cookies)
+    assert page.status_code == 200
+    assert "canViewScorerDashboard=false" in page.text

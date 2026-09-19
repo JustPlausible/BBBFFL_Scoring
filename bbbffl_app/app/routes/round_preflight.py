@@ -4,7 +4,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from app.audit import ActorContext
-from app.authorization import Principal, require_capability, require_role_covers_season
+from app.authorization import Principal, Role, require_capability, require_role_covers_season, resolve_principal
 from app.config import BASE_DIR
 from app.csrf import issue_token, verify_token
 from app.round_preflight import (
@@ -316,9 +316,27 @@ def open_round(round_id: str, request: Request, principal: Principal = Depends(r
 
 
 @page_router.get("/admin/round-preflight/{round_id}", response_class=HTMLResponse)
-def page(round_id: str, request: Request):
+def page(round_id: str, request: Request, principal: Principal = Depends(resolve_principal)):
     token = issue_token(request.app.state.settings.session_secret)
-    response = templates.TemplateResponse(request, "round_preflight.html", {"round_id": round_id, "csrf_token": token})
+    # Issue #221 review (Codex, P2): the page's own "Back to Scorer
+    # dashboard" return link must never promise a destination the current
+    # active role cannot actually reach -- `/api/scorer/dashboard` admits
+    # only Scorer/Replay-Operator/Administrator (`app.routes.scorer_
+    # dashboard.require_scorer_dashboard`), and a Secretary (who holds
+    # `roundsetup.manage` and can reach this very preflight page) is
+    # deliberately excluded from it. Mirrors that exact role set rather
+    # than widening Scorer dashboard access, which is a separate decision
+    # outside this navigation fix's scope.
+    can_view_scorer_dashboard = principal.role in (Role.SCORER, Role.REPLAY_OPERATOR, Role.ADMIN)
+    response = templates.TemplateResponse(
+        request,
+        "round_preflight.html",
+        {
+            "round_id": round_id,
+            "csrf_token": token,
+            "can_view_scorer_dashboard": can_view_scorer_dashboard,
+        },
+    )
     response.set_cookie(
         "bbbffl_csrf",
         token,

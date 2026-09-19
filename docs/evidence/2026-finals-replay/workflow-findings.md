@@ -351,3 +351,13 @@ None blocked completion of the historical replay, but they are useful candidates
 After the lifecycle repair in finding 10, completion preview returned ready with Finals Weeks 1-4 and SS1-SS4 all final. The atomic completion transaction succeeded, created the Premiership and Wooden Spoon season awards, and transitioned the season to `completed` version 3. The independent archival guard then re-derived and matched the exact `season.completed` event before the final paired database/checkpoint archive was taken. The dump passed `pg_restore --list` and both private checksums verified.
 
 The sanitised identifiers and timestamps are recorded in `provenance-manifest.md`; private backup filenames and hashes remain outside GitHub by policy.
+
+## Finding 15: completed-season write fence passed a real post-closeout smoke test
+
+After the final archival checkpoint was taken, the operator ran a read-only SS4 review status for JHAS and observed review version 1 with no DNP rulings, no interchange ruling and no overrides. An attempted SS4 DNP mutation against that exact current review version was then made through the supported `scripts.superscore_review_2026` CLI.
+
+The application refused the operation with the completed-season fence:
+
+`season 3832745c-c19a-4224-bceb-86ded6baa09c is completed; result-changing operations are permanently refused`.
+
+A second read-only status immediately afterwards still reported review version 1 with empty slot rulings, no interchange ruling and no overrides. This is direct operational evidence that the completed-season fence rejected the supported result-changing path without mutating review state.

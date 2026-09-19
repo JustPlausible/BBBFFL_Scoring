@@ -3,9 +3,7 @@
 Durable findings discovered while issue #194 prepared this phase's operator
 surface, in the same spirit as
 [`2026-second-half-replay/workflow-findings.md`](../2026-second-half-replay/workflow-findings.md).
-These are findings about the *tooling/code*, not about replaying finals or
-SuperScore against real historical data -- no such replay has run yet (see
-[`README.md`](README.md)'s "Status" section).
+Findings 1-9 were discovered while preparing the tooling/operator surface. The execution findings added below were observed while subsequently running the full 2026 Finals/SuperScore historical replay through Grand Final/SS4 and season closeout.
 
 ## Finding 1: SuperScore round setup/review and season completion had no operator-reachable entry point
 
@@ -307,12 +305,61 @@ playbook step reordering was needed, only its explanatory note.
 No other defect was found in #190-#193/#195 while preparing this phase's
 tooling.
 
-## Not yet found: any finding from actually running the phase
+## Finding 10: the replay season remained in `setup` until closeout
 
-Everything above was found while building the operator surface, before any
-finals week or SuperScore round has been played against the real 2026
-replay database (see `README.md`). Genuine replay-execution findings
-(historical-data availability, workbook discrepancies, UX friction) belong
-in a `round-results.md`/`ux-findings.md` this directory does not yet have --
-create them, in the same shape as the second-half replay's own documents,
-when that execution actually happens.
+**Severity:** closeout blocker / future live-season lifecycle gap.
+
+The first real `scripts.season_completion_2026 preview` correctly refused because the replay season was still `setup`. The replay bootstrap had intentionally created the season in `setup`, but no later replay operation had transitioned it to `active`; nevertheless the entire ordinary season, mid-season draft, Finals and SuperScore workflows had been able to proceed.
+
+For the historical replay closeout, the operator used the supported audited `SeasonRepository.transition_lifecycle(..., "active")` path with an explicit replay-closeout reason. The season moved to version 2, and the next completion preview returned `ready: true` with all eight Finals/SuperScore rounds final. The atomic completion then moved the season to `completed`, version 3.
+
+**2027 implication:** season activation needs to be an explicit operational milestone/gate in preseason setup. It should not be possible for a live season to progress indefinitely while the parent season remains `setup`.
+
+## Finding 11: the browser Scorer workflow was substantially easier than the original CLI-heavy playbook, but navigation still matters
+
+The real replay increasingly used the Scorer web surfaces rather than the original command-by-command CLI procedure. The browser workflow successfully carried the operator through Finals progression, paired Finals/SuperScore operation, review and publication. The remaining friction was primarily discoverability: a correct "Complete Grand Final preflight" blocker did not initially give a human operator an obvious route to the relevant Finals preflight page, while the preflight index stopped at Round 20. This is tracked by issue #221.
+
+The replay therefore supports retaining CLI tools as recovery/operator primitives while treating the browser Scorer workflow as the normal 2027 path. A non-coding Scorer beta rehearsal remains desirable before live use.
+
+## Finding 12: real Coach and exceptional Scorer paths were exercised during Finals
+
+The execution phase exercised more than the happy path:
+
+- two authenticated Coach accounts were retained through the final two replay rounds;
+- Finals eligibility and cross-coach private-lineup isolation were verified;
+- Finals and concurrent SuperScore submissions remained independent;
+- a non-finalist Coach could participate in SuperScore without gaining Finals lineup access;
+- delegated lineup entry, missed-submission adjudication and locked-lineup correction were all used;
+- DNP/Interchange review, calculation, finalisation and publication were exercised;
+- a Preliminary Final with a main-only lockout plan proved no synthetic early trigger is required.
+
+These are positive operational findings, not merely unit-test coverage.
+
+## Finding 13: remaining UX follow-up identified by execution
+
+The replay exposed several non-blocking 2027 UX improvements:
+
+- Coach Account weekly selections should be ordered by competition chronology rather than colliding ordinary/Finals/SuperScore sequence numbers.
+- Coaches participating in both Finals and SuperScore would benefit from an optional same-week "copy other lineup to draft" action; copying must never bind or auto-submit the two independent lineups.
+- Carry-forward plus an existing private draft can make the authoritative submitted lineup difficult to understand in the Scorer UI; submitted state versus private changes should be clearer.
+- The Scorer Dashboard's explanatory workflow cards and Finals-preflight handoff need small presentation/navigation polish (issue #221 covers the current preflight/dashboard work).
+
+None blocked completion of the historical replay, but they are useful candidates for the post-replay 2027 UX backlog.
+
+## Finding 14: season completion and archival guard succeeded against the real replay
+
+After the lifecycle repair in finding 10, completion preview returned ready with Finals Weeks 1-4 and SS1-SS4 all final. The atomic completion transaction succeeded, created the Premiership and Wooden Spoon season awards, and transitioned the season to `completed` version 3. The independent archival guard then re-derived and matched the exact `season.completed` event before the final paired database/checkpoint archive was taken. The dump passed `pg_restore --list` and both private checksums verified.
+
+The sanitised identifiers and timestamps are recorded in `provenance-manifest.md`; private backup filenames and hashes remain outside GitHub by policy.
+
+## Finding 15: completed-season write fence passed a real post-closeout smoke test
+
+After the final archival checkpoint was taken, the operator ran a read-only SS4 review status for JHAS and observed review version 1 with no DNP rulings, no interchange ruling and no overrides. An attempted SS4 DNP mutation against that exact current review version was then made through the supported `scripts.superscore_review_2026` CLI.
+
+The application refused the operation with the completed-season fence:
+
+`season 3832745c-c19a-4224-bceb-86ded6baa09c is completed; result-changing operations are permanently refused`.
+
+A second read-only status immediately afterwards still reported review version 1 with empty slot rulings, no interchange ruling and no overrides. This is direct operational evidence that the completed-season fence rejected the supported result-changing path without mutating review state.
+
+The archival verifier was then re-run after the refused mutation and again returned completed season version 3 with the same completion event `9cd65eee-d6ec-43b5-bcb7-23b275ac227a` (verified at 2026-09-19T09:46:21.433457+00:00), confirming the archival identity remained unchanged after the failed write attempt.

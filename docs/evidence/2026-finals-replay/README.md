@@ -42,58 +42,46 @@ first-half `phase-one-closeout.md`.
 
 ## Status
 
-**Tooling and documentation complete; live replay execution pending
-operator access to the 2026 replay environment.**
+**Replay execution and season closeout completed on 2026-09-19.**
 
-Issue #194 delivered the audit-event catalogue addendum
-(`docs/audit-events.md`), the operational playbook
-(`docs/2026-finals-superscore-playbook.md`), the three previously-missing
-operator CLIs (`scripts/superscore_round_2026.py`,
-`scripts/superscore_review_2026.py`, `scripts/season_completion_2026.py`),
-the final-archival-checkpoint guard (`app/season_archival.py`,
-`scripts/season_archival_checkpoint_2026.py`, both with passing automated
-tests), and a fix to a genuine PostgreSQL defect in `app.superscore_round`
-that would otherwise have made the SuperScore round-setup CLI unusable
-against the real replay database.
+The real 2026 replay environment was run through all four Finals weeks and
+all four SuperScore rounds, including authenticated Coach submissions,
+exceptional Scorer workflows, Grand Final/SS4 publication, season
+completion, independent archival verification, and a final validated
+database/checkpoint archive. The sanitised completion identifiers and
+verification state are recorded in
+[`provenance-manifest.md`](provenance-manifest.md); private backup
+filenames, paths and hashes remain outside GitHub by policy.
 
-**What this issue did not do, and why:** this development session has no
-access to the actual 2026 finals/SuperScore replay database or Docker
-Compose stack (`compose.second-half-replay.yaml`'s successor installation)
--- that environment is operator-only, holds real private secrets, and is
-never available inside CI/development. Concretely, this means:
+The replay also surfaced execution-time findings beyond the original
+tooling work: the parent season remained in `setup` until closeout and had
+to be transitioned through the supported audited `setup -> active` path
+before completion; browser Scorer workflows proved preferable for routine
+Finals operation; Coach privacy/eligibility boundaries and several
+exceptional Scorer workflows were exercised; and several non-blocking UX
+follow-ups were identified. These are recorded in
+[`workflow-findings.md`](workflow-findings.md).
 
-- The post-finals-seeding-apply paired database/checkpoint backup (below)
-  has **not** been taken against the real replay database. The exact
-  procedure to take it is documented in full in
-  [`provenance-manifest.md`](provenance-manifest.md) and
-  `docs/2026-finals-superscore-playbook.md` section C; running it is
-  outstanding operator work.
-- No finals week or SuperScore round has actually been played against the
-  real 2026 replay database in this session. This directory therefore has
-  no `round-results.md`/`ux-findings.md` populated with real findings yet
-  -- [`workflow-findings.md`](workflow-findings.md) instead records what
-  this issue found and fixed in the *code/tooling* while preparing the
-  operator surface (the missing CLIs, the PostgreSQL bug), which is real,
-  verifiable work product, distinct from replay execution findings.
-- The hard exit-gate checklist (`docs/2026-finals-superscore-playbook.md`)
-  is consequently unchecked -- it cannot honestly be marked complete
-  without the operator having actually run the phase.
+Some earlier per-round recovery-boundary details were not captured into
+this repository at the time they were taken. Where exact audit-event ids or
+checkpoint metadata are no longer available from the conversation record,
+the manifest now records that evidence gap explicitly rather than
+inventing identifiers. The terminal pre-closeout and post-completion
+archives are both preserved and validated privately.
 
 ## Documents
 
-- [Provenance manifest](provenance-manifest.md) -- the post-finals-seeding-
-  apply backup record (template, outstanding), the per-finals-week and
-  per-SuperScore-round checkpoint template, and the final archival
-  checkpoint template bound to issue #195's completion-event identifier.
-- [Workflow findings](workflow-findings.md) -- durable findings from
-  preparing this phase's operator surface: the missing SuperScore round-
-  setup/review and season-completion CLIs, and the PostgreSQL `COUNT(*) ...
-  FOR UPDATE` defect in `app.superscore_round`.
-
-`round-results.md`/`ux-findings.md` are intentionally not created yet --
-`docs/2026-finals-superscore-playbook.md`'s own instructions direct the
-operator to create them, in the same shape as the second-half replay's own
-documents, once the phase is actually run.
+- [Provenance manifest](provenance-manifest.md) -- sanitised replay
+  provenance, known evidence gaps, season-completion identifiers, and the
+  final archival-checkpoint verification.
+- [Workflow findings](workflow-findings.md) -- tooling findings plus
+  execution findings from the completed Finals/SuperScore replay,
+  including lifecycle, Coach/privacy, Scorer workflow and UX observations.
+- [Round results](round-results.md) -- phase-level execution summary for
+  Finals Weeks 1-4 and SS1-SS4, including the historical-result outcome
+  checks available from the replay record.
+- [UX findings](ux-findings.md) -- operator/Coach usability observations
+  retained for 2027 follow-up.
 
 ## Evidence policy
 

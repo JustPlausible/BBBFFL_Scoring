@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BBBFFL Mid-season Draft Operations</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 12px; background: #0f1115; color: #e7e9ee; }
+  h1 { font-size: 1.2rem; }
+  h2 { font-size: 1rem; margin-top: 20px; }
+  input, select, button, textarea { font-size: 0.9rem; padding: 5px 8px; border-radius: 6px; border: 1px solid #333a48; background: #171a21; color: inherit; }
+  button { cursor: pointer; }
+  button.primary { background: #3a6ea5; border-color: #3a6ea5; color: white; }
+  button.danger { background: #a53a3a; border-color: #a53a3a; color: white; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 8px; font-size: 0.85rem; }
+  th, td { padding: 6px; border-bottom: 1px solid #2a2f3a; text-align: left; vertical-align: middle; }
+  .block { background: #171a21; border: 1px solid #2a2f3a; border-radius: 10px; padding: 10px 14px; margin-bottom: 16px; }
+  .muted { color: #9aa3b2; font-size: 0.8rem; }
+  .search-row { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+  .search-row input[type=text] { flex: 1; min-width: 160px; }
+  .pill { font-size: 0.7rem; padding: 1px 6px; border-radius: 6px; background: #2a2f3a; display: inline-block; }
+  .lifecycle { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 12px; }
+  .lifecycle span { padding: 4px 10px; border-radius: 999px; background: #171a21; border: 1px solid #2a2f3a; font-size: 0.8rem; }
+  .lifecycle span.current { background: #3a6ea5; border-color: #3a6ea5; color: white; font-weight: 600; }
+  .lifecycle span.done { border-color: #2f6e3a; color: #75d384; }
+  .message { display:none; padding: 9px; margin-bottom: 12px; border-radius: 8px; }
+  .message.error { display:block; background:#4a1f1f; border:1px solid #a53a3a; }
+  .message.success { display:block; background:#1f3a24; border:1px solid #2f6e3a; }
+  a { color: #79c0ff; }
+</style>
+</head>
+<body>
+  <h1>Mid-season draft operations</h1>
+  <div id="message" class="message" role="alert"></div>
+
+  <div class="block">
+    <h2>Lifecycle</h2>
+    <div class="lifecycle" id="lifecycle-track"></div>
+    <div id="next-action"></div>
+  </div>
+
+  <div class="block" id="setup-block">
+    <h2>Set up</h2>
+    <div class="search-row">
+      <input type="number" id="trigger-round" placeholder="Trigger round number" min="1">
+      <button id="set-trigger-btn">Set trigger round</button>
+    </div>
+    <div class="search-row">
+      <input type="text" id="competition-id" placeholder="Ordinary competition ID">
+      <button id="confirm-ladder-btn" class="primary">Preview ladder</button>
+    </div>
+    <div id="ladder-preview"></div>
+  </div>
+
+  <div class="block" id="open-delisting-block" style="display:none;">
+    <h2>Open delisting window</h2>
+    <p class="muted">The ladder and draft order are confirmed. Open the delisting window to let coaches (or a Scorer proxy) submit delistings and trades.</p>
+    <button id="open-delisting-btn" class="primary">Open delisting window</button>
+  </div>
+
+  <div class="block" id="delisting-block" style="display:none;">
+    <h2>Delistings</h2>
+    <div id="delisting-list"></div>
+    <div class="search-row" id="delist-form-row">
+      <select id="delist-entry"><option value="">Select team…</option></select>
+      <select id="delist-player"><option value="">Select an owned player…</option></select>
+      <input type="text" id="delist-reason" placeholder="Reason (optional)">
+      <button id="delist-btn">Submit delisting</button>
+    </div>
+    <h2>Trades</h2>
+    <div id="trade-list"></div>
+    <p class="muted">Proposing a new trade is available via the API for now (<code>POST /api/admin/midseason-draft/{season_id}/trade</code>); pending trades proposed elsewhere can be approved/rejected here.</p>
+    <div class="search-row">
+      <button id="lock-btn" class="danger">Lock delistings</button>
+      <button id="generate-btn" class="primary">Generate selections</button>
+    </div>
+  </div>
+
+  <div class="block" id="draft-link-block" style="display:none;">
+    <h2>Conduct the draft</h2>
+    <p><a id="conduct-link" href="#">Open the shared draft-selection board →</a></p>
+  </div>
+
+  <div class="block" id="completion-block" style="display:none;">
+    <h2>Post-draft trading &amp; completion</h2>
+    <button id="close-trading-btn" class="danger">Close post-draft trading and complete</button>
+  </div>
+
+<script>
+const SEASON_ID = {{ season_id | tojson }};
+const API = `/api/admin/midseason-draft/${SEASON_ID}`;
+
+async function api(path, body) {
+  const res = await fetch(path, {
+    method: body !== undefined ? 'POST' : 'GET',
+    headers: { 'Content-Type': 'application/json' },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || res.statusText);
+  }
+  return res.json();
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[char]);
+}
+
+function say(text, kind='error') {
+  const message = document.getElementById('message');
+  message.textContent = text || '';
+  message.className = text ? `message ${kind}` : 'message';
+}
+
+const STAGES = [
+  ['ladder_confirmed', 'Ladder confirmed'],
+  ['delisting_open', 'Delisting window open'],
+  ['delistings_locked', 'Delistings locked'],
+  ['draft_open', 'Draft open'],
+  ['draft_complete', 'Draft complete'],
+  ['complete', 'Complete'],
+];
+
+function renderLifecycle(status) {
+  const state = status ? status.state : null;
+  const index = state ? STAGES.findIndex(([key]) => key === state) : -1;
+  document.getElementById('lifecycle-track').innerHTML = STAGES.map(([key, label], i) => {
+    const cls = key === state ? 'current' : (index >= 0 && i < index ? 'done' : '');
+    return `<span class="${cls}">${escapeHtml(label)}</span>`;
+  }).join('');
+}
+
+function nextActionText(body) {
+  if (!body.draft) return 'Set the trigger round, confirm every round through it is final, then preview and confirm the ladder.';
+  const state = body.draft.state;
+  const messages = {
+    ladder_confirmed: 'Open the delisting window to allow coaches to submit delistings and trades.',
+    delisting_open: 'Submit/withdraw delistings and decide trades, then lock delistings once every trade is resolved.',
+    delistings_locked: 'Generate the mid-season selection table to begin the draft.',
+    draft_open: 'Conduct the draft on the shared draft board.',
+    draft_complete: 'Post-draft trading is open. Close it when ready to complete the mid-season draft.',
+    complete: 'The mid-season draft is complete. Round 11 proceeds as normal.',
+  };
+  return messages[state] || '';
+}
+
+function renderDelistings(body) {
+  const list = document.getElementById('delisting-list');
+  const active = (body.delistings || []).filter(d => !d.withdrawn_at);
+  list.innerHTML = active.length
+    ? '<table><thead><tr><th>Team</th><th>Player</th><th>Reason</th><th></th></tr></thead><tbody>' +
+      active.map(d => `<tr><td>${escapeHtml(d.team ? d.team.team_name : d.season_entry_id)}</td><td>${escapeHtml(d.player ? d.player.display_name : d.season_player_id)}</td><td>${escapeHtml(d.reason || '')}</td><td><button data-withdraw="${d.delisting_id}">Withdraw</button></td></tr>`).join('') +
+      '</tbody></table>'
+    : '<p class="muted">No active delistings yet.</p>';
+  document.querySelectorAll('[data-withdraw]').forEach(btn => {
+    btn.onclick = () => api(`${API}/delisting/${btn.dataset.withdraw}/withdraw`, { reason: null }).then(() => refresh('Delisting withdrawn.')).catch(handleError);
+  });
+}
+
+function tradeLegText(leg) {
+  const fromTeam = leg.from_team ? leg.from_team.team_name : leg.from_season_entry_id;
+  const toTeam = leg.to_team ? leg.to_team.team_name : leg.to_season_entry_id;
+  const what = leg.leg_type === 'player'
+    ? (leg.player ? leg.player.display_name : leg.season_player_id)
+    : `round ${leg.draft_round} pick`;
+  return `${escapeHtml(fromTeam)} → ${escapeHtml(toTeam)}: ${escapeHtml(what)}`;
+}
+
+function renderTrades(body) {
+  const list = document.getElementById('trade-list');
+  const trades = body.trades || [];
+  list.innerHTML = trades.length
+    ? '<table><thead><tr><th>Legs</th><th>Status</th><th></th></tr></thead><tbody>' +
+      trades.map(t => `<tr><td>${(t.legs || []).map(tradeLegText).join('<br>')}</td><td>${escapeHtml(t.status)}</td><td>${
+        t.status === 'pending'
+          ? `<button data-approve="${t.trade_id}" class="primary">Approve</button> <button data-reject="${t.trade_id}" class="danger">Reject</button>`
+          : ''
+      }</td></tr>`).join('') +
+      '</tbody></table>'
+    : '<p class="muted">No trades proposed yet.</p>';
+  document.querySelectorAll('[data-approve]').forEach(btn => {
+    btn.onclick = () => api(`${API}/trade/${btn.dataset.approve}/decide`, { approve: true }).then(() => refresh('Trade approved.')).catch(handleError);
+  });
+  document.querySelectorAll('[data-reject]').forEach(btn => {
+    btn.onclick = () => {
+      const reason = prompt('Reason for rejecting this trade? (optional)') || null;
+      api(`${API}/trade/${btn.dataset.reject}/decide`, { approve: false, reason }).then(() => refresh('Trade rejected.')).catch(handleError);
+    };
+  });
+}
+
+// Codex review, PR #225 (P2): populate human-readable team/owned-player
+// selectors for the delisting form instead of requiring the operator to
+// already know and type raw UUIDs -- reuses the same shared player
+// browser (`GET .../players`) the conduct-draft board uses, filtered
+// client-side to the chosen team's currently owned players.
+function populateTeamSelect(body) {
+  const select = document.getElementById('delist-entry');
+  const previous = select.value;
+  select.innerHTML = '<option value="">Select team…</option>' +
+    (body.order || []).map(o => `<option value="${escapeHtml(o.season_entry_id)}">${escapeHtml(o.team_name)}</option>`).join('');
+  if (previous) select.value = previous;
+}
+
+async function populatePlayerSelect() {
+  const teamSelect = document.getElementById('delist-entry');
+  const playerSelect = document.getElementById('delist-player');
+  const entryId = teamSelect.value;
+  playerSelect.innerHTML = '<option value="">Select an owned player…</option>';
+  if (!entryId) return;
+  try {
+    const players = await api(`${API}/players?availability=owned`);
+    const owned = players.filter(p => p.owner_season_entry_id === entryId);
+    playerSelect.innerHTML += owned.map(p => `<option value="${escapeHtml(p.season_player_id)}">${escapeHtml(p.display_name)}${p.afl_team_name ? ' — ' + escapeHtml(p.afl_team_name) : ''}</option>`).join('');
+  } catch (e) {
+    // Leave the selector at its placeholder-only state; the delist
+    // button's own validation still refuses an empty selection.
+  }
+}
+document.getElementById('delist-entry').onchange = populatePlayerSelect;
+
+async function handleError(error) {
+  await refresh();
+  say(error.message || 'The action could not be completed.');
+}
+
+function on(id, handler) {
+  const el = document.getElementById(id);
+  if (el) el.onclick = handler;
+}
+
+on('set-trigger-btn', () => {
+  const value = parseInt(document.getElementById('trigger-round').value, 10);
+  if (!value) { say('Enter a trigger round number.'); return; }
+  api(`${API}/trigger-round`, { trigger_round: value }).then(() => refresh('Trigger round set.')).catch(handleError);
+});
+
+on('confirm-ladder-btn', () => {
+  const competitionId = document.getElementById('competition-id').value.trim();
+  if (!competitionId) { say('Enter the ordinary competition ID.'); return; }
+  api(`${API}/ladder-preview?competition_id=${encodeURIComponent(competitionId)}`).then(preview => {
+    document.getElementById('ladder-preview').innerHTML = `
+      <p class="muted">Ladder through round ${preview.trigger_round}. Confirming freezes an immutable snapshot for the draft order and never modifies the live ladder.</p>
+      <table><thead><tr><th>#</th><th>Team</th><th>W-D-L</th></tr></thead><tbody>
+      ${preview.rows.map(r => `<tr><td>${r.rank}</td><td>${escapeHtml(r.team_name)}</td><td>${r.wins}-${r.draws}-${r.losses}</td></tr>`).join('')}
+      </tbody></table>
+      <h2>Reverse draft-order preview</h2>
+      <table><thead><tr><th>Pick</th><th>Team</th></tr></thead><tbody>
+      ${preview.reverse_order_preview.map(r => `<tr><td>${r.position}</td><td>${escapeHtml(r.team_name)}</td></tr>`).join('')}
+      </tbody></table>
+      <div class="search-row">
+        <input type="text" id="confirm-reason" placeholder="Reason (optional, required for an order override)">
+        <button id="do-confirm-btn" class="primary">Confirm ladder and freeze draft order</button>
+      </div>`;
+    document.getElementById('do-confirm-btn').onclick = () => {
+      if (!confirm('Confirming freezes an immutable draft-order snapshot. This cannot be undone. Continue?')) return;
+      api(`${API}/confirm-ladder`, { competition_id: competitionId, reason: document.getElementById('confirm-reason').value || null })
+        .then(() => refresh('Ladder confirmed; draft order frozen.'))
+        .catch(handleError);
+    };
+  }).catch(handleError);
+});
+
+on('open-delisting-btn', () => {
+  api(`${API}/open-delisting-window`, {}).then(() => refresh('Delisting window opened.')).catch(handleError);
+});
+
+on('delist-btn', () => {
+  const seasonEntryId = document.getElementById('delist-entry').value.trim();
+  const seasonPlayerId = document.getElementById('delist-player').value.trim();
+  if (!seasonEntryId || !seasonPlayerId) { say('Team and player are both required.'); return; }
+  api(`${API}/delisting`, {
+    season_entry_id: seasonEntryId,
+    season_player_id: seasonPlayerId,
+    reason: document.getElementById('delist-reason').value || null,
+  }).then(() => refresh('Delisting submitted.')).catch(handleError);
+});
+
+on('lock-btn', () => {
+  if (!confirm('Lock delistings? Every active delisted player releases immediately and this cannot be undone.')) return;
+  api(`${API}/lock-delistings`, {}).then(() => refresh('Delistings locked.')).catch(handleError);
+});
+
+on('generate-btn', () => {
+  api(`${API}/generate-selections`, {}).then(() => refresh('Selections generated.')).catch(handleError);
+});
+
+on('close-trading-btn', () => {
+  if (!confirm('Close post-draft trading and complete the mid-season draft?')) return;
+  api(`${API}/close-post-draft-trading`, {}).then(() => refresh('Mid-season draft complete.')).catch(handleError);
+});
+
+async function refresh(successMessage) {
+  try {
+    const body = await api(`${API}/status`);
+    renderLifecycle(body.draft);
+    document.getElementById('next-action').innerHTML = `<p>${escapeHtml(nextActionText(body))}</p>`;
+    const state = body.draft ? body.draft.state : null;
+    document.getElementById('setup-block').style.display = body.draft ? 'none' : '';
+    document.getElementById('open-delisting-block').style.display = state === 'ladder_confirmed' ? '' : 'none';
+    document.getElementById('delisting-block').style.display = ['delisting_open', 'delistings_locked'].includes(state) ? '' : 'none';
+    // Submitting a new delisting is only legal while the window is open;
+    // locking is only legal from delisting_open; generating is only legal
+    // once delistings are locked (Codex review, PR #225, P1 -- the
+    // previous version showed both lock and generate together with no
+    // way to reach delisting_open at all).
+    document.getElementById('delist-form-row').style.display = state === 'delisting_open' ? '' : 'none';
+    document.getElementById('lock-btn').style.display = state === 'delisting_open' ? '' : 'none';
+    document.getElementById('generate-btn').style.display = state === 'delistings_locked' ? '' : 'none';
+    document.getElementById('draft-link-block').style.display = ['draft_open', 'draft_complete'].includes(state) ? '' : 'none';
+    document.getElementById('completion-block').style.display = state === 'draft_complete' ? '' : 'none';
+    document.getElementById('conduct-link').href = `/admin/midseason-draft/${SEASON_ID}/conduct`;
+    if (body.draft) {
+      renderDelistings(body);
+      renderTrades(body);
+      populateTeamSelect(body);
+    }
+    if (successMessage) say(successMessage, 'success'); else say('');
+  } catch (e) {
+    say(e.message || 'The mid-season draft status could not be loaded.');
+  }
+}
+
+refresh();
+</script>
+</body>
+</html>

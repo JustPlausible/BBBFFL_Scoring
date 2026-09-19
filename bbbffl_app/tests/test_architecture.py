@@ -86,6 +86,17 @@ SEASON_MODEL = {
     # constructed instance on request.app.state (see this file's
     # ROUND_REVIEW comment).
     "app.midseason_draft",
+    # Issue #181's private coach draft shortlist: a season-entry-scoped
+    # ordered preference list, the same shape as every other aggregate
+    # here -- reached only via the already-constructed instance on
+    # request.app.state, never imported directly by its route
+    # (app.routes.shortlist).
+    "app.shortlist",
+    # Issue #181's read-only, best-effort player scoring-context aggregate
+    # over app.calculations' own persisted `bbbffl_matchup_calculation`
+    # snapshots -- a sibling read model alongside app.ladder, never
+    # imported directly by a route.
+    "app.player_stats_context",
 }
 
 # Lockouts sits one layer above the season model (it depends on
@@ -398,6 +409,7 @@ ROUTES = {
     "app.routes.scorer_dashboard",
     "app.routes.admin_dashboard",
     "app.routes.midseason_draft",
+    "app.routes.shortlist",
     "app.routes.finals_preflight",
     "app.routes.superscore_review",
 }

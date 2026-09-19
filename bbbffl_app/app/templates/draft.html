@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>BBBFFL Preseason Draft — Scorer</title>
+<title>BBBFFL {{ "Mid-season" if draft_kind == "midseason" else "Preseason" }} Draft</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 12px; background: #0f1115; color: #e7e9ee; }
@@ -55,7 +55,11 @@
 </head>
 <body>
   <div class="page-head">
-    <h1>BBBFFL Preseason Draft — Scorer</h1>
+    <h1>BBBFFL {{ "Mid-season" if draft_kind == "midseason" else "Preseason" }} Draft</h1>
+  </div>
+  <div id="shortlist-banner" class="block" style="display:none;">
+    <span id="shortlist-suggestion-line" style="display:none;"><strong>Your shortlist suggestion:</strong> <span id="shortlist-suggestion-text"></span> — </span>
+    <a id="shortlist-link" href="#">Manage your shortlist →</a>
   </div>
   <div class="token-bar">
     <input type="password" id="token" placeholder="Admin token (if required)">
@@ -110,6 +114,7 @@
     <div class="corrections-list" id="corrections-list"></div>
   </div>
 
+  {% if draft_kind != "midseason" %}
   <div class="block">
     <h2>Pause / resume</h2>
     <div class="search-row">
@@ -126,20 +131,37 @@
     <button class="danger" id="finalize-btn">Finalise draft</button>
     <div id="completion-summary"></div>
   </div>
+  {% else %}
+  <div class="block finalize-box">
+    <h2>Draft completion</h2>
+    <p class="muted">The mid-season draft finalises automatically once every configured selection is made. Post-draft trading and completion are managed from the <a href="/admin/midseason-draft/{{ season_id }}">mid-season draft operations page</a>.</p>
+    <div id="completion-summary"></div>
+  </div>
+  {% endif %}
 
   <details class="danger-zone">
-    <summary>Danger zone: reopen a finalised draft</summary>
+    <summary>Danger zone: correction / reopen</summary>
+    {% if draft_kind == "midseason" %}
+    <p class="muted">Reopens the most recently completed mid-season draft (only while it awaits post-draft trading closure). Requires a reason.</p>
+    <div class="search-row">
+      <input type="text" id="reopen-reason" placeholder="Reason (required)">
+      <button class="danger" id="reopen-btn">Reopen mid-season draft</button>
+    </div>
+    {% else %}
     <p class="muted">Deliberately not a one-click control. Type the exact confirmation phrase and a reason to reopen.</p>
     <div class="search-row">
       <input type="text" id="reopen-reason" placeholder="Reason (required)">
       <input type="text" id="reopen-confirm" placeholder="Type: REOPEN FINALIZED DRAFT">
       <button class="danger" id="reopen-btn">Reopen finalised draft</button>
     </div>
+    {% endif %}
   </details>
 
 <script>
 const SEASON_ID = {{ season_id | tojson }};
-const API = `/api/admin/draft/${SEASON_ID}`;
+const DRAFT_KIND = {{ draft_kind | default("preseason") | tojson }};
+const MY_SEASON_ENTRY_ID = {{ my_season_entry_id | default(None) | tojson }};
+const API = {{ api_base | default("/api/admin/draft") | tojson }} + `/${SEASON_ID}`;
 
 function getToken() { return localStorage.getItem('bbbffl_admin_token') || ''; }
 
@@ -262,7 +284,8 @@ function renderCompleted(board) {
       const reason = prompt('Reason for correcting this pick?');
       if (reason === null) return;
       if (!confirm('This audited correction reopens the latest pick and releases its player. Later picks are not deleted. Continue?')) return;
-      api(`${API}/correct`, { draft_pick_id: btn.dataset.pick, reason })
+      const correctPath = DRAFT_KIND === 'midseason' ? 'correct-selection' : 'correct';
+      api(`${API}/${correctPath}`, { draft_pick_id: btn.dataset.pick, reason })
         .then(() => refresh('Pick corrected; select a replacement.'))
         .catch(handleError);
     };
@@ -281,16 +304,25 @@ async function renderPlayers(query) {
   }
   const filter = document.getElementById('availability-filter').value;
   const players = await api(`${API}/players?q=${encodeURIComponent(query || '')}&availability=${encodeURIComponent(filter)}`);
-  results.innerHTML = players.map(p => `
+  // Codex review, PR #225 (P2): a signed-in coach (or a delegated role
+  // representing a specific entry) can only ever submit for
+  // MY_SEASON_ENTRY_ID -- require_entry_context refuses anything else with
+  // a 404, so showing a "Draft" button while a *different* team is on the
+  // clock would always fail. `MY_SEASON_ENTRY_ID` is null for the legacy
+  // shared-token path (full proxy authority, no owned-entry concept), so
+  // this never hides the button from that path.
+  const canPick = !MY_SEASON_ENTRY_ID || MY_SEASON_ENTRY_ID === board.current_pick.current_season_entry_id;
+  const readOnlyNote = canPick ? '' : `<p class="muted">It is ${escapeHtml(board.current_pick.current_team_name)}'s turn. You can browse, but only that team (or a Scorer/Admin) can select right now.</p>`;
+  results.innerHTML = readOnlyNote + (players.map(p => `
     <div class="player-row">
       <div class="player-details">
-        <span><strong>${escapeHtml(p.display_name || 'Name unavailable')}</strong><br><span class="muted">Canonical AFL ID ${escapeHtml(p.canonical_player_id)}</span></span>
+        <span><strong>${escapeHtml(p.display_name || 'Name unavailable')}</strong><br><span class="muted">${p.total_points != null ? `${escapeHtml(p.stats_label)}: ${p.total_points} pts (${p.games_played} gm, avg ${p.average_points})` : `${escapeHtml(p.stats_label || '')} data unavailable`}</span></span>
         <span>${p.afl_team_name ? escapeHtml(p.afl_team_name) : '<span class="diagnostic">AFL club unavailable</span>'}</span>
         <span class="state-${escapeHtml(p.availability)}">${p.availability === 'owned' ? `Owned — ${escapeHtml(p.owner_team_name || p.owner_season_entry_id)}` : p.availability === 'available' ? 'Available' : 'Unresolved / not selectable'}${p.diagnostic ? `<br><span class="diagnostic">${escapeHtml(p.diagnostic)}</span>` : ''}</span>
       </div>
-      ${p.availability === 'available' ? `<button class="primary pick-btn" data-player="${escapeHtml(p.season_player_id)}">Draft for ${escapeHtml(board.current_pick.current_team_name)}</button>` : ''}
+      ${p.availability === 'available' && canPick ? `<button class="primary pick-btn" data-player="${escapeHtml(p.season_player_id)}">Draft for ${escapeHtml(board.current_pick.current_team_name)}</button>` : ''}
     </div>
-  `).join('') || '<p class="muted">No matching season players.</p>';
+  `).join('') || '<p class="muted">No matching season players.</p>');
   document.querySelectorAll('.pick-btn').forEach(btn => {
     btn.onclick = () => {
       const selectedPlayer = players.find(player => player.season_player_id === btn.dataset.player);
@@ -318,22 +350,60 @@ document.getElementById('availability-filter').onchange = () => {
   refreshPlayers(document.getElementById('player-search').value);
 };
 
-document.getElementById('pause-btn').onclick = () => {
+function on(id, handler) {
+  const el = document.getElementById(id);
+  if (el) el.onclick = handler;
+}
+on('pause-btn', () => {
   api(`${API}/pause`, { reason: document.getElementById('pause-reason').value || null }).then(() => refresh('Draft paused.')).catch(handleError);
-};
-document.getElementById('resume-btn').onclick = () => {
+});
+on('resume-btn', () => {
   api(`${API}/resume`, { reason: document.getElementById('pause-reason').value || null }).then(() => refresh('Draft resumed at the authoritative current turn.')).catch(handleError);
-};
-document.getElementById('finalize-btn').onclick = () => {
+});
+on('finalize-btn', () => {
   if (!confirm('Finalise the draft? Ordinary draft controls will stop mutating it.')) return;
   api(`${API}/finalize`, { note: document.getElementById('finalize-note').value || null }).then(() => refresh('Draft finalised.')).catch(handleError);
-};
-document.getElementById('reopen-btn').onclick = () => {
+});
+on('reopen-btn', () => {
   const reason = document.getElementById('reopen-reason').value;
+  if (DRAFT_KIND === 'midseason') {
+    if (!confirm('Reopen the mid-season draft? This is a deliberately unusual action.')) return;
+    api(`${API}/reopen-draft`, { reason }).then(() => refresh('Mid-season draft reopened.')).catch(handleError);
+    return;
+  }
   const confirmText = document.getElementById('reopen-confirm').value;
   if (!confirm('Reopen the finalised draft? This is a deliberately unusual action.')) return;
   api(`${API}/reopen`, { reason, confirm: confirmText }).then(() => refresh('Draft reopened.')).catch(handleError);
-};
+});
+
+// Issue #181: a private "your shortlist suggestion" banner, fetched only
+// for the signed-in viewer's own team -- the shortlist API itself
+// enforces that no other team's preferences are ever readable, so this is
+// convenience display, not a second authorization layer.
+async function refreshShortlistBanner(board) {
+  // Codex review, PR #225 (P2): the "Manage your shortlist" link is this
+  // page's only entry point to the shortlist -- it must stay visible even
+  // with no suggestion yet (a first-time coach), or the feature is
+  // undiscoverable without already knowing/typing its URL. Only the
+  // suggestion text itself is conditional.
+  const banner = document.getElementById('shortlist-banner');
+  const suggestionLine = document.getElementById('shortlist-suggestion-line');
+  if (!MY_SEASON_ENTRY_ID) { banner.style.display = 'none'; return; }
+  document.getElementById('shortlist-link').href = `/shortlist/${MY_SEASON_ENTRY_ID}`;
+  banner.style.display = '';
+  try {
+    const result = await api(`/api/shortlist/${MY_SEASON_ENTRY_ID}/suggestion`);
+    if (result.suggestion) {
+      document.getElementById('shortlist-suggestion-text').textContent =
+        `${result.suggestion.display_name}${result.suggestion.afl_team_name ? ' (' + result.suggestion.afl_team_name + ')' : ''}`;
+      suggestionLine.style.display = '';
+    } else {
+      suggestionLine.style.display = 'none';
+    }
+  } catch (e) {
+    suggestionLine.style.display = 'none';
+  }
+}
 
 function say(text, kind='error') {
   const message = document.getElementById('message'); message.textContent = text || ''; message.className = text ? `message ${kind}` : 'message';
@@ -349,7 +419,16 @@ async function refresh(successMessage) {
   try {
     const readiness = await api(`${API}/readiness`);
     renderReadiness(readiness);
-    if (!readiness.ready || !readiness.checks.find(c => c.key === 'order').ready) {
+    // Only "no accepted draft order exists at all" blocks fetching the
+    // board entirely -- `readiness.ready` also folds in paused/finalized/
+    // player-count checks that describe *pre-draft* setup, not "can a
+    // board be rendered". Gating on the full bundle meant a finalized (or
+    // paused) draft's completed board could never be fetched or shown at
+    // all once `readiness.ready` went false (Codex review, PR #225, P2) --
+    // the rest of this function already handles both states (see
+    // renderCurrentPick's paused message and the finalized-state summary
+    // below).
+    if (!readiness.checks.find(c => c.key === 'order').ready) {
       document.getElementById('status-line').textContent = 'Draft setup is not ready yet.';
       if (successMessage) say(successMessage, 'success');
       return;
@@ -362,10 +441,18 @@ async function refresh(successMessage) {
     renderUpcoming(board);
     renderCompleted(board);
     renderProgress(board);
-    document.getElementById('completion-summary').innerHTML = board.status.finalized_at
-      ? `<p><strong>Draft finalised.</strong> All ${board.status.total_picks} required picks and team squad targets are satisfied.</p><p><a href="${escapeHtml(board.preseason_url)}">Continue to preseason and opening-squad management →</a></p>`
-      : (board.status.completed_picks === board.status.total_picks ? '<p><strong>Every required pick and squad target is complete.</strong> Review the board, then finalise.</p>' : '');
+    const completionEl = document.getElementById('completion-summary');
+    if (DRAFT_KIND === 'midseason') {
+      completionEl.innerHTML = board.status.finalized_at
+        ? `<p><strong>Mid-season draft complete.</strong> All ${board.status.total_picks} required selections are made.</p><p><a href="/admin/midseason-draft/${escapeHtml(SEASON_ID)}">Continue to post-draft trading and completion →</a></p>`
+        : '';
+    } else {
+      completionEl.innerHTML = board.status.finalized_at
+        ? `<p><strong>Draft finalised.</strong> All ${board.status.total_picks} required picks and team squad targets are satisfied.</p><p><a href="${escapeHtml(board.preseason_url)}">Continue to preseason and opening-squad management →</a></p>`
+        : (board.status.completed_picks === board.status.total_picks ? '<p><strong>Every required pick and squad target is complete.</strong> Review the board, then finalise.</p>' : '');
+    }
     await renderPlayers(document.getElementById('player-search').value);
+    await refreshShortlistBanner(board);
     if (successMessage) say(successMessage, 'success'); else say('');
   } catch (e) {
     document.getElementById('status-line').textContent = 'The draft board could not be loaded.';

@@ -185,22 +185,52 @@ evidence becomes available; its one deliberately synthetic convenience,
 `auto-complete`, fills remaining picks from the available pool only once no
 further evidence exists, always logged as such.
 
-## Deferred (2027 coach-facing convenience)
+## Web UI and coach self-service (issue #181)
 
-Not implemented, per the issue's explicit scope:
+The items this section previously deferred to "2027" are now implemented,
+on top of the same domain layer above with no changes to its rules:
 
-- private coach list-planning (Keep/Potential delist/Potential trade tags);
-- a dedicated Scorer/coach HTML dashboard page for this workflow (the JSON
-  API in `app/routes/midseason_draft.py` is complete and testable; a page
-  can be added on top of it later without further domain changes, the same
-  layering `app/templates/draft.html`/`preseason.html` already use);
-  in-app trade proposal confirmation by both coaches before Scorer/Admin
-  approval;
-- timed auto-pick from a private preference list;
-- automatic closure of post-draft trading tied to Round 11's own lockout
-  trigger (`close_post_draft_trading` is an explicit Scorer action, matching
-  `app.preseason.close_window`'s "the Scorer decides when the phase is
-  closed" convention).
+- **Shared draft board.** `app/draft_board.py`'s `build_board`/
+  `build_readiness`/`player_browse_view` are parameterised by `draft_kind`
+  and used by both `app/routes/draft.py` (preseason) and
+  `app/routes/midseason_draft.py` (mid-season, once a pick table exists via
+  `generate_selection_table`) -- one shared player-discovery/selection
+  experience, not two independent pickers. `app/templates/draft.html` is
+  itself `draft_kind`-aware (`{{ draft_kind }}`/`{{ api_base }}`), reused
+  verbatim at `/admin/midseason-draft/{season_id}/conduct`.
+- **Coach self-service selection.** `midseason_draft.participate`
+  (granted to Coach, alongside the existing `midseason_draft.manage`
+  Scorer/Admin/Replay-Operator authority) lets a coach whose team owns the
+  active pick submit it directly through `POST /api/admin/midseason-draft/
+  {season_id}/pick` -- gated by `require_entry_context`, the same rule the
+  preseason board already used. A proxy pick on behalf of a different team
+  still requires the full `midseason_draft.manage` authority. Every
+  existing turn/ownership/capacity/concurrency check in
+  `MidseasonDraftRepository.execute_pick`/`app.draft.DraftRepository.
+  execute_pick` is unchanged and still authoritative.
+- **Private coach shortlist.** `app/shortlist.py`'s `ShortlistRepository`
+  (`coach_draft_shortlist` table, migration 0035) is a season-entry-scoped
+  ordered preference list, usable before/during either draft type. It never
+  reserves a player or changes ownership; `suggestion()` recomputes the
+  highest-ranked still-available preference fresh on every read. Privacy is
+  enforced entirely by `app/routes/shortlist.py`'s use of
+  `require_entry_context` -- the module itself trusts its caller.
+- **Mid-season operations page.** `/admin/midseason-draft/{season_id}`
+  (`app/templates/midseason_draft_operations.html`) walks the lifecycle
+  above with human-readable team/coach/player labels (never a bare id as
+  the primary display), a ladder/reverse-order preview
+  (`GET .../ladder-preview`) before `confirm-ladder` becomes irreversible,
+  and delisting/lock/generate controls. `app/admin_dashboard.py`'s
+  `midseason_draft_dashboard_status` surfaces an "obvious action card" once
+  the configured trigger round is fully final and no draft exists yet.
+- `scripts/replay_2026_midseason_draft.py` now resolves team/coach/player
+  names in its printed output, retaining the raw id in parentheses.
+
+Still deferred, per the issue's explicit non-goals: in-app trade proposal
+confirmation by both coaches before Scorer/Admin approval; timed auto-pick
+from a private shortlist; automatic closure of post-draft trading tied to
+Round 11's own lockout trigger (`close_post_draft_trading` remains an
+explicit Scorer action).
 
 ## Schema
 

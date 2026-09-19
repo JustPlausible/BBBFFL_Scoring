@@ -187,7 +187,21 @@ def require_secretary_or_admin(principal: Principal) -> Principal:
 _WILDCARD_CAPABILITY = "*"
 CAPABILITIES: dict[Role, frozenset[str]] = {
     Role.SPECTATOR: frozenset(),
-    Role.COACH: frozenset({"own_team.manage"}),
+    # Issue #181: a Coach may browse the shared draft player pool, view the
+    # draft board, and make their own team's selection when authorised
+    # (`require_entry_context`/`require_owned_season_entry` still gate the
+    # actual write against their own `season_entry_id` -- these capability
+    # grants alone never authorise acting for another team), plus manage
+    # their own private shortlist.
+    Role.COACH: frozenset(
+        {
+            "own_team.manage",
+            "draft.participate",
+            "player_pool.read",
+            "midseason_draft.participate",
+            "shortlist.manage",
+        }
+    ),
     Role.SCORER: frozenset(
         {
             "scoring.manage",
@@ -202,6 +216,12 @@ CAPABILITIES: dict[Role, frozenset[str]] = {
             "player_pool.read",
             "preseason.manage",
             "midseason_draft.manage",
+            "midseason_draft.participate",
+            # Issue #181: legitimate proxy/support access to a coach's
+            # private shortlist requires the same explicit represented-entry
+            # acting context as any other proxy action -- see
+            # `app.routes.shortlist`'s module docstring.
+            "shortlist.manage",
         }
     ),
     Role.SECRETARY: frozenset(
@@ -214,6 +234,7 @@ CAPABILITIES: dict[Role, frozenset[str]] = {
             "player_pool.manage",
             "preseason.manage",
             "midseason_draft.manage",
+            "midseason_draft.participate",
         }
     ),
     Role.REPLAY_OPERATOR: frozenset(
@@ -228,6 +249,7 @@ CAPABILITIES: dict[Role, frozenset[str]] = {
             "lineup.adjudicate_missed_submission",
             "opening_round.nominate",
             "midseason_draft.manage",
+            "midseason_draft.participate",
         }
     ),
     Role.ADMIN: frozenset({_WILDCARD_CAPABILITY}),

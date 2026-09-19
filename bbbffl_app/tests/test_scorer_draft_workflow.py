@@ -199,6 +199,10 @@ def test_full_ten_entry_draft_runs_through_finalisation_via_the_admin_api(synthe
     assert searched[0]["afl_team_name"] == "Western Bulldogs"
     assert searched[0]["availability"] == "available"
     unresolved = client.get(f"{api}/players", params={"availability": "unresolved"}).json()
+    # Issue #181: the shared player browser now also annotates every item
+    # with phase-appropriate scoring context (previous-season points for
+    # the preseason draft) -- best-effort and empty here since this test's
+    # season has no calculated rounds at all.
     assert unresolved == [
         {
             "season_player_id": ineligible.season_player_id,
@@ -212,6 +216,10 @@ def test_full_ten_entry_draft_runs_through_finalisation_via_the_admin_api(synthe
             "owner_season_entry_id": None,
             "owner_team_name": None,
             "diagnostic": "Not selectable: season player identity or eligibility requires investigation",
+            "stats_label": "Previous season",
+            "games_played": None,
+            "total_points": None,
+            "average_points": None,
         }
     ]
 

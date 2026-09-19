@@ -207,6 +207,15 @@ function identityIssuesHtml(issues){
   return `<div class="warn">${issues.map(i=>esc(i.detail)).join('<br>')}</div>`;
 }
 
+function midseasonDraftCardHtml(card){
+  if(!card)return '';
+  return `<section class="card" aria-labelledby="midseason-draft-heading">
+      <h2 id="midseason-draft-heading">Mid-season draft ready</h2>
+      <p>${esc(card.title)}</p>
+      <div class="grid-links"><a href="${esc(card.url)}">Open mid-season draft operations →</a></div>
+    </section>`;
+}
+
 function renderDashboard(portfolioSectionHtml,dashboard){
   if(!dashboard){
     document.querySelector('#app').innerHTML=portfolioSectionHtml+'<div class="card"><p class="muted">Select a season, or create one from the Season Centre.</p></div>';
@@ -222,6 +231,7 @@ function renderDashboard(portfolioSectionHtml,dashboard){
         ${dashboard.links.public_season?`<a href="${esc(dashboard.links.public_season)}">Public season</a>`:'<span class="disabled">Public season n/a</span>'}
       </div>
     </section>
+    ${midseasonDraftCardHtml(dashboard.midseason_draft)}
     <section class="card" aria-labelledby="workflow-heading">
       <h2 id="workflow-heading">Workflow map</h2>
       ${workflowMapHtml(dashboard.workflow_map)}

@@ -330,3 +330,56 @@ def test_legacy_shared_token_pick_still_succeeds_with_anonymous_scorer_provenanc
     assert matching[0].actor_type == "anonymous_operator"
     assert matching[0].actor_id == "Legacy Scorer"
     assert matching[0].actor_role == "scorer"
+
+
+def test_genuine_coach_self_service_pick_audits_actor_type_coach(client):
+    """Issue #181, Codex review on PR #225 (P2): once Coach itself gained
+    `draft.participate`, a coach acting as *themselves* (never a delegated
+    role) must be audited with `actor_type="coach"`
+    (`app.audit.ActorContext.coach`) -- `anonymous_operator` is reserved for
+    the shared-token/delegated-role proxy surface and must never describe
+    an authenticated coach's own action (see app/audit.py's module
+    docstring)."""
+    database = client.app.state.database
+    season, entries, players = _seed_draft_ready_season(database, year=2105, label="Genuine coach self-service")
+    current_pick_owner = entries[0]
+    coach = database.execute(
+        "SELECT coach_id FROM season_entry_coach_history WHERE season_entry_id=? AND ended_at IS NULL",
+        (current_pick_owner.season_entry_id,),
+    ).fetchone()
+    from app.audit import ActorContext
+
+    client.app.state.credentials.set_password(
+        coach["coach_id"], PASSWORD, actor=ActorContext.anonymous_operator("admin")
+    )
+    client.app.state.identities.update_coach(
+        coach["coach_id"], email="genuine-coach@example.com", actor=ActorContext.anonymous_operator("admin")
+    )
+    session_cookie = _login(client, email="genuine-coach@example.com")
+    cookies = {"bbbffl_session": session_cookie}
+
+    api = f"/api/admin/draft/{season.season_id}"
+    current_pick = client.get(f"{api}/board", cookies=cookies).json()["current_pick"]
+    assert current_pick["current_season_entry_id"] == current_pick_owner.season_entry_id
+
+    response = client.post(
+        f"{api}/pick",
+        json={
+            "season_entry_id": current_pick_owner.season_entry_id,
+            "season_player_id": players[0].season_player_id,
+        },
+        cookies=cookies,
+    )
+    assert response.status_code == 200, response.text
+
+    events = AuditEventRepository(database).list_events(action="draft.pick.completed")
+    matching = [event for event in events if event.entity_id == current_pick["draft_pick_id"]]
+    assert len(matching) == 1
+    assert matching[0].actor_type == "coach"
+    assert matching[0].actor_id == coach["coach_id"]
+
+    # And the shared board must never label this a Scorer/Admin proxy
+    # entry -- it renders straight from that same audit event.
+    board_after = response.json()
+    completed = board_after["completed_picks"][0]
+    assert completed["proxy"] is None

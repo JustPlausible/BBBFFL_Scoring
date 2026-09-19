@@ -1707,3 +1707,52 @@ class MidseasonDraftRepository:
         (both flow through the same `player_ownership_period` ledger) and
         excludes anyone still held by another BBBFFL squad."""
         return self.player_pool.list_available(season_id)
+
+
+def midseason_draft_dashboard_status(database, season_id):
+    """Read-only dashboard signal (issue #181): is this season's configured
+    mid-season draft trigger round fully final, with no mid-season draft
+    started yet? Purely informational -- `MidseasonDraftRepository.
+    confirm_ladder` re-validates every one of these facts itself from
+    scratch under its own transaction lock; nothing here is ever treated as
+    authoritative by that call, and this function performs no locking of
+    its own.
+
+    Returns `None` once there is nothing actionable to show: no trigger
+    round configured, or a mid-season draft already exists for this
+    season (the dashboard card's purpose -- prompting the Scorer/Admin to
+    go start one -- no longer applies)."""
+    season = database.execute(
+        "SELECT midseason_draft_trigger_round FROM bbbffl_season WHERE season_id=?", (season_id,)
+    ).fetchone()
+    if not season or season["midseason_draft_trigger_round"] is None:
+        return None
+    if database.execute("SELECT 1 FROM midseason_draft WHERE season_id=?", (season_id,)).fetchone():
+        return None
+    trigger = season["midseason_draft_trigger_round"]
+    ordinary = database.execute(
+        "SELECT competition_id FROM competition_stream WHERE season_id=? AND stream_type='ordinary'", (season_id,)
+    ).fetchone()
+    if not ordinary:
+        return {
+            "trigger_round": trigger,
+            "competition_id": None,
+            "ready": False,
+            "missing_rounds": list(range(1, trigger + 1)),
+            "rounds_not_final": [],
+        }
+    rows = database.execute(
+        "SELECT fixture_round_number, state FROM bbbffl_round_lifecycle "
+        "WHERE competition_id=? AND fixture_round_number<=?",
+        (ordinary["competition_id"], trigger),
+    ).fetchall()
+    present = {row["fixture_round_number"] for row in rows}
+    missing = sorted(set(range(1, trigger + 1)) - present)
+    not_final = sorted(row["fixture_round_number"] for row in rows if row["state"] != "final")
+    return {
+        "trigger_round": trigger,
+        "competition_id": ordinary["competition_id"],
+        "ready": not missing and not not_final,
+        "missing_rounds": missing,
+        "rounds_not_final": not_final,
+    }

@@ -114,6 +114,7 @@ EXPECTED_TABLES = {
     "superscore_leaderboard_revision",
     "superscore_official_result",
     "season_award",
+    "coach_draft_shortlist",
 }
 
 

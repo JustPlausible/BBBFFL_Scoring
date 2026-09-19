@@ -329,3 +329,41 @@ def test_ladder_preview_rejects_a_competition_id_from_a_different_season(midseas
     )
     assert response.status_code == 400
     assert "ordinary competition belonging to this season" in response.json()["detail"]
+
+
+def test_trade_legs_are_human_readable(midseason_client):
+    """The mid-season operations page (issue #181) renders proposed trades
+    with team/player names, not raw ids -- `_status`'s trade legs must
+    carry `from_team`/`to_team`/`player` labels."""
+    client = midseason_client
+    database = client.app.state.database
+    ctx = build_season(database, year=3012, trigger_round=10, squad_limit=4, regular_season_round_count=12)
+    season, entries = ctx["season"], ctx["entries"]
+    SeasonRepository(database).set_midseason_draft_trigger_round(season.season_id, 10)
+    api = f"/api/admin/midseason-draft/{season.season_id}"
+    client.post(f"{api}/confirm-ladder", json={"competition_id": ctx["competition"].competition_id})
+    client.post(f"{api}/open-delisting-window", json={})
+
+    from_entry, to_entry = entries[0], entries[1]
+    player = ctx["ownership"].current_squad(from_entry.season_entry_id)[0]
+    trade = client.post(
+        f"{api}/trade",
+        json={
+            "legs": [
+                {
+                    "leg_type": "player",
+                    "from_season_entry_id": from_entry.season_entry_id,
+                    "to_season_entry_id": to_entry.season_entry_id,
+                    "season_player_id": player.season_player_id,
+                }
+            ]
+        },
+    )
+    assert trade.status_code == 200, trade.text
+
+    status = client.get(f"{api}/status").json()
+    assert len(status["trades"]) == 1
+    leg = status["trades"][0]["legs"][0]
+    assert leg["from_team"]["team_name"]
+    assert leg["to_team"]["team_name"]
+    assert leg["player"]["display_name"]

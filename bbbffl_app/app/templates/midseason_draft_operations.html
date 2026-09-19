@@ -61,16 +61,17 @@
   </div>
 
   <div class="block" id="delisting-block" style="display:none;">
-    <h2>Delistings &amp; trades</h2>
+    <h2>Delistings</h2>
     <div id="delisting-list"></div>
     <div class="search-row" id="delist-form-row">
-      <input type="text" id="delist-entry" placeholder="Team (season_entry_id)">
-      <input type="text" id="delist-player" placeholder="Player (season_player_id)">
+      <select id="delist-entry"><option value="">Select team…</option></select>
+      <select id="delist-player"><option value="">Select an owned player…</option></select>
       <input type="text" id="delist-reason" placeholder="Reason (optional)">
       <button id="delist-btn">Submit delisting</button>
     </div>
+    <h2>Trades</h2>
     <div id="trade-list"></div>
-    <p class="muted">Player/pick trades and approvals are available via the API for now (<code>POST /api/admin/midseason-draft/{season_id}/trade</code>); this v0.1 view focuses on delistings and the lock/generate transition.</p>
+    <p class="muted">Proposing a new trade is available via the API for now (<code>POST /api/admin/midseason-draft/{season_id}/trade</code>); pending trades proposed elsewhere can be approved/rejected here.</p>
     <div class="search-row">
       <button id="lock-btn" class="danger">Lock delistings</button>
       <button id="generate-btn" class="primary">Generate selections</button>
@@ -160,6 +161,68 @@ function renderDelistings(body) {
     btn.onclick = () => api(`${API}/delisting/${btn.dataset.withdraw}/withdraw`, { reason: null }).then(() => refresh('Delisting withdrawn.')).catch(handleError);
   });
 }
+
+function tradeLegText(leg) {
+  const fromTeam = leg.from_team ? leg.from_team.team_name : leg.from_season_entry_id;
+  const toTeam = leg.to_team ? leg.to_team.team_name : leg.to_season_entry_id;
+  const what = leg.leg_type === 'player'
+    ? (leg.player ? leg.player.display_name : leg.season_player_id)
+    : `round ${leg.draft_round} pick`;
+  return `${escapeHtml(fromTeam)} → ${escapeHtml(toTeam)}: ${escapeHtml(what)}`;
+}
+
+function renderTrades(body) {
+  const list = document.getElementById('trade-list');
+  const trades = body.trades || [];
+  list.innerHTML = trades.length
+    ? '<table><thead><tr><th>Legs</th><th>Status</th><th></th></tr></thead><tbody>' +
+      trades.map(t => `<tr><td>${(t.legs || []).map(tradeLegText).join('<br>')}</td><td>${escapeHtml(t.status)}</td><td>${
+        t.status === 'pending'
+          ? `<button data-approve="${t.trade_id}" class="primary">Approve</button> <button data-reject="${t.trade_id}" class="danger">Reject</button>`
+          : ''
+      }</td></tr>`).join('') +
+      '</tbody></table>'
+    : '<p class="muted">No trades proposed yet.</p>';
+  document.querySelectorAll('[data-approve]').forEach(btn => {
+    btn.onclick = () => api(`${API}/trade/${btn.dataset.approve}/decide`, { approve: true }).then(() => refresh('Trade approved.')).catch(handleError);
+  });
+  document.querySelectorAll('[data-reject]').forEach(btn => {
+    btn.onclick = () => {
+      const reason = prompt('Reason for rejecting this trade? (optional)') || null;
+      api(`${API}/trade/${btn.dataset.reject}/decide`, { approve: false, reason }).then(() => refresh('Trade rejected.')).catch(handleError);
+    };
+  });
+}
+
+// Codex review, PR #225 (P2): populate human-readable team/owned-player
+// selectors for the delisting form instead of requiring the operator to
+// already know and type raw UUIDs -- reuses the same shared player
+// browser (`GET .../players`) the conduct-draft board uses, filtered
+// client-side to the chosen team's currently owned players.
+function populateTeamSelect(body) {
+  const select = document.getElementById('delist-entry');
+  const previous = select.value;
+  select.innerHTML = '<option value="">Select team…</option>' +
+    (body.order || []).map(o => `<option value="${escapeHtml(o.season_entry_id)}">${escapeHtml(o.team_name)}</option>`).join('');
+  if (previous) select.value = previous;
+}
+
+async function populatePlayerSelect() {
+  const teamSelect = document.getElementById('delist-entry');
+  const playerSelect = document.getElementById('delist-player');
+  const entryId = teamSelect.value;
+  playerSelect.innerHTML = '<option value="">Select an owned player…</option>';
+  if (!entryId) return;
+  try {
+    const players = await api(`${API}/players?availability=owned`);
+    const owned = players.filter(p => p.owner_season_entry_id === entryId);
+    playerSelect.innerHTML += owned.map(p => `<option value="${escapeHtml(p.season_player_id)}">${escapeHtml(p.display_name)}${p.afl_team_name ? ' — ' + escapeHtml(p.afl_team_name) : ''}</option>`).join('');
+  } catch (e) {
+    // Leave the selector at its placeholder-only state; the delist
+    // button's own validation still refuses an empty selection.
+  }
+}
+document.getElementById('delist-entry').onchange = populatePlayerSelect;
 
 async function handleError(error) {
   await refresh();
@@ -252,7 +315,11 @@ async function refresh(successMessage) {
     document.getElementById('draft-link-block').style.display = ['draft_open', 'draft_complete'].includes(state) ? '' : 'none';
     document.getElementById('completion-block').style.display = state === 'draft_complete' ? '' : 'none';
     document.getElementById('conduct-link').href = `/admin/midseason-draft/${SEASON_ID}/conduct`;
-    if (body.draft) renderDelistings(body);
+    if (body.draft) {
+      renderDelistings(body);
+      renderTrades(body);
+      populateTeamSelect(body);
+    }
     if (successMessage) say(successMessage, 'success'); else say('');
   } catch (e) {
     say(e.message || 'The mid-season draft status could not be loaded.');

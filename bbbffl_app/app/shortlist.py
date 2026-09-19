@@ -117,6 +117,19 @@ class ShortlistRepository:
 
     def remove_player(self, season_entry_id, season_player_id, *, actor: ActorContext, reason=None):
         with transaction(self.database) as conn:
+            # Lock the same parent `season_entry` row `add_player` locks
+            # (Codex review, PR #225, P2) -- locking only the shortlist
+            # rows already selected here does not block a concurrent
+            # `add_player`, which reads MAX(rank) under the season_entry
+            # lock alone and could insert a new row (using a rank computed
+            # against this call's soon-to-be-superseded state) before this
+            # transaction's renumber commits, leaving a rank gap/collision.
+            # Every shortlist mutation now serializes on the one lock.
+            if not conn.execute(
+                "SELECT 1 FROM season_entry WHERE season_entry_id=?" + _for_update_suffix(self.database),
+                (season_entry_id,),
+            ).fetchone():
+                raise KeyError(season_entry_id)
             rows = conn.execute(
                 "SELECT * FROM coach_draft_shortlist WHERE season_entry_id=? ORDER BY rank"
                 + _for_update_suffix(self.database),
@@ -145,6 +158,13 @@ class ShortlistRepository:
         list is refused rather than silently dropping/ignoring entries."""
         ordered_season_player_ids = list(ordered_season_player_ids)
         with transaction(self.database) as conn:
+            # Same parent-row lock as `add_player`/`remove_player` -- see
+            # `remove_player`'s comment.
+            if not conn.execute(
+                "SELECT 1 FROM season_entry WHERE season_entry_id=?" + _for_update_suffix(self.database),
+                (season_entry_id,),
+            ).fetchone():
+                raise KeyError(season_entry_id)
             rows = conn.execute(
                 "SELECT * FROM coach_draft_shortlist WHERE season_entry_id=?" + _for_update_suffix(self.database),
                 (season_entry_id,),

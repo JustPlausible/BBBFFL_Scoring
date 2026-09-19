@@ -361,3 +361,5 @@ The application refused the operation with the completed-season fence:
 `season 3832745c-c19a-4224-bceb-86ded6baa09c is completed; result-changing operations are permanently refused`.
 
 A second read-only status immediately afterwards still reported review version 1 with empty slot rulings, no interchange ruling and no overrides. This is direct operational evidence that the completed-season fence rejected the supported result-changing path without mutating review state.
+
+The archival verifier was then re-run after the refused mutation and again returned completed season version 3 with the same completion event `9cd65eee-d6ec-43b5-bcb7-23b275ac227a` (verified at 2026-09-19T09:46:21.433457+00:00), confirming the archival identity remained unchanged after the failed write attempt.

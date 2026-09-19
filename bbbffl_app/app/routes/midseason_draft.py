@@ -281,6 +281,18 @@ def ladder_preview(season_id: str, competition_id: str, request: Request, princi
     trigger = season.midseason_draft_trigger_round
     if trigger is None:
         raise HTTPException(status_code=400, detail="season has no configured mid-season draft trigger round")
+    # Codex review, PR #225 (P2): `competition_id` is caller-controlled and
+    # LadderRepository.snapshot derives its own season from it -- without
+    # this check a season-scoped Scorer could preview a *different*
+    # season's ladder by naming its competition_id. Same validation
+    # `MidseasonDraftRepository.confirm_ladder` itself requires.
+    competition = request.app.state.database.execute(
+        "SELECT season_id, stream_type FROM competition_stream WHERE competition_id=?", (competition_id,)
+    ).fetchone()
+    if not competition or competition["season_id"] != season_id or competition["stream_type"] != "ordinary":
+        raise HTTPException(
+            status_code=400, detail="competition_id must name an ordinary competition belonging to this season"
+        )
     ladder = request.app.state.ladder.snapshot(competition_id, trigger)
     entry_cache: dict = {}
     reverse_order = sorted(ladder.rows, key=lambda row: (-row.rank, row.season_entry_id))
@@ -498,6 +510,12 @@ def _authorise_pick(request: Request, principal: Principal, season_id: str, seas
 
 @router.post("/{season_id}/pick")
 def submit_pick(season_id: str, payload: PickRequest, request: Request, principal: Principal = Depends(participate)):
+    """Returns the shared, participate-safe board (issue #181) -- never
+    `_status`, which exposes every team's delistings and trade proposals/
+    reasons and is deliberately gated behind the full `midseason_draft.
+    manage` authority everywhere else (Codex review, PR #225, P1). Matches
+    `app.routes.draft.submit_pick`'s own return value for the preseason
+    board."""
     _authorise_pick(request, principal, season_id, payload.season_entry_id)
     request.app.state.midseason_draft.execute_pick(
         season_id,
@@ -507,7 +525,7 @@ def submit_pick(season_id: str, payload: PickRequest, request: Request, principa
         actor=_actor(principal, payload.scorer_name),
         reason=payload.reason or "mid-season draft selection",
     )
-    return _status(request, season_id)
+    return build_board(request, season_id, draft_kind="midseason")
 
 
 @router.post("/{season_id}/reconcile-completion")

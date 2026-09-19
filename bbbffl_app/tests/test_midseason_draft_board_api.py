@@ -140,7 +140,15 @@ def test_coach_can_make_their_own_midseason_selection(midseason_client):
         cookies=cookies,
     )
     assert response.status_code == 200, response.text
-    assert response.json()["draft"]["state"] in ("delistings_locked", "draft_open", "draft_complete")
+    body = response.json()
+    # Codex review, PR #225 (P1): a coach's own pick response must be the
+    # shared, participate-safe board -- never `_status`, which exposes
+    # every team's delistings/trade proposals/reasons and is otherwise
+    # gated behind the full midseason_draft.manage authority.
+    assert body["draft_kind"] == "midseason"
+    assert "delistings" not in body
+    assert "trades" not in body
+    assert body["status"]["completed_picks"] == 1
 
     squad = ctx["ownership"].current_squad(worst.season_entry_id)
     assert chosen["season_player_id"] in {row.season_player_id for row in squad}
@@ -287,3 +295,22 @@ def test_status_response_is_human_readable(midseason_client):
     # resolve human-readable rows the same way pre-confirmation would.
     assert ladder_preview.status_code == 200
     assert ladder_preview.json()["reverse_order_preview"][0]["team_name"]
+
+
+def test_ladder_preview_rejects_a_competition_id_from_a_different_season(midseason_client):
+    """Codex review, PR #225 (P2): `competition_id` is caller-controlled --
+    without validating it belongs to the URL's `season_id`, a season-scoped
+    Scorer (or an operator who pastes the wrong id) could preview a
+    *different* season's ladder entirely."""
+    client = midseason_client
+    database = client.app.state.database
+    season_a = build_season(database, year=3010, trigger_round=10, squad_limit=4, regular_season_round_count=12)
+    season_b = build_season(database, year=3011, trigger_round=10, squad_limit=4, regular_season_round_count=12)
+    SeasonRepository(database).set_midseason_draft_trigger_round(season_a["season"].season_id, 10)
+
+    response = client.get(
+        f"/api/admin/midseason-draft/{season_a['season'].season_id}/ladder-preview",
+        params={"competition_id": season_b["competition"].competition_id},
+    )
+    assert response.status_code == 400
+    assert "ordinary competition belonging to this season" in response.json()["detail"]

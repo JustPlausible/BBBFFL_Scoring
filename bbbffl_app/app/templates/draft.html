@@ -403,7 +403,16 @@ async function refresh(successMessage) {
   try {
     const readiness = await api(`${API}/readiness`);
     renderReadiness(readiness);
-    if (!readiness.ready || !readiness.checks.find(c => c.key === 'order').ready) {
+    // Only "no accepted draft order exists at all" blocks fetching the
+    // board entirely -- `readiness.ready` also folds in paused/finalized/
+    // player-count checks that describe *pre-draft* setup, not "can a
+    // board be rendered". Gating on the full bundle meant a finalized (or
+    // paused) draft's completed board could never be fetched or shown at
+    // all once `readiness.ready` went false (Codex review, PR #225, P2) --
+    // the rest of this function already handles both states (see
+    // renderCurrentPick's paused message and the finalized-state summary
+    // below).
+    if (!readiness.checks.find(c => c.key === 'order').ready) {
       document.getElementById('status-line').textContent = 'Draft setup is not ready yet.';
       if (successMessage) say(successMessage, 'success');
       return;

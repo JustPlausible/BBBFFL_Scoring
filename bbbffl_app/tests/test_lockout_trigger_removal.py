@@ -17,12 +17,14 @@ from fastapi.testclient import TestClient
 
 from app.audit import ActorContext, AuditEventRepository
 from app.authorization import Principal, Role
+from app.competition_lifecycle import CompetitionLifecycleRepository
 from app.finals_preflight import open_finals_week
 from app.finals_superscore_open import (
     LockoutPlanDivergedError,
     open_finals_and_superscore_week,
     synchronise_lockout_plan_from_finals,
 )
+from app.identity import IdentityRepository
 from app.lockouts import (
     LockoutRepository,
     LockoutTriggerRepository,
@@ -30,6 +32,7 @@ from app.lockouts import (
     TriggerAlreadyActivatedError,
     TriggerAlreadyRemovedError,
 )
+from app.round_preflight import build_round_preflight, configure_preflight_trigger
 from tests.db_helpers import migrated_connection
 from tests.test_competition_lifecycle import configured
 from tests.test_finals import ACTOR as FINALS_ACTOR
@@ -404,6 +407,64 @@ def test_remove_trigger_route_removes_an_unactivated_trigger(preflight_client):
     assert response.status_code == 200, response.text
     triggers = [t["trigger_key"] for t in response.json()["lockout_triggers"]]
     assert triggers == ["main"]
+
+
+def test_removed_trigger_is_exposed_in_the_preflight_view_with_its_true_revision(preflight_client):
+    """Codex review (PR #220, P2): removal advances `current_revision`, so a
+    round-preflight client that only sees the active `lockout_triggers` list
+    has no way to learn a removed key's true revision and would always submit
+    a stale `expected_revision=0` if it tried to reuse that key -- see
+    `app/lockouts.py`'s ABA-race discussion. `build_round_preflight` must
+    expose removed ("tombstoned") triggers separately, with their real
+    revision, so the Scorer UI can knowingly reconfigure (un-remove) one."""
+    _operator(preflight_client)
+    db = preflight_client.app.state.database
+    round_, _entries = configured(db, 2617)
+    LockoutTriggerRepository(db).create(
+        round_.bbbffl_round_id, "early-1", "selective", 1, [9001], actor=ACTOR, reason="mistaken early"
+    )
+    LockoutTriggerRepository(db).create(round_.bbbffl_round_id, "main", "main", 2, [9002], actor=ACTOR, reason="main")
+
+    remove_response = preflight_client.post(
+        f"/api/admin/round-preflight/{round_.bbbffl_round_id}/lockout-trigger/early-1/remove",
+        json={"reason": "unnecessary -- no Thursday match"},
+    )
+    assert remove_response.status_code == 200, remove_response.text
+    removed_view = remove_response.json()["removed_lockout_triggers"]
+    assert [t["trigger_key"] for t in removed_view] == ["early-1"]
+    removed_trigger = LockoutTriggerRepository(db).get(round_.bbbffl_round_id, "early-1")
+    assert removed_trigger is not None
+    assert removed_view[0]["revision"] == removed_trigger.revision
+    assert removed_view[0]["removed_reason"] == "unnecessary -- no Thursday match"
+
+    # The Scorer UI would now knowingly submit exactly this exposed revision
+    # (not a guessed 0) to reconfigure/un-remove the key -- exercised here at
+    # the same `app.round_preflight` service layer the route calls, using a
+    # stub AFL client rather than the route's live one (network access is
+    # unavailable in this test environment; the route wiring itself is
+    # already covered by `test_remove_trigger_route_removes_an_unactivated_trigger`
+    # and `tests/test_round_preflight.py`'s HTTP trigger-configuration coverage).
+    from tests.test_round_preflight import Evidence, TriggerPayload, _match
+
+    configure_preflight_trigger(
+        db,
+        round_.bbbffl_round_id,
+        TriggerPayload("early-1", "selective", 1, [9001], expected_revision=removed_view[0]["revision"]),
+        Evidence([_match(9001), _match(9002)]),
+        actor=ACTOR,
+        reason="actually needed after all",
+    )
+    un_removed = LockoutTriggerRepository(db).get(round_.bbbffl_round_id, "early-1")
+    assert un_removed.removed_at is None
+    view_after = build_round_preflight(
+        db,
+        CompetitionLifecycleRepository(db),
+        IdentityRepository(db),
+        Evidence([_match(9001), _match(9002)]),
+        round_.bbbffl_round_id,
+    )
+    assert "early-1" in {t["trigger_key"] for t in view_after["lockout_triggers"]}
+    assert view_after["removed_lockout_triggers"] == []
 
 
 def test_remove_trigger_route_requires_a_reason(preflight_client):

@@ -269,6 +269,22 @@ again -- e.g. by re-opening the paired week, or calling it directly)
 mirroring the removal onto SS automatically; the Scorer never repairs SS's
 own trigger rows by hand.
 
+Removal advances the trigger's revision (it is recorded as a new revision,
+not a mutation of the current one -- see `lockouts.md`), so re-typing a
+previously-removed key through `POST .../lockout-trigger` to reconfigure
+(un-remove) it must submit that trigger's *true* post-removal revision as
+`expected_revision`, never a guessed `0`; submitting `0` for a key that was
+once created and then removed is correctly rejected as stale. `GET
+.../round-preflight/{round_id}` (and the response of every mutating route
+under it) therefore returns removed triggers separately, under
+`removed_lockout_triggers`, each with its real `revision` alongside
+`removed_at`/`removed_by`/`removed_reason` -- read-only, excluded from
+`lockout_triggers` and from all readiness/blocker logic, existing purely so
+a freshly loaded client can discover the revision it needs to knowingly
+reuse the key. The round-preflight template's "Configure trigger" form
+resolves `expected_revision` from either list, and lists removed triggers
+in a collapsed "Removed triggers" section for discoverability.
+
 ## Live/replay parity
 
 Every endpoint above (`afl-seasons`, `afl-seasons/{id}/afl-rounds`,

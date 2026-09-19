@@ -36,6 +36,7 @@ ${d.mapping_recommendation?`<div class="item recommend"><strong>Recommended (adv
 <section class="card ${d.afl_evidence_fresh?'':'warn'}"><h2>Relevant AFL matches (scheduled-start order)</h2>${d.afl_evidence_fresh?'':'<p><strong>Stale cached evidence — diagnostic only. Opening is blocked.</strong></p>'}${d.afl_matches.map(match).join('')||'<p class="muted">Matches cannot be shown until mapping evidence resolves.</p>'}</section>
 <section class="card"><h2>Lockout plan</h2><p class="muted">Selecting from the mapped matches above is authoritative once submitted; the activating AFL-match relationship remains authoritative and server-validated.</p>
 ${d.lockout_triggers.map(t=>`<div class="item"><strong>${e(t.trigger_type==='main'?'Main / remaining lockout':'Selective lockout')} · ${e(t.trigger_key)}</strong> <span class="pill">sequence ${e(t.sequence)}</span> <span class="pill">revision ${e(t.revision)}</span><p>${e(t.scope)}${t.participating_clubs?.length?` — ${t.participating_clubs.map(e).join(', ')}`:''}</p><p><span class="pill ${t.activation.activated?'on':'pending'}">BBBFFL lockout ${t.activation.activated?`ACTIVATED (${e(t.activation.activation_reason)} at ${e(t.activation.effective_lock_at)})`:'not yet activated'}</span></p>${t.activating_matches.map(m=>m.unresolved?`<span class="bad">Unresolved AFL Match ${e(m.match_id)}</span>`:match(m)).join('')}${t.activation.activated?'':`<p><button type="button" class="remove-trigger" data-key="${e(t.trigger_key)}" data-revision="${e(t.revision)}">Remove this trigger</button></p>`}</div>`).join('')||'<p>No triggers configured.</p>'}
+${d.removed_lockout_triggers?.length?`<details><summary>Removed triggers (${d.removed_lockout_triggers.length})</summary>${d.removed_lockout_triggers.map(t=>`<div class="item muted"><strong>${e(t.trigger_type==='main'?'Main / remaining lockout':'Selective lockout')} · ${e(t.trigger_key)}</strong> <span class="pill">revision ${e(t.revision)}</span><p>Removed ${e(t.removed_at)}${t.removed_by?` by ${e(t.removed_by)}`:''} — ${e(t.removed_reason)}</p><p class="muted">Reusing this key will un-remove it and restore it to the active plan.</p></div>`).join('')}</details>`:''}
 ${d.lockout_recommendation?`<div class="item recommend"><strong>Recommended plan (advisory only, never auto-persisted):</strong>${d.lockout_recommendation.stages.map(s=>`<p>${e(s.trigger_type==='main'?'Main/remaining':'Selective')} · matches ${s.afl_match_ids.map(e).join(', ')} — ${e(s.evidence)} <button type="button" class="use-lockout-stage" data-stage='${JSON.stringify(s).replace(/'/g,"&#39;")}'>Use this stage</button></p>`).join('')}</div>`:''}
 <form id="trigger" class="actions">
 <label>Key<input name="key" placeholder="early-1 or main" required></label>
@@ -117,7 +118,8 @@ async function trigger(x){
   let f=new FormData(x.target),key=f.get('key'),type=f.get('type'),sequence=f.get('sequence'),
     matches=Array.from(x.target.querySelectorAll('input[name="matches"]:checked')).map(cb=>+cb.value),
     reason=f.get('reason'),
-    existing=(current.lockout_triggers||[]).find(t=>t.trigger_key===key),
+    existing=(current.lockout_triggers||[]).find(t=>t.trigger_key===key)
+      ||(current.removed_lockout_triggers||[]).find(t=>t.trigger_key===key),
     expectedRevision=existing?existing.revision:0;
   try{
     render(await api(`/api/admin/round-preflight/${roundId}/lockout-trigger`,{trigger_key:key,trigger_type:type,sequence:+sequence,afl_match_ids:matches,reason:reason||null,expected_revision:expectedRevision}));

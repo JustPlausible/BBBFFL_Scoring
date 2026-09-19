@@ -592,7 +592,22 @@ def build_round_preflight(database, lifecycle, identities, afl_client, round_id:
                 }
             )
 
-    triggers = LockoutTriggerRepository(database).list_triggers(round_id)
+    trigger_repo = LockoutTriggerRepository(database)
+    triggers = trigger_repo.list_triggers(round_id)
+    # Issue #219: a removed trigger's key can be legitimately reused (its
+    # `configure` call un-removes it), but only if the caller submits that
+    # trigger's *true* post-removal revision as `expected_revision` -- see
+    # `app/lockouts.py`'s ABA-race discussion. Since removal itself advances
+    # the revision counter, an operator who only saw the active-triggers list
+    # would have no way to know that revision and would always be rejected as
+    # stale. Expose removed ("tombstoned") triggers separately, read-only, so
+    # the Scorer UI can resolve the correct `expected_revision` for a
+    # previously-removed key without reopening the ABA race by guessing 0.
+    removed_triggers = [
+        trigger
+        for trigger in trigger_repo.list_triggers(round_id, include_removed=True)
+        if trigger.removed_at is not None
+    ]
     # Issue #152: `observed_status`/`start_time_utc` on `activating_matches`
     # above is always this match's *current* AFL evidence; the durable
     # activation row queried here is BBBFFL's own, separate, irreversible
@@ -660,6 +675,17 @@ def build_round_preflight(database, lifecycle, identities, afl_client, round_id:
         )
     for view in match_views:
         view["lockout_trigger_coverage"] = match_trigger_coverage.get(view["match_id"], [])
+    removed_trigger_views = [
+        {
+            "trigger_key": trigger.trigger_key,
+            "trigger_type": trigger.trigger_type,
+            "revision": trigger.revision,
+            "removed_at": trigger.removed_at,
+            "removed_by": trigger.removed_by,
+            "removed_reason": trigger.removed_reason,
+        }
+        for trigger in removed_triggers
+    ]
     mains = [t for t in triggers if t.trigger_type == "main"]
     if len(mains) != 1:
         blockers.append(
@@ -808,6 +834,7 @@ def build_round_preflight(database, lifecycle, identities, afl_client, round_id:
         "afl_matches": match_views,
         "afl_evidence_fresh": evidence_fresh,
         "lockout_triggers": trigger_views,
+        "removed_lockout_triggers": removed_trigger_views,
         "lockout_recommendation": lockout_recommendation,
         "replay_checkpoint_recommendations": replay_checkpoint_recommendations,
         "opening_round": {"applies": bool(opening), "deferred_selections": opening},

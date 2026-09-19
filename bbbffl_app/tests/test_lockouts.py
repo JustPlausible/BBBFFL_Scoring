@@ -14,6 +14,8 @@ import pytest
 
 import app.lockouts as lockouts_module
 from app.afl_client import Match, Team
+from app.audit import ActorContext
+from app.db import transaction
 from app.lineups import WeeklyLineupRepository
 from app.lockouts import (
     InvalidSelectionError,
@@ -32,6 +34,7 @@ from app.lockouts import (
 )
 from app.player_pool import OwnershipRepository, PlayerPoolRepository
 from app.round_mapping import RoundMappingRepository
+from app.season import _id, _now
 from tests import afl_evidence
 from tests.db_helpers import migrated_connection
 from tests.test_competition_lifecycle import operational
@@ -99,6 +102,74 @@ def test_materialize_round_triggers_acquires_header_locks_one_at_a_time_in_sorte
     ]
     assert header_locks == ["trigger-a", "trigger-z"]
     assert timeline[0] == "provider", "provider retrieval must finish before the parent FOR UPDATE"
+
+
+def test_remove_locked_acquires_the_round_lock_before_the_trigger_header_lock(monkeypatch):
+    """Codex review (PR #220, P1): without the parent round-row lock held
+    first, a concurrent `_materialize_round_triggers` call (which itself
+    always locks the round before any trigger header, per the test above)
+    could lock the round, read this trigger as still active under that
+    lock, then block on the header lock `_remove_locked` holds -- and once
+    removal commits and releases it, resume and durably activate an
+    already-removed trigger, since its per-trigger loop never re-checks
+    `removed_at` after acquiring the header lock. Acquiring the identical
+    round-then-header lock order closes this: whichever of removal or
+    materialization acquires the round lock first now fully commits before
+    the other can even begin its own read."""
+
+    class Result:
+        def __init__(self, row=None, rows=()):
+            self.row = row
+            self.rows = list(rows)
+
+        def fetchone(self):
+            return self.row
+
+        def fetchall(self):
+            return self.rows
+
+    calls = []
+
+    class Connection:
+        def execute(self, statement, parameters=()):
+            calls.append(statement)
+            if statement.startswith("SELECT * FROM bbbffl_round_lockout_trigger WHERE"):
+                return Result(
+                    row={
+                        "trigger_id": "trigger-1",
+                        "bbbffl_round_id": "round-1",
+                        "trigger_key": "early-1",
+                        "current_revision": 1,
+                        "removed_at": None,
+                    }
+                )
+            if statement.startswith("SELECT 1 FROM bbbffl_round_lockout_trigger_activation"):
+                return Result(row=None)
+            if statement.startswith("SELECT r.trigger_type, r.sequence FROM"):
+                return Result(row={"trigger_type": "selective", "sequence": 1})
+            if statement.startswith("SELECT afl_match_id FROM"):
+                return Result(rows=[])
+            return Result()
+
+    @contextmanager
+    def fake_transaction(_database):
+        yield Connection()
+
+    database = SimpleNamespace(engine=SimpleNamespace(dialect=SimpleNamespace(name="postgresql")))
+    monkeypatch.setattr(lockouts_module, "transaction", fake_transaction)
+    monkeypatch.setattr(lockouts_module, "append_event", lambda *args, **kwargs: None)
+
+    LockoutTriggerRepository(database).remove(
+        "round-1", "early-1", actor=ActorContext.anonymous_operator("test"), reason="test removal"
+    )
+
+    round_lock_index = next(i for i, s in enumerate(calls) if s.startswith("SELECT 1 FROM bbbffl_round WHERE"))
+    header_lock_index = next(
+        i for i, s in enumerate(calls) if s.startswith("SELECT * FROM bbbffl_round_lockout_trigger WHERE")
+    )
+    assert round_lock_index < header_lock_index, "the parent round row must be locked before the trigger header"
+    assert calls[round_lock_index].endswith("FOR UPDATE")
+    assert calls[header_lock_index].endswith("FOR UPDATE")
 
 
 def test_materialize_round_triggers_rejects_facts_from_a_mapping_changed_before_the_round_lock(monkeypatch):
@@ -427,6 +498,80 @@ def test_trigger_create_rejects_duplicate_key_and_empty_or_duplicate_matches():
         )
     with pytest.raises(ValueError, match="trigger_type"):
         triggers.create(round_.bbbffl_round_id, "bad-type", "early", 1, [EARLY_MATCH_ID])
+
+
+def test_trigger_key_must_remain_a_single_url_path_segment():
+    """Codex review (PR #220, P2): `trigger_key` is embedded as a raw path
+    segment in the round-preflight HTTP removal route (`POST
+    .../lockout-trigger/{trigger_key}/remove`). A key containing '/' would
+    decode into multiple path segments before FastAPI's routing ever sees
+    it -- `encodeURIComponent` on the client produces `%2F`, but ASGI
+    decodes the path before route matching, so the request 404s and such a
+    trigger could be configured but never removed through that route.
+    Rejecting these (and '.'/'..', which a client or intermediary could
+    similarly normalize away) whenever a *new* key is created (`create`,
+    and `configure`'s new-row branch) guarantees every key accepted from
+    now on stays removable. `replace`, and `configure`'s existing-row
+    branch, never re-validate an already-persisted key's format -- see
+    `test_configure_and_replace_can_still_correct_a_pre_existing_legacy_
+    trigger_key` below for why that matters."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    triggers = LockoutTriggerRepository(db)
+    for bad_key in ("early/1", "/main", "main/", ".", ".."):
+        with pytest.raises(ValueError, match="not a valid identifier"):
+            triggers.create(round_.bbbffl_round_id, bad_key, "selective", 1, [EARLY_MATCH_ID])
+    with pytest.raises(ValueError, match="non-empty"):
+        triggers.create(round_.bbbffl_round_id, "", "selective", 1, [EARLY_MATCH_ID])
+
+    with pytest.raises(ValueError, match="not a valid identifier"):
+        triggers.configure(
+            round_.bbbffl_round_id, "early/2", "selective", 2, [LATE_MATCH_ID], reason="configure early/2"
+        )
+
+
+def test_configure_and_replace_can_still_correct_a_pre_existing_legacy_trigger_key():
+    """Codex review (PR #220, P2): the key-format check above must only
+    ever block *creating* a new key -- a trigger whose key predates that
+    validation (e.g. seeded before this change shipped, or restored from a
+    backup) must remain fully correctable/removable through `configure`/
+    `replace`/`remove`, even though such a key could never be created again
+    going forward. Seeds a trigger with an invalid key directly (bypassing
+    the repository, exactly as a pre-existing row would have been created
+    before this validation existed)."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    trigger_id, now = _id(), _now()
+    with transaction(db) as conn:
+        conn.execute(
+            "INSERT INTO bbbffl_round_lockout_trigger "
+            "(trigger_id, bbbffl_round_id, trigger_key, current_revision, created_at) VALUES (?, ?, ?, ?, ?)",
+            (trigger_id, round_.bbbffl_round_id, "early/1", 1, now),
+        )
+        conn.execute(
+            "INSERT INTO bbbffl_round_lockout_trigger_revision VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (trigger_id, 1, "selective", 1, now, "legacy-seed", "pre-existing legacy key"),
+        )
+        conn.execute("INSERT INTO bbbffl_round_lockout_trigger_match VALUES (?, ?, ?)", (trigger_id, 1, EARLY_MATCH_ID))
+
+    triggers = LockoutTriggerRepository(db)
+    replaced = triggers.replace(
+        round_.bbbffl_round_id,
+        "early/1",
+        trigger_type="selective",
+        sequence=1,
+        afl_match_ids=[LATE_MATCH_ID],
+        reason="correcting the legacy key's match id",
+    )
+    assert replaced.afl_match_ids == (LATE_MATCH_ID,)
+
+    reconfigured = triggers.configure(
+        round_.bbbffl_round_id, "early/1", "selective", 1, [EARLY_MATCH_ID], reason="reconfigure legacy key"
+    )
+    assert reconfigured.afl_match_ids == (EARLY_MATCH_ID,)
+
+    triggers.remove(
+        round_.bbbffl_round_id, "early/1", actor=ActorContext.anonymous_operator("test"), reason="remove legacy key"
+    )
+    assert triggers.get(round_.bbbffl_round_id, "early/1").removed_at is not None
 
 
 def test_trigger_rejects_a_second_main_and_replace_into_a_second_main():

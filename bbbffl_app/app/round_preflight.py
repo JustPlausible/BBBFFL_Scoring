@@ -18,7 +18,13 @@ from contextlib import nullcontext
 
 from app.afl_client import is_recognized_match_status, normalize_match_status
 from app.finals import SLOT_LABELS, WEEK_LABELS, FinalsBracketRepository
-from app.lockouts import LockoutTriggerRepository, StaleTriggerRevisionError, TriggerValidationError
+from app.lockouts import (
+    LockoutTriggerRepository,
+    StaleTriggerRevisionError,
+    TriggerAlreadyActivatedError,
+    TriggerAlreadyRemovedError,
+    TriggerValidationError,
+)
 from app.opening_round import (
     OpeningRoundNominationRepository,
     OpeningRoundRuleRepository,
@@ -39,12 +45,15 @@ from app.round_mapping import (
 __all__ = [
     "StaleMappingRevisionError",
     "StaleTriggerRevisionError",
+    "TriggerAlreadyActivatedError",
+    "TriggerAlreadyRemovedError",
     "TriggerValidationError",
     "accept_preflight_mapping",
     "build_round_preflight",
     "configure_preflight_trigger",
     "open_preflight_round",
     "recommend_lockout_plan",
+    "remove_preflight_trigger",
 ]
 
 
@@ -180,6 +189,26 @@ def configure_preflight_trigger(database, round_id, payload, afl_client, *, acto
         reason=reason,
         expected_revision=payload.expected_revision,
         expected_mapping_revision=mapping.revision,
+    )
+
+
+def remove_preflight_trigger(database, round_id, trigger_key, *, actor, reason, expected_revision=None):
+    """The safe Scorer-facing correction path for an unnecessary,
+    unactivated lockout trigger (issue #219) -- e.g. a mistaken selective
+    trigger created alongside `main`, which the domain previously had no
+    supported way to remove (only to revise/retarget via `configure_
+    preflight_trigger` above). Delegates entirely to `LockoutTrigger
+    Repository.remove`, the one place activation-irreversibility and audit
+    history are enforced; this function adds no rule of its own and works
+    identically for an ordinary or a finals round, exactly like `configure_
+    preflight_trigger` -- both are round-stream-agnostic.
+
+    `expected_revision`, mirroring `configure_preflight_trigger`'s own
+    optimistic-concurrency parameter (Codex review, PR #220): a stale
+    preflight view must never remove a trigger a concurrent operator has
+    since reconfigured to a different revision."""
+    return LockoutTriggerRepository(database).remove(
+        round_id, trigger_key, actor=actor, reason=reason, expected_revision=expected_revision
     )
 
 
@@ -563,7 +592,22 @@ def build_round_preflight(database, lifecycle, identities, afl_client, round_id:
                 }
             )
 
-    triggers = LockoutTriggerRepository(database).list_triggers(round_id)
+    trigger_repo = LockoutTriggerRepository(database)
+    triggers = trigger_repo.list_triggers(round_id)
+    # Issue #219: a removed trigger's key can be legitimately reused (its
+    # `configure` call un-removes it), but only if the caller submits that
+    # trigger's *true* post-removal revision as `expected_revision` -- see
+    # `app/lockouts.py`'s ABA-race discussion. Since removal itself advances
+    # the revision counter, an operator who only saw the active-triggers list
+    # would have no way to know that revision and would always be rejected as
+    # stale. Expose removed ("tombstoned") triggers separately, read-only, so
+    # the Scorer UI can resolve the correct `expected_revision` for a
+    # previously-removed key without reopening the ABA race by guessing 0.
+    removed_triggers = [
+        trigger
+        for trigger in trigger_repo.list_triggers(round_id, include_removed=True)
+        if trigger.removed_at is not None
+    ]
     # Issue #152: `observed_status`/`start_time_utc` on `activating_matches`
     # above is always this match's *current* AFL evidence; the durable
     # activation row queried here is BBBFFL's own, separate, irreversible
@@ -631,6 +675,17 @@ def build_round_preflight(database, lifecycle, identities, afl_client, round_id:
         )
     for view in match_views:
         view["lockout_trigger_coverage"] = match_trigger_coverage.get(view["match_id"], [])
+    removed_trigger_views = [
+        {
+            "trigger_key": trigger.trigger_key,
+            "trigger_type": trigger.trigger_type,
+            "revision": trigger.revision,
+            "removed_at": trigger.removed_at,
+            "removed_by": trigger.removed_by,
+            "removed_reason": trigger.removed_reason,
+        }
+        for trigger in removed_triggers
+    ]
     mains = [t for t in triggers if t.trigger_type == "main"]
     if len(mains) != 1:
         blockers.append(
@@ -779,6 +834,7 @@ def build_round_preflight(database, lifecycle, identities, afl_client, round_id:
         "afl_matches": match_views,
         "afl_evidence_fresh": evidence_fresh,
         "lockout_triggers": trigger_views,
+        "removed_lockout_triggers": removed_trigger_views,
         "lockout_recommendation": lockout_recommendation,
         "replay_checkpoint_recommendations": replay_checkpoint_recommendations,
         "opening_round": {"applies": bool(opening), "deferred_selections": opening},

@@ -229,12 +229,23 @@ def season_round_options(database, season_id: str) -> list[dict]:
     currently open (issue #153: the two dashboards must never disagree
     about which rounds exist)."""
     options = [_round_option(row) for row in ordinary_rounds_with_lifecycle(database, season_id)]
+    # Scoped by `c.season_id` (the finals week's own round, through the
+    # identical `competition_stream` join `round_stream_type`/`build_
+    # finals_week_dashboard`'s own season check use) rather than `finals_
+    # bracket.season_id` -- issue #219: the two are expected to always
+    # agree, but this is the one place the selector's own listing is built,
+    # and keeping it keyed off the same authoritative source everything
+    # else already trusts (rather than a second, independent season
+    # reference on `finals_bracket` itself) is what guarantees the
+    # selector can never omit or mis-scope the exact round `build_finals_
+    # week_dashboard` just resolved and rendered.
     finals_rows = database.execute(
         "SELECT w.bbbffl_round_id, w.week_number, w.label round_label, l.state round_state "
         "FROM finals_bracket_week w "
-        "JOIN finals_bracket b ON b.bracket_id=w.bracket_id "
+        "JOIN bbbffl_round r ON r.bbbffl_round_id=w.bbbffl_round_id "
+        "JOIN competition_stream c ON c.competition_id=r.competition_id "
         "LEFT JOIN bbbffl_round_lifecycle l ON l.bbbffl_round_id=w.bbbffl_round_id "
-        "WHERE b.season_id=? "
+        "WHERE c.season_id=? "
         "ORDER BY w.week_number",
         (season_id,),
     ).fetchall()

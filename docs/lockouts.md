@@ -71,6 +71,41 @@ via `app.audit.LOCKOUT_TRIGGER_CONFIGURED`). `LockoutTriggerRepository` is
 the persistence/service boundary a later commissioner/scorer management UI
 would call -- no UI is built in this issue.
 
+`trigger_key` must be a single, literal URL path segment forever (no `/`,
+and never `.`/`..`): rejected at every entry point (`create`/`replace`/
+`configure`, Codex review, PR #220) rather than only at the HTTP layer,
+since it is embedded raw in the round-preflight removal route's path
+(`POST .../lockout-trigger/{trigger_key}/remove`) and a key an ASGI router
+could never re-address would be configurable but permanently unremovable
+through that surface.
+
+Issue #219 adds one further pre-activation correction primitive:
+`LockoutTriggerRepository.remove` drops a trigger key out of a round's
+*active* plan entirely (e.g. an unnecessary selective trigger mistakenly
+created alongside `main`) -- a header-level fact, exactly like activation,
+audited separately (`app.audit.LOCKOUT_TRIGGER_REMOVED`) and never a
+delete of the trigger's row or its `create`/`replace` revision history.
+`list_triggers` excludes a removed trigger by default (so it is never
+evaluated for activation and never shown as part of the round's plan);
+`list_triggers(include_removed=True)`, or `get`, still return it for
+audit/history display. Reconfiguring the same trigger key afterwards (via
+`configure`) implicitly un-removes it. Refused, exactly like `replace`,
+once the trigger has activated -- see "Historical lock irreversibility"
+below.
+
+Removal also advances the trigger's own `revision` counter (Codex review,
+PR #220): it duplicates the unchanged configuration -- identical
+`trigger_type`/`sequence`/`afl_match_ids` -- into a new revision row
+rather than reusing the pre-removal number, so `expected_revision`'s
+optimistic-concurrency comparison (below) never conflates "this key was
+never created at all" (0) with "it existed and was later removed" (some
+real, non-zero revision). A caller that wants to reconfigure/un-remove a
+key it has actually observed as removed (via `get`/`list_triggers(include_
+removed=True)`) submits that trigger's own current revision, exactly like
+reconfiguring any other existing trigger; a caller that never observed the
+key at all still submits 0, and 0 only ever matches a genuinely
+never-created key.
+
 ## Player -> AFL match resolution
 
 `app.lockouts.resolve_match(afl_team_id, matches)` matches a selected
@@ -152,13 +187,13 @@ true rather than aspirational:
 Once a trigger has activated, that fact is durably recorded in
 `bbbffl_round_lockout_trigger_activation` (PK `trigger_id`; immutable via
 the same trigger-based enforcement as `weekly_lineup_submission`/
-`weekly_lineup_lock`). `LockoutTriggerRepository.replace` then permanently
-refuses to change that trigger's configuration
-(`TriggerAlreadyActivatedError`), so the set of AFL matches an activated
-trigger covers can never change afterwards, and a later upstream schedule/
-status correction to one of those matches cannot un-fire it either --
-activation evidence, once written, is never recomputed against fresh
-`matches` data.
+`weekly_lineup_lock`). `LockoutTriggerRepository.replace` (and, issue
+#219, `.remove`) then permanently refuse to change or remove that
+trigger's configuration (`TriggerAlreadyActivatedError`), so the set of
+AFL matches an activated trigger covers can never change afterwards, and
+a later upstream schedule/status correction to one of those matches
+cannot un-fire it either -- activation evidence, once written, is never
+recomputed against fresh `matches` data.
 
 ### 2. Player-level
 
@@ -437,7 +472,9 @@ upstream-fact observations: recording an already-authoritative AFL/trigger
 fact is not itself a privileged decision. `LockoutTriggerRepository.create`/
 `.replace` **are** audited (`app.audit.LOCKOUT_TRIGGER_CONFIGURED`), since
 configuring the lockout plan is itself a privileged BBBFFL competition
-decision, not an observation.
+decision, not an observation. `.remove` (issue #219) is audited separately
+(`app.audit.LOCKOUT_TRIGGER_REMOVED`) for the same reason -- removing a
+trigger from the active plan is equally a privileged decision.
 
 ## Deliberately vacant positions (issue #98, revised by issue #155)
 

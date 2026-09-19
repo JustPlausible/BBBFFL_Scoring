@@ -10,10 +10,13 @@ from app.csrf import issue_token, verify_token
 from app.round_preflight import (
     StaleMappingRevisionError,
     StaleTriggerRevisionError,
+    TriggerAlreadyActivatedError,
+    TriggerAlreadyRemovedError,
     accept_preflight_mapping,
     build_round_preflight,
     configure_preflight_trigger,
     open_preflight_round,
+    remove_preflight_trigger,
 )
 
 router = APIRouter(prefix="/api/admin/round-preflight")
@@ -45,6 +48,15 @@ class TriggerRequest(BaseModel):
     # Optimistic concurrency: the trigger's revision the caller last
     # observed for this trigger_key (0 meaning "does not exist yet"), or
     # omit to skip the check.
+    expected_revision: int | None = None
+
+
+class TriggerRemoveRequest(BaseModel):
+    reason: str
+    # Optimistic concurrency, mirroring TriggerRequest's own field: the
+    # trigger's revision the caller last observed, or omit to skip the
+    # check (Codex review, PR #220 -- without it, a stale preflight view
+    # could remove a trigger a concurrent operator has since reconfigured).
     expected_revision: int | None = None
 
 
@@ -188,6 +200,45 @@ def configure_trigger(
         raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
+    return _view(request, round_id)
+
+
+@router.post("/{round_id}/lockout-trigger/{trigger_key}/remove")
+def remove_trigger(
+    round_id: str,
+    trigger_key: str,
+    payload: TriggerRemoveRequest,
+    request: Request,
+    principal: Principal = Depends(require_round_operator),
+):
+    """Issue #219: the safe Scorer-facing correction path for an
+    unnecessary, unactivated lockout trigger -- e.g. a mistaken selective
+    trigger created alongside `main`. Never available once the trigger has
+    activated (`TriggerAlreadyActivatedError`, 409) or for a trigger key
+    already removed (`TriggerAlreadyRemovedError`, 409). `expected_revision`
+    (Codex review, PR #220), when supplied, rejects a stale preflight
+    view's removal of a trigger a concurrent operator has since
+    reconfigured (`StaleTriggerRevisionError`, 409) -- the identical
+    concurrency guard `configure_trigger` above already applies."""
+    _authorise(request, principal, round_id)
+    _csrf(request, principal)
+    try:
+        remove_preflight_trigger(
+            request.app.state.database,
+            round_id,
+            trigger_key,
+            reason=payload.reason,
+            actor=_actor(principal),
+            expected_revision=payload.expected_revision,
+        )
+    except StaleTriggerRevisionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (TriggerAlreadyActivatedError, TriggerAlreadyRemovedError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(404, f"Unknown lockout trigger key {trigger_key!r} for this round") from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     return _view(request, round_id)
 
 

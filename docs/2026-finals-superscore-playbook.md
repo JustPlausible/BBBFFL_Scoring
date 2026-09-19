@@ -686,3 +686,32 @@ for the full template and current record -- structured identically in
 spirit to `docs/2026-second-half-replay-playbook.md` section M's table,
 adapted to this phase's own boundaries (post-apply, per-finals-week,
 per-SuperScore-round, final archival).
+
+## P. Post-replay operational notes (2026-09-19)
+
+The full 2026 Finals/SuperScore replay has now been executed through Grand Final, SS4, season completion and the final archival checkpoint. The original CLI procedures above remain useful as recovery primitives, but the merged Scorer web workflow became the preferred normal operator path during the later Finals weeks. Detailed execution evidence is in `docs/evidence/2026-finals-replay/workflow-findings.md` and the sanitised closeout identifiers are in `provenance-manifest.md`.
+
+### Season activation is a required pre-closeout prerequisite
+
+The real closeout exposed one lifecycle omission not obvious while this playbook was originally written: the replay season was still `setup` after the entire competition had been played. `scripts.season_completion_2026 preview` correctly refused with `season must be active to complete (currently 'setup')`. The operator then used the supported audited `SeasonRepository.transition_lifecycle` path to move the season `setup -> active`; the next preview was ready and completion succeeded.
+
+For future rehearsals and especially the 2027 live season, make `setup -> active` an explicit season-start operational gate. Do not defer it to closeout and do not bypass `complete_season`'s requirement that the season already be active.
+
+### Prefer browser workflow for routine Finals operations
+
+The completed replay demonstrated that the Scorer Operations Dashboard, Finals progression controls, Finals/SuperScore review and publication flow are substantially easier to operate in-browser than the original CLI-heavy sequence. Use the browser as the normal operator surface where a supported control exists; retain the CLI commands in this playbook for diagnostics, recovery, and operations that still lack a browser surface.
+
+The operator should not need to know round UUIDs or manually construct URLs. In particular, a preflight blocker should link directly to the appropriate Finals preflight surface, and the preflight index should expose Finals rounds as well as Rounds 1-20 (tracked by issue #221).
+
+### Completed-season boundary
+
+The real closeout followed the intended hard ordering and confirmed it works:
+
+1. take a completed-but-not-yet-closed recovery checkpoint;
+2. run completion preview and require `ready: true`;
+3. run the atomic completion transaction and retain its completed-season version and completion-event id;
+4. run `scripts.season_archival_checkpoint_2026 verify` against that exact event id;
+5. only after verification passes, take the final paired database/checkpoint archive and validate its readability/checksums;
+6. retain private archive filenames/hashes outside GitHub and commit only sanitised provenance.
+
+A post-completion smoke test of the completed-season write fence is recommended as the final operational validation. Use an existing supported result-changing command/path and expect `SeasonCompletedError`/the corresponding operator-facing refusal; do not use direct SQL and do not create a bypass or reopen path merely for the test.

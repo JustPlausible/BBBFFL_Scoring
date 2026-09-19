@@ -57,11 +57,34 @@ import sys
 
 from app.audit import ActorContext
 from app.db import connect
+from app.identity import IdentityRepository
 from app.midseason_draft import MidseasonDraftRepository, MidseasonDraftStateError
 from app.migrations import migrate
 from app.season import SeasonRepository
 
 ACTOR = ActorContext.anonymous_operator("replay_operator")
+
+
+def _team_label(midseason: MidseasonDraftRepository, season_entry_id: str) -> str:
+    """Issue #181's CLI quality-of-life: a human-readable team/coach label,
+    with the raw id retained in parentheses for audit/debugging -- never the
+    primary display on its own."""
+    identities = IdentityRepository(midseason.database)
+    team = identities.get_public_team(season_entry_id)
+    coach = identities.get_current_coach(season_entry_id)
+    team_name = team.team_name if team else "Unknown team"
+    coach_name = coach.display_name if coach else "Coach not assigned"
+    return f"{team_name} ({coach_name}) ({season_entry_id})"
+
+
+def _player_label(midseason: MidseasonDraftRepository, season_player_id: str | None) -> str:
+    if season_player_id is None:
+        return "(no player)"
+    player = midseason.player_pool.get_by_id(season_player_id)
+    if player is None:
+        return f"Unknown player ({season_player_id})"
+    club = f", {player.afl_team_name}" if player.afl_team_name else ""
+    return f"{player.display_name}{club} ({season_player_id})"
 
 
 def _print_status(midseason: MidseasonDraftRepository, season_id: str) -> None:
@@ -73,6 +96,9 @@ def _print_status(midseason: MidseasonDraftRepository, season_id: str) -> None:
     status = midseason.status(season_id)
     if status is not None:
         print(f"  Selections: {status.completed_picks}/{status.total_picks} completed")
+    next_pick = midseason.next_pick(season_id)
+    if next_pick is not None:
+        print(f"  On the clock: {_team_label(midseason, next_pick.current_season_entry_id)}")
 
 
 def cmd_confirm_ladder(midseason: MidseasonDraftRepository, args: argparse.Namespace) -> int:
@@ -80,7 +106,9 @@ def cmd_confirm_ladder(midseason: MidseasonDraftRepository, args: argparse.Names
         args.season_id, args.competition_id, actor=ACTOR, reason=args.reason or "2026 replay: ladder confirmed"
     )
     order = midseason.draft_order(args.season_id)
-    print(f"Ladder confirmed; draft order (worst-placed picks first): {[e for _, e, _ in order]}")
+    print("Ladder confirmed; draft order (worst-placed picks first):")
+    for position, entry_id, _source in order:
+        print(f"  {position}. {_team_label(midseason, entry_id)}")
     _print_status(midseason, draft.season_id)
     return 0
 
@@ -103,13 +131,19 @@ def cmd_delist(midseason: MidseasonDraftRepository, args: argparse.Namespace) ->
     delisting = midseason.submit_delisting(
         args.season_id, args.season_entry_id, args.season_player_id, actor=ACTOR, reason=args.reason
     )
-    print(f"Delisting recorded: {delisting.delisting_id}")
+    print(
+        f"Delisting recorded ({delisting.delisting_id}): "
+        f"{_team_label(midseason, args.season_entry_id)} delists {_player_label(midseason, args.season_player_id)}"
+    )
     return 0
 
 
 def cmd_withdraw_delisting(midseason: MidseasonDraftRepository, args: argparse.Namespace) -> int:
-    midseason.withdraw_delisting(args.season_id, args.delisting_id, actor=ACTOR, reason=args.reason)
-    print("Delisting withdrawn.")
+    delisting = midseason.withdraw_delisting(args.season_id, args.delisting_id, actor=ACTOR, reason=args.reason)
+    print(
+        f"Delisting withdrawn: {_team_label(midseason, delisting.season_entry_id)} "
+        f"keeps {_player_label(midseason, delisting.season_player_id)}"
+    )
     return 0
 
 
@@ -154,6 +188,13 @@ def parse_trade_leg(spec: str) -> dict:
 def cmd_trade(midseason: MidseasonDraftRepository, args: argparse.Namespace) -> int:
     trade = midseason.propose_trade(args.season_id, args.legs, actor=ACTOR, reason=args.reason)
     print(f"Trade proposed: {trade.trade_id} (status={trade.status}, {len(args.legs)} leg(s))")
+    for leg in args.legs:
+        from_label = _team_label(midseason, leg["from_season_entry_id"])
+        to_label = _team_label(midseason, leg["to_season_entry_id"])
+        if leg["leg_type"] == "player":
+            print(f"  {from_label} sends {_player_label(midseason, leg['season_player_id'])} to {to_label}")
+        else:
+            print(f"  {from_label} sends its round {leg['draft_round']} pick to {to_label}")
     return 0
 
 
@@ -192,7 +233,10 @@ def cmd_pick(midseason: MidseasonDraftRepository, args: argparse.Namespace) -> i
         actor=ACTOR,
         reason=args.reason or "2026 replay: mid-season selection",
     )
-    print(f"Pick {pick.overall_number} completed.")
+    print(
+        f"Pick {pick.overall_number} completed: "
+        f"{_team_label(midseason, args.season_entry_id)} selects {_player_label(midseason, args.season_player_id)}"
+    )
     _print_status(midseason, args.season_id)
     return 0
 
@@ -227,6 +271,10 @@ def cmd_auto_complete(midseason: MidseasonDraftRepository, args: argparse.Namesp
             actor=ACTOR,
             reason="2026 replay: auto-complete (SIMULATION -- no further historical evidence)",
         )
+        print(
+            f"  [SIMULATED] {_team_label(midseason, pick.current_season_entry_id)} "
+            f"auto-selects {_player_label(midseason, pool[0].season_player_id)}"
+        )
         completed += 1
     print(f"Auto-completed {completed} remaining selection(s).")
     _print_status(midseason, args.season_id)
@@ -238,8 +286,11 @@ def cmd_correct_selection(midseason: MidseasonDraftRepository, args: argparse.Na
     same slot for re-selection -- only legal on the active (not yet
     draft_complete) mid-season draft; use reopen-draft first once the draft
     has already completed."""
-    midseason.correct_selection(args.season_id, args.draft_pick_id, actor=ACTOR, reason=args.reason)
-    print(f"Selection {args.draft_pick_id} corrected; the slot is open for re-selection.")
+    corrected = midseason.correct_selection(args.season_id, args.draft_pick_id, actor=ACTOR, reason=args.reason)
+    print(
+        f"Selection corrected (overall pick {corrected.overall_number}, "
+        f"{_team_label(midseason, corrected.current_season_entry_id)}); the slot is open for re-selection."
+    )
     _print_status(midseason, args.season_id)
     return 0
 

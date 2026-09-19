@@ -56,6 +56,7 @@ import dataclasses
 
 from app.audit import ENTITY_TYPE_LINEUP, ROLE_GRANT_CREATED, ROLE_GRANT_REVOKED
 from app.lineups import WeeklyLineupRepository
+from app.midseason_draft import midseason_draft_dashboard_status
 from app.round_preflight import build_round_preflight
 from app.scorer_dashboard import (
     CATEGORY_BLOCKING,
@@ -113,6 +114,7 @@ DRAFT_URL = "/admin/draft/{season_id}"
 PRESEASON_URL = "/admin/preseason/{season_id}"
 OPENING_ROUND_URL = "/operations/seasons/{season_id}/opening-round"
 PREFLIGHT_URL = "/admin/round-preflight/{round_id}"
+MIDSEASON_DRAFT_URL = "/admin/midseason-draft/{season_id}"
 
 
 def scorer_dashboard_link(season_id: str, round_id: str | None = None) -> str:
@@ -883,6 +885,25 @@ def build_admin_dashboard(
             current_round_id,
         )
 
+    # Issue #181: an obvious, additive-only dashboard entry point once the
+    # configured mid-season draft trigger round is fully final and no
+    # mid-season draft exists yet -- deliberately its own top-level key
+    # rather than folded into `_attention_queue`'s categorised list, so it
+    # can never perturb that queue's existing category grouping/ordering or
+    # the cross-dashboard handoff-link consistency it is tested against
+    # (see `tests/test_admin_dashboard.py`). Purely a read; `confirm_ladder`
+    # re-validates everything itself before it ever writes anything.
+    midseason_status = midseason_draft_dashboard_status(database, season_id)
+    midseason_card = (
+        {
+            "trigger_round": midseason_status["trigger_round"],
+            "title": f"Round {midseason_status['trigger_round']} final — confirm ladder and prepare draft",
+            "url": MIDSEASON_DRAFT_URL.format(season_id=season_id),
+        }
+        if midseason_status is not None and midseason_status["ready"]
+        else None
+    )
+
     attention = _attention_queue(
         season=season,
         entries=entries,
@@ -937,6 +958,7 @@ def build_admin_dashboard(
         "current_round": round_summary["current_round"],
         "preflight": preflight,
         "scorer_summary": scorer_summary,
+        "midseason_draft": midseason_card,
         "attention": attention,
         "workflow_map": workflow_map,
         "role_overview": role_overview,

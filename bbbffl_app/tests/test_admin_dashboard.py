@@ -185,6 +185,39 @@ def test_draft_in_progress_is_reported_with_pick_counts():
     assert "0/20" in item["detail"]
 
 
+def test_midseason_draft_ready_card_appears_once_trigger_round_is_final():
+    """Issue #181's dashboard entry point: once the configured mid-season
+    draft trigger round is fully final and no mid-season draft exists yet,
+    `dashboard["midseason_draft"]` names an obvious action card -- purely
+    additive, never folded into the governance attention queue (so it can
+    never perturb that queue's existing category/ordering assumptions)."""
+    from tests.midseason_draft_helpers import build_season
+
+    database = migrated_connection()
+    ctx = build_season(database, year=9200, trigger_round=10, squad_limit=4, regular_season_round_count=12)
+    season = ctx["season"]
+    identities = IdentityRepository(database)
+
+    # Before the trigger round is configured, there is nothing to show.
+    dashboard = _dashboard_for(database, season.season_id, identities)
+    assert dashboard["midseason_draft"] is None
+
+    SeasonRepository(database).set_midseason_draft_trigger_round(season.season_id, 10)
+    dashboard = _dashboard_for(database, season.season_id, identities)
+    assert dashboard["midseason_draft"] is not None
+    assert dashboard["midseason_draft"]["trigger_round"] == 10
+    assert dashboard["midseason_draft"]["url"] == f"/admin/midseason-draft/{season.season_id}"
+
+    # Once a mid-season draft actually exists, the card disappears again --
+    # its purpose (prompting the Scorer/Admin to go start one) no longer
+    # applies.
+    from app.midseason_draft import MidseasonDraftRepository
+
+    MidseasonDraftRepository(database).confirm_ladder(season.season_id, ctx["competition"].competition_id)
+    dashboard = _dashboard_for(database, season.season_id, identities)
+    assert dashboard["midseason_draft"] is None
+
+
 def test_draft_not_started_at_all_is_a_blocking_attention_item():
     """Codex review, PR #160: a season with a complete roster and an
     ordinary competition but no accepted draft order previously had no

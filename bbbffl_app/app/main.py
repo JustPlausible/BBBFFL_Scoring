@@ -51,6 +51,7 @@ from app.midseason_draft import (
 from app.migrations import migrate
 from app.opening_round import OpeningRoundError
 from app.player_pool import PlayerPoolRepository, PlayerUnavailableError, SquadCapacityError
+from app.player_stats_context import PlayerStatsContext
 from app.preseason import (
     PreseasonDraftNotFinalizedError,
     PreseasonRepository,
@@ -92,6 +93,7 @@ from app.routes import round_preflight as round_preflight_routes
 from app.routes import round_review as round_review_routes
 from app.routes import scorer_dashboard as scorer_dashboard_routes
 from app.routes import season_centre as season_centre_routes
+from app.routes import shortlist as shortlist_routes
 from app.routes import superscore as superscore_routes
 from app.routes import superscore_results as superscore_result_routes
 from app.routes import superscore_review as superscore_review_routes
@@ -105,6 +107,7 @@ from app.scorer_decisions import (
 )
 from app.season import SeasonRepository
 from app.service import PlayerIdentityCache
+from app.shortlist import ShortlistRepository
 from app.superscore import competition_key as superscore_competition_key
 from app.superscore import get_superscore_config
 from app.superscore_results import SuperScoreLeaderboardService
@@ -200,7 +203,16 @@ async def lifespan(app: FastAPI):
     app.state.role_grants = RoleGrantRepository(database)
     app.state.acting_context = ActingContextService(app.state.identities, app.state.role_grants, app.state.sessions)
     app.state.player_pool = PlayerPoolRepository(database)
+    # Issue #181's shared draft player browser -- read-only, best-effort
+    # scoring context computed from `bbbffl_matchup_calculation`; never
+    # consulted by any ownership/eligibility decision. See
+    # app/player_stats_context.py's module docstring.
+    app.state.player_stats_context = PlayerStatsContext(database)
     app.state.draft = DraftRepository(database)
+    # Issue #181's private coach draft shortlist/planning list -- never
+    # itself an authority over turn/ownership/availability. See
+    # app/shortlist.py's module docstring.
+    app.state.shortlist = ShortlistRepository(database)
     # Roadmap package 15's preseason trade/finalisation window (issue #54,
     # app/routes/preseason.py) is an operator surface over this same
     # authoritative repository -- see docs/preseason-trades.md.
@@ -288,6 +300,9 @@ app.include_router(draft_routes.page_router)
 app.include_router(preseason_routes.router)
 app.include_router(preseason_routes.page_router)
 app.include_router(midseason_draft_routes.router)
+app.include_router(midseason_draft_routes.page_router)
+app.include_router(shortlist_routes.router)
+app.include_router(shortlist_routes.page_router)
 app.include_router(round_review_routes.router)
 app.include_router(round_review_routes.page_router)
 app.include_router(round_preflight_routes.router)

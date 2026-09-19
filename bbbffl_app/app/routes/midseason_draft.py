@@ -1,4 +1,5 @@
-"""Scorer-operated mid-season draft workflow (issue #164).
+"""Scorer/Admin lifecycle + shared coach draft-board workflow for the
+mid-season draft (issues #164, #181).
 
 A thin JSON operator surface over `app.midseason_draft.MidseasonDraftRepository`
 -- every mutating endpoint here is a direct translation from an HTTP request
@@ -6,24 +7,54 @@ to one repository call; turn sequencing, ownership, audit and validation all
 live in that repository (and, once selections are generated, in
 `app.draft.DraftRepository`). No business logic lives in this module.
 
-For the 2026 replay this surface is deliberately proxy/operator-shaped
-(Scorer/Admin/Replay Operator submit on a team's behalf); a dedicated
-coach-facing page is future 2027 work and is not required for this issue --
-see the module docstring in `app.midseason_draft` and
-docs/midseason-draft-planning.md.
+Two authority tiers (issue #181 extends the original Scorer/Admin/Replay-
+Operator-only surface):
+
+- `manage` (`midseason_draft.manage`): the full Scorer/Admin/Replay-Operator
+  lifecycle surface -- confirm the ladder, run the delisting/trade window,
+  lock, generate selections, and every exceptional correction. Unchanged
+  from issue #164.
+- `participate` (`midseason_draft.participate`): read the board/player pool
+  and, once a mid-season pick table exists, make a selection -- granted to
+  Coach as well, exactly mirroring `app.routes.draft`'s existing preseason
+  self-service pattern. `submit_pick` still requires a Coach to be acting
+  for the entry making the selection
+  (`app.authorization.require_entry_context`); a proxy pick on behalf of a
+  *different* team still requires `midseason_draft.manage`, never merely
+  `participate`.
+
+Board/player-browsing responses are built from `app.draft_board`'s shared,
+draft-kind-parameterised helpers -- the exact same functions
+`app.routes.draft` renders the preseason board from (issue #181's "reuse the
+existing pre-season draft board/selection machinery" direction) -- so this
+module never re-implements pick/readiness/player-browser presentation.
 """
 
 import dataclasses
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from app.audit import ActorContext
-from app.authorization import Principal, require_capability, require_role_covers_season
+from app.authorization import (
+    Principal,
+    Role,
+    principal_has_capability,
+    require_capability,
+    require_entry_context,
+    require_role_covers_season,
+)
+from app.config import BASE_DIR
+from app.draft_board import build_board, build_readiness, entry_view, player_browse_view, resolve_my_entry_id
 
 router = APIRouter(prefix="/api/admin/midseason-draft")
+page_router = APIRouter()
+templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
 
 manage = require_capability("midseason_draft.manage")
+participate = require_capability("midseason_draft.participate")
 
 
 def _actor(principal: Principal, legacy_name: str | None = None) -> ActorContext:
@@ -36,6 +67,25 @@ def _actor(principal: Principal, legacy_name: str | None = None) -> ActorContext
 
 def _authorise(request: Request, principal: Principal, season_id: str) -> None:
     require_role_covers_season(request, principal, season_id)
+
+
+def _entry_label(request: Request, season_entry_id: str | None, cache: dict) -> dict | None:
+    if season_entry_id is None:
+        return None
+    return entry_view(request, season_entry_id, cache)
+
+
+def _player_label(request: Request, season_player_id: str | None, cache: dict) -> dict | None:
+    if season_player_id is None:
+        return None
+    if season_player_id not in cache:
+        player = request.app.state.player_pool.get_by_id(season_player_id)
+        cache[season_player_id] = {
+            "season_player_id": season_player_id,
+            "display_name": player.display_name if player else "Unknown player",
+            "afl_team_name": player.afl_team_name if player else None,
+        }
+    return cache[season_player_id]
 
 
 class SetTriggerRoundRequest(BaseModel):
@@ -131,16 +181,47 @@ class ClosePostDraftTradingRequest(BaseModel):
 
 
 def _status(request: Request, season_id: str) -> dict:
+    """Issue #181's human-readable presentation: every field an earlier
+    caller already relied on (`season_entry_id`, `season_player_id`, raw
+    dataclass fields) is kept verbatim -- this only *adds* `team_name`/
+    `coach_display_name`/player-label fields alongside them, so a raw id
+    remains available as secondary/audit detail exactly as the issue asks,
+    without breaking any existing reader of this response."""
     midseason = request.app.state.midseason_draft
     draft = midseason.get_draft(season_id)
     if draft is None:
         return {"season_id": season_id, "draft": None}
     ladder = midseason.ladder_snapshot(season_id)
+    entry_cache: dict = {}
+    player_cache: dict = {}
+
+    def _delisting_view(item):
+        view = dataclasses.asdict(item)
+        view["team"] = _entry_label(request, item.season_entry_id, entry_cache)
+        view["player"] = _player_label(request, item.season_player_id, player_cache)
+        return view
+
+    def _trade_view(trade):
+        view = dataclasses.asdict(trade)
+        view["legs"] = []
+        for leg in midseason.trade_legs(trade.trade_id):
+            leg_view = dataclasses.asdict(leg)
+            leg_view["from_team"] = _entry_label(request, leg.from_season_entry_id, entry_cache)
+            leg_view["to_team"] = _entry_label(request, leg.to_season_entry_id, entry_cache)
+            leg_view["player"] = _player_label(request, leg.season_player_id, player_cache)
+            view["legs"].append(leg_view)
+        return view
+
     return {
         "season_id": season_id,
         "draft": dataclasses.asdict(draft),
         "order": [
-            {"position": position, "season_entry_id": entry_id, "source": source}
+            {
+                "position": position,
+                "season_entry_id": entry_id,
+                "source": source,
+                **_entry_label(request, entry_id, entry_cache),
+            }
             for position, entry_id, source in midseason.draft_order(season_id)
         ],
         "ladder_snapshot": (
@@ -148,13 +229,16 @@ def _status(request: Request, season_id: str) -> dict:
                 "snapshot_id": ladder.snapshot_id,
                 "through_round": ladder.through_round,
                 "created_at": ladder.created_at,
-                "rows": [dataclasses.asdict(row) for row in ladder.rows],
+                "rows": [
+                    {**dataclasses.asdict(row), **_entry_label(request, row.season_entry_id, entry_cache)}
+                    for row in ladder.rows
+                ],
             }
             if ladder
             else None
         ),
-        "delistings": [dataclasses.asdict(item) for item in midseason.list_delistings(season_id)],
-        "trades": [dataclasses.asdict(item) for item in midseason.list_trades(season_id)],
+        "delistings": [_delisting_view(item) for item in midseason.list_delistings(season_id)],
+        "trades": [_trade_view(item) for item in midseason.list_trades(season_id)],
         "engine_status": (dataclasses.asdict(midseason.status(season_id)) if midseason.status(season_id) else None),
         "available_player_count": len(midseason.available_player_pool(season_id)),
     }
@@ -179,6 +263,38 @@ def set_trigger_round(
         season_id, payload.trigger_round, actor=_actor(principal, payload.scorer_name), reason=payload.reason
     )
     return _status(request, season_id)
+
+
+@router.get("/{season_id}/ladder-preview")
+def ladder_preview(season_id: str, competition_id: str, request: Request, principal: Principal = Depends(manage)):
+    """Issue #181: the calculated ladder through the configured trigger
+    round, plus the reverse-ladder draft order it would seed, *before*
+    `confirm-ladder` becomes irreversible. Reads the exact same
+    `app.ladder.LadderRepository.snapshot` call `confirm_ladder` itself
+    takes -- never a second ladder calculation -- and never writes
+    anything: the live ladder and any eventual frozen snapshot are both
+    completely untouched by this preview."""
+    _authorise(request, principal, season_id)
+    season = request.app.state.seasons.get_season(season_id)
+    if season is None:
+        raise HTTPException(status_code=404, detail="Unknown season")
+    trigger = season.midseason_draft_trigger_round
+    if trigger is None:
+        raise HTTPException(status_code=400, detail="season has no configured mid-season draft trigger round")
+    ladder = request.app.state.ladder.snapshot(competition_id, trigger)
+    entry_cache: dict = {}
+    reverse_order = sorted(ladder.rows, key=lambda row: (-row.rank, row.season_entry_id))
+    return {
+        "trigger_round": trigger,
+        "rows": [
+            {**dataclasses.asdict(row), **_entry_label(request, row.season_entry_id, entry_cache)}
+            for row in sorted(ladder.rows, key=lambda row: row.rank)
+        ],
+        "reverse_order_preview": [
+            {"position": position, **_entry_label(request, row.season_entry_id, entry_cache)}
+            for position, row in enumerate(reverse_order, 1)
+        ],
+    }
 
 
 @router.post("/{season_id}/confirm-ladder")
@@ -314,20 +430,75 @@ def generate_selections(
 
 
 @router.get("/{season_id}/available-players")
-def available_players(season_id: str, request: Request, principal: Principal = Depends(manage)):
+def available_players(season_id: str, request: Request, principal: Principal = Depends(participate)):
     _authorise(request, principal, season_id)
     return [dataclasses.asdict(item) for item in request.app.state.midseason_draft.available_player_pool(season_id)]
 
 
+@router.get("/{season_id}/players")
+def player_pool(
+    season_id: str,
+    request: Request,
+    q: str | None = None,
+    availability: str | None = None,
+    limit: int = 200,
+    principal: Principal = Depends(participate),
+):
+    """The shared player browser (issue #181), annotated with
+    current-season-to-date scoring context -- the mid-season counterpart of
+    `app.routes.draft.player_pool`, built from the same
+    `app.draft_board.player_browse_view` helper."""
+    _authorise(request, principal, season_id)
+    availability = availability or None
+    if availability not in (None, "available", "owned", "unresolved"):
+        raise HTTPException(status_code=400, detail="availability must be available, owned, or unresolved")
+    return player_browse_view(
+        request, season_id, draft_kind="midseason", query=q, availability=availability, limit=min(limit, 500)
+    )
+
+
+@router.get("/{season_id}/board")
+def board(season_id: str, request: Request, principal: Principal = Depends(participate)):
+    """The shared conduct-draft board (issue #181) once the mid-season pick
+    table exists -- the same `app.draft_board.build_board` view model
+    `app.routes.draft.board` renders for the preseason draft, scoped to
+    `draft_kind="midseason"`."""
+    _authorise(request, principal, season_id)
+    return build_board(request, season_id, draft_kind="midseason")
+
+
+@router.get("/{season_id}/readiness")
+def readiness(season_id: str, request: Request, principal: Principal = Depends(participate)):
+    _authorise(request, principal, season_id)
+    return build_readiness(request, season_id, draft_kind="midseason")
+
+
 @router.get("/{season_id}/picks")
-def picks(season_id: str, request: Request, principal: Principal = Depends(manage)):
+def picks(season_id: str, request: Request, principal: Principal = Depends(participate)):
     _authorise(request, principal, season_id)
     return [dataclasses.asdict(item) for item in request.app.state.midseason_draft.picks(season_id)]
 
 
-@router.post("/{season_id}/pick")
-def submit_pick(season_id: str, payload: PickRequest, request: Request, principal: Principal = Depends(manage)):
+def _authorise_pick(request: Request, principal: Principal, season_id: str, season_entry_id: str) -> None:
+    """A Coach may only ever submit for the team they are authenticated as
+    (or currently, explicitly, representing) -- `require_entry_context`
+    404s otherwise, matching the preseason board's own rule
+    (`app.routes.draft.submit_pick`). A proxy selection on behalf of a
+    *different* team still requires the full `midseason_draft.manage`
+    authority, never merely `midseason_draft.participate` -- a Coach's own
+    participate grant must never let them pick for another team by naming
+    a different `season_entry_id` in the request body."""
+    if principal.role is Role.COACH:
+        require_entry_context(request, principal, season_entry_id)
+        return
+    if not principal_has_capability(principal, "midseason_draft.manage"):
+        raise HTTPException(status_code=403, detail="'midseason_draft.manage' authority required for a proxy selection")
     _authorise(request, principal, season_id)
+
+
+@router.post("/{season_id}/pick")
+def submit_pick(season_id: str, payload: PickRequest, request: Request, principal: Principal = Depends(participate)):
+    _authorise_pick(request, principal, season_id, payload.season_entry_id)
     request.app.state.midseason_draft.execute_pick(
         season_id,
         payload.season_entry_id,
@@ -376,3 +547,35 @@ def close_post_draft_trading(
         season_id, actor=_actor(principal, payload.scorer_name), reason=payload.reason
     )
     return _status(request, season_id)
+
+
+@page_router.get("/admin/midseason-draft/{season_id}", response_class=HTMLResponse)
+def midseason_operations_page(season_id: str, request: Request, principal: Principal = Depends(manage)):
+    """The dedicated mid-season draft operations view (issue #181):
+    Scorer/Admin-only guided lifecycle (ladder confirmation, delisting/
+    trade window, lock, generate selections) -- see
+    `app.midseason_draft`'s module docstring for the exact state sequence
+    this page walks. Conducting the generated draft itself happens on the
+    shared board at `/admin/midseason-draft/{season_id}/conduct`."""
+    _authorise(request, principal, season_id)
+    return templates.TemplateResponse(request, "midseason_draft_operations.html", {"season_id": season_id})
+
+
+@page_router.get("/admin/midseason-draft/{season_id}/conduct", response_class=HTMLResponse)
+def midseason_conduct_page(season_id: str, request: Request, principal: Principal = Depends(participate)):
+    """The shared draft-selection board (issue #181), reused verbatim from
+    the preseason draft's own page (`app.routes.draft.draft_page`) with
+    `draft_kind="midseason"` -- a Coach whose team owns the active pick may
+    reach this page directly; a Scorer/Admin retains the audited proxy
+    path on the same page."""
+    _authorise(request, principal, season_id)
+    return templates.TemplateResponse(
+        request,
+        "draft.html",
+        {
+            "season_id": season_id,
+            "draft_kind": "midseason",
+            "api_base": "/api/admin/midseason-draft",
+            "my_season_entry_id": resolve_my_entry_id(request, principal, season_id),
+        },
+    )

@@ -15,6 +15,7 @@ import pytest
 import app.lockouts as lockouts_module
 from app.afl_client import Match, Team
 from app.audit import ActorContext
+from app.db import transaction
 from app.lineups import WeeklyLineupRepository
 from app.lockouts import (
     InvalidSelectionError,
@@ -33,6 +34,7 @@ from app.lockouts import (
 )
 from app.player_pool import OwnershipRepository, PlayerPoolRepository
 from app.round_mapping import RoundMappingRepository
+from app.season import _id, _now
 from tests import afl_evidence
 from tests.db_helpers import migrated_connection
 from tests.test_competition_lifecycle import operational
@@ -507,8 +509,12 @@ def test_trigger_key_must_remain_a_single_url_path_segment():
     decodes the path before route matching, so the request 404s and such a
     trigger could be configured but never removed through that route.
     Rejecting these (and '.'/'..', which a client or intermediary could
-    similarly normalize away) at every entry point (`create`/`replace`/
-    `configure`) guarantees every accepted key stays removable."""
+    similarly normalize away) whenever a *new* key is created (`create`,
+    and `configure`'s new-row branch) guarantees every key accepted from
+    now on stays removable. `replace`, and `configure`'s existing-row
+    branch, never re-validate an already-persisted key's format -- see
+    `test_configure_and_replace_can_still_correct_a_pre_existing_legacy_
+    trigger_key` below for why that matters."""
     db, _, round_, entries, scope, pool, ownership = context()
     triggers = LockoutTriggerRepository(db)
     for bad_key in ("early/1", "/main", "main/", ".", ".."):
@@ -518,18 +524,54 @@ def test_trigger_key_must_remain_a_single_url_path_segment():
         triggers.create(round_.bbbffl_round_id, "", "selective", 1, [EARLY_MATCH_ID])
 
     with pytest.raises(ValueError, match="not a valid identifier"):
-        triggers.replace(
-            round_.bbbffl_round_id,
-            "early/1",
-            trigger_type="selective",
-            sequence=1,
-            afl_match_ids=[EARLY_MATCH_ID],
-            reason="x",
-        )
-    with pytest.raises(ValueError, match="not a valid identifier"):
         triggers.configure(
             round_.bbbffl_round_id, "early/2", "selective", 2, [LATE_MATCH_ID], reason="configure early/2"
         )
+
+
+def test_configure_and_replace_can_still_correct_a_pre_existing_legacy_trigger_key():
+    """Codex review (PR #220, P2): the key-format check above must only
+    ever block *creating* a new key -- a trigger whose key predates that
+    validation (e.g. seeded before this change shipped, or restored from a
+    backup) must remain fully correctable/removable through `configure`/
+    `replace`/`remove`, even though such a key could never be created again
+    going forward. Seeds a trigger with an invalid key directly (bypassing
+    the repository, exactly as a pre-existing row would have been created
+    before this validation existed)."""
+    db, _, round_, entries, scope, pool, ownership = context()
+    trigger_id, now = _id(), _now()
+    with transaction(db) as conn:
+        conn.execute(
+            "INSERT INTO bbbffl_round_lockout_trigger "
+            "(trigger_id, bbbffl_round_id, trigger_key, current_revision, created_at) VALUES (?, ?, ?, ?, ?)",
+            (trigger_id, round_.bbbffl_round_id, "early/1", 1, now),
+        )
+        conn.execute(
+            "INSERT INTO bbbffl_round_lockout_trigger_revision VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (trigger_id, 1, "selective", 1, now, "legacy-seed", "pre-existing legacy key"),
+        )
+        conn.execute("INSERT INTO bbbffl_round_lockout_trigger_match VALUES (?, ?, ?)", (trigger_id, 1, EARLY_MATCH_ID))
+
+    triggers = LockoutTriggerRepository(db)
+    replaced = triggers.replace(
+        round_.bbbffl_round_id,
+        "early/1",
+        trigger_type="selective",
+        sequence=1,
+        afl_match_ids=[LATE_MATCH_ID],
+        reason="correcting the legacy key's match id",
+    )
+    assert replaced.afl_match_ids == (LATE_MATCH_ID,)
+
+    reconfigured = triggers.configure(
+        round_.bbbffl_round_id, "early/1", "selective", 1, [EARLY_MATCH_ID], reason="reconfigure legacy key"
+    )
+    assert reconfigured.afl_match_ids == (EARLY_MATCH_ID,)
+
+    triggers.remove(
+        round_.bbbffl_round_id, "early/1", actor=ActorContext.anonymous_operator("test"), reason="remove legacy key"
+    )
+    assert triggers.get(round_.bbbffl_round_id, "early/1").removed_at is not None
 
 
 def test_trigger_rejects_a_second_main_and_replace_into_a_second_main():

@@ -695,7 +695,13 @@ class LockoutTriggerRepository:
         revision points (e.g. `app.round_mapping`)."""
         if not reason:
             raise ValueError("replacing a trigger's configuration requires a reason")
-        trigger_key = self._validated_trigger_key(trigger_key)
+        # No `_validated_trigger_key` call here (Codex review, PR #220, P2):
+        # `replace` only ever addresses an *existing* row by its already-
+        # persisted key, never creates a new one -- rejecting the key's
+        # format here would make a trigger created before this validation
+        # existed (or one recovered from a pre-#219 backup) permanently
+        # uncorrectable through this method, even though the row it
+        # addresses is perfectly real.
         match_ids = self._validated_matches(trigger_type, afl_match_ids)
         with transaction(self.database) as conn:
             head = conn.execute(
@@ -783,8 +789,13 @@ class LockoutTriggerRepository:
         trigger set closes that gap by serializing every `configure()` call
         for one round through this transaction regardless of how many
         triggers currently exist (issue #152 review, second pass, P1).
+
+        `trigger_key`'s format (Codex review, PR #220, P2) is validated
+        inside `_configure_locked`, only when this call turns out to be
+        creating a brand-new key -- never here unconditionally, which would
+        also reject a legitimate reconfiguration of a pre-existing trigger
+        whose key was created before that validation existed.
         """
-        trigger_key = self._validated_trigger_key(trigger_key)
         match_ids = self._validated_matches(trigger_type, afl_match_ids)
         with transaction(self.database) as conn:
             self._configure_locked(
@@ -938,6 +949,12 @@ class LockoutTriggerRepository:
                 (revision, trigger_id),
             )
         else:
+            # Issue #219 review (P2): the key-format check only applies to
+            # a genuinely *new* key -- reconfiguring an existing row (the
+            # `if existing is not None` branch above) never re-validates
+            # its already-persisted key, so a trigger created before this
+            # check existed stays fully correctable through `configure`.
+            self._validated_trigger_key(trigger_key)
             trigger_id, revision = _id(), 1
             try:
                 conn.execute(

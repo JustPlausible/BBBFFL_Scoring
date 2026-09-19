@@ -36,7 +36,20 @@ def _authorise_bracket(request: Request, principal: Principal, bracket_id: str):
     bracket = FinalsBracketRepository(request.app.state.database).get_bracket_by_id(bracket_id)
     if bracket is None:
         raise HTTPException(404, "Unknown finals bracket")
-    require_role_covers_season(request, principal, bracket.season_id)
+    # Issue #219 review (P1): authorise against the finals competition's
+    # own authoritative `competition_stream.season_id`, never `bracket.
+    # season_id` directly -- a second, independently-set reference that can
+    # disagree with it (the same inconsistency class `app.finals_superscore_
+    # open._authoritative_season_id` and the round-selector fix already
+    # distrust). Using the stale/wrong season here would let an operator
+    # scoped to the wrong season authorise an action against a bracket
+    # whose rounds actually belong to a different one, or deny the correct
+    # season's own operator.
+    season_row = request.app.state.database.execute(
+        "SELECT season_id FROM competition_stream WHERE competition_id=?", (bracket.competition_id,)
+    ).fetchone()
+    authoritative_season_id = season_row["season_id"] if season_row else bracket.season_id
+    require_role_covers_season(request, principal, authoritative_season_id)
     return bracket
 
 

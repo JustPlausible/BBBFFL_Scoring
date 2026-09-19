@@ -189,3 +189,78 @@ def test_advance_apply_with_a_stale_expected_versions_returns_409_not_500(finals
     )
     assert response.status_code == 409
     assert len(repo.list_pairings(bracket.bracket_id, week_number=2)) == 0
+
+
+def test_authorise_bracket_uses_the_finals_competitions_authoritative_season_not_a_corrupted_bracket_season_id(
+    finals_client,
+):
+    """Codex review (PR #220, P1): `_authorise_bracket` must check the
+    finals competition's own authoritative `competition_stream.season_id`
+    (via `bracket.competition_id`), never `finals_bracket.season_id`
+    directly -- the same second, independently-set reference the paired-
+    open fix already distrusts. Otherwise a season-scoped operator covered
+    only by a stale/corrupted bracket season could authorise against a
+    bracket whose rounds actually belong to a different season, while the
+    correct season's own operator is wrongly denied."""
+    from fastapi import HTTPException
+
+    from app.audit import ActorContext
+    from app.auth import RoleGrantRepository
+    from app.authorization import Principal, Role
+    from app.db import transaction
+    from app.identity import IdentityRepository
+    from app.routes.finals_preflight import _authorise_bracket
+
+    built, bracket = _seed_bracket(finals_client, year=2607)
+    database = finals_client.app.state.database
+
+    other_season = SeasonRepository(database).create_season(2608, "Unrelated season")
+    with transaction(database) as conn:
+        conn.execute(
+            "UPDATE finals_bracket SET season_id=? WHERE bracket_id=?", (other_season.season_id, bracket.bracket_id)
+        )
+
+    identities = IdentityRepository(database)
+    role_grants = RoleGrantRepository(database)
+
+    class _FakeState:
+        def __init__(self, database, role_grants):
+            self.database = database
+            self.role_grants = role_grants
+
+    class _FakeApp:
+        def __init__(self, state):
+            self.state = state
+
+    class _FakeRequest:
+        def __init__(self, database, role_grants):
+            self.app = _FakeApp(_FakeState(database, role_grants))
+
+    request = _FakeRequest(database, role_grants)
+
+    right_season_coach = identities.create_coach("Season-scoped Secretary")
+    role_grants.grant(
+        right_season_coach.coach_id,
+        "secretary",
+        actor=ActorContext.anonymous_operator("admin"),
+        season_id=built["season"].season_id,
+    )
+    right_season_principal = Principal(Role.SECRETARY, right_season_coach.coach_id, "Secretary")
+    # Must succeed: this operator is scoped to the bracket's *real*
+    # (authoritative) season, even though `finals_bracket.season_id` itself
+    # now says otherwise.
+    _authorise_bracket(request, right_season_principal, bracket.bracket_id)
+
+    wrong_season_coach = identities.create_coach("Wrong-season Secretary")
+    role_grants.grant(
+        wrong_season_coach.coach_id,
+        "secretary",
+        actor=ActorContext.anonymous_operator("admin"),
+        season_id=other_season.season_id,
+    )
+    wrong_season_principal = Principal(Role.SECRETARY, wrong_season_coach.coach_id, "Secretary")
+    # Must be denied: this operator is only scoped to the corrupted
+    # `finals_bracket.season_id` value, not the bracket's real season.
+    with pytest.raises(HTTPException) as excinfo:
+        _authorise_bracket(request, wrong_season_principal, bracket.bracket_id)
+    assert excinfo.value.status_code == 403

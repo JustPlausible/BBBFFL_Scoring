@@ -54,10 +54,16 @@
     <div id="ladder-preview"></div>
   </div>
 
+  <div class="block" id="open-delisting-block" style="display:none;">
+    <h2>Open delisting window</h2>
+    <p class="muted">The ladder and draft order are confirmed. Open the delisting window to let coaches (or a Scorer proxy) submit delistings and trades.</p>
+    <button id="open-delisting-btn" class="primary">Open delisting window</button>
+  </div>
+
   <div class="block" id="delisting-block" style="display:none;">
     <h2>Delistings &amp; trades</h2>
     <div id="delisting-list"></div>
-    <div class="search-row">
+    <div class="search-row" id="delist-form-row">
       <input type="text" id="delist-entry" placeholder="Team (season_entry_id)">
       <input type="text" id="delist-player" placeholder="Player (season_player_id)">
       <input type="text" id="delist-reason" placeholder="Reason (optional)">
@@ -197,6 +203,10 @@ on('confirm-ladder-btn', () => {
   }).catch(handleError);
 });
 
+on('open-delisting-btn', () => {
+  api(`${API}/open-delisting-window`, {}).then(() => refresh('Delisting window opened.')).catch(handleError);
+});
+
 on('delist-btn', () => {
   const seasonEntryId = document.getElementById('delist-entry').value.trim();
   const seasonPlayerId = document.getElementById('delist-player').value.trim();
@@ -227,10 +237,20 @@ async function refresh(successMessage) {
     const body = await api(`${API}/status`);
     renderLifecycle(body.draft);
     document.getElementById('next-action').innerHTML = `<p>${escapeHtml(nextActionText(body))}</p>`;
+    const state = body.draft ? body.draft.state : null;
     document.getElementById('setup-block').style.display = body.draft ? 'none' : '';
-    document.getElementById('delisting-block').style.display = body.draft && ['ladder_confirmed', 'delisting_open', 'delistings_locked'].includes(body.draft.state) ? '' : 'none';
-    document.getElementById('draft-link-block').style.display = body.draft && ['draft_open', 'draft_complete'].includes(body.draft.state) ? '' : 'none';
-    document.getElementById('completion-block').style.display = body.draft && body.draft.state === 'draft_complete' ? '' : 'none';
+    document.getElementById('open-delisting-block').style.display = state === 'ladder_confirmed' ? '' : 'none';
+    document.getElementById('delisting-block').style.display = ['delisting_open', 'delistings_locked'].includes(state) ? '' : 'none';
+    // Submitting a new delisting is only legal while the window is open;
+    // locking is only legal from delisting_open; generating is only legal
+    // once delistings are locked (Codex review, PR #225, P1 -- the
+    // previous version showed both lock and generate together with no
+    // way to reach delisting_open at all).
+    document.getElementById('delist-form-row').style.display = state === 'delisting_open' ? '' : 'none';
+    document.getElementById('lock-btn').style.display = state === 'delisting_open' ? '' : 'none';
+    document.getElementById('generate-btn').style.display = state === 'delistings_locked' ? '' : 'none';
+    document.getElementById('draft-link-block').style.display = ['draft_open', 'draft_complete'].includes(state) ? '' : 'none';
+    document.getElementById('completion-block').style.display = state === 'draft_complete' ? '' : 'none';
     document.getElementById('conduct-link').href = `/admin/midseason-draft/${SEASON_ID}/conduct`;
     if (body.draft) renderDelistings(body);
     if (successMessage) say(successMessage, 'success'); else say('');

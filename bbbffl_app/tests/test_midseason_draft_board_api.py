@@ -88,6 +88,28 @@ def _build_open_draft(client, *, year):
     return season, entries, ctx
 
 
+def test_team_progress_target_is_allocated_picks_not_the_season_squad_limit(midseason_client):
+    """Codex review, PR #225 (P2): a mid-season draft's `target_squad_size`
+    is the season-wide squad *limit* (4 here), not a uniform per-team pick
+    count -- mid-season picks are vacancy-based. The worst entry delisted
+    exactly two players, so its own progress target must read 2, never the
+    squad limit."""
+    client = midseason_client
+    season, entries, ctx = _build_open_draft(client, year=3006)
+    worst = entries[9]
+    api = f"/api/admin/midseason-draft/{season.season_id}"
+
+    board = client.get(f"{api}/board").json()
+    worst_progress = next(t for t in board["team_progress"] if t["season_entry_id"] == worst.season_entry_id)
+    assert worst_progress["target_count"] == 2
+    assert worst_progress["drafted_count"] == 0
+
+    # Every other entry has no vacancy at all in this fixture -- its own
+    # target must read 0, not the squad limit either.
+    other_progress = next(t for t in board["team_progress"] if t["season_entry_id"] == entries[0].season_entry_id)
+    assert other_progress["target_count"] == 0
+
+
 def test_coach_can_make_their_own_midseason_selection(midseason_client):
     client = midseason_client
     season, entries, ctx = _build_open_draft(client, year=3001)

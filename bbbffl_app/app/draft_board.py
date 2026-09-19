@@ -38,10 +38,18 @@ def resolve_my_entry_id(request, principal, season_id: str) -> str | None:
     return None
 
 
-def draft_board_readiness(database, identities, draft, player_pool, season_id):
-    """Return whether the existing board can execute its next human pick."""
+def draft_board_readiness(database, identities, draft, player_pool, season_id, *, draft_kind: str = "preseason"):
+    """Return whether the existing board can execute its next human pick.
+
+    `draft_kind` (issue #181, Codex review on PR #225, P1): without it this
+    always read the *preseason* draft's status regardless of which board
+    actually called in -- in the normal mid-season flow the preseason draft
+    already exists and is finalized, so a mid-season caller would silently
+    see `draft_not_paused`/`draft_not_finalized` computed from the wrong
+    draft entirely (both trivially true), rather than its own mid-season
+    draft's real state."""
     entries = identities.list_entries(season_id)
-    status = draft.status(season_id)
+    status = draft.status(season_id, draft_kind=draft_kind)
     config = database.execute(
         "SELECT squad_limit FROM season_squad_configuration WHERE season_id=?", (season_id,)
     ).fetchone()
@@ -51,13 +59,17 @@ def draft_board_readiness(database, identities, draft, player_pool, season_id):
     remaining = max(total_required - completed, 0)
     checks = {
         "entries": len(entries) == 10,
-        "order": status is not None and len(draft.order(season_id)) == 10,
+        "order": status is not None and len(draft.order(season_id, draft_kind=draft_kind)) == 10,
         "players": total_required > 0 and available_count >= remaining,
         "squad": config is not None and config["squad_limit"] > 0,
         "draft_not_paused": status is not None and not status.is_paused,
         "draft_not_finalized": status is not None and not status.is_finalized,
     }
-    next_pick = draft.next_pick(season_id) if status and not status.is_paused and not status.is_finalized else None
+    next_pick = (
+        draft.next_pick(season_id, draft_kind=draft_kind)
+        if status and not status.is_paused and not status.is_finalized
+        else None
+    )
     return {
         "ready": all(checks.values()),
         "checks": checks,
@@ -146,6 +158,7 @@ def build_readiness(request, season_id: str, *, draft_kind: str = "preseason") -
         request.app.state.draft,
         request.app.state.player_pool,
         season_id,
+        draft_kind=draft_kind,
     )
     available_count = shared["available_player_count"]
     if status is not None:
@@ -239,6 +252,23 @@ def build_board(request, season_id: str, *, draft_kind: str = "preseason") -> di
         for event in AuditEventRepository(request.app.state.database).list_events(action="draft.pick.completed")
         if event.entity_id in completed_ids
     }
+    # A mid-season draft's `target_squad_size` (issue #181, Codex review on
+    # PR #225, P2) is the season's uniform squad *limit*, not a uniform
+    # picks-per-team count -- unlike the preseason snake draft, mid-season
+    # picks are vacancy-based and vary per entry (`app.midseason_draft.
+    # vacancy_allocations`), including entries with zero picks at all.
+    # Each entry's own target is however many picks it was actually
+    # allocated in `all_picks`, not the season-wide squad limit.
+    target_counts = (
+        {
+            row["season_entry_id"]: sum(
+                1 for pick in all_picks if pick.current_season_entry_id == row["season_entry_id"]
+            )
+            for row in order
+        }
+        if draft_kind == "midseason"
+        else None
+    )
     return {
         "season_id": season_id,
         "draft_kind": draft_kind,
@@ -254,7 +284,11 @@ def build_board(request, season_id: str, *, draft_kind: str = "preseason") -> di
                 "drafted_count": sum(
                     1 for pick in completed if pick.current_season_entry_id == identity["season_entry_id"]
                 ),
-                "target_count": status.target_squad_size,
+                "target_count": (
+                    target_counts[identity["season_entry_id"]]
+                    if target_counts is not None
+                    else status.target_squad_size
+                ),
             }
             for identity in (
                 entry_view(request, entry_id, cache) for _, entry_id in draft.order(season_id, draft_kind=draft_kind)

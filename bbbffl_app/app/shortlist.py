@@ -87,9 +87,15 @@ class ShortlistRepository:
             ).fetchone()
             if existing:
                 raise ShortlistError("player is already on this shortlist")
+            # No FOR UPDATE here (Codex review on PR #225, P1): PostgreSQL
+            # rejects a locking clause on an aggregate query. The
+            # `season_entry` row locked above already serializes concurrent
+            # additions for this same entry -- the same "lock the parent
+            # row first, then read the now-stable aggregate without a lock
+            # of its own" pattern `app.midseason_draft.decide_trade` uses
+            # for its own squad-size count.
             next_rank = conn.execute(
-                "SELECT COALESCE(MAX(rank), 0) + 1 AS next_rank FROM coach_draft_shortlist "
-                "WHERE season_entry_id=?" + _for_update_suffix(self.database),
+                "SELECT COALESCE(MAX(rank), 0) + 1 AS next_rank FROM coach_draft_shortlist WHERE season_entry_id=?",
                 (season_entry_id,),
             ).fetchone()["next_rank"]
             now = _now()

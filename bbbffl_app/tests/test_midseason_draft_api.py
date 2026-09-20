@@ -175,3 +175,56 @@ def test_trigger_round_can_be_set_via_the_admin_api_then_confirm_ladder_succeeds
     )
     assert confirmed.status_code == 200, confirmed.text
     assert confirmed.json()["draft"]["state"] == "ladder_confirmed"
+
+
+def test_ordinary_competitions_endpoint_resolves_the_unambiguous_case(midseason_client):
+    """Issue #226: the normal case -- exactly one ordinary competition --
+    resolves without the operator ever supplying a UUID."""
+    client = midseason_client
+    database = client.app.state.database
+    ctx = build_season(database, trigger_round=10)
+    season, competition = ctx["season"], ctx["competition"]
+
+    response = client.get(f"/api/admin/midseason-draft/{season.season_id}/ordinary-competitions")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body == [{"competition_id": competition.competition_id, "label": competition.label}]
+
+
+def test_ordinary_competitions_endpoint_offers_a_human_readable_selector_when_ambiguous(midseason_client):
+    """Issue #226: when a season somehow has more than one legitimate
+    ordinary competition, every one is returned with its human-readable
+    label so the operator can choose -- never a bare id list."""
+    client = midseason_client
+    database = client.app.state.database
+    ctx = build_season(database, trigger_round=10)
+    season, competition = ctx["season"], ctx["competition"]
+    from app.season import SeasonRepository
+
+    seasons = SeasonRepository(database)
+    rules = seasons.create_rules_version(season.season_id, "ordinary-2", 1, "Rules 2")
+    second = seasons.create_competition(
+        season.season_id, rules.rules_version_id, "ordinary-2", "Ordinary (revised)", "ordinary"
+    )
+
+    response = client.get(f"/api/admin/midseason-draft/{season.season_id}/ordinary-competitions")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert {item["competition_id"] for item in body} == {competition.competition_id, second.competition_id}
+    assert {item["label"] for item in body} == {competition.label, second.label}
+
+
+def test_ordinary_competitions_endpoint_is_empty_when_none_configured(midseason_client):
+    """Issue #226: fail-closed -- a season with no ordinary competition at
+    all returns an empty list rather than inventing or guessing one; the
+    operations page disables ladder preview entirely in this case."""
+    client = midseason_client
+    database = client.app.state.database
+    from app.season import SeasonRepository
+
+    seasons = SeasonRepository(database)
+    season = seasons.create_season(9300, "9300", regular_season_round_count=10)
+
+    response = client.get(f"/api/admin/midseason-draft/{season.season_id}/ordinary-competitions")
+    assert response.status_code == 200, response.text
+    assert response.json() == []

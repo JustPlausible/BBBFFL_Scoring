@@ -275,6 +275,30 @@ def set_trigger_round(
     return _status(request, season_id)
 
 
+@router.get("/{season_id}/ordinary-competitions")
+def ordinary_competitions(season_id: str, request: Request, principal: Principal = Depends(manage)):
+    """Issue #226: human-readable competition resolution for the ladder
+    preview/confirm step, instead of requiring the operator to already
+    know and paste a raw `competition_id`. Every ordinary-stream
+    competition belonging to this season -- normally exactly one, but
+    never assumed to be, since `app.season.SeasonRepository.
+    create_competition` places no uniqueness constraint on `stream_type`
+    per season. The setup page auto-resolves when there is exactly one,
+    offers a `<select>` of these labels when there is more than one, and
+    refuses (fail-closed) to proceed at all when there are none -- see
+    `midseason_draft_operations.html`'s `loadOrdinaryCompetitions`. Never
+    writes anything, and never a second source of truth: `ladder-preview`/
+    `confirm-ladder` still perform the exact same `stream_type='ordinary'`
+    validation themselves regardless of what this list returns."""
+    _authorise(request, principal, season_id)
+    competitions = request.app.state.seasons.list_competitions(season_id)
+    return [
+        {"competition_id": competition.competition_id, "label": competition.label}
+        for competition in competitions
+        if competition.stream_type == "ordinary"
+    ]
+
+
 @router.get("/{season_id}/ladder-preview")
 def ladder_preview(season_id: str, competition_id: str, request: Request, principal: Principal = Depends(manage)):
     """Issue #181: the calculated ladder through the configured trigger

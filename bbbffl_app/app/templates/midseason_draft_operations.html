@@ -47,9 +47,10 @@
       <input type="number" id="trigger-round" placeholder="Trigger round number" min="1">
       <button id="set-trigger-btn">Set trigger round</button>
     </div>
-    <div class="search-row">
-      <input type="text" id="competition-id" placeholder="Ordinary competition ID">
-      <button id="confirm-ladder-btn" class="primary">Preview ladder</button>
+    <div class="search-row" id="competition-row">
+      <span id="competition-label" class="muted">Loading the season's ordinary competition…</span>
+      <select id="competition-select" style="display:none;"></select>
+      <button id="confirm-ladder-btn" class="primary" disabled>Preview ladder</button>
     </div>
     <div id="ladder-preview"></div>
   </div>
@@ -240,9 +241,58 @@ on('set-trigger-btn', () => {
   api(`${API}/trigger-round`, { trigger_round: value }).then(() => refresh('Trigger round set.')).catch(handleError);
 });
 
+// Issue #226: resolve the season's ordinary competition automatically
+// when there is exactly one (the normal case) -- no raw UUID entry --
+// and fall back to a human-readable <select> of competition labels only
+// when there is genuinely more than one legitimate choice. Fails closed
+// (button stays disabled, an explanatory message shown) when there is
+// none configured yet.
+let resolvedCompetitionId = null;
+
+function currentCompetitionId() {
+  const select = document.getElementById('competition-select');
+  if (select.style.display !== 'none') return select.value || null;
+  return resolvedCompetitionId;
+}
+
+async function loadOrdinaryCompetitions() {
+  const label = document.getElementById('competition-label');
+  const select = document.getElementById('competition-select');
+  const btn = document.getElementById('confirm-ladder-btn');
+  let competitions;
+  try {
+    competitions = await api(`${API}/ordinary-competitions`);
+  } catch (e) {
+    label.style.display = '';
+    select.style.display = 'none';
+    label.textContent = 'The season\'s ordinary competition could not be loaded.';
+    btn.disabled = true;
+    return;
+  }
+  if (!competitions.length) {
+    label.style.display = '';
+    select.style.display = 'none';
+    label.textContent = 'No ordinary competition is configured for this season yet -- set one up before confirming the ladder.';
+    resolvedCompetitionId = null;
+    btn.disabled = true;
+  } else if (competitions.length === 1) {
+    resolvedCompetitionId = competitions[0].competition_id;
+    label.style.display = '';
+    select.style.display = 'none';
+    label.textContent = `Ordinary competition: ${competitions[0].label}`;
+    btn.disabled = false;
+  } else {
+    label.style.display = 'none';
+    select.style.display = '';
+    select.innerHTML = competitions.map(c => `<option value="${escapeHtml(c.competition_id)}">${escapeHtml(c.label)}</option>`).join('');
+    resolvedCompetitionId = null;
+    btn.disabled = false;
+  }
+}
+
 on('confirm-ladder-btn', () => {
-  const competitionId = document.getElementById('competition-id').value.trim();
-  if (!competitionId) { say('Enter the ordinary competition ID.'); return; }
+  const competitionId = currentCompetitionId();
+  if (!competitionId) { say('No ordinary competition is selected.'); return; }
   api(`${API}/ladder-preview?competition_id=${encodeURIComponent(competitionId)}`).then(preview => {
     document.getElementById('ladder-preview').innerHTML = `
       <p class="muted">Ladder through round ${preview.trigger_round}. Confirming freezes an immutable snapshot for the draft order and never modifies the live ladder.</p>
@@ -326,6 +376,7 @@ async function refresh(successMessage) {
   }
 }
 
+loadOrdinaryCompetitions();
 refresh();
 </script>
 </body>

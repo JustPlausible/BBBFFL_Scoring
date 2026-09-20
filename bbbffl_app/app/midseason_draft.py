@@ -669,6 +669,36 @@ class MidseasonDraftRepository:
         ).fetchall()
         return [Delisting(**dict(row)) for row in rows]
 
+    def coach_delisting_context(self, identities, coach_id):
+        """Issue #226's Coach Account discoverability signal: the season
+        entry (if any) this coach currently owns in whichever season has
+        its mid-season delisting window open, so `/account` can show an
+        unmistakable "delisting is open for your team" cue and link
+        without the coach ever supplying a season id or route. `identities`
+        (`app.identity.IdentityRepository`) is passed in rather than
+        imported, matching this module's existing pattern of taking every
+        other repository it needs as a constructor/call argument.
+
+        `None` once there is nothing to show: no season is currently
+        `delisting_open`, or this coach owns no entry in one that is.
+        Purely a read -- `submit_delisting`/`withdraw_delisting` remain the
+        sole authoritative writers, and re-validate lifecycle state and
+        ownership themselves regardless of what this signal reports.
+
+        In practice at most one season is ever `delisting_open` at a time
+        (one live BBBFFL season); the first matching season/entry is
+        returned if more than one somehow is."""
+        rows = self.database.execute("SELECT season_id FROM midseason_draft WHERE state='delisting_open'").fetchall()
+        for row in rows:
+            for entry in identities.list_entries(row["season_id"]):
+                if entry.coach_id == coach_id:
+                    return {
+                        "season_id": row["season_id"],
+                        "season_entry_id": entry.season_entry_id,
+                        "team_name": entry.team_name,
+                    }
+        return None
+
     # -- Trades: player and round-based pick legs ------------------------
 
     def propose_trade(self, season_id, legs, *, actor, reason=None):

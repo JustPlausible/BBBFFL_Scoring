@@ -232,6 +232,53 @@ from a private shortlist; automatic closure of post-draft trading tied to
 Round 11's own lockout trigger (`close_post_draft_trading` remains an
 explicit Scorer action).
 
+## Navigation, competition resolution and Coach delisting UX (issue #226)
+
+Acceptance testing of the issue #181 UI against a restored 2026 replay
+checkpoint found three practical gaps in the same "no CLI/UUID/database
+knowledge" journey; each is a navigation/presentation fix over the
+unchanged domain layer above, not a new capability:
+
+- **Persistent mid-season setup navigation.** Before a trigger round is
+  configured, `midseason_draft_dashboard_status` correctly returns `None`,
+  so the conditional Admin Dashboard readiness card has nothing to show.
+  Season Centre's `links.midseason_draft`
+  (`app/season_centre.py`'s `_links`) is a *persistent* entry to
+  `/admin/midseason-draft/{season_id}` instead, gated only on the season
+  having regular-season rounds created -- present before, during and after
+  trigger configuration, for Secretary/Admin. The Scorer Operations
+  Dashboard carries the same persistent link (in its static "Which workflow
+  do I need?" panel) for Scorer/Replay-Operator/Admin. The conditional
+  Admin Dashboard readiness card is unchanged and still appears once the
+  trigger round is fully final -- the stronger operational cue at that
+  point, per the issue.
+- **Ordinary competition resolution.** `GET .../ordinary-competitions`
+  returns every `stream_type='ordinary'` competition for the season with
+  its human-readable label. `midseason_draft_operations.html` auto-selects
+  when there is exactly one (the normal case), offers a `<select>` when
+  there is more than one, and disables ladder preview with an explanatory
+  message when there is none -- the operator never types or pastes a raw
+  competition UUID. `ladder-preview`/`confirm-ladder` still perform their
+  own `stream_type='ordinary'` + season-ownership validation exactly as
+  before; this is presentation only.
+- **Coach self-service delisting.** `app/routes/coach_delisting.py` is a
+  thin Coach-facing surface over the exact same
+  `MidseasonDraftRepository.submit_delisting`/`withdraw_delisting` calls
+  the Scorer/Admin proxy path already used -- no new domain model, no
+  duplicated validation. `MidseasonDraftRepository.coach_delisting_context`
+  finds the season entry (if any) this coach owns in whichever season is
+  currently `delisting_open`; the Coach Account page (`/account`) shows an
+  unmistakable cue and link into `/account/delisting` only while that is
+  true. Authorization is `require_entry_context` -- the same "coach owns
+  it, or a delegated role is representing it" primitive
+  `app/routes/shortlist.py`/`submit_pick` already use -- so a
+  client-supplied `season_entry_id` is always checked against the
+  authenticated principal, never trusted on its own; withdrawal
+  additionally checks the named delisting's own `season_entry_id` against
+  that same resolved entry. The Scorer/Admin proxy controls on
+  `/admin/midseason-draft/{season_id}` are unchanged and remain the
+  exceptional/audited path.
+
 ## Schema
 
 See `migrations/versions/0027_midseason_draft.py`: `bbbffl_season` gains a

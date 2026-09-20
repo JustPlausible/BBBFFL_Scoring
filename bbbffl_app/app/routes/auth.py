@@ -174,6 +174,15 @@ def account_page(request: Request):
     preferred_admin_role = next(
         (role for role in admin_dashboard_routes.ADMIN_DASHBOARD_ROLE_PREFERENCE if role in granted_roles), None
     )
+    # Issue #226: the same discoverability pattern as the Scorer/Admin
+    # dashboard links above -- an unmistakable cue and link straight into
+    # the Coach's own mid-season delisting workflow whenever a season's
+    # delisting window is currently open for their team, with no season id
+    # or route required. `None` (nothing shown at all) whenever it is not
+    # open, so the page never implies delistings can currently be changed.
+    midseason_delisting = request.app.state.midseason_draft.coach_delisting_context(
+        request.app.state.identities, coach.coach_id
+    )
     response = templates.TemplateResponse(
         request,
         "account.html",
@@ -185,6 +194,7 @@ def account_page(request: Request):
             "preferred_scorer_role": preferred_scorer_role,
             "has_admin_dashboard_access": preferred_admin_role is not None,
             "preferred_admin_role": preferred_admin_role,
+            "midseason_delisting": midseason_delisting,
         },
     )
     _attach_csrf_cookie(request, response, token)

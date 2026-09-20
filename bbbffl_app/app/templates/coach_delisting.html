@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BBBFFL Mid-season Delisting</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 12px; background: #0f1115; color: #e7e9ee; }
+  h1 { font-size: 1.2rem; }
+  h2 { font-size: 1rem; margin-top: 20px; }
+  input, select, button { font-size: 0.9rem; padding: 5px 8px; border-radius: 6px; border: 1px solid #333a48; background: #171a21; color: inherit; }
+  button { cursor: pointer; }
+  button.primary { background: #3a6ea5; border-color: #3a6ea5; color: white; }
+  button.danger { background: #a53a3a; border-color: #a53a3a; color: white; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .block { background: #171a21; border: 1px solid #2a2f3a; border-radius: 10px; padding: 10px 14px; margin-bottom: 16px; }
+  .muted { color: #9aa3b2; font-size: 0.8rem; }
+  .squad-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #2a2f3a; gap: 8px; flex-wrap: wrap; }
+  .pill { font-size: 0.7rem; padding: 1px 6px; border-radius: 6px; background: #2a2f3a; display: inline-block; }
+  .pill.delisted { background: #4a1f1f; color: #ff9b9b; }
+  .message { display:none; padding: 9px; margin-bottom: 12px; border-radius: 8px; }
+  .message.error { display:block; background:#4a1f1f; border:1px solid #a53a3a; }
+  .message.success { display:block; background:#1f3a24; border:1px solid #2f6e3a; }
+  a { color: #79c0ff; }
+</style>
+</head>
+<body>
+  <h1>Mid-season delisting</h1>
+  <p><a href="/account">← Back to your account</a></p>
+  <div id="message" class="message" role="alert"></div>
+
+  {% if season_entry_id %}
+  <div class="block">
+    <h2 id="team-heading">{{ team_name }}</h2>
+    <p class="muted" id="state-line">Loading…</p>
+  </div>
+
+  <div class="block">
+    <h2>Your squad</h2>
+    <p class="muted">Mark a player for delisting to release them into the available pool once the Scorer locks the window. You can withdraw or change your mind any time before then.</p>
+    <div id="squad-body"><p class="muted">Loading…</p></div>
+  </div>
+  {% else %}
+  <div class="block">
+    <p class="muted">There is no mid-season delisting window currently open for your team.</p>
+  </div>
+  {% endif %}
+
+<script>
+const SEASON_ENTRY_ID = {{ season_entry_id | tojson }};
+const API = SEASON_ENTRY_ID ? `/api/account/delisting/${SEASON_ENTRY_ID}` : null;
+
+async function api(path, body) {
+  const res = await fetch(path, {
+    method: body !== undefined ? 'POST' : 'GET',
+    headers: { 'Content-Type': 'application/json' },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || res.statusText);
+  }
+  return res.json();
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[char]);
+}
+
+function say(text, kind='error') {
+  const message = document.getElementById('message');
+  message.textContent = text || '';
+  message.className = text ? `message ${kind}` : 'message';
+}
+
+const STATE_TEXT = {
+  delisting_open: 'The delisting window is open. Submit or withdraw delistings for your own squad below before the Scorer locks it.',
+  delistings_locked: 'Delistings are locked -- your squad below is now final for the draft. No further changes are possible.',
+};
+
+function renderSquad(view) {
+  document.getElementById('state-line').textContent =
+    STATE_TEXT[view.draft_state] || 'The mid-season delisting window is not currently open for your team.';
+  const body = document.getElementById('squad-body');
+  if (!view.squad.length) {
+    body.innerHTML = '<p class="muted">Your squad currently has no players.</p>';
+    return;
+  }
+  body.innerHTML = view.squad.map(p => {
+    const delisting = view.delistings.find(d => d.season_player_id === p.season_player_id);
+    return `
+    <div class="squad-row">
+      <span><strong>${escapeHtml(p.display_name)}</strong>${p.afl_team_name ? ' — ' + escapeHtml(p.afl_team_name) : ''}
+        ${p.delisted ? '<span class="pill delisted">Marked for delisting</span>' : ''}
+      </span>
+      <span>
+        ${view.is_open
+          ? (p.delisted
+              ? `<button class="danger" data-withdraw="${escapeHtml(delisting ? delisting.delisting_id : '')}">Withdraw</button>`
+              : `<button class="primary" data-delist="${escapeHtml(p.season_player_id)}">Delist</button>`)
+          : ''}
+      </span>
+    </div>`;
+  }).join('');
+  document.querySelectorAll('[data-delist]').forEach(btn => {
+    btn.onclick = () => submitDelisting(btn.dataset.delist);
+  });
+  document.querySelectorAll('[data-withdraw]').forEach(btn => {
+    btn.onclick = () => withdrawDelisting(btn.dataset.withdraw);
+  });
+}
+
+async function refresh(successMessage) {
+  if (!API) return;
+  try {
+    const view = await api(API);
+    renderSquad(view);
+    if (successMessage) say(successMessage, 'success'); else say('');
+  } catch (e) {
+    say(e.message || 'Your squad could not be loaded.');
+  }
+}
+
+async function submitDelisting(seasonPlayerId) {
+  const reason = prompt('Reason for this delisting? (optional)') || null;
+  try {
+    await api(`${API}/submit`, { season_player_id: seasonPlayerId, reason });
+    await refresh('Delisting submitted.');
+  } catch (e) {
+    say(e.message || 'Could not submit that delisting.');
+  }
+}
+
+async function withdrawDelisting(delistingId) {
+  if (!delistingId) return;
+  try {
+    await api(`${API}/${delistingId}/withdraw`, { reason: null });
+    await refresh('Delisting withdrawn.');
+  } catch (e) {
+    say(e.message || 'Could not withdraw that delisting.');
+  }
+}
+
+refresh();
+</script>
+</body>
+</html>

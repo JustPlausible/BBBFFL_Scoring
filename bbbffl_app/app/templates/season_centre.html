@@ -210,6 +210,7 @@ function linksHtml(links) {
       ${SEASON_ID ? item('Fixture setup', `/admin/fixture-setup/${SEASON_ID}`) : ''}
       ${item('Prepare / open a round', '/admin/round-preflight')}
       ${links.opening_round ? item('Opening Round Operations', links.opening_round) : ''}
+      ${item('Mid-season draft setup', links.midseason_draft)}
     </div>`;
 }
 

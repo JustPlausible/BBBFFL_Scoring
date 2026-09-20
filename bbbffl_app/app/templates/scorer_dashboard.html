@@ -100,6 +100,9 @@ tr.action-required td:first-child{border-left:4px solid #f85149}
 <div class="card"><h3>Missed-submission adjudication</h3><p class="muted">A team never submitted at all before a trigger locked it. Resolves the round's first authoritative submission from evidenced pre-lockout intent or carry-forward -- never ordinary editing.</p></div>
 <div class="card"><h3>Locked-lineup correction</h3><p class="muted">An existing authoritative submission was recorded incorrectly and must be audited-corrected after lockout. Never used for a team that simply changed its mind.</p></div>
 <div class="card"><h3>Scorer Round Centre</h3><p class="muted">Calculation, DNP/Interchange decisions, manual overrides and atomic publication. The one place official results are produced.</p></div>
+<!-- Persistent nav entry to mid-season draft setup (issue #226): reachable
+     before a trigger round is even configured, not only once it is final. -->
+<div class="card"><h3>Mid-season draft setup</h3><p class="muted">Configure the mid-season draft trigger round, confirm the ladder, run the delisting/trade window and generate selections once the regular season reaches that point.</p><p><a id="midseason-draft-link" href="/admin/midseason-draft/">Open mid-season draft operations →</a></p></div>
 </section>
 </main>
 <script>
@@ -642,6 +645,13 @@ async function load(){
     current.round_id=dashboardRoundId(d.dashboard);
     updateUrlParams(current.season_id,current.round_id);
     renderSelectors(d.seasons,d.dashboard);
+    // Issue #226: a persistent, human-readable nav entry to mid-season
+    // draft setup -- unlike the round/attention cards below, this never
+    // depends on a trigger round already being configured, so it is the
+    // one place a Scorer/Replay-Operator/Admin can always reach that page
+    // from without knowing its URL or season id.
+    const midseasonLink=document.querySelector('#midseason-draft-link');
+    if(midseasonLink&&current.season_id)midseasonLink.href=`/admin/midseason-draft/${current.season_id}`;
     if(!d.seasons.length){
       document.querySelector('#app').innerHTML='<div class="card"><p class="muted">No seasons are authorised for the active role.</p></div>';
       return;

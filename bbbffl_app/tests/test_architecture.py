@@ -409,6 +409,7 @@ ROUTES = {
     "app.routes.scorer_dashboard",
     "app.routes.admin_dashboard",
     "app.routes.midseason_draft",
+    "app.routes.coach_delisting",
     "app.routes.shortlist",
     "app.routes.finals_preflight",
     "app.routes.superscore_review",

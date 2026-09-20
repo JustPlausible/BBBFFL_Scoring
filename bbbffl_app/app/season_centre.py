@@ -243,12 +243,25 @@ def _links(season_id: str, draft_started: bool, ordinary_rounds_created: bool, o
     accepted Opening Round rule exists for the season (the existing
     lifecycle's own clean signal that the operation is meaningful) -- not
     merely once the draft has started, since a season that never
-    configures Opening Round must never surface the link at all."""
+    configures Opening Round must never surface the link at all.
+
+    `midseason_draft` (issue #226): a persistent, human-readable
+    navigation entry to the dedicated mid-season draft operations page
+    (`/admin/midseason-draft/{season_id}`) -- gated only on the season
+    having its regular-season rounds created, the same minimal precondition
+    `round_centre` already uses, never on whether a trigger round has been
+    configured yet. Unlike the conditional Admin Dashboard readiness card
+    (`app.admin_dashboard`'s `midseason_status`), which only appears once a
+    configured trigger round is fully final, this link is meant to be the
+    *first* place an operator discovers mid-season setup at all -- see
+    that page's own "Set up" block, which accepts the initial trigger-round
+    configuration this link is the only way to reach before it exists."""
     return {
         "draft": f"/admin/draft/{season_id}" if draft_started else None,
         "preseason": f"/admin/preseason/{season_id}" if draft_started else None,
         "round_centre": "/scorer/round-centre" if ordinary_rounds_created else None,
         "opening_round": f"/operations/seasons/{season_id}/opening-round" if opening_round_configured else None,
+        "midseason_draft": f"/admin/midseason-draft/{season_id}" if ordinary_rounds_created else None,
     }
 
 

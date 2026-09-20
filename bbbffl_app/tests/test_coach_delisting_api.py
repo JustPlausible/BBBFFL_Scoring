@@ -136,7 +136,9 @@ def test_coach_can_submit_then_withdraw_their_own_delisting(midseason_client):
     squad = ctx["ownership"].current_squad(worst.season_entry_id)
     target = squad[0].season_player_id
 
-    submitted = client.post(f"{api}/submit", json={"season_player_id": target, "reason": "swap needed"}, cookies=cookies)
+    submitted = client.post(
+        f"{api}/submit", json={"season_player_id": target, "reason": "swap needed"}, cookies=cookies
+    )
     assert submitted.status_code == 200, submitted.text
     body = submitted.json()
     assert len(body["delistings"]) == 1

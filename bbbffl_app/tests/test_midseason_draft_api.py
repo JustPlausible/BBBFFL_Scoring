@@ -203,7 +203,9 @@ def test_ordinary_competitions_endpoint_offers_a_human_readable_selector_when_am
 
     seasons = SeasonRepository(database)
     rules = seasons.create_rules_version(season.season_id, "ordinary-2", 1, "Rules 2")
-    second = seasons.create_competition(season.season_id, rules.rules_version_id, "ordinary-2", "Ordinary (revised)", "ordinary")
+    second = seasons.create_competition(
+        season.season_id, rules.rules_version_id, "ordinary-2", "Ordinary (revised)", "ordinary"
+    )
 
     response = client.get(f"/api/admin/midseason-draft/{season.season_id}/ordinary-competitions")
     assert response.status_code == 200, response.text

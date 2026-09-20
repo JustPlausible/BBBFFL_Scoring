@@ -88,7 +88,7 @@ def _build_open_draft(client, *, year):
     return season, entries, ctx
 
 
-def test_team_progress_target_is_allocated_picks_not_the_season_squad_limit(midseason_client):
+def test_conduct_board_uses_generated_picks_for_participants_and_progress(midseason_client):
     """Codex review, PR #225 (P2): a mid-season draft's `target_squad_size`
     is the season-wide squad *limit* (4 here), not a uniform per-team pick
     count -- mid-season picks are vacancy-based. The worst entry delisted
@@ -104,10 +104,30 @@ def test_team_progress_target_is_allocated_picks_not_the_season_squad_limit(mids
     assert worst_progress["target_count"] == 2
     assert worst_progress["drafted_count"] == 0
 
-    # Every other entry has no vacancy at all in this fixture -- its own
-    # target must read 0, not the squad limit either.
-    other_progress = next(t for t in board["team_progress"] if t["season_entry_id"] == entries[0].season_entry_id)
-    assert other_progress["target_count"] == 0
+    # Every other entry has a full squad and no generated pick. The frozen
+    # ladder order remains available as context, but marks that team as a
+    # non-participant and does not present it as selection progress.
+    full_squad_entry = entries[0]
+    full_squad_order = next(o for o in board["order"] if o["season_entry_id"] == full_squad_entry.season_entry_id)
+    assert full_squad_order["allocated_pick_count"] == 0
+    assert full_squad_entry.season_entry_id not in {team["season_entry_id"] for team in board["team_progress"]}
+
+    generated = client.app.state.draft.picks(season.season_id, draft_kind="midseason")
+    displayed = [board["current_pick"], *board["upcoming_picks"]]
+    assert [pick["draft_pick_id"] for pick in displayed] == [pick.draft_pick_id for pick in generated]
+    assert full_squad_entry.season_entry_id not in {pick["current_season_entry_id"] for pick in displayed}
+
+    _give_credentials(client.app, full_squad_entry.season_entry_id, email="full-squad-coach@example.com")
+    session = _login(client, email="full-squad-coach@example.com")
+    account = client.get("/account", cookies={"bbbffl_session": session})
+    assert account.status_code == 200, account.text
+    assert f"/account/midseason-draft/{season.season_id}" in account.text
+    assert "0 picks — your team is not participating in selections" in account.text
+
+    page = client.get(f"/account/midseason-draft/{season.season_id}", cookies={"bbbffl_session": session})
+    assert page.status_code == 200, page.text
+    assert "Teams with 0 picks are identified in the frozen draft order above." in page.text
+    assert "not participating" in page.text
 
 
 def test_coach_can_make_their_own_midseason_selection(midseason_client):
@@ -118,12 +138,56 @@ def test_coach_can_make_their_own_midseason_selection(midseason_client):
     session = _login(client, email="worst-coach@example.com")
     cookies = {"bbbffl_session": session}
 
-    api = f"/api/admin/midseason-draft/{season.season_id}"
-    board = client.get(f"{api}/board", cookies=cookies).json()
+    admin_api = f"/api/admin/midseason-draft/{season.season_id}"
+    coach_api = f"/api/account/midseason-draft/{season.season_id}"
+    account = client.get("/account", cookies=cookies)
+    assert account.status_code == 200, account.text
+    conduct_url = f"/account/midseason-draft/{season.season_id}"
+    assert conduct_url in account.text
+    assert "2 generated picks" in account.text
+    conduct_page = client.get(conduct_url, cookies=cookies)
+    assert conduct_page.status_code == 200, conduct_page.text
+    team = client.app.state.identities.get_public_team(worst.season_entry_id)
+    assert f"BBBFFL {team.team_name} Mid-season Draft" in conduct_page.text
+    assert "/api/account/midseason-draft" in conduct_page.text
+    assert "Admin token" not in conduct_page.text
+    assert "Pre-draft readiness" not in conduct_page.text
+    assert "Proxy provenance" not in conduct_page.text
+    assert f'href="/admin/midseason-draft/{season.season_id}"' not in conduct_page.text
+    assert "A Scorer/Admin manages post-draft trading and completion." in conduct_page.text
+    assert "const AUTO_REFRESH_MS = 12000" in conduct_page.text
+    assert "await refresh(null, true)" in conduct_page.text
+    assert "if (!successMessage && !requireFresh) return refreshInFlight" in conduct_page.text
+    assert "queuedRefreshMessage = successMessage" in conduct_page.text
+    assert "return refresh(message)" in conduct_page.text
+    assert "const requestId = ++latestPlayerRequest" in conduct_page.text
+    assert "requestId !== latestPlayerRequest" in conduct_page.text
+    assert "liveBoard.current_pick.draft_pick_id !== currentPickId" in conduct_page.text
+    assert "document.addEventListener('visibilitychange', refreshAfterReturning)" in conduct_page.text
+    assert "window.addEventListener('focus', refreshAfterReturning)" in conduct_page.text
+    assert "It’s your turn — your team now owns the current pick." in conduct_page.text
+    assert "renderPlayers(document.getElementById('player-search').value)" in conduct_page.text
+
+    shortlist_page = client.get(f"/shortlist/{worst.season_entry_id}", cookies=cookies)
+    assert shortlist_page.status_code == 200, shortlist_page.text
+    assert f'href="{conduct_url}"' in shortlist_page.text
+    assert "← Back to your mid-season draft" in shortlist_page.text
+
+    admin_page = client.get(f"/admin/midseason-draft/{season.season_id}/conduct", cookies=cookies)
+    assert admin_page.status_code == 403
+    assert client.get(f"{admin_api}/board", cookies=cookies).status_code == 403
+
+    operator_page = client.get(f"/admin/midseason-draft/{season.season_id}/conduct", cookies={"bbbffl_session": ""})
+    assert operator_page.status_code == 200, operator_page.text
+    assert "Pre-draft readiness" in operator_page.text
+    assert "Proxy provenance" in operator_page.text
+    assert f'href="/admin/midseason-draft/{season.season_id}"' in operator_page.text
+
+    board = client.get(f"{coach_api}/board", cookies=cookies).json()
     assert board["current_pick"]["current_season_entry_id"] == worst.season_entry_id
     assert board["draft_kind"] == "midseason"
 
-    players = client.get(f"{api}/players", cookies=cookies, params={"availability": "available"}).json()
+    players = client.get(f"{coach_api}/players", cookies=cookies, params={"availability": "available"}).json()
     assert len(players) == 2
     # Mid-season browsing shows current-season-to-date context, not the
     # preseason draft's previous-season label.
@@ -131,7 +195,7 @@ def test_coach_can_make_their_own_midseason_selection(midseason_client):
     chosen = players[0]
 
     response = client.post(
-        f"{api}/pick",
+        f"{coach_api}/pick",
         json={
             "season_entry_id": worst.season_entry_id,
             "season_player_id": chosen["season_player_id"],
@@ -181,10 +245,10 @@ def test_stale_pick_cannot_double_select_or_take_an_already_taken_player(midseas
     session = _login(client, email="stale-coach@example.com")
     cookies = {"bbbffl_session": session}
 
-    api = f"/api/admin/midseason-draft/{season.season_id}"
+    api = f"/api/account/midseason-draft/{season.season_id}"
     board = client.get(f"{api}/board", cookies=cookies).json()
     current_pick = board["current_pick"]
-    pool = client.get(f"{api}/available-players", cookies=cookies).json()
+    pool = client.get(f"{api}/players", cookies=cookies, params={"availability": "available"}).json()
     first_choice, second_choice = pool[0], pool[1]
 
     first = client.post(
@@ -240,12 +304,19 @@ def test_coach_cannot_make_a_selection_for_another_teams_pick(midseason_client):
     session = _login(client, email="other-coach@example.com")
     cookies = {"bbbffl_session": session}
 
-    api = f"/api/admin/midseason-draft/{season.season_id}"
+    api = f"/api/account/midseason-draft/{season.season_id}"
+    coach_page = client.get(f"/account/midseason-draft/{season.season_id}", cookies=cookies)
+    assert coach_page.status_code == 200, coach_page.text
+    assert "Read-only until it is your team’s turn." in coach_page.text
+    assert (
+        "const canPick = MY_SEASON_ENTRY_ID == null || "
+        "MY_SEASON_ENTRY_ID === board.current_pick.current_season_entry_id" in coach_page.text
+    )
     board = client.get(f"{api}/board", cookies=cookies).json()
     current_pick = board["current_pick"]
     assert current_pick["current_season_entry_id"] == worst.season_entry_id
 
-    pool = client.get(f"{api}/available-players", cookies=cookies).json()
+    pool = client.get(f"{api}/players", cookies=cookies, params={"availability": "available"}).json()
     response = client.post(
         f"{api}/pick",
         json={

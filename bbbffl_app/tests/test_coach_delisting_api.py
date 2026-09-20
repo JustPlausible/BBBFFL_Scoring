@@ -88,6 +88,7 @@ def test_account_page_shows_delisting_cue_only_while_the_window_is_open(midseaso
     assert account.status_code == 200
     assert "Mid-season delisting is open" in account.text
     assert "/account/delisting" in account.text
+    assert "/conduct" not in account.text
 
     # A coach with no team in any season currently `delisting_open` sees no
     # cue and no implication that delistings can currently be changed.
@@ -122,6 +123,49 @@ def test_coach_can_view_own_squad_and_delisting_state(midseason_client):
     assert {p["season_player_id"] for p in body["squad"]} == {row.season_player_id for row in squad}
     assert all(p["delisted"] is False for p in body["squad"])
     assert body["delistings"] == []
+
+
+def test_coach_squad_is_ordered_by_full_player_name(midseason_client):
+    client = midseason_client
+    season, entries, ctx = _build_delisting_open(client, year=4010)
+    entry = entries[9]
+    squad = ctx["ownership"].current_squad(entry.season_entry_id)
+    names = ["Amy Young", "Madonna", "Zoe Adams", "Ben Brown"]
+    for ownership, display_name in zip(squad, names, strict=True):
+        player = ctx["player_pool"].get_by_id(ownership.season_player_id)
+        ctx["player_pool"].refresh_player(season.season_id, player.canonical_player_id, display_name)
+
+    _give_credentials(client.app, entry.season_entry_id, email="alphabetical-coach@example.com")
+    session = _login(client, email="alphabetical-coach@example.com")
+    status = client.get(
+        f"/api/account/delisting/{entry.season_entry_id}/status",
+        cookies={"bbbffl_session": session},
+    )
+
+    assert status.status_code == 200, status.text
+    assert [player["display_name"] for player in status.json()["squad"]] == sorted(names, key=str.casefold)
+
+
+def test_rendered_coach_page_uses_status_route_for_initial_load(midseason_client):
+    """The browser's automatic read uses the API's `/status` route while
+    submit and withdraw keep their existing mutation URLs."""
+    client = midseason_client
+    _, entries, _ = _build_delisting_open(client, year=4009)
+    entry = entries[9]
+    _give_credentials(client.app, entry.season_entry_id, email="browser-contract-coach@example.com")
+    session = _login(client, email="browser-contract-coach@example.com")
+
+    page = client.get("/account/delisting", cookies={"bbbffl_session": session})
+    assert page.status_code == 200
+    script_match = re.search(r"<script>([\s\S]*)</script>", page.text)
+    assert script_match, "inline script not found in the rendered Coach delisting page"
+    script = script_match.group(1)
+
+    initial_read = re.search(r"async function refresh\(.*?await api\(([^\n]+)\);", script, re.DOTALL)
+    assert initial_read, "refresh() initial API request not found in the rendered Coach delisting page"
+    assert initial_read.group(1) == "`${API}/status`"
+    assert "await api(`${API}/submit`," in script
+    assert "await api(`${API}/${delistingId}/withdraw`," in script
 
 
 def test_coach_can_submit_then_withdraw_their_own_delisting(midseason_client):

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from app.audit import AuditEventRepository
 from app.season import SeasonRepository
 from tests.midseason_draft_helpers import build_season
 
@@ -143,6 +144,308 @@ def test_midseason_draft_workflow_end_to_end_via_the_admin_api(midseason_client)
     )
     assert closed.status_code == 200
     assert closed.json()["draft"]["state"] == "complete"
+
+
+def test_operations_player_selector_filters_team_before_global_limit(midseason_client):
+    client = midseason_client
+    ctx = build_season(
+        client.app.state.database,
+        year=4011,
+        trigger_round=10,
+        squad_limit=22,
+        regular_season_round_count=12,
+    )
+    season, entry = ctx["season"], ctx["entries"][9]
+    expected_ids = {item.season_player_id for item in ctx["ownership"].current_squad(entry.season_entry_id)}
+
+    players = client.get(
+        f"/api/admin/midseason-draft/{season.season_id}/players",
+        params={"availability": "owned", "owner_season_entry_id": entry.season_entry_id},
+    )
+
+    assert players.status_code == 200, players.text
+    assert {item["season_player_id"] for item in players.json()} == expected_ids
+    assert len(players.json()) == 22
+
+    page = client.get(f"/admin/midseason-draft/{season.season_id}")
+    assert page.status_code == 200, page.text
+    assert "/players?availability=owned&owner_season_entry_id=${encodeURIComponent(entryId)}" in page.text
+
+
+def _open_trade_window(client, *, year):
+    ctx = build_season(
+        client.app.state.database,
+        year=year,
+        trigger_round=10,
+        squad_limit=4,
+        regular_season_round_count=12,
+    )
+    season = ctx["season"]
+    SeasonRepository(client.app.state.database).set_midseason_draft_trigger_round(season.season_id, 10)
+    api = f"/api/admin/midseason-draft/{season.season_id}"
+    confirmed = client.post(f"{api}/confirm-ladder", json={"competition_id": ctx["competition"].competition_id})
+    assert confirmed.status_code == 200, confirmed.text
+    opened = client.post(f"{api}/open-delisting-window", json={"reason": "agreed trade window"})
+    assert opened.status_code == 200, opened.text
+    return ctx, api
+
+
+def test_operations_trade_recorder_uses_human_choices_and_domain_decisions(midseason_client):
+    client = midseason_client
+    ctx, api = _open_trade_window(client, year=4012)
+    season, team_a, team_b = ctx["season"], ctx["entries"][0], ctx["entries"][1]
+    squad_a = ctx["ownership"].current_squad(team_a.season_entry_id)
+    squad_b = ctx["ownership"].current_squad(team_b.season_entry_id)
+
+    page = client.get(f"/admin/midseason-draft/{season.season_id}")
+    assert page.status_code == 200, page.text
+    for control_id in (
+        "trade-team-a",
+        "trade-team-b",
+        "trade-type-a",
+        "trade-type-b",
+        "trade-asset-a",
+        "trade-asset-b",
+        "propose-trade-btn",
+    ):
+        assert f'id="{control_id}"' in page.text
+    assert "Team A gives / Team B receives" in page.text
+    assert "Team B gives / Team A receives" in page.text
+    assert "owner_season_entry_id=${encodeURIComponent(teamId)}" in page.text
+    assert "draft_round: Number(asset)" in page.text
+    assert 'data-reverse="${t.trade_id}"' in page.text
+    assert "/trade/${btn.dataset.reverse}/reverse" in page.text
+    assert "A reason is required to reverse an approved trade." in page.text
+    assert "const requestGeneration = ++tradeAssetRequestGeneration[side]" in page.text
+    assert "requestGeneration !== tradeAssetRequestGeneration[side]" in page.text
+    assert "document.getElementById(`trade-team-${side}`).value !== teamId" in page.text
+    assert "document.getElementById(`trade-type-${side}`).value !== legType" in page.text
+
+    status = client.get(f"{api}/status").json()
+    assert status["trade_pick_rounds"] == [1, 2, 3, 4]
+    expected_team_names = {
+        ctx["identities"].get_public_team(entry.season_entry_id).team_name for entry in (team_a, team_b)
+    }
+    assert {item["team_name"] for item in status["order"]} >= expected_team_names
+
+    owned_a = client.get(
+        f"{api}/players",
+        params={"availability": "owned", "owner_season_entry_id": team_a.season_entry_id},
+    )
+    assert owned_a.status_code == 200, owned_a.text
+    assert {item["season_player_id"] for item in owned_a.json()} == {item.season_player_id for item in squad_a}
+
+    # Player-for-pick entry exercises the exact leg shapes emitted by the
+    # browser recorder. Rejecting it must leave ownership untouched.
+    proposed_pick_trade = client.post(
+        f"{api}/trade",
+        json={
+            "legs": [
+                {
+                    "leg_type": "player",
+                    "from_season_entry_id": team_a.season_entry_id,
+                    "to_season_entry_id": team_b.season_entry_id,
+                    "season_player_id": squad_a[0].season_player_id,
+                },
+                {
+                    "leg_type": "pick",
+                    "from_season_entry_id": team_b.season_entry_id,
+                    "to_season_entry_id": team_a.season_entry_id,
+                    "draft_round": 1,
+                },
+            ],
+            "reason": "coaches agreed player for round one",
+        },
+    )
+    assert proposed_pick_trade.status_code == 200, proposed_pick_trade.text
+    rejected_id = proposed_pick_trade.json()["trade"]["trade_id"]
+    rejected = client.post(
+        f"{api}/trade/{rejected_id}/decide",
+        json={"approve": False, "reason": "coaches withdrew agreement"},
+    )
+    assert rejected.status_code == 200, rejected.text
+    assert rejected.json()["trade"]["status"] == "rejected"
+    assert (
+        ctx["ownership"].owner_at(squad_a[0].season_player_id, "9999-12-31").season_entry_id == team_a.season_entry_id
+    )
+
+    pick_swap = client.post(
+        f"{api}/trade",
+        json={
+            "legs": [
+                {
+                    "leg_type": "pick",
+                    "from_season_entry_id": team_a.season_entry_id,
+                    "to_season_entry_id": team_b.season_entry_id,
+                    "draft_round": 1,
+                },
+                {
+                    "leg_type": "pick",
+                    "from_season_entry_id": team_b.season_entry_id,
+                    "to_season_entry_id": team_a.season_entry_id,
+                    "draft_round": 2,
+                },
+            ],
+            "reason": "agreed round-pick swap",
+        },
+    )
+    assert pick_swap.status_code == 200, pick_swap.text
+    pick_swap_id = pick_swap.json()["trade"]["trade_id"]
+    assert (
+        client.post(
+            f"{api}/trade/{pick_swap_id}/decide",
+            json={"approve": False, "reason": "recording test only"},
+        ).status_code
+        == 200
+    )
+
+    # A player-for-player trade can then be reviewed and approved through
+    # the same route; the existing domain applies both ownership legs.
+    proposed_swap = client.post(
+        f"{api}/trade",
+        json={
+            "legs": [
+                {
+                    "leg_type": "player",
+                    "from_season_entry_id": team_a.season_entry_id,
+                    "to_season_entry_id": team_b.season_entry_id,
+                    "season_player_id": squad_a[1].season_player_id,
+                },
+                {
+                    "leg_type": "player",
+                    "from_season_entry_id": team_b.season_entry_id,
+                    "to_season_entry_id": team_a.season_entry_id,
+                    "season_player_id": squad_b[0].season_player_id,
+                },
+            ],
+            "reason": "recorded from coaches' chat agreement",
+        },
+    )
+    assert proposed_swap.status_code == 200, proposed_swap.text
+    approved_id = proposed_swap.json()["trade"]["trade_id"]
+    approved = client.post(
+        f"{api}/trade/{approved_id}/decide",
+        json={"approve": True, "reason": "Scorer verified both sides"},
+    )
+    assert approved.status_code == 200, approved.text
+    assert (
+        ctx["ownership"].owner_at(squad_a[1].season_player_id, "9999-12-31").season_entry_id == team_b.season_entry_id
+    )
+    assert (
+        ctx["ownership"].owner_at(squad_b[0].season_player_id, "9999-12-31").season_entry_id == team_a.season_entry_id
+    )
+
+    refreshed = client.get(f"{api}/status").json()
+    approved_view = next(trade for trade in refreshed["trades"] if trade["trade_id"] == approved_id)
+    assert approved_view["proposal_audit"]["actor_role"] == "admin"
+    assert approved_view["proposal_audit"]["reason"] == "recorded from coaches' chat agreement"
+    assert approved_view["decision_audit"]["actor_role"] == "admin"
+    assert approved_view["decision_audit"]["reason"] == "Scorer verified both sides"
+    actions = [
+        event.action for event in AuditEventRepository(client.app.state.database).list_events(entity_id=approved_id)
+    ]
+    assert actions == ["midseason.trade.proposed", "midseason.trade.approved"]
+
+    reversed_trade = client.post(
+        f"{api}/trade/{approved_id}/reverse",
+        json={"reason": "Scorer corrected the recorded agreement"},
+    )
+    assert reversed_trade.status_code == 200, reversed_trade.text
+    assert reversed_trade.json()["trade"]["status"] == "rejected"
+    reversed_view = next(
+        trade for trade in client.get(f"{api}/status").json()["trades"] if trade["trade_id"] == approved_id
+    )
+    assert reversed_view["decision_audit"]["actor_role"] == "admin"
+    assert reversed_view["decision_audit"]["reason"] == "Scorer corrected the recorded agreement"
+
+
+def test_trade_recorder_obeys_pre_and_post_draft_lifecycle(midseason_client):
+    client = midseason_client
+    database = client.app.state.database
+    ctx = build_season(database, year=4013, trigger_round=10, squad_limit=4, regular_season_round_count=12)
+    season, entries = ctx["season"], ctx["entries"]
+    SeasonRepository(database).set_midseason_draft_trigger_round(season.season_id, 10)
+    api = f"/api/admin/midseason-draft/{season.season_id}"
+    assert (
+        client.post(f"{api}/confirm-ladder", json={"competition_id": ctx["competition"].competition_id}).status_code
+        == 200
+    )
+
+    player_a = ctx["ownership"].current_squad(entries[0].season_entry_id)[0]
+    player_b = ctx["ownership"].current_squad(entries[1].season_entry_id)[0]
+    legs = [
+        {
+            "leg_type": "player",
+            "from_season_entry_id": entries[0].season_entry_id,
+            "to_season_entry_id": entries[1].season_entry_id,
+            "season_player_id": player_a.season_player_id,
+        },
+        {
+            "leg_type": "player",
+            "from_season_entry_id": entries[1].season_entry_id,
+            "to_season_entry_id": entries[0].season_entry_id,
+            "season_player_id": player_b.season_player_id,
+        },
+    ]
+    refused = client.post(f"{api}/trade", json={"legs": legs, "reason": "too early"})
+    assert refused.status_code == 409
+
+    assert client.post(f"{api}/open-delisting-window", json={}).status_code == 200
+    worst = entries[9]
+    delisted = ctx["ownership"].current_squad(worst.season_entry_id)[0]
+    assert (
+        client.post(
+            f"{api}/delisting",
+            json={"season_entry_id": worst.season_entry_id, "season_player_id": delisted.season_player_id},
+        ).status_code
+        == 200
+    )
+    assert client.post(f"{api}/lock-delistings", json={}).status_code == 200
+    assert client.post(f"{api}/generate-selections", json={}).status_code == 200
+    pick = client.get(f"{api}/picks").json()[0]
+    available = client.get(f"{api}/available-players").json()[0]
+    selected = client.post(
+        f"{api}/pick",
+        json={
+            "season_entry_id": pick["current_season_entry_id"],
+            "season_player_id": available["season_player_id"],
+            "draft_pick_id": pick["draft_pick_id"],
+        },
+    )
+    assert selected.status_code == 200, selected.text
+    assert client.get(f"{api}/status").json()["draft"]["state"] == "draft_complete"
+
+    post_draft_trade = client.post(f"{api}/trade", json={"legs": legs, "reason": "post-draft agreement"})
+    assert post_draft_trade.status_code == 200, post_draft_trade.text
+    post_id = post_draft_trade.json()["trade"]["trade_id"]
+    assert (
+        client.post(
+            f"{api}/trade/{post_id}/decide", json={"approve": True, "reason": "post-draft approval"}
+        ).status_code
+        == 200
+    )
+
+    pick_leg_after_lock = client.post(
+        f"{api}/trade",
+        json={
+            "legs": [
+                {
+                    "leg_type": "pick",
+                    "from_season_entry_id": entries[0].season_entry_id,
+                    "to_season_entry_id": entries[1].season_entry_id,
+                    "draft_round": 1,
+                },
+                {
+                    "leg_type": "player",
+                    "from_season_entry_id": entries[1].season_entry_id,
+                    "to_season_entry_id": entries[0].season_entry_id,
+                    "season_player_id": player_a.season_player_id,
+                },
+            ]
+        },
+    )
+    assert pick_leg_after_lock.status_code == 409
+    assert "only available before delistings lock" in pick_leg_after_lock.text
 
 
 def test_confirm_ladder_before_configured_trigger_round_is_a_409(midseason_client):

@@ -116,7 +116,7 @@ function renderSquad(view) {
 async function refresh(successMessage) {
   if (!API) return;
   try {
-    const view = await api(API);
+    const view = await api(`${API}/status`);
     renderSquad(view);
     if (successMessage) say(successMessage, 'success'); else say('');
   } catch (e) {

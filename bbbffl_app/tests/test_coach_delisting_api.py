@@ -124,6 +124,28 @@ def test_coach_can_view_own_squad_and_delisting_state(midseason_client):
     assert body["delistings"] == []
 
 
+def test_rendered_coach_page_uses_status_route_for_initial_load(midseason_client):
+    """The browser's automatic read uses the API's `/status` route while
+    submit and withdraw keep their existing mutation URLs."""
+    client = midseason_client
+    _, entries, _ = _build_delisting_open(client, year=4009)
+    entry = entries[9]
+    _give_credentials(client.app, entry.season_entry_id, email="browser-contract-coach@example.com")
+    session = _login(client, email="browser-contract-coach@example.com")
+
+    page = client.get("/account/delisting", cookies={"bbbffl_session": session})
+    assert page.status_code == 200
+    script_match = re.search(r"<script>([\s\S]*)</script>", page.text)
+    assert script_match, "inline script not found in the rendered Coach delisting page"
+    script = script_match.group(1)
+
+    initial_read = re.search(r"async function refresh\(.*?await api\(([^\n]+)\);", script, re.DOTALL)
+    assert initial_read, "refresh() initial API request not found in the rendered Coach delisting page"
+    assert initial_read.group(1) == "`${API}/status`"
+    assert "await api(`${API}/submit`," in script
+    assert "await api(`${API}/${delistingId}/withdraw`," in script
+
+
 def test_coach_can_submit_then_withdraw_their_own_delisting(midseason_client):
     client = midseason_client
     season, entries, ctx = _build_delisting_open(client, year=4004)

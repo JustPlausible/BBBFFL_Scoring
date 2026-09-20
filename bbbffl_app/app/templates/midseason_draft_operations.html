@@ -243,6 +243,7 @@ function renderTrades(body) {
 }
 
 let currentTradeBody = null;
+const tradeAssetRequestGeneration = { a: 0, b: 0 };
 
 function tradeTeamOptions(body) {
   return '<option value="">Select team…</option>' +
@@ -250,6 +251,7 @@ function tradeTeamOptions(body) {
 }
 
 async function populateTradeAsset(side) {
+  const requestGeneration = ++tradeAssetRequestGeneration[side];
   const teamId = document.getElementById(`trade-team-${side}`).value;
   const legType = document.getElementById(`trade-type-${side}`).value;
   const asset = document.getElementById(`trade-asset-${side}`);
@@ -263,13 +265,15 @@ async function populateTradeAsset(side) {
   } else {
     try {
       const players = await api(`${API}/players?availability=owned&owner_season_entry_id=${encodeURIComponent(teamId)}`);
-      if (document.getElementById(`trade-team-${side}`).value !== teamId ||
+      if (requestGeneration !== tradeAssetRequestGeneration[side] ||
+          document.getElementById(`trade-team-${side}`).value !== teamId ||
           document.getElementById(`trade-type-${side}`).value !== legType) return;
       asset.innerHTML += players.map(player =>
         `<option value="${escapeHtml(player.season_player_id)}">${escapeHtml(player.display_name)}${player.afl_team_name ? ' — ' + escapeHtml(player.afl_team_name) : ''}</option>`
       ).join('');
     } catch (e) {
-      if (document.getElementById(`trade-team-${side}`).value === teamId &&
+      if (requestGeneration === tradeAssetRequestGeneration[side] &&
+          document.getElementById(`trade-team-${side}`).value === teamId &&
           document.getElementById(`trade-type-${side}`).value === legType) {
         say(e.message || 'Owned players could not be loaded.');
       }

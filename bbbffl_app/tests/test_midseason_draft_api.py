@@ -216,6 +216,8 @@ def test_operations_trade_recorder_uses_human_choices_and_domain_decisions(midse
     assert 'data-reverse="${t.trade_id}"' in page.text
     assert "/trade/${btn.dataset.reverse}/reverse" in page.text
     assert "A reason is required to reverse an approved trade." in page.text
+    assert "const requestGeneration = ++tradeAssetRequestGeneration[side]" in page.text
+    assert "requestGeneration !== tradeAssetRequestGeneration[side]" in page.text
     assert "document.getElementById(`trade-team-${side}`).value !== teamId" in page.text
     assert "document.getElementById(`trade-type-${side}`).value !== legType" in page.text
 

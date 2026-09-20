@@ -160,6 +160,9 @@ def test_coach_can_make_their_own_midseason_selection(midseason_client):
     assert "if (!successMessage && !requireFresh) return refreshInFlight" in conduct_page.text
     assert "queuedRefreshMessage = successMessage" in conduct_page.text
     assert "return refresh(message)" in conduct_page.text
+    assert "const requestId = ++latestPlayerRequest" in conduct_page.text
+    assert "requestId !== latestPlayerRequest" in conduct_page.text
+    assert "liveBoard.current_pick.draft_pick_id !== currentPickId" in conduct_page.text
     assert "document.addEventListener('visibilitychange', refreshAfterReturning)" in conduct_page.text
     assert "window.addEventListener('focus', refreshAfterReturning)" in conduct_page.text
     assert "It’s your turn — your team now owns the current pick." in conduct_page.text

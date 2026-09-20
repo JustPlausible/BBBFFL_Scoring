@@ -318,7 +318,10 @@ function renderCompleted(board) {
     : '';
 }
 
+let latestPlayerRequest = 0;
+
 async function renderPlayers(query) {
+  const requestId = ++latestPlayerRequest;
   const results = document.getElementById('player-results');
   const board = window._lastBoard;
   if (!board || !board.current_pick || board.status.finalized_at || board.status.paused_at) {
@@ -326,7 +329,13 @@ async function renderPlayers(query) {
     return;
   }
   const filter = document.getElementById('availability-filter').value;
+  const currentPickId = board.current_pick.draft_pick_id;
   const players = await api(`${API}/players?q=${encodeURIComponent(query || '')}&availability=${encodeURIComponent(filter)}`);
+  const liveBoard = window._lastBoard;
+  if (requestId !== latestPlayerRequest ||
+      document.getElementById('player-search').value !== (query || '') ||
+      document.getElementById('availability-filter').value !== filter ||
+      !liveBoard || !liveBoard.current_pick || liveBoard.current_pick.draft_pick_id !== currentPickId) return;
   // Codex review, PR #225 (P2): a signed-in coach (or a delegated role
   // representing a specific entry) can only ever submit for
   // MY_SEASON_ENTRY_ID -- require_entry_context refuses anything else with

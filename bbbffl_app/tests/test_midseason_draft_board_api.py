@@ -153,6 +153,8 @@ def test_coach_can_make_their_own_midseason_selection(midseason_client):
     assert "Admin token" not in conduct_page.text
     assert "Pre-draft readiness" not in conduct_page.text
     assert "Proxy provenance" not in conduct_page.text
+    assert f'href="/admin/midseason-draft/{season.season_id}"' not in conduct_page.text
+    assert "A Scorer/Admin manages post-draft trading and completion." in conduct_page.text
     assert "const AUTO_REFRESH_MS = 12000" in conduct_page.text
     assert "await refresh(null, true)" in conduct_page.text
     assert "if (!successMessage && !requireFresh) return refreshInFlight" in conduct_page.text
@@ -176,6 +178,7 @@ def test_coach_can_make_their_own_midseason_selection(midseason_client):
     assert operator_page.status_code == 200, operator_page.text
     assert "Pre-draft readiness" in operator_page.text
     assert "Proxy provenance" in operator_page.text
+    assert f'href="/admin/midseason-draft/{season.season_id}"' in operator_page.text
 
     board = client.get(f"{coach_api}/board", cookies=cookies).json()
     assert board["current_pick"]["current_season_entry_id"] == worst.season_entry_id

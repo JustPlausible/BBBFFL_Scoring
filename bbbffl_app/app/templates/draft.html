@@ -140,7 +140,11 @@
   {% else %}
   <div class="block finalize-box">
     <h2>Draft completion</h2>
+    {% if coach_view %}
+    <p class="muted">The mid-season draft finalises automatically once every configured selection is made. A Scorer/Admin manages post-draft trading and completion.</p>
+    {% else %}
     <p class="muted">The mid-season draft finalises automatically once every configured selection is made. Post-draft trading and completion are managed from the <a href="/admin/midseason-draft/{{ season_id }}">mid-season draft operations page</a>.</p>
+    {% endif %}
     <div id="completion-summary"></div>
   </div>
   {% endif %}

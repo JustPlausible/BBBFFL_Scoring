@@ -261,7 +261,7 @@ function renderCurrentPick(board) {
   const el = document.getElementById('current-pick');
   const pick = board.current_pick;
   const searchable = !board.status.finalized_at && !board.status.paused_at && pick;
-  const ownTurn = !COACH_VIEW || (pick && MY_SEASON_ENTRY_ID === pick.current_season_entry_id);
+  const ownTurn = MY_SEASON_ENTRY_ID == null || (pick && MY_SEASON_ENTRY_ID === pick.current_season_entry_id);
   document.getElementById('current-pick-block').style.display = pick ? '' : 'none';
   document.getElementById('player-search').disabled = !searchable;
   document.getElementById('pick-reason').disabled = !ownTurn;
@@ -330,8 +330,8 @@ async function renderPlayers(query) {
   // clock would always fail. `MY_SEASON_ENTRY_ID` is null for the legacy
   // shared-token path (full proxy authority, no owned-entry concept), so
   // this never hides the button from that path.
-  const canPick = !COACH_VIEW || MY_SEASON_ENTRY_ID === board.current_pick.current_season_entry_id;
-  const readOnlyNote = canPick ? '' : `<p class="muted">It is ${escapeHtml(board.current_pick.current_team_name)}'s turn. You can browse, but only that team (or a Scorer/Admin) can select right now.</p>`;
+  const canPick = MY_SEASON_ENTRY_ID == null || MY_SEASON_ENTRY_ID === board.current_pick.current_season_entry_id;
+  const readOnlyNote = canPick ? '' : `<p class="muted">It is ${escapeHtml(board.current_pick.current_team_name)}'s turn. You can browse, but only that team or an authorized operator acting for it can select right now.</p>`;
   results.innerHTML = readOnlyNote + (players.map(p => `
     <div class="player-row">
       <div class="player-details">

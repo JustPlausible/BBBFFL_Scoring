@@ -339,6 +339,18 @@ def test_operations_trade_recorder_uses_human_choices_and_domain_decisions(midse
     ]
     assert actions == ["midseason.trade.proposed", "midseason.trade.approved"]
 
+    reversed_trade = client.post(
+        f"{api}/trade/{approved_id}/reverse",
+        json={"reason": "Scorer corrected the recorded agreement"},
+    )
+    assert reversed_trade.status_code == 200, reversed_trade.text
+    assert reversed_trade.json()["trade"]["status"] == "rejected"
+    reversed_view = next(
+        trade for trade in client.get(f"{api}/status").json()["trades"] if trade["trade_id"] == approved_id
+    )
+    assert reversed_view["decision_audit"]["actor_role"] == "admin"
+    assert reversed_view["decision_audit"]["reason"] == "Scorer corrected the recorded agreement"
+
 
 def test_trade_recorder_obeys_pre_and_post_draft_lifecycle(midseason_client):
     client = midseason_client

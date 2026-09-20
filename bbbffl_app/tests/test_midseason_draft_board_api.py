@@ -300,8 +300,8 @@ def test_coach_cannot_make_a_selection_for_another_teams_pick(midseason_client):
     assert coach_page.status_code == 200, coach_page.text
     assert "Read-only until it is your team’s turn." in coach_page.text
     assert (
-        "const canPick = !COACH_VIEW || MY_SEASON_ENTRY_ID === board.current_pick.current_season_entry_id"
-        in coach_page.text
+        "const canPick = MY_SEASON_ENTRY_ID == null || "
+        "MY_SEASON_ENTRY_ID === board.current_pick.current_season_entry_id" in coach_page.text
     )
     board = client.get(f"{api}/board", cookies=cookies).json()
     current_pick = board["current_pick"]

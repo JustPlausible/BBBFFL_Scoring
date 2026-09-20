@@ -247,7 +247,11 @@ def _status(request: Request, season_id: str) -> dict:
 
         proposal = next((event for event in events if event.action == "midseason.trade.proposed"), None)
         decision = next(
-            (event for event in events if event.action in ("midseason.trade.approved", "midseason.trade.rejected")),
+            (
+                event
+                for event in reversed(events)
+                if event.action in ("midseason.trade.approved", "midseason.trade.rejected", "midseason.trade.reversed")
+            ),
             None,
         )
         view["proposal_audit"] = _audit_view(proposal)

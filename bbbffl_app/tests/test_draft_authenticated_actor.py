@@ -227,6 +227,14 @@ def test_authenticated_delegated_pick_for_a_represented_entry_that_does_not_own_
     completed_before = board_before["status"]["completed_picks"]
     current_pick = board_before["current_pick"]
 
+    page = client.get(f"/admin/draft/{season.season_id}", cookies=cookies)
+    assert page.status_code == 200, page.text
+    assert f'const MY_SEASON_ENTRY_ID = "{other_entry.season_entry_id}";' in page.text
+    assert (
+        "const canPick = MY_SEASON_ENTRY_ID == null || "
+        "MY_SEASON_ENTRY_ID === board.current_pick.current_season_entry_id" in page.text
+    )
+
     # The represented context (`other_entry`) does not own the current
     # pick; submitting a payload for the entry that *does* own it must
     # still be refused, because the acting session is not representing it

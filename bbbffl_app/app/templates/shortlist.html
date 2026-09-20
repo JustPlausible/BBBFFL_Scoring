@@ -31,7 +31,7 @@
 </head>
 <body>
   <h1>Your private draft shortlist</h1>
-  {% if coach_draft_url %}<p><a href="{{ coach_draft_url }}">← Back to your mid-season draft</a></p>{% endif %}
+  {% if coach_draft_url %}<p><a href="{{ coach_draft_url }}">← Back to your {{ coach_draft_label | default("mid-season draft") }}</a></p>{% endif %}
   <p class="muted">Visible only to you (and, when acting for your team, an authorised Scorer/Admin). Adding a player here never reserves them or changes ownership -- it is planning only.</p>
   <div id="message" class="message" role="alert"></div>
 

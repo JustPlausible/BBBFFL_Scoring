@@ -186,6 +186,12 @@ def account_page(request: Request):
     midseason_selection = request.app.state.midseason_draft.coach_selection_context(
         request.app.state.identities, coach.coach_id
     )
+    # Issue #229: the same discoverability pattern as the mid-season
+    # selection cue above, for the pre-season draft -- an unmistakable cue
+    # and link straight into the Coach's own pre-season draft board
+    # whenever an accepted, unfinalized pre-season draft exists for their
+    # team, with no season id or route required.
+    preseason_selection = request.app.state.draft.coach_selection_context(request.app.state.identities, coach.coach_id)
     response = templates.TemplateResponse(
         request,
         "account.html",
@@ -199,6 +205,7 @@ def account_page(request: Request):
             "preferred_admin_role": preferred_admin_role,
             "midseason_delisting": midseason_delisting,
             "midseason_selection": midseason_selection,
+            "preseason_selection": preseason_selection,
         },
     )
     _attach_csrf_cookie(request, response, token)

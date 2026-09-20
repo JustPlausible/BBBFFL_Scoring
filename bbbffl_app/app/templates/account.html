@@ -37,6 +37,37 @@
     <div class="muted">This confirms which coach identity your browser session is authenticated as.</div>
     <div class="field"><span>Coach:</span> {{ coach.display_name }}</div>
     <div class="field"><span>Coach ID:</span> {{ coach.coach_id }}</div>
+    <script>
+      // Codex review, PR #230 (P2): a multi-role coach whose session's
+      // *active* role is currently Scorer/Secretary/Administrator/Replay
+      // Operator (switched via the dashboard buttons below, or a prior
+      // visit) would otherwise get a plain `<a href>` 403 from any
+      // Coach-only destination below (`coach_participant`/`require_coach`
+      // requires the active role to literally be "coach"). Every
+      // Coach-only cue link below goes through this helper instead, which
+      // switches the active role back to "coach" -- always available to a
+      // signed-in coach identity, see `ActingContextService.
+      // available_roles` -- before navigating.
+      function switchToCoachRoleAndNavigate(targetUrl, button, errorEl, csrfToken) {
+        button.disabled = true;
+        errorEl.textContent = '';
+        fetch('/api/context/role', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+          body: JSON.stringify({ role: 'coach' })
+        }).then(function (response) {
+          if (!response.ok) {
+            return response.json().catch(function () { return {}; }).then(function (data) {
+              throw new Error(data.detail || response.statusText);
+            });
+          }
+          window.location.href = targetUrl;
+        }).catch(function (err) {
+          button.disabled = false;
+          errorEl.textContent = 'Could not open this page: ' + err.message;
+        });
+      }
+    </script>
     {% if has_admin_dashboard_access %}<div class="rounds">
       <button type="button" class="link-button" id="open-admin-dashboard">
         <span class="round-label">Administrator Dashboard →</span>
@@ -118,21 +149,65 @@
     </script>
     {% endif %}
     {% if midseason_delisting %}<div class="rounds">
-      <a href="/account/delisting">
+      <button type="button" class="link-button" id="open-midseason-delisting">
         <span class="round-label">Mid-season delisting is open →</span>
         <span class="round-meta">{{ midseason_delisting.team_name }}: submit or withdraw a delisting before the Scorer locks the window.</span>
-      </a>
-    </div>{% endif %}
+      </button>
+      <p class="link-error" id="open-midseason-delisting-error" role="alert"></p>
+    </div>
+    <script>
+      (function () {
+        var button = document.getElementById('open-midseason-delisting');
+        var error = document.getElementById('open-midseason-delisting-error');
+        var csrfToken = {{ csrf_token|tojson }};
+        button.addEventListener('click', function () {
+          switchToCoachRoleAndNavigate('/account/delisting', button, error, csrfToken);
+        });
+      })();
+    </script>
+    {% endif %}
+    {% if preseason_selection %}<div class="rounds">
+      <button type="button" class="link-button" id="open-preseason-draft">
+        <span class="round-label">Pre-season draft selections →</span>
+        <span class="round-meta">{{ preseason_selection.team_name }}: follow the draft, manage your shortlist, and select when it is your turn.</span>
+      </button>
+      <p class="link-error" id="open-preseason-draft-error" role="alert"></p>
+    </div>
+    <script>
+      (function () {
+        var button = document.getElementById('open-preseason-draft');
+        var error = document.getElementById('open-preseason-draft-error');
+        var csrfToken = {{ csrf_token|tojson }};
+        var targetUrl = {{ ("/account/preseason-draft/" ~ preseason_selection.season_id)|tojson }};
+        button.addEventListener('click', function () {
+          switchToCoachRoleAndNavigate(targetUrl, button, error, csrfToken);
+        });
+      })();
+    </script>
+    {% endif %}
     {% if midseason_selection %}<div class="rounds">
-      <a href="/account/midseason-draft/{{ midseason_selection.season_id }}">
+      <button type="button" class="link-button" id="open-midseason-draft">
         <span class="round-label">Mid-season draft selections →</span>
         <span class="round-meta">{{ midseason_selection.team_name }}:
           {% if midseason_selection.selection_count %}{{ midseason_selection.selection_count }} generated pick{% if midseason_selection.selection_count != 1 %}s{% endif %}. Open the board to follow the draft and select when it is your turn.
           {% else %}0 picks — your team is not participating in selections. Open the board to follow draft progress.
           {% endif %}
         </span>
-      </a>
-    </div>{% endif %}
+      </button>
+      <p class="link-error" id="open-midseason-draft-error" role="alert"></p>
+    </div>
+    <script>
+      (function () {
+        var button = document.getElementById('open-midseason-draft');
+        var error = document.getElementById('open-midseason-draft-error');
+        var csrfToken = {{ csrf_token|tojson }};
+        var targetUrl = {{ ("/account/midseason-draft/" ~ midseason_selection.season_id)|tojson }};
+        button.addEventListener('click', function () {
+          switchToCoachRoleAndNavigate(targetUrl, button, error, csrfToken);
+        });
+      })();
+    </script>
+    {% endif %}
     {% if lineup_rounds %}<h2>Weekly selections</h2><div class="rounds">{% for round in lineup_rounds %}<a class="state-{{ round.state }}" href="/coach/seasons/{{ round.season_id }}/rounds/{{ round.round_id }}/lineup">
       <span class="round-label">{{ round.round_label }} →</span>
       <span class="round-status">{% if round.state == 'submitted_with_changes' %}Submitted + private changes{% elif round.state == 'submitted' %}Submitted{% elif round.state == 'draft_saved' %}Draft saved{% else %}Not submitted{% endif %}</span>

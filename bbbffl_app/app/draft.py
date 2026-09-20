@@ -324,6 +324,37 @@ class DraftRepository:
             draft_kind=row["draft_kind"],
         )
 
+    def coach_selection_context(self, identities, coach_id, *, draft_kind="preseason"):
+        """Issue #229's Coach Account discoverability signal: the season
+        entry (if any) this coach currently owns in a `draft_kind` draft
+        that is accepted and not yet finalized, so `/account` can show an
+        unmistakable "the draft is open, here's your team" cue and link
+        without the coach ever supplying a season id or route -- mirrors
+        `app.midseason_draft.MidseasonDraftRepository.coach_selection_context`.
+
+        Purely a read -- `execute_pick` and the shared draft board remain
+        the sole authoritative source for turn order and selection
+        authorization; this signal only decides whether the cue appears.
+        `None` once there is nothing to show: no season has an accepted,
+        unfinalized draft of this kind, or this coach owns no entry in one.
+        A paused draft still counts as relevant here -- only finalisation
+        should make the cue disappear, matching the issue's acceptance
+        criteria. In practice at most one preseason draft is ever open at a
+        time; the first matching season/entry is returned if more than one
+        somehow is."""
+        rows = self.database.execute(
+            "SELECT season_id FROM season_draft WHERE draft_kind=? AND finalized_at IS NULL", (draft_kind,)
+        ).fetchall()
+        for row in rows:
+            for entry in identities.list_entries(row["season_id"]):
+                if entry.coach_id == coach_id:
+                    return {
+                        "season_id": row["season_id"],
+                        "season_entry_id": entry.season_entry_id,
+                        "team_name": entry.team_name,
+                    }
+        return None
+
     def _locked_draft(self, conn, season_id, draft_kind="preseason"):
         draft = conn.execute(
             "SELECT * FROM season_draft WHERE season_id=? AND draft_kind=?" + _for_update_suffix(self.database),

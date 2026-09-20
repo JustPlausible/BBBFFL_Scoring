@@ -1,4 +1,4 @@
-"""Scorer/Admin lifecycle + shared coach draft-board workflow for the
+"""Scorer/Admin lifecycle plus separate coach draft-board workflow for the
 mid-season draft (issues #164, #181).
 
 A thin JSON operator surface over `app.midseason_draft.MidseasonDraftRepository`
@@ -14,14 +14,10 @@ Operator-only surface):
   lifecycle surface -- confirm the ladder, run the delisting/trade window,
   lock, generate selections, and every exceptional correction. Unchanged
   from issue #164.
-- `participate` (`midseason_draft.participate`): read the board/player pool
-  and, once a mid-season pick table exists, make a selection -- granted to
-  Coach as well, exactly mirroring `app.routes.draft`'s existing preseason
-  self-service pattern. `submit_pick` still requires a Coach to be acting
-  for the entry making the selection
-  (`app.authorization.require_entry_context`); a proxy pick on behalf of a
-  *different* team still requires `midseason_draft.manage`, never merely
-  `participate`.
+- `participate` (`midseason_draft.participate`): backs the distinct
+  `/account/midseason-draft/...` Coach surface. Its own endpoints require
+  an active Coach role and an entry in the requested season; the
+  `/api/admin/...` and `/admin/...` surfaces require `manage` throughout.
 
 Board/player-browsing responses are built from `app.draft_board`'s shared,
 draft-kind-parameterised helpers -- the exact same functions
@@ -37,12 +33,12 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from app.audit import ActorContext
+from app.audit import ActorContext, AuditEventRepository
 from app.authorization import (
     Principal,
     Role,
-    principal_has_capability,
     require_capability,
+    require_coach,
     require_entry_context,
     require_role_covers_season,
 )
@@ -50,11 +46,16 @@ from app.config import BASE_DIR
 from app.draft_board import build_board, build_readiness, entry_view, player_browse_view, resolve_my_entry_id
 
 router = APIRouter(prefix="/api/admin/midseason-draft")
+coach_router = APIRouter(prefix="/api/account/midseason-draft")
 page_router = APIRouter()
 templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
 
 manage = require_capability("midseason_draft.manage")
 participate = require_capability("midseason_draft.participate")
+
+
+def coach_participant(principal: Principal = Depends(participate)) -> Principal:
+    return require_coach(principal)
 
 
 def _actor(principal: Principal, legacy_name: str | None = None) -> ActorContext:
@@ -77,6 +78,13 @@ def _actor(principal: Principal, legacy_name: str | None = None) -> ActorContext
 
 def _authorise(request: Request, principal: Principal, season_id: str) -> None:
     require_role_covers_season(request, principal, season_id)
+
+
+def _coach_entry_id(request: Request, principal: Principal, season_id: str) -> str:
+    entry_id = resolve_my_entry_id(request, principal, season_id)
+    if entry_id is None:
+        raise HTTPException(status_code=404, detail="Private resource not found")
+    return entry_id
 
 
 def _entry_label(request: Request, season_entry_id: str | None, cache: dict) -> dict | None:
@@ -204,6 +212,7 @@ def _status(request: Request, season_id: str) -> dict:
     ladder = midseason.ladder_snapshot(season_id)
     entry_cache: dict = {}
     player_cache: dict = {}
+    audit = AuditEventRepository(request.app.state.database)
 
     def _delisting_view(item):
         view = dataclasses.asdict(item)
@@ -220,7 +229,34 @@ def _status(request: Request, season_id: str) -> dict:
             leg_view["to_team"] = _entry_label(request, leg.to_season_entry_id, entry_cache)
             leg_view["player"] = _player_label(request, leg.season_player_id, player_cache)
             view["legs"].append(leg_view)
+        events = audit.list_events(entity_type="midseason.trade", entity_id=trade.trade_id)
+
+        def _audit_view(event):
+            if event is None:
+                return None
+            actor_name = None
+            if event.actor_id:
+                coach = request.app.state.identities.get_coach(event.actor_id)
+                actor_name = coach.display_name if coach else event.actor_id
+            return {
+                "actor_name": actor_name or "Shared-token operator",
+                "actor_role": event.actor_role,
+                "occurred_at": event.occurred_at,
+                "reason": event.reason,
+            }
+
+        proposal = next((event for event in events if event.action == "midseason.trade.proposed"), None)
+        decision = next(
+            (event for event in events if event.action in ("midseason.trade.approved", "midseason.trade.rejected")),
+            None,
+        )
+        view["proposal_audit"] = _audit_view(proposal)
+        view["decision_audit"] = _audit_view(decision)
         return view
+
+    config = request.app.state.database.execute(
+        "SELECT squad_limit FROM season_squad_configuration WHERE season_id=?", (season_id,)
+    ).fetchone()
 
     return {
         "season_id": season_id,
@@ -249,6 +285,7 @@ def _status(request: Request, season_id: str) -> dict:
         ),
         "delistings": [_delisting_view(item) for item in midseason.list_delistings(season_id)],
         "trades": [_trade_view(item) for item in midseason.list_trades(season_id)],
+        "trade_pick_rounds": list(range(1, config["squad_limit"] + 1)) if config else [],
         "engine_status": (dataclasses.asdict(midseason.status(season_id)) if midseason.status(season_id) else None),
         "available_player_count": len(midseason.available_player_pool(season_id)),
     }
@@ -476,7 +513,7 @@ def generate_selections(
 
 
 @router.get("/{season_id}/available-players")
-def available_players(season_id: str, request: Request, principal: Principal = Depends(participate)):
+def available_players(season_id: str, request: Request, principal: Principal = Depends(manage)):
     _authorise(request, principal, season_id)
     return [dataclasses.asdict(item) for item in request.app.state.midseason_draft.available_player_pool(season_id)]
 
@@ -487,8 +524,9 @@ def player_pool(
     request: Request,
     q: str | None = None,
     availability: str | None = None,
+    owner_season_entry_id: str | None = None,
     limit: int = 200,
-    principal: Principal = Depends(participate),
+    principal: Principal = Depends(manage),
 ):
     """The shared player browser (issue #181), annotated with
     current-season-to-date scoring context -- the mid-season counterpart of
@@ -499,12 +537,18 @@ def player_pool(
     if availability not in (None, "available", "owned", "unresolved"):
         raise HTTPException(status_code=400, detail="availability must be available, owned, or unresolved")
     return player_browse_view(
-        request, season_id, draft_kind="midseason", query=q, availability=availability, limit=min(limit, 500)
+        request,
+        season_id,
+        draft_kind="midseason",
+        query=q,
+        availability=availability,
+        limit=min(limit, 500),
+        owner_season_entry_id=owner_season_entry_id,
     )
 
 
 @router.get("/{season_id}/board")
-def board(season_id: str, request: Request, principal: Principal = Depends(participate)):
+def board(season_id: str, request: Request, principal: Principal = Depends(manage)):
     """The shared conduct-draft board (issue #181) once the mid-season pick
     table exists -- the same `app.draft_board.build_board` view model
     `app.routes.draft.board` renders for the preseason draft, scoped to
@@ -514,49 +558,73 @@ def board(season_id: str, request: Request, principal: Principal = Depends(parti
 
 
 @router.get("/{season_id}/readiness")
-def readiness(season_id: str, request: Request, principal: Principal = Depends(participate)):
+def readiness(season_id: str, request: Request, principal: Principal = Depends(manage)):
     _authorise(request, principal, season_id)
     return build_readiness(request, season_id, draft_kind="midseason")
 
 
 @router.get("/{season_id}/picks")
-def picks(season_id: str, request: Request, principal: Principal = Depends(participate)):
+def picks(season_id: str, request: Request, principal: Principal = Depends(manage)):
     _authorise(request, principal, season_id)
     return [dataclasses.asdict(item) for item in request.app.state.midseason_draft.picks(season_id)]
 
 
-def _authorise_pick(request: Request, principal: Principal, season_id: str, season_entry_id: str) -> None:
-    """A Coach may only ever submit for the team they are authenticated as
-    (or currently, explicitly, representing) -- `require_entry_context`
-    404s otherwise, matching the preseason board's own rule
-    (`app.routes.draft.submit_pick`). A proxy selection on behalf of a
-    *different* team still requires the full `midseason_draft.manage`
-    authority, never merely `midseason_draft.participate` -- a Coach's own
-    participate grant must never let them pick for another team by naming
-    a different `season_entry_id` in the request body."""
-    if principal.role is Role.COACH:
-        require_entry_context(request, principal, season_entry_id)
-        return
-    if not principal_has_capability(principal, "midseason_draft.manage"):
-        raise HTTPException(status_code=403, detail="'midseason_draft.manage' authority required for a proxy selection")
-    _authorise(request, principal, season_id)
-
-
 @router.post("/{season_id}/pick")
-def submit_pick(season_id: str, payload: PickRequest, request: Request, principal: Principal = Depends(participate)):
+def submit_pick(season_id: str, payload: PickRequest, request: Request, principal: Principal = Depends(manage)):
     """Returns the shared, participate-safe board (issue #181) -- never
     `_status`, which exposes every team's delistings and trade proposals/
     reasons and is deliberately gated behind the full `midseason_draft.
     manage` authority everywhere else (Codex review, PR #225, P1). Matches
     `app.routes.draft.submit_pick`'s own return value for the preseason
     board."""
-    _authorise_pick(request, principal, season_id, payload.season_entry_id)
+    _authorise(request, principal, season_id)
     request.app.state.midseason_draft.execute_pick(
         season_id,
         payload.season_entry_id,
         payload.season_player_id,
         pick_id=payload.draft_pick_id,
         actor=_actor(principal, payload.scorer_name),
+        reason=payload.reason or "mid-season draft selection",
+    )
+    return build_board(request, season_id, draft_kind="midseason")
+
+
+@coach_router.get("/{season_id}/players")
+def coach_player_pool(
+    season_id: str,
+    request: Request,
+    q: str | None = None,
+    availability: str | None = None,
+    limit: int = 200,
+    principal: Principal = Depends(coach_participant),
+):
+    _coach_entry_id(request, principal, season_id)
+    return player_pool(season_id, request, q, availability, None, limit, principal)
+
+
+@coach_router.get("/{season_id}/board")
+def coach_board(season_id: str, request: Request, principal: Principal = Depends(coach_participant)):
+    _coach_entry_id(request, principal, season_id)
+    return build_board(request, season_id, draft_kind="midseason")
+
+
+@coach_router.post("/{season_id}/pick")
+def coach_submit_pick(
+    season_id: str,
+    payload: PickRequest,
+    request: Request,
+    principal: Principal = Depends(coach_participant),
+):
+    own_entry_id = _coach_entry_id(request, principal, season_id)
+    if payload.season_entry_id != own_entry_id:
+        raise HTTPException(status_code=404, detail="Private resource not found")
+    require_entry_context(request, principal, payload.season_entry_id)
+    request.app.state.midseason_draft.execute_pick(
+        season_id,
+        own_entry_id,
+        payload.season_player_id,
+        pick_id=payload.draft_pick_id,
+        actor=_actor(principal),
         reason=payload.reason or "mid-season draft selection",
     )
     return build_board(request, season_id, draft_kind="midseason")
@@ -614,12 +682,9 @@ def midseason_operations_page(season_id: str, request: Request, principal: Princ
 
 
 @page_router.get("/admin/midseason-draft/{season_id}/conduct", response_class=HTMLResponse)
-def midseason_conduct_page(season_id: str, request: Request, principal: Principal = Depends(participate)):
-    """The shared draft-selection board (issue #181), reused verbatim from
-    the preseason draft's own page (`app.routes.draft.draft_page`) with
-    `draft_kind="midseason"` -- a Coach whose team owns the active pick may
-    reach this page directly; a Scorer/Admin retains the audited proxy
-    path on the same page."""
+def midseason_conduct_page(season_id: str, request: Request, principal: Principal = Depends(manage)):
+    """The operator draft-selection board; Coach access uses the separate
+    `/account/midseason-draft/{season_id}` surface below."""
     _authorise(request, principal, season_id)
     return templates.TemplateResponse(
         request,
@@ -629,5 +694,24 @@ def midseason_conduct_page(season_id: str, request: Request, principal: Principa
             "draft_kind": "midseason",
             "api_base": "/api/admin/midseason-draft",
             "my_season_entry_id": resolve_my_entry_id(request, principal, season_id),
+            "coach_view": False,
+        },
+    )
+
+
+@page_router.get("/account/midseason-draft/{season_id}", response_class=HTMLResponse)
+def coach_midseason_draft_page(season_id: str, request: Request, principal: Principal = Depends(coach_participant)):
+    entry_id = _coach_entry_id(request, principal, season_id)
+    team = request.app.state.identities.get_public_team(entry_id)
+    return templates.TemplateResponse(
+        request,
+        "draft.html",
+        {
+            "season_id": season_id,
+            "draft_kind": "midseason",
+            "api_base": "/api/account/midseason-draft",
+            "my_season_entry_id": entry_id,
+            "coach_view": True,
+            "coach_team_name": team.team_name if team else "Coach",
         },
     )

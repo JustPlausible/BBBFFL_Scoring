@@ -322,7 +322,7 @@ class PlayerPoolRepository:
             available = [player for player in available if needle in player.display_name.lower()]
         return available[: max(limit, 0)]
 
-    def browse(self, season_id, query=None, availability=None, limit=200):
+    def browse(self, season_id, query=None, availability=None, limit=200, owner_season_entry_id=None):
         """Return the season pool plus current authoritative ownership.
 
         This is intentionally a joined, request-time read model.  It does not
@@ -345,6 +345,8 @@ class PlayerPoolRepository:
         for row in rows:
             state = "owned" if row["owner_season_entry_id"] else ("available" if row["eligible"] else "unresolved")
             if availability and state != availability:
+                continue
+            if owner_season_entry_id is not None and row["owner_season_entry_id"] != owner_season_entry_id:
                 continue
             searchable = " ".join(
                 str(value or "") for value in (row["display_name"], row["afl_team_name"], row["canonical_player_id"])

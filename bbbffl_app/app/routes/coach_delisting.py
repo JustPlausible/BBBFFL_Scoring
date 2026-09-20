@@ -65,11 +65,14 @@ def _status_view(request: Request, season_entry_id: str) -> dict:
     if team is None:
         raise HTTPException(status_code=404, detail="Private resource not found")
     draft = midseason.get_draft(team.season_id)
-    squad = [
-        item
-        for item in player_browse_view(request, team.season_id, draft_kind="midseason", availability="owned")
-        if item["owner_season_entry_id"] == season_entry_id
-    ]
+    squad = player_browse_view(
+        request,
+        team.season_id,
+        draft_kind="midseason",
+        availability="owned",
+        owner_season_entry_id=season_entry_id,
+    )
+    squad.sort(key=lambda item: (item["display_name"].casefold(), str(item["canonical_player_id"])))
     delistings = (
         [
             dataclasses.asdict(item)

@@ -171,4 +171,13 @@ def suggestion(season_entry_id: str, request: Request, principal: Principal = De
 @page_router.get("/shortlist/{season_entry_id}", response_class=HTMLResponse)
 def shortlist_page(season_entry_id: str, request: Request, principal: Principal = Depends(manage)):
     require_entry_context(request, principal, season_entry_id)
-    return templates.TemplateResponse(request, "shortlist.html", {"season_entry_id": season_entry_id})
+    coach_draft_url = None
+    team = request.app.state.identities.get_public_team(season_entry_id)
+    midseason_draft = request.app.state.midseason_draft.get_draft(team.season_id) if team else None
+    if principal.role is Role.COACH and team and midseason_draft and midseason_draft.state == "draft_open":
+        coach_draft_url = f"/account/midseason-draft/{team.season_id}"
+    return templates.TemplateResponse(
+        request,
+        "shortlist.html",
+        {"season_entry_id": season_entry_id, "coach_draft_url": coach_draft_url},
+    )

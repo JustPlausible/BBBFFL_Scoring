@@ -246,11 +246,20 @@ def build_board(request, season_id: str, *, draft_kind: str = "preseason") -> di
         raise KeyError(season_id)
     cache: dict = {}
     player_cache: dict = {}
-    order = [
-        {"position": position, **entry_view(request, entry_id, cache)}
-        for position, entry_id in draft.order(season_id, draft_kind=draft_kind)
-    ]
     all_picks = draft.picks(season_id, draft_kind=draft_kind)
+    frozen_order = draft.order(season_id, draft_kind=draft_kind)
+    allocated_pick_counts = {
+        entry_id: sum(1 for pick in all_picks if pick.current_season_entry_id == entry_id)
+        for _, entry_id in frozen_order
+    }
+    order = [
+        {
+            "position": position,
+            **entry_view(request, entry_id, cache),
+            "allocated_pick_count": allocated_pick_counts[entry_id],
+        }
+        for position, entry_id in frozen_order
+    ]
     completed = [pick for pick in all_picks if pick.completed_at is not None]
     remaining = [pick for pick in all_picks if pick.completed_at is None]
     current = remaining[0] if remaining else None
@@ -268,16 +277,20 @@ def build_board(request, season_id: str, *, draft_kind: str = "preseason") -> di
     # vacancy_allocations`), including entries with zero picks at all.
     # Each entry's own target is however many picks it was actually
     # allocated in `all_picks`, not the season-wide squad limit.
-    target_counts = (
+    target_counts = allocated_pick_counts if draft_kind == "midseason" else None
+    team_progress = [
         {
-            row["season_entry_id"]: sum(
-                1 for pick in all_picks if pick.current_season_entry_id == row["season_entry_id"]
-            )
-            for row in order
+            **identity,
+            "drafted_count": sum(
+                1 for pick in completed if pick.current_season_entry_id == identity["season_entry_id"]
+            ),
+            "target_count": (
+                target_counts[identity["season_entry_id"]] if target_counts is not None else status.target_squad_size
+            ),
         }
-        if draft_kind == "midseason"
-        else None
-    )
+        for identity in (entry_view(request, row["season_entry_id"], cache) for row in order)
+        if target_counts is None or target_counts[identity["season_entry_id"]] > 0
+    ]
     return {
         "season_id": season_id,
         "draft_kind": draft_kind,
@@ -287,29 +300,14 @@ def build_board(request, season_id: str, *, draft_kind: str = "preseason") -> di
         "current_pick": pick_view(request, current, cache, player_cache, event_cache) if current else None,
         "upcoming_picks": [pick_view(request, pick, cache, player_cache, event_cache) for pick in remaining[1:]],
         "completed_picks": [pick_view(request, pick, cache, player_cache, event_cache) for pick in reversed(completed)],
-        "team_progress": [
-            {
-                **identity,
-                "drafted_count": sum(
-                    1 for pick in completed if pick.current_season_entry_id == identity["season_entry_id"]
-                ),
-                "target_count": (
-                    target_counts[identity["season_entry_id"]]
-                    if target_counts is not None
-                    else status.target_squad_size
-                ),
-            }
-            for identity in (
-                entry_view(request, entry_id, cache) for _, entry_id in draft.order(season_id, draft_kind=draft_kind)
-            )
-        ],
+        "team_progress": team_progress,
         "correctable_draft_pick_id": latest_completed.draft_pick_id if latest_completed else None,
         "corrections": [dataclasses.asdict(item) for item in draft.corrections(season_id, draft_kind=draft_kind)],
     }
 
 
 def player_browse_view(
-    request, season_id: str, *, draft_kind: str, query=None, availability=None, limit=200
+    request, season_id: str, *, draft_kind: str, query=None, availability=None, limit=200, owner_season_entry_id=None
 ) -> list[dict]:
     """The shared player-browser response (issue #181): `app.player_pool.
     PlayerPoolRepository.browse`'s existing availability/search/sort model,
@@ -319,7 +317,9 @@ def player_browse_view(
     draft. Stats are informational only: `browse`'s own `availability`
     field remains the sole authoritative state, read fresh from
     `player_ownership_period`, exactly as before this annotation existed."""
-    items = request.app.state.player_pool.browse(season_id, query, availability, limit)
+    items = request.app.state.player_pool.browse(
+        season_id, query, availability, limit, owner_season_entry_id=owner_season_entry_id
+    )
     stats_context = request.app.state.player_stats_context
     if draft_kind == "midseason":
         stats_by_canonical_id = stats_context.current_season_points(season_id)

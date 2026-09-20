@@ -699,6 +699,35 @@ class MidseasonDraftRepository:
                     }
         return None
 
+    def coach_selection_context(self, identities, coach_id):
+        """The open mid-season selection board discoverable from a Coach
+        Account, including how many active generated picks their team owns.
+
+        This is presentation-only: the shared conduct board and
+        ``execute_pick`` remain authoritative for turn order and selection
+        authorization. A zero-pick team still receives the board link for
+        context, but the account page labels it as not participating.
+        """
+        rows = self.database.execute("SELECT season_id FROM midseason_draft WHERE state='draft_open'").fetchall()
+        for row in rows:
+            for entry in identities.list_entries(row["season_id"]):
+                if entry.coach_id != coach_id:
+                    continue
+                selection_count = self.database.execute(
+                    "SELECT COUNT(*) AS n FROM draft_pick p "
+                    "JOIN season_draft d ON d.draft_id=p.draft_id "
+                    "WHERE d.season_id=? AND d.draft_kind='midseason' "
+                    "AND p.current_season_entry_id=? AND p.superseded_by_draft_pick_id IS NULL",
+                    (row["season_id"], entry.season_entry_id),
+                ).fetchone()["n"]
+                return {
+                    "season_id": row["season_id"],
+                    "season_entry_id": entry.season_entry_id,
+                    "team_name": entry.team_name,
+                    "selection_count": selection_count,
+                }
+        return None
+
     # -- Trades: player and round-based pick legs ------------------------
 
     def propose_trade(self, season_id, legs, *, actor, reason=None):

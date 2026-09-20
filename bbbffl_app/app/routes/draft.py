@@ -244,5 +244,6 @@ def draft_page(
             "draft_kind": "preseason",
             "api_base": "/api/admin/draft",
             "my_season_entry_id": resolve_my_entry_id(request, principal, season_id),
+            "coach_view": principal.role is Role.COACH,
         },
     )

@@ -183,6 +183,9 @@ def account_page(request: Request):
     midseason_delisting = request.app.state.midseason_draft.coach_delisting_context(
         request.app.state.identities, coach.coach_id
     )
+    midseason_selection = request.app.state.midseason_draft.coach_selection_context(
+        request.app.state.identities, coach.coach_id
+    )
     response = templates.TemplateResponse(
         request,
         "account.html",
@@ -195,6 +198,7 @@ def account_page(request: Request):
             "has_admin_dashboard_access": preferred_admin_role is not None,
             "preferred_admin_role": preferred_admin_role,
             "midseason_delisting": midseason_delisting,
+            "midseason_selection": midseason_selection,
         },
     )
     _attach_csrf_cookie(request, response, token)

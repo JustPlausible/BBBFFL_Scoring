@@ -28,6 +28,10 @@
   .message { display:none; padding: 9px; margin-bottom: 12px; border-radius: 8px; }
   .message.error { display:block; background:#4a1f1f; border:1px solid #a53a3a; }
   .message.success { display:block; background:#1f3a24; border:1px solid #2f6e3a; }
+  .trade-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:10px; margin:10px 0; }
+  .trade-side { padding:10px; border:1px solid #2a2f3a; border-radius:8px; }
+  .trade-side h3 { margin:0 0 8px; font-size:.95rem; }
+  .trade-side select { width:100%; margin-bottom:7px; }
   a { color: #79c0ff; }
 </style>
 </head>
@@ -70,13 +74,36 @@
       <input type="text" id="delist-reason" placeholder="Reason (optional)">
       <button id="delist-btn">Submit delisting</button>
     </div>
-    <h2>Trades</h2>
-    <div id="trade-list"></div>
-    <p class="muted">Proposing a new trade is available via the API for now (<code>POST /api/admin/midseason-draft/{season_id}/trade</code>); pending trades proposed elsewhere can be approved/rejected here.</p>
     <div class="search-row">
       <button id="lock-btn" class="danger">Lock delistings</button>
       <button id="generate-btn" class="primary">Generate selections</button>
     </div>
+  </div>
+
+  <div class="block" id="trade-block" style="display:none;">
+    <h2>Record an agreed trade</h2>
+    <p class="muted" id="trade-phase-note"></p>
+    <p class="muted">Record the agreement as a pending proposal, review the summary below, then explicitly approve or reject it. The domain revalidates ownership, capacity, pick entitlement and lifecycle when each action is submitted.</p>
+    <div class="trade-grid">
+      <section class="trade-side">
+        <h3>Team A gives / Team B receives</h3>
+        <select id="trade-team-a"><option value="">Select Team A…</option></select>
+        <select id="trade-type-a"><option value="player">Player</option><option value="pick">Mid-season round pick</option></select>
+        <select id="trade-asset-a"><option value="">Select asset…</option></select>
+      </section>
+      <section class="trade-side">
+        <h3>Team B gives / Team A receives</h3>
+        <select id="trade-team-b"><option value="">Select Team B…</option></select>
+        <select id="trade-type-b"><option value="player">Player</option><option value="pick">Mid-season round pick</option></select>
+        <select id="trade-asset-b"><option value="">Select asset…</option></select>
+      </section>
+    </div>
+    <div class="search-row">
+      <input type="text" id="trade-proposal-reason" placeholder="Agreement / audit note (optional)">
+      <button id="propose-trade-btn" class="primary">Record pending trade proposal</button>
+    </div>
+    <h2>Recorded trades</h2>
+    <div id="trade-list"></div>
   </div>
 
   <div class="block" id="draft-link-block" style="display:none;">
@@ -176,16 +203,27 @@ function renderTrades(body) {
   const list = document.getElementById('trade-list');
   const trades = body.trades || [];
   list.innerHTML = trades.length
-    ? '<table><thead><tr><th>Legs</th><th>Status</th><th></th></tr></thead><tbody>' +
-      trades.map(t => `<tr><td>${(t.legs || []).map(tradeLegText).join('<br>')}</td><td>${escapeHtml(t.status)}</td><td>${
+    ? '<table><thead><tr><th>Exchange</th><th>Proposal audit</th><th>Status / decision</th><th></th></tr></thead><tbody>' +
+      trades.map(t => `<tr><td>${(t.legs || []).map(tradeLegText).join('<br>')}</td><td>${
+        t.proposal_audit
+          ? `${escapeHtml(t.proposal_audit.actor_name)} (${escapeHtml(t.proposal_audit.actor_role || 'operator')})<br><span class="muted">${escapeHtml(t.proposal_audit.occurred_at)}${t.proposal_audit.reason ? ` — ${escapeHtml(t.proposal_audit.reason)}` : ''}</span>`
+          : '<span class="muted">Proposal audit unavailable</span>'
+      }</td><td><span class="pill">${escapeHtml(t.status)}</span>${
+        t.decision_audit
+          ? `<br>${escapeHtml(t.decision_audit.actor_name)} (${escapeHtml(t.decision_audit.actor_role || 'operator')})<br><span class="muted">${escapeHtml(t.decision_audit.occurred_at)}${t.decision_audit.reason ? ` — ${escapeHtml(t.decision_audit.reason)}` : ''}</span>`
+          : ''
+      }</td><td>${
         t.status === 'pending'
-          ? `<button data-approve="${t.trade_id}" class="primary">Approve</button> <button data-reject="${t.trade_id}" class="danger">Reject</button>`
+          ? `<button data-approve="${t.trade_id}" class="primary">Approve trade</button> <button data-reject="${t.trade_id}" class="danger">Reject trade</button>`
           : ''
       }</td></tr>`).join('') +
       '</tbody></table>'
     : '<p class="muted">No trades proposed yet.</p>';
   document.querySelectorAll('[data-approve]').forEach(btn => {
-    btn.onclick = () => api(`${API}/trade/${btn.dataset.approve}/decide`, { approve: true }).then(() => refresh('Trade approved.')).catch(handleError);
+    btn.onclick = () => {
+      const reason = prompt('Audit note for approving this agreed trade? (optional)') || null;
+      api(`${API}/trade/${btn.dataset.approve}/decide`, { approve: true, reason }).then(() => refresh('Trade approved and applied.')).catch(handleError);
+    };
   });
   document.querySelectorAll('[data-reject]').forEach(btn => {
     btn.onclick = () => {
@@ -195,11 +233,66 @@ function renderTrades(body) {
   });
 }
 
+let currentTradeBody = null;
+
+function tradeTeamOptions(body) {
+  return '<option value="">Select team…</option>' +
+    (body.order || []).map(o => `<option value="${escapeHtml(o.season_entry_id)}">${escapeHtml(o.team_name)}</option>`).join('');
+}
+
+async function populateTradeAsset(side) {
+  const teamId = document.getElementById(`trade-team-${side}`).value;
+  const legType = document.getElementById(`trade-type-${side}`).value;
+  const asset = document.getElementById(`trade-asset-${side}`);
+  const previous = asset.value;
+  asset.innerHTML = '<option value="">Select asset…</option>';
+  if (!teamId || !currentTradeBody) return;
+  if (legType === 'pick') {
+    asset.innerHTML += (currentTradeBody.trade_pick_rounds || []).map(round =>
+      `<option value="${round}">Round ${round} pick (subject to vacancy at delisting lock)</option>`
+    ).join('');
+  } else {
+    try {
+      const players = await api(`${API}/players?availability=owned&owner_season_entry_id=${encodeURIComponent(teamId)}`);
+      asset.innerHTML += players.map(player =>
+        `<option value="${escapeHtml(player.season_player_id)}">${escapeHtml(player.display_name)}${player.afl_team_name ? ' — ' + escapeHtml(player.afl_team_name) : ''}</option>`
+      ).join('');
+    } catch (e) {
+      say(e.message || 'Owned players could not be loaded.');
+    }
+  }
+  if ([...asset.options].some(option => option.value === previous)) asset.value = previous;
+}
+
+function populateTradeForm(body, state) {
+  currentTradeBody = body;
+  const options = tradeTeamOptions(body);
+  for (const side of ['a', 'b']) {
+    const team = document.getElementById(`trade-team-${side}`);
+    const previousTeam = team.value;
+    team.innerHTML = options;
+    if ([...team.options].some(option => option.value === previousTeam)) team.value = previousTeam;
+    const type = document.getElementById(`trade-type-${side}`);
+    const pickOption = type.querySelector('option[value="pick"]');
+    pickOption.disabled = state !== 'delisting_open';
+    if (pickOption.disabled && type.value === 'pick') type.value = 'player';
+    populateTradeAsset(side);
+  }
+  document.getElementById('trade-phase-note').textContent = state === 'delisting_open'
+    ? 'Pre-draft trading is open: player and round-based pick legs may be recorded. Pick delivery remains subject to the authoritative vacancy reconciliation at delisting lock.'
+    : 'Post-draft trading is open: player legs may be recorded. Round-based pick trading is no longer permitted after delistings lock.';
+}
+
+for (const side of ['a', 'b']) {
+  document.getElementById(`trade-team-${side}`).onchange = () => populateTradeAsset(side);
+  document.getElementById(`trade-type-${side}`).onchange = () => populateTradeAsset(side);
+}
+
 // Codex review, PR #225 (P2): populate human-readable team/owned-player
 // selectors for the delisting form instead of requiring the operator to
 // already know and type raw UUIDs -- reuses the same shared player
-// browser (`GET .../players`) the conduct-draft board uses, filtered
-// client-side to the chosen team's currently owned players.
+// browser (`GET .../players`) the conduct-draft board uses, scoped to the
+// chosen team's currently owned players before the API applies its limit.
 function populateTeamSelect(body) {
   const select = document.getElementById('delist-entry');
   const previous = select.value;
@@ -215,9 +308,8 @@ async function populatePlayerSelect() {
   playerSelect.innerHTML = '<option value="">Select an owned player…</option>';
   if (!entryId) return;
   try {
-    const players = await api(`${API}/players?availability=owned`);
-    const owned = players.filter(p => p.owner_season_entry_id === entryId);
-    playerSelect.innerHTML += owned.map(p => `<option value="${escapeHtml(p.season_player_id)}">${escapeHtml(p.display_name)}${p.afl_team_name ? ' — ' + escapeHtml(p.afl_team_name) : ''}</option>`).join('');
+    const players = await api(`${API}/players?availability=owned&owner_season_entry_id=${encodeURIComponent(entryId)}`);
+    playerSelect.innerHTML += players.map(p => `<option value="${escapeHtml(p.season_player_id)}">${escapeHtml(p.display_name)}${p.afl_team_name ? ' — ' + escapeHtml(p.afl_team_name) : ''}</option>`).join('');
   } catch (e) {
     // Leave the selector at its placeholder-only state; the delist
     // button's own validation still refuses an empty selection.
@@ -331,6 +423,26 @@ on('delist-btn', () => {
   }).then(() => refresh('Delisting submitted.')).catch(handleError);
 });
 
+on('propose-trade-btn', () => {
+  const teamA = document.getElementById('trade-team-a').value;
+  const teamB = document.getElementById('trade-team-b').value;
+  const typeA = document.getElementById('trade-type-a').value;
+  const typeB = document.getElementById('trade-type-b').value;
+  const assetA = document.getElementById('trade-asset-a').value;
+  const assetB = document.getElementById('trade-asset-b').value;
+  if (!teamA || !teamB || !assetA || !assetB) {
+    say('Select both teams and what each team gives.');
+    return;
+  }
+  const leg = (legType, from, to, asset) => legType === 'player'
+    ? { leg_type: 'player', from_season_entry_id: from, to_season_entry_id: to, season_player_id: asset }
+    : { leg_type: 'pick', from_season_entry_id: from, to_season_entry_id: to, draft_round: Number(asset) };
+  api(`${API}/trade`, {
+    legs: [leg(typeA, teamA, teamB, assetA), leg(typeB, teamB, teamA, assetB)],
+    reason: document.getElementById('trade-proposal-reason').value || null,
+  }).then(() => refresh('Agreed trade recorded as pending. Review it below, then approve or reject it.')).catch(handleError);
+});
+
 on('lock-btn', () => {
   if (!confirm('Lock delistings? Every active delisted player releases immediately and this cannot be undone.')) return;
   api(`${API}/lock-delistings`, {}).then(() => refresh('Delistings locked.')).catch(handleError);
@@ -354,6 +466,7 @@ async function refresh(successMessage) {
     document.getElementById('setup-block').style.display = body.draft ? 'none' : '';
     document.getElementById('open-delisting-block').style.display = state === 'ladder_confirmed' ? '' : 'none';
     document.getElementById('delisting-block').style.display = ['delisting_open', 'delistings_locked'].includes(state) ? '' : 'none';
+    document.getElementById('trade-block').style.display = ['delisting_open', 'draft_complete'].includes(state) ? '' : 'none';
     // Submitting a new delisting is only legal while the window is open;
     // locking is only legal from delisting_open; generating is only legal
     // once delistings are locked (Codex review, PR #225, P1 -- the
@@ -369,6 +482,7 @@ async function refresh(successMessage) {
       renderDelistings(body);
       renderTrades(body);
       populateTeamSelect(body);
+      if (['delisting_open', 'draft_complete'].includes(state)) populateTradeForm(body, state);
     }
     if (successMessage) say(successMessage, 'success'); else say('');
   } catch (e) {

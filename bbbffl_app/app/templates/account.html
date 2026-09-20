@@ -123,6 +123,16 @@
         <span class="round-meta">{{ midseason_delisting.team_name }}: submit or withdraw a delisting before the Scorer locks the window.</span>
       </a>
     </div>{% endif %}
+    {% if midseason_selection %}<div class="rounds">
+      <a href="/account/midseason-draft/{{ midseason_selection.season_id }}">
+        <span class="round-label">Mid-season draft selections →</span>
+        <span class="round-meta">{{ midseason_selection.team_name }}:
+          {% if midseason_selection.selection_count %}{{ midseason_selection.selection_count }} generated pick{% if midseason_selection.selection_count != 1 %}s{% endif %}. Open the board to follow the draft and select when it is your turn.
+          {% else %}0 picks — your team is not participating in selections. Open the board to follow draft progress.
+          {% endif %}
+        </span>
+      </a>
+    </div>{% endif %}
     {% if lineup_rounds %}<h2>Weekly selections</h2><div class="rounds">{% for round in lineup_rounds %}<a class="state-{{ round.state }}" href="/coach/seasons/{{ round.season_id }}/rounds/{{ round.round_id }}/lineup">
       <span class="round-label">{{ round.round_label }} →</span>
       <span class="round-status">{% if round.state == 'submitted_with_changes' %}Submitted + private changes{% elif round.state == 'submitted' %}Submitted{% elif round.state == 'draft_saved' %}Draft saved{% else %}Not submitted{% endif %}</span>

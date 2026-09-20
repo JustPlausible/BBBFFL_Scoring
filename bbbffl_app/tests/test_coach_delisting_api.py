@@ -88,6 +88,7 @@ def test_account_page_shows_delisting_cue_only_while_the_window_is_open(midseaso
     assert account.status_code == 200
     assert "Mid-season delisting is open" in account.text
     assert "/account/delisting" in account.text
+    assert "/conduct" not in account.text
 
     # A coach with no team in any season currently `delisting_open` sees no
     # cue and no implication that delistings can currently be changed.
@@ -122,6 +123,27 @@ def test_coach_can_view_own_squad_and_delisting_state(midseason_client):
     assert {p["season_player_id"] for p in body["squad"]} == {row.season_player_id for row in squad}
     assert all(p["delisted"] is False for p in body["squad"])
     assert body["delistings"] == []
+
+
+def test_coach_squad_is_ordered_by_full_player_name(midseason_client):
+    client = midseason_client
+    season, entries, ctx = _build_delisting_open(client, year=4010)
+    entry = entries[9]
+    squad = ctx["ownership"].current_squad(entry.season_entry_id)
+    names = ["Amy Young", "Madonna", "Zoe Adams", "Ben Brown"]
+    for ownership, display_name in zip(squad, names, strict=True):
+        player = ctx["player_pool"].get_by_id(ownership.season_player_id)
+        ctx["player_pool"].refresh_player(season.season_id, player.canonical_player_id, display_name)
+
+    _give_credentials(client.app, entry.season_entry_id, email="alphabetical-coach@example.com")
+    session = _login(client, email="alphabetical-coach@example.com")
+    status = client.get(
+        f"/api/account/delisting/{entry.season_entry_id}/status",
+        cookies={"bbbffl_session": session},
+    )
+
+    assert status.status_code == 200, status.text
+    assert [player["display_name"] for player in status.json()["squad"]] == sorted(names, key=str.casefold)
 
 
 def test_rendered_coach_page_uses_status_route_for_initial_load(midseason_client):

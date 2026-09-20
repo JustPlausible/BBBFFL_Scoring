@@ -323,3 +323,64 @@ def test_polling_and_focus_refresh_wiring_present_on_coach_preseason_page(client
     assert "document.addEventListener('visibilitychange', refreshAfterReturning)" in page.text
     assert "window.addEventListener('focus', refreshAfterReturning)" in page.text
     assert "renderPlayers(document.getElementById('player-search').value)" in page.text
+
+
+def test_account_cue_switches_role_back_to_coach_before_opening_the_coach_route(client):
+    """Codex review, PR #230 (P2): a multi-role coach whose session's
+    *active* role is currently a delegated one (Scorer here) would 403 on
+    `coach_draft_page` (`coach_participant` requires the active role to
+    literally be "coach") if the `/account` cue were a plain `<a href>`.
+    `account.html`'s cue is a button that switches the active role back to
+    "coach" via `POST /api/context/role` before navigating -- this proves
+    that server-side mechanism: activating a delegated role first-hand
+    blocks the coach route exactly as the review predicted, and switching
+    back to "coach" (always available to a signed-in coach identity that
+    owns a season entry) unblocks it again, which is what the button's
+    `fetch` call performs before `window.location.href` navigates."""
+    client_ = client
+    database = client_.app.state.database
+    season, entries, players = _seed_draft_ready_season(database, year=4006, label="Preseason Coach Role Switch")
+    entry = entries[0]
+    coach = _give_credentials(client_.app, entry.season_entry_id)
+    session = _login(client_, email="preseason-coach-0-4006@example.com")
+    cookies = {"bbbffl_session": session}
+
+    account = client_.get("/account", cookies=cookies)
+    assert account.status_code == 200, account.text
+    assert f"/account/preseason-draft/{season.season_id}" in account.text
+    assert "switchToCoachRoleAndNavigate(targetUrl, button, error, csrfToken)" in account.text
+    csrf_token = _extract_csrf(account.text)
+
+    # `client_.cookies` still carries the coach's own session from `_login`
+    # above -- an explicit empty override (as elsewhere in this file)
+    # resolves to no session, defaulting to admin in dev/test mode, which
+    # `/api/admin/role-grants` requires.
+    grant = client_.post(
+        "/api/admin/role-grants",
+        json={"coach_id": coach.coach_id, "role": "scorer", "season_id": None},
+        cookies={"bbbffl_session": ""},
+    )
+    assert grant.status_code == 200, grant.text
+    activate_scorer = client_.post(
+        "/api/context/role",
+        json={"role": "scorer"},
+        cookies=cookies,
+        headers={"X-CSRF-Token": csrf_token},
+    )
+    assert activate_scorer.status_code == 200, activate_scorer.text
+
+    # With "scorer" active, the coach-only route 403s -- exactly the gap
+    # the review flagged for a plain link.
+    blocked = client_.get(f"/account/preseason-draft/{season.season_id}", cookies=cookies)
+    assert blocked.status_code == 403, blocked.text
+
+    switch_back = client_.post(
+        "/api/context/role",
+        json={"role": "coach"},
+        cookies=cookies,
+        headers={"X-CSRF-Token": csrf_token},
+    )
+    assert switch_back.status_code == 200, switch_back.text
+
+    unblocked = client_.get(f"/account/preseason-draft/{season.season_id}", cookies=cookies)
+    assert unblocked.status_code == 200, unblocked.text

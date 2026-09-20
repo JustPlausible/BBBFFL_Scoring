@@ -121,6 +121,7 @@
   </div>
 
   {% if draft_kind != "midseason" %}
+  {% if not coach_view %}
   <div class="block">
     <h2>Pause / resume</h2>
     <div class="search-row">
@@ -129,12 +130,18 @@
       <button id="resume-btn" class="primary">Resume draft</button>
     </div>
   </div>
+  {% endif %}
 
   <div class="block finalize-box">
+    {% if coach_view %}
+    <h2>Draft completion</h2>
+    <p class="muted">The pre-season draft finalises once a Scorer/Admin completes every required pick and confirms readiness.</p>
+    {% else %}
     <h2>Finalise draft</h2>
     <p class="muted">Only possible once every configured pick is completed. This locks ordinary draft controls.</p>
     <input type="text" id="finalize-note" placeholder="Optional sign-off note">
     <button class="danger" id="finalize-btn">Finalise draft</button>
+    {% endif %}
     <div id="completion-summary"></div>
   </div>
   {% else %}
@@ -486,8 +493,10 @@ async function performRefresh(successMessage) {
         : '';
     } else {
       completionEl.innerHTML = board.status.finalized_at
-        ? `<p><strong>Draft finalised.</strong> All ${board.status.total_picks} required picks and team squad targets are satisfied.</p><p><a href="${escapeHtml(board.preseason_url)}">Continue to preseason and opening-squad management →</a></p>`
-        : (board.status.completed_picks === board.status.total_picks ? '<p><strong>Every required pick and squad target is complete.</strong> Review the board, then finalise.</p>' : '');
+        ? `<p><strong>Draft finalised.</strong> All ${board.status.total_picks} required picks and team squad targets are satisfied.</p>${COACH_VIEW ? '' : `<p><a href="${escapeHtml(board.preseason_url)}">Continue to preseason and opening-squad management →</a></p>`}`
+        : (board.status.completed_picks === board.status.total_picks
+            ? `<p><strong>Every required pick and squad target is complete.</strong> ${COACH_VIEW ? 'A Scorer/Admin will review and finalise the draft.' : 'Review the board, then finalise.'}</p>`
+            : '');
     }
     // Search text and the availability select are deliberately never
     // rewritten by board refreshes; reuse their live values when refreshing

@@ -317,11 +317,54 @@ the application's normal development database, and refuses to run at all
 when `BBBFFL_ENVIRONMENT=production`. Every run creates a fresh season, so
 re-running it never collides with or contaminates a prior replay.
 
+## Coach self-service pre-season draft (issue #229)
+
+The Scorer/Admin operator surface above is unchanged, but a Coach no longer
+needs it (or an `/admin/draft/{season_id}` URL) to follow and participate in
+their own pre-season draft:
+
+- **Coach Account discoverability.** `DraftRepository.coach_selection_context`
+  finds the season entry (if any) this coach owns in a `draft_kind`
+  draft that is accepted and not yet finalized -- a paused draft still
+  counts as relevant, only finalisation clears the cue. The Coach Account
+  page (`/account`) shows an unmistakable "Pre-season draft selections →"
+  card and link whenever that is true, mirroring
+  `MidseasonDraftRepository.coach_selection_context`'s existing mid-season
+  cue (`docs/midseason-draft.md`'s issue #226 section).
+- **Dedicated Coach route.** `GET /account/preseason-draft/{season_id}`
+  (`app/routes/draft.py`'s `coach_draft_page`) renders the exact same
+  `templates/draft.html` board as `/admin/draft/{season_id}` --
+  `draft_kind="preseason"`, scoped to the Coach's own entry -- with
+  `coach_view=True` hiding every operator-only control (pre-draft
+  readiness, pause/resume, finalise, danger-zone correction/reopen, proxy
+  provenance). Its `/api/account/preseason-draft/{season_id}/...` API
+  (`board`, `players`, `pick`) is a thin, Coach-only surface over the same
+  `app.draft_board` view-model helpers and `DraftRepository.execute_pick`
+  the operator surface uses -- no second draft engine.
+- **Entry resolution never trusts the client.** `_coach_entry_id` resolves
+  the entry from the authenticated principal
+  (`app.draft_board.resolve_my_entry_id`) rather than any request
+  parameter; `coach_submit_pick` additionally 404s (enumeration-safe, never
+  403) if a submitted `season_entry_id` does not match that resolved entry,
+  before `require_entry_context`/`execute_pick` re-validate turn,
+  ownership, availability, squad limits, staleness and concurrency exactly
+  as the operator path does. A Coach reading the board while another team
+  is on the clock is read-only by construction: `draft.html` only offers a
+  pick control once `MY_SEASON_ENTRY_ID` matches the current pick's owner.
+- **Coach audit provenance preserved.** `coach_submit_pick` reuses
+  `_pick_actor`, which already resolves a genuine Coach principal to
+  `ActorContext.coach(...)` (never `anonymous_operator`) -- unchanged from
+  the operator route's existing behaviour.
+- **Template gap fixed for both surfaces.** `draft.html`'s pause/resume and
+  finalise controls were previously shown regardless of `coach_view` for
+  the preseason `draft_kind` (only the mid-season branch and the danger
+  zone were already coach-gated) -- a latent gap that would have exposed
+  operator buttons to a Coach browsing `/admin/draft/{season_id}` directly.
+  Both are now gated behind `{% if not coach_view %}`, matching the
+  mid-season branch's existing convention.
+
 ## Deliberate limitations / follow-up work
 
-- **Scorer-first only.** No coach-facing self-service pick submission
-  exists; every pick is scorer-entered. Introducing that is explicitly out
-  of this issue's scope.
 - **No dedicated "configure a season for drafting" HTTP workflow.** Season/
   entry/player-pool/squad-limit setup remains script/admin-tool driven
   (see `scripts/replay_2026_draft.py` for a worked example); only the

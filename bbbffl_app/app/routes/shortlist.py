@@ -172,12 +172,28 @@ def suggestion(season_entry_id: str, request: Request, principal: Principal = De
 def shortlist_page(season_entry_id: str, request: Request, principal: Principal = Depends(manage)):
     require_entry_context(request, principal, season_entry_id)
     coach_draft_url = None
+    coach_draft_label = None
     team = request.app.state.identities.get_public_team(season_entry_id)
-    midseason_draft = request.app.state.midseason_draft.get_draft(team.season_id) if team else None
-    if principal.role is Role.COACH and team and midseason_draft and midseason_draft.state == "draft_open":
-        coach_draft_url = f"/account/midseason-draft/{team.season_id}"
+    if principal.role is Role.COACH and team:
+        midseason_draft = request.app.state.midseason_draft.get_draft(team.season_id)
+        if midseason_draft and midseason_draft.state == "draft_open":
+            coach_draft_url = f"/account/midseason-draft/{team.season_id}"
+            coach_draft_label = "mid-season draft"
+        else:
+            # Issue #229: the same "return to the board you came from" link,
+            # for the pre-season draft -- an accepted draft that is not yet
+            # finalized (paused or actively running) is still the board this
+            # shortlist supports.
+            preseason_status = request.app.state.draft.status(team.season_id, draft_kind="preseason")
+            if preseason_status and not preseason_status.is_finalized:
+                coach_draft_url = f"/account/preseason-draft/{team.season_id}"
+                coach_draft_label = "pre-season draft"
     return templates.TemplateResponse(
         request,
         "shortlist.html",
-        {"season_entry_id": season_entry_id, "coach_draft_url": coach_draft_url},
+        {
+            "season_entry_id": season_entry_id,
+            "coach_draft_url": coach_draft_url,
+            "coach_draft_label": coach_draft_label,
+        },
     )

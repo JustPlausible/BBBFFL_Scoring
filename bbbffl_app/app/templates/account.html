@@ -123,6 +123,12 @@
         <span class="round-meta">{{ midseason_delisting.team_name }}: submit or withdraw a delisting before the Scorer locks the window.</span>
       </a>
     </div>{% endif %}
+    {% if preseason_selection %}<div class="rounds">
+      <a href="/account/preseason-draft/{{ preseason_selection.season_id }}">
+        <span class="round-label">Pre-season draft selections →</span>
+        <span class="round-meta">{{ preseason_selection.team_name }}: follow the draft, manage your shortlist, and select when it is your turn.</span>
+      </a>
+    </div>{% endif %}
     {% if midseason_selection %}<div class="rounds">
       <a href="/account/midseason-draft/{{ midseason_selection.season_id }}">
         <span class="round-label">Mid-season draft selections →</span>

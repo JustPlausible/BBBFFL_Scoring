@@ -430,7 +430,7 @@ function say(text, kind='error') {
 async function handleError(error) {
   // Refresh first so stale turn/availability state is authoritative, then
   // restore the useful domain message that `refresh()` normally clears.
-  await refresh();
+  await refresh(null, true);
   say(error.message || 'The draft action could not be completed.');
 }
 
@@ -490,10 +490,10 @@ async function performRefresh(successMessage) {
   }
 }
 
-function refresh(successMessage) {
+function refresh(successMessage, requireFresh = false) {
   if (refreshInFlight) {
-    if (!successMessage) return refreshInFlight;
-    queuedRefreshMessage = successMessage;
+    if (!successMessage && !requireFresh) return refreshInFlight;
+    if (successMessage) queuedRefreshMessage = successMessage;
     return refreshInFlight.then(() => {
       const message = queuedRefreshMessage;
       queuedRefreshMessage = null;

@@ -77,6 +77,7 @@ from app.round_review import (
 from app.routes import admin, health, public
 from app.routes import admin_dashboard as admin_dashboard_routes
 from app.routes import auth as auth_routes
+from app.routes import coach_delisting as coach_delisting_routes
 from app.routes import coach_lineup as coach_lineup_routes
 from app.routes import context as context_routes
 from app.routes import delegated_operations as delegated_operations_routes
@@ -301,6 +302,8 @@ app.include_router(preseason_routes.router)
 app.include_router(preseason_routes.page_router)
 app.include_router(midseason_draft_routes.router)
 app.include_router(midseason_draft_routes.page_router)
+app.include_router(coach_delisting_routes.router)
+app.include_router(coach_delisting_routes.page_router)
 app.include_router(shortlist_routes.router)
 app.include_router(shortlist_routes.page_router)
 app.include_router(round_review_routes.router)

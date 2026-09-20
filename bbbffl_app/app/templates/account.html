@@ -117,6 +117,12 @@
       })();
     </script>
     {% endif %}
+    {% if midseason_delisting %}<div class="rounds">
+      <a href="/account/delisting">
+        <span class="round-label">Mid-season delisting is open →</span>
+        <span class="round-meta">{{ midseason_delisting.team_name }}: submit or withdraw a delisting before the Scorer locks the window.</span>
+      </a>
+    </div>{% endif %}
     {% if lineup_rounds %}<h2>Weekly selections</h2><div class="rounds">{% for round in lineup_rounds %}<a class="state-{{ round.state }}" href="/coach/seasons/{{ round.season_id }}/rounds/{{ round.round_id }}/lineup">
       <span class="round-label">{{ round.round_label }} →</span>
       <span class="round-status">{% if round.state == 'submitted_with_changes' %}Submitted + private changes{% elif round.state == 'submitted' %}Submitted{% elif round.state == 'draft_saved' %}Draft saved{% else %}Not submitted{% endif %}</span>

@@ -435,6 +435,7 @@ async function handleError(error) {
 }
 
 let refreshInFlight = null;
+let queuedRefreshMessage = null;
 let lastCurrentPickId = null;
 let hasLoadedBoard = false;
 
@@ -490,7 +491,15 @@ async function performRefresh(successMessage) {
 }
 
 function refresh(successMessage) {
-  if (refreshInFlight) return refreshInFlight;
+  if (refreshInFlight) {
+    if (!successMessage) return refreshInFlight;
+    queuedRefreshMessage = successMessage;
+    return refreshInFlight.then(() => {
+      const message = queuedRefreshMessage;
+      queuedRefreshMessage = null;
+      return refresh(message);
+    });
+  }
   refreshInFlight = performRefresh(successMessage).finally(() => { refreshInFlight = null; });
   return refreshInFlight;
 }

@@ -273,3 +273,34 @@ def test_list_seasons_and_list_coaches_overviews(repos):
     assert {2026, 2027} <= years
     names = {coach["display_name"] for coach in list_coaches_overview(repos["identities"])}
     assert {"Coach One", "Coach Two"} <= names
+
+
+def test_midseason_draft_link_is_persistently_discoverable_before_and_after_trigger_configuration(repos):
+    """Issue #226: unlike the conditional Admin Dashboard readiness card
+    (`app.admin_dashboard`'s `midseason_status`, which only appears once a
+    configured trigger round is fully final), Season Centre's
+    `links.midseason_draft` must be a normal, human-readable navigation
+    entry to `/admin/midseason-draft/{season_id}` from the moment the
+    season has regular-season rounds -- before any trigger round is even
+    configured, not only after."""
+    from tests.midseason_draft_helpers import build_season
+
+    ctx = build_season(repos["database"], year=9231, trigger_round=5, regular_season_round_count=6)
+    season = ctx["season"]
+
+    centre = _build(repos, season.season_id)
+    assert centre["links"]["midseason_draft"] == f"/admin/midseason-draft/{season.season_id}"
+
+    repos["seasons"].set_midseason_draft_trigger_round(season.season_id, 5)
+    centre_after = _build(repos, season.season_id)
+    assert centre_after["links"]["midseason_draft"] == f"/admin/midseason-draft/{season.season_id}"
+
+
+def test_midseason_draft_link_absent_before_any_ordinary_rounds_exist(repos):
+    """A season with no regular-season rounds yet has no meaningful
+    mid-season draft to set up -- `links.midseason_draft` stays `None`,
+    matching the existing `round_centre` link's own precondition, rather
+    than advertising a dead-end destination."""
+    season = create_season(repos["seasons"], 9232, "9232")
+    centre = _build(repos, season["season_id"])
+    assert centre["links"]["midseason_draft"] is None

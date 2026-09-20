@@ -363,6 +363,42 @@ their own pre-season draft:
   Both are now gated behind `{% if not coach_view %}`, matching the
   mid-season branch's existing convention.
 
+## Operator proxy picks without a represented-entry switch (issue #231)
+
+V0.1 regression testing of the restored 2026 pre-season draft found that a
+signed-in Scorer/Admin/Replay Operator with no represented season entry
+selected got `Private resource not found` clicking `Draft for <team>` on
+`/admin/draft/{season_id}` for the actual current-pick owner. `submit_pick`
+called `require_entry_context` for *every* authenticated session
+(`principal.coach_id is not None`), which for a delegated role requires
+`principal.represented_season_entry_id` to already equal the payload's
+`season_entry_id` -- the older #107 delegated-acting-context workflow, and
+tedious for every single pick during a live draft.
+
+`submit_pick` now only calls `require_entry_context` when
+`principal.role is Role.COACH` -- a genuine Coach session acting as
+themselves (still limited to their own owned entry, unchanged). A delegated
+operator (Scorer/Admin/Replay Operator -- `draft.participate` is not
+granted to Secretary) is authorised by `draft.participate` alone, exactly
+like `app.routes.midseason_draft.
+submit_pick`'s existing operator route, which never required a represented
+entry at all: `draft.html`'s "Draft for `<team>`" button already submits
+`board.current_pick.current_season_entry_id`, so the operator never had to
+type or choose an entry id in the first place. `DraftRepository.
+execute_pick` remains the sole authority on whether that entry actually
+owns the current pick (`DraftTurnError` -> 409) -- this change only removes
+a redundant, harder-to-satisfy authorization check in front of a repository
+that already rejects the wrong team, a stale pick, an unavailable player,
+or a paused/finalized draft.
+
+The legacy shared `X-Admin-Token` path (`principal.coach_id is None`) is
+untouched -- it never had a represented-entry concept to begin with.
+Audit provenance is unaffected: `_pick_actor` already resolved a delegated
+role to `anonymous_operator` with the operator's own `coach_id` and active
+role, and a genuine Coach to `ActorContext.coach(...)`; this fix changes
+only which sessions must pass `require_entry_context`, never how a pick is
+attributed once it executes.
+
 ## Deliberate limitations / follow-up work
 
 - **No dedicated "configure a season for drafting" HTTP workflow.** Season/

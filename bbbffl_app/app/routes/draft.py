@@ -11,15 +11,25 @@ mutating endpoint here is a thin translation from an HTTP request to one
 response from the database on every request -- a browser reload always
 reflects authoritative persisted state, never reconstructed client state.
 
-Authenticated operators use issue #107's active role and represented-entry
-context; the represented season entry is the domain target (`execute_pick`'s
-owner-of-the-pick identity), never the operator. The audit actor for such a
-pick stays `anonymous_operator` -- the same delegated-write convention every
-other proxy/domain write in this module uses -- with the authenticated
-operator's stable `coach_id` carried in `actor_id` purely as provenance, and
-the active delegated role in `actor_role`. The older shared-token API may
-still supply `PickRequest.scorer_name` as its transitional audit label; it is
-never an entry or ownership identifier.
+Authenticated operators use issue #107's active role. Issue #231 aligned
+`submit_pick`'s authorization with `app.routes.midseason_draft.submit_pick`'s
+existing operator path: a delegated (Scorer/Admin/Replay Operator --
+`draft.participate` is not granted to Secretary) active role no longer has
+to first switch `represented_season_entry_id` to
+the current pick owner just to make a proxy selection -- `draft.participate`
+authority is enough, and `DraftRepository.execute_pick` itself remains the
+sole authority on whether `payload.season_entry_id` is actually the current
+pick's owner (see its "selecting entry does not own the current pick"
+check), so this never lets an operator pick for a team that is not
+genuinely on the clock. A genuine Coach session (`principal.role is
+Role.COACH`) still goes through `require_entry_context` and can only ever
+submit for its own owned entry -- unchanged. The audit actor for a
+delegated proxy pick stays `anonymous_operator` -- the same delegated-write
+convention every other proxy/domain write in this module uses -- with the
+authenticated operator's stable `coach_id` carried in `actor_id` purely as
+provenance, and the active delegated role in `actor_role`. The older
+shared-token API may still supply `PickRequest.scorer_name` as its
+transitional audit label; it is never an entry or ownership identifier.
 
 Reopening a finalized draft is deliberately not an ordinary one-click
 control (see `DraftRepository.reopen`'s docstring): `/reopen` requires the
@@ -54,8 +64,9 @@ router = APIRouter(prefix="/api/admin/draft")
 # midseason_draft`'s `coach_router` -- its own endpoints require an active
 # Coach role and an entry in the requested season; the `/api/admin/...` and
 # `/admin/...` surfaces above require `draft.participate` throughout and
-# remain reachable by a delegated operator (Scorer/Secretary/Admin/Replay
-# Operator) representing an entry, not just a genuine Coach.
+# remain reachable by a delegated operator (Scorer/Admin/Replay Operator --
+# `draft.participate` is not granted to Secretary), not just a genuine
+# Coach.
 coach_router = APIRouter(prefix="/api/account/preseason-draft")
 page_router = APIRouter()
 templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
@@ -205,9 +216,18 @@ def submit_pick(
     principal: Principal = Depends(require_capability("draft.participate")),
 ):
     _authorise_season(request, principal, season_id)
-    # Authenticated #107 sessions must use their represented entry. Keep the
-    # established shared-token compatibility path, which has no coach/session.
-    if principal.coach_id is not None:
+    # Issue #231: only a genuine Coach self-service session (acting as
+    # themselves) needs `require_entry_context`'s ownership check here -- a
+    # delegated operator (Scorer/Admin/Replay Operator -- `draft.participate`
+    # is not granted to Secretary) is already authorised by
+    # `draft.participate` alone, exactly like
+    # `app.routes.midseason_draft.submit_pick`'s equivalent operator route,
+    # and no longer needs to first switch `represented_season_entry_id` to
+    # make a proxy pick -- `execute_pick` still authoritatively rejects any
+    # `season_entry_id` that is not the current pick's real owner. The
+    # legacy shared-token path (`principal.coach_id is None`) is unaffected;
+    # it never had a represented-entry concept.
+    if principal.role is Role.COACH:
         require_entry_context(request, principal, payload.season_entry_id)
     request.app.state.draft.execute_pick(
         season_id,

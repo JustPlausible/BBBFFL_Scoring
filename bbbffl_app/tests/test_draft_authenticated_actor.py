@@ -9,12 +9,17 @@ it inside `DraftRepository.execute_pick`'s transaction, so the whole pick
 transaction) rolled back.
 
 These tests exercise the real HTTP endpoint end-to-end -- login, role
-activation, represented-entry selection, then `POST /api/admin/draft/
-{season_id}/pick` -- exactly as `docs/acting-context.md`'s browser workflow
-does, rather than calling `_pick_actor` in isolation, so a regression here
-would only be caught once the complete authorization path is exercised
-(matching how the original bug was only visible in production, not in any
-unit-level check of the actor construction alone).
+activation, optionally represented-entry selection, then `POST /api/admin/
+draft/{season_id}/pick` -- exactly as `docs/acting-context.md`'s browser
+workflow does, rather than calling `_pick_actor` in isolation, so a
+regression here would only be caught once the complete authorization path
+is exercised (matching how the original bug was only visible in
+production, not in any unit-level check of the actor construction alone).
+
+Also covers issue #231: a delegated operator no longer needs a represented
+entry selected at all to submit the current pre-season pick -- see
+`test_authenticated_delegated_pick_succeeds_with_no_represented_entry_selected`
+and `test_authenticated_delegated_pick_for_a_team_that_does_not_own_the_current_pick_is_refused`.
 """
 
 import re
@@ -116,11 +121,15 @@ def _seed_draft_ready_season(database, *, year, label):
     return season, entries, players
 
 
-def _authenticate_delegated_operator(client, *, season_id, represented_entry_id, role="replay_operator"):
+def _authenticate_delegated_operator(client, *, season_id, represented_entry_id=None, role="replay_operator"):
     """Registers an operator coach identity, grants it `role` scoped to
-    `season_id`, logs in, activates the role, and represents
-    `represented_entry_id` -- the complete #107 acting-context path a real
-    browser session drives before ever reaching the Draft Board."""
+    `season_id`, logs in, and activates the role -- the #107 acting-context
+    path a real browser session drives before ever reaching the Draft
+    Board. `represented_entry_id` is optional (issue #231): a freshly
+    activated delegated role represents no entry until `/api/context/
+    represented-entry` is called, exactly like a Scorer who has not
+    manually switched context, which the pre-season proxy-pick path must
+    no longer require."""
     from app.main import app
 
     operator = _register_coach(app, email="delegated-operator@example.com", name="Delegated Operator")
@@ -133,13 +142,14 @@ def _authenticate_delegated_operator(client, *, season_id, represented_entry_id,
     activated = client.post("/api/context/role", json={"role": role}, cookies=cookies, headers=headers)
     assert activated.status_code == 200, activated.text
 
-    represented = client.post(
-        "/api/context/represented-entry",
-        json={"season_entry_id": represented_entry_id},
-        cookies=cookies,
-        headers=headers,
-    )
-    assert represented.status_code == 200, represented.text
+    if represented_entry_id is not None:
+        represented = client.post(
+            "/api/context/represented-entry",
+            json={"season_entry_id": represented_entry_id},
+            cookies=cookies,
+            headers=headers,
+        )
+        assert represented.status_code == 200, represented.text
 
     return operator, cookies
 
@@ -212,44 +222,93 @@ def test_authenticated_delegated_pick_succeeds_and_audits_anonymous_operator(cli
     assert event.after_state["season_entry_id"] == current_pick_owner.season_entry_id
 
 
-def test_authenticated_delegated_pick_for_a_represented_entry_that_does_not_own_the_pick_is_a_404(client):
+def test_authenticated_delegated_pick_succeeds_with_no_represented_entry_selected(client):
+    """Issue #231's core regression: a Scorer/Admin/Replay Operator session
+    with active role activated but **no** represented season entry
+    selected (the exact reported state -- granted roles admin/coach/
+    replay_operator/scorer, represented entry null) must still be able to
+    submit the current outstanding pre-season pick directly, without first
+    switching `represented_season_entry_id` -- mirroring `app.routes.
+    midseason_draft.submit_pick`'s existing operator path, which never
+    required a represented entry at all."""
     database = client.app.state.database
-    season, entries, players = _seed_draft_ready_season(database, year=2102, label="Represented entry mismatch")
+    season, entries, players = _seed_draft_ready_season(database, year=2102, label="No represented entry")
+    current_pick_owner = entries[0]
+
+    operator, cookies = _authenticate_delegated_operator(client, season_id=season.season_id, role="scorer")
+
+    api = f"/api/admin/draft/{season.season_id}"
+    board_before = client.get(f"{api}/board", cookies=cookies).json()
+    current_pick = board_before["current_pick"]
+    assert current_pick["current_season_entry_id"] == current_pick_owner.season_entry_id
+    chosen_player = players[0]
+
+    response = client.post(
+        f"{api}/pick",
+        json={
+            "season_entry_id": current_pick_owner.season_entry_id,
+            "season_player_id": chosen_player.season_player_id,
+        },
+        cookies=cookies,
+    )
+    assert response.status_code == 200, response.text
+
+    board_after = response.json()
+    assert board_after["status"]["completed_picks"] == 1
+    completed_pick = board_after["completed_picks"][0]
+    assert completed_pick["draft_pick_id"] == current_pick["draft_pick_id"]
+    assert completed_pick["selected_season_player_id"] == chosen_player.season_player_id
+
+    # The draft advances authoritatively to the next pick.
+    next_current = board_after["current_pick"]
+    assert next_current is not None
+    assert next_current["overall_number"] == current_pick["overall_number"] + 1
+
+    ownership = OwnershipRepository(database)
+    squad = ownership.squad_at(current_pick_owner.season_entry_id, "9999-12-31")
+    assert [row.season_player_id for row in squad] == [chosen_player.season_player_id]
+
+    # Provenance: an operator/proxy pick, correctly attributed -- never
+    # genuine Coach self-service.
+    events = AuditEventRepository(database).list_events(action="draft.pick.completed")
+    matching = [event for event in events if event.entity_id == current_pick["draft_pick_id"]]
+    assert len(matching) == 1
+    event = matching[0]
+    assert event.actor_type == "anonymous_operator"
+    assert event.actor_id == operator.coach_id
+    assert event.actor_role == "scorer"
+
+
+def test_authenticated_delegated_pick_for_a_team_that_does_not_own_the_current_pick_is_refused(client):
+    """Issue #231: dropping the represented-entry requirement for delegated
+    operators must not let one submit a pick on behalf of a team that does
+    not actually own the current pick -- `DraftRepository.execute_pick`
+    remains the sole authority on pick ownership (`DraftTurnError` ->
+    409), exactly as it already is for the mid-season operator route and
+    for a wrong/stale pick generally."""
+    database = client.app.state.database
+    season, entries, players = _seed_draft_ready_season(database, year=2103, label="Wrong team refused")
     current_pick_owner = entries[0]
     other_entry = entries[1]
 
-    operator, cookies = _authenticate_delegated_operator(
-        client, season_id=season.season_id, represented_entry_id=other_entry.season_entry_id
-    )
+    operator, cookies = _authenticate_delegated_operator(client, season_id=season.season_id, role="scorer")
 
     api = f"/api/admin/draft/{season.season_id}"
     board_before = client.get(f"{api}/board", cookies=cookies).json()
     completed_before = board_before["status"]["completed_picks"]
     current_pick = board_before["current_pick"]
+    assert current_pick["current_season_entry_id"] == current_pick_owner.season_entry_id
 
-    page = client.get(f"/admin/draft/{season.season_id}", cookies=cookies)
-    assert page.status_code == 200, page.text
-    assert f'const MY_SEASON_ENTRY_ID = "{other_entry.season_entry_id}";' in page.text
-    assert (
-        "const canPick = MY_SEASON_ENTRY_ID == null || "
-        "MY_SEASON_ENTRY_ID === board.current_pick.current_season_entry_id" in page.text
-    )
-
-    # The represented context (`other_entry`) does not own the current
-    # pick; submitting a payload for the entry that *does* own it must
-    # still be refused, because the acting session is not representing it
-    # -- this must not leak whether `current_pick_owner` exists as a
-    # privately-scoped entry via a 403 vs. 404 distinction.
     response = client.post(
         f"{api}/pick",
         json={
-            "season_entry_id": current_pick_owner.season_entry_id,
+            "season_entry_id": other_entry.season_entry_id,
             "season_player_id": players[0].season_player_id,
         },
         cookies=cookies,
     )
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Private resource not found"
+    assert response.status_code == 409
+    assert response.json()["detail"] == "selecting entry does not own the current pick"
 
     board_after = client.get(f"{api}/board", cookies=cookies).json()
     assert board_after["status"]["completed_picks"] == completed_before
@@ -259,7 +318,7 @@ def test_authenticated_delegated_pick_for_a_represented_entry_that_does_not_own_
     assert players[0].season_player_id in available_ids
 
     ownership = OwnershipRepository(database)
-    assert ownership.squad_at(current_pick_owner.season_entry_id, "9999-12-31") == []
+    assert ownership.squad_at(other_entry.season_entry_id, "9999-12-31") == []
 
     events = AuditEventRepository(database).list_events(action="draft.pick.completed")
     assert events == []

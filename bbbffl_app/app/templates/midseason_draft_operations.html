@@ -215,6 +215,8 @@ function renderTrades(body) {
       }</td><td>${
         t.status === 'pending'
           ? `<button data-approve="${t.trade_id}" class="primary">Approve trade</button> <button data-reject="${t.trade_id}" class="danger">Reject trade</button>`
+          : t.status === 'approved' && body.draft && body.draft.state === 'delisting_open'
+            ? `<button data-reverse="${t.trade_id}" class="danger">Reverse approval</button>`
           : ''
       }</td></tr>`).join('') +
       '</tbody></table>'
@@ -229,6 +231,13 @@ function renderTrades(body) {
     btn.onclick = () => {
       const reason = prompt('Reason for rejecting this trade? (optional)') || null;
       api(`${API}/trade/${btn.dataset.reject}/decide`, { approve: false, reason }).then(() => refresh('Trade rejected.')).catch(handleError);
+    };
+  });
+  document.querySelectorAll('[data-reverse]').forEach(btn => {
+    btn.onclick = () => {
+      const reason = prompt('Reason for reversing this approved trade? (required)');
+      if (!reason || !reason.trim()) { say('A reason is required to reverse an approved trade.'); return; }
+      api(`${API}/trade/${btn.dataset.reverse}/reverse`, { reason: reason.trim() }).then(() => refresh('Trade approval reversed.')).catch(handleError);
     };
   });
 }
@@ -254,11 +263,16 @@ async function populateTradeAsset(side) {
   } else {
     try {
       const players = await api(`${API}/players?availability=owned&owner_season_entry_id=${encodeURIComponent(teamId)}`);
+      if (document.getElementById(`trade-team-${side}`).value !== teamId ||
+          document.getElementById(`trade-type-${side}`).value !== legType) return;
       asset.innerHTML += players.map(player =>
         `<option value="${escapeHtml(player.season_player_id)}">${escapeHtml(player.display_name)}${player.afl_team_name ? ' — ' + escapeHtml(player.afl_team_name) : ''}</option>`
       ).join('');
     } catch (e) {
-      say(e.message || 'Owned players could not be loaded.');
+      if (document.getElementById(`trade-team-${side}`).value === teamId &&
+          document.getElementById(`trade-type-${side}`).value === legType) {
+        say(e.message || 'Owned players could not be loaded.');
+      }
     }
   }
   if ([...asset.options].some(option => option.value === previous)) asset.value = previous;

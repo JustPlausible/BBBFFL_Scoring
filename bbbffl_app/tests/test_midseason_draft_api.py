@@ -213,6 +213,11 @@ def test_operations_trade_recorder_uses_human_choices_and_domain_decisions(midse
     assert "Team B gives / Team A receives" in page.text
     assert "owner_season_entry_id=${encodeURIComponent(teamId)}" in page.text
     assert "draft_round: Number(asset)" in page.text
+    assert 'data-reverse="${t.trade_id}"' in page.text
+    assert "/trade/${btn.dataset.reverse}/reverse" in page.text
+    assert "A reason is required to reverse an approved trade." in page.text
+    assert "document.getElementById(`trade-team-${side}`).value !== teamId" in page.text
+    assert "document.getElementById(`trade-type-${side}`).value !== legType" in page.text
 
     status = client.get(f"{api}/status").json()
     assert status["trade_pick_rounds"] == [1, 2, 3, 4]

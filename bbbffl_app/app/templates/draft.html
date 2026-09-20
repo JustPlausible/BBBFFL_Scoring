@@ -272,7 +272,14 @@ function renderCurrentPick(board) {
   const el = document.getElementById('current-pick');
   const pick = board.current_pick;
   const searchable = !board.status.finalized_at && !board.status.paused_at && pick;
-  const ownTurn = MY_SEASON_ENTRY_ID == null || (pick && MY_SEASON_ENTRY_ID === pick.current_season_entry_id);
+  // Codex review, PR #232 (P2): `MY_SEASON_ENTRY_ID` restricts *Coach*
+  // self-service to its own team's turn -- it must never also gate a
+  // Scorer/Admin/Replay Operator page (`COACH_VIEW` false), or a delegated
+  // operator with some unrelated represented entry still set would be
+  // client-side blocked from a proxy pick issue #231 explicitly removed the
+  // server-side block for. `execute_pick` remains the sole authority on
+  // whether the submitted entry actually owns the current pick.
+  const ownTurn = !COACH_VIEW || MY_SEASON_ENTRY_ID == null || (pick && MY_SEASON_ENTRY_ID === pick.current_season_entry_id);
   document.getElementById('current-pick-block').style.display = pick ? '' : 'none';
   document.getElementById('player-search').disabled = !searchable;
   document.getElementById('pick-reason').disabled = !ownTurn;
@@ -343,14 +350,20 @@ async function renderPlayers(query) {
       document.getElementById('player-search').value !== (query || '') ||
       document.getElementById('availability-filter').value !== filter ||
       !liveBoard || !liveBoard.current_pick || liveBoard.current_pick.draft_pick_id !== currentPickId) return;
-  // Codex review, PR #225 (P2): a signed-in coach (or a delegated role
-  // representing a specific entry) can only ever submit for
-  // MY_SEASON_ENTRY_ID -- require_entry_context refuses anything else with
-  // a 404, so showing a "Draft" button while a *different* team is on the
-  // clock would always fail. `MY_SEASON_ENTRY_ID` is null for the legacy
-  // shared-token path (full proxy authority, no owned-entry concept), so
-  // this never hides the button from that path.
-  const canPick = MY_SEASON_ENTRY_ID == null || MY_SEASON_ENTRY_ID === board.current_pick.current_season_entry_id;
+  // Codex review, PR #225 (P2): a genuine Coach session (`COACH_VIEW`) can
+  // only ever submit for MY_SEASON_ENTRY_ID -- require_entry_context
+  // refuses anything else with a 404, so showing a "Draft" button while a
+  // *different* team is on the clock would always fail for a coach.
+  // Codex review, PR #232 (P2): that restriction must not extend to a
+  // Scorer/Admin/Replay Operator page -- issue #231 removed the
+  // represented-entry requirement for a delegated operator's proxy pick
+  // server-side, so the client must offer the button for whichever team
+  // the authoritative board shows on the clock, regardless of any
+  // unrelated represented entry the operator's session still carries.
+  // `MY_SEASON_ENTRY_ID` is null for the legacy shared-token path (full
+  // proxy authority, no owned-entry concept), so this never hides the
+  // button from that path either.
+  const canPick = !COACH_VIEW || MY_SEASON_ENTRY_ID == null || MY_SEASON_ENTRY_ID === board.current_pick.current_season_entry_id;
   const readOnlyNote = canPick ? '' : `<p class="muted">It is ${escapeHtml(board.current_pick.current_team_name)}'s turn. You can browse, but only that team or an authorized operator acting for it can select right now.</p>`;
   results.innerHTML = readOnlyNote + (players.map(p => `
     <div class="player-row">

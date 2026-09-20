@@ -279,6 +279,63 @@ def test_authenticated_delegated_pick_succeeds_with_no_represented_entry_selecte
     assert event.actor_role == "scorer"
 
 
+def test_authenticated_delegated_pick_succeeds_with_a_different_entry_represented(client):
+    """Codex review, PR #232 (P2): the original report's represented entry
+    was `null`, but the fix must not be narrower than that -- an operator
+    whose session still carries some *other*, unrelated represented entry
+    (e.g. left over from an earlier proxy action elsewhere) must still be
+    able to submit the current pick directly, and the operator page itself
+    must offer the "Draft for <team>" control rather than silently hiding
+    it (the review found `templates/draft.html`'s `canPick`/`ownTurn` still
+    gated on `MY_SEASON_ENTRY_ID` regardless of `COACH_VIEW`, so this
+    exact case 403'd through the UI even after the server-side fix)."""
+    database = client.app.state.database
+    season, entries, players = _seed_draft_ready_season(database, year=2106, label="Different entry represented")
+    current_pick_owner = entries[0]
+    unrelated_entry = entries[1]
+
+    operator, cookies = _authenticate_delegated_operator(
+        client, season_id=season.season_id, represented_entry_id=unrelated_entry.season_entry_id, role="scorer"
+    )
+
+    api = f"/api/admin/draft/{season.season_id}"
+    board_before = client.get(f"{api}/board", cookies=cookies).json()
+    current_pick = board_before["current_pick"]
+    assert current_pick["current_season_entry_id"] == current_pick_owner.season_entry_id
+    chosen_player = players[0]
+
+    # The rendered operator page must offer the pick control for whichever
+    # team the board shows on the clock, even though MY_SEASON_ENTRY_ID
+    # (the represented entry) names a different team entirely.
+    page = client.get(f"/admin/draft/{season.season_id}", cookies=cookies)
+    assert page.status_code == 200, page.text
+    assert f'const MY_SEASON_ENTRY_ID = "{unrelated_entry.season_entry_id}";' in page.text
+    assert "const COACH_VIEW = false;" in page.text
+    assert (
+        "const canPick = !COACH_VIEW || MY_SEASON_ENTRY_ID == null || "
+        "MY_SEASON_ENTRY_ID === board.current_pick.current_season_entry_id" in page.text
+    )
+    assert (
+        "const ownTurn = !COACH_VIEW || MY_SEASON_ENTRY_ID == null || "
+        "(pick && MY_SEASON_ENTRY_ID === pick.current_season_entry_id)" in page.text
+    )
+
+    response = client.post(
+        f"{api}/pick",
+        json={
+            "season_entry_id": current_pick_owner.season_entry_id,
+            "season_player_id": chosen_player.season_player_id,
+        },
+        cookies=cookies,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"]["completed_picks"] == 1
+
+    ownership = OwnershipRepository(database)
+    squad = ownership.squad_at(current_pick_owner.season_entry_id, "9999-12-31")
+    assert [row.season_player_id for row in squad] == [chosen_player.season_player_id]
+
+
 def test_authenticated_delegated_pick_for_a_team_that_does_not_own_the_current_pick_is_refused(client):
     """Issue #231: dropping the represented-entry requirement for delegated
     operators must not let one submit a pick on behalf of a team that does

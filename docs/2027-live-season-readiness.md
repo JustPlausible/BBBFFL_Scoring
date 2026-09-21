@@ -144,7 +144,7 @@ remain v0.2 candidates.
 | Capability | Status | Evidence |
 |---|---|---|
 | Season identity, coaches and season entries (Season Centre) | Replay-proven (all three phases) + automated-test-proven | `docs/season-centre.md`; all three evidence directories |
-| Fresh-season player pool population and rules/ordinary-competition/round creation | **Outstanding / blocks v0.1** | Season Centre creates the season, coaches and entries, but the season/replay databases behind every 2026 replay phase were populated by `scripts/bootstrap_round1_2026.py`/`bootstrap_2026_first_half.py` and `scripts/replay_2026_draft.py` -- the only callers of `app.player_pool.PlayerPoolRepository.refresh_player`, and (per this review's route inventory) the only code that creates a fresh ordinary rules version/competition/rounds outside tests. Those scripts explicitly refuse to run under `BBBFFL_ENVIRONMENT=production`. A brand-new 2027 production database therefore has no way to populate its player pool or create its ordinary competition/rounds through any production-safe surface, browser or CLI. Found by Codex review on this PR (P1); confirmed against the current route/script inventory. Not previously named as a v0.1 item in issue #224's own candidate list -- the 2026 replay never needed this path because every replay phase started from a script-seeded or restored database, never a fresh production bootstrap. |
+| Fresh-season player pool population and rules/ordinary-competition/round creation | **Outstanding / blocks v0.1**, plus a **separate confirmed safety gap** | Season Centre creates the season, coaches and entries, but the season/replay databases behind every 2026 replay phase were populated by `scripts/bootstrap_round1_2026.py`, `scripts/bootstrap_2026_first_half.py` and `scripts/replay_2026_draft.py` -- the only callers of `app.player_pool.PlayerPoolRepository.refresh_player`, and (per this review's route inventory) the only code that creates a fresh ordinary rules version/competition/rounds outside tests. `bootstrap_round1_2026.py` and `replay_2026_draft.py` both explicitly refuse to run under `BBBFFL_ENVIRONMENT=production`. **`scripts/bootstrap_2026_first_half.py` does not** -- confirmed by inspecting its `main()` (no `BBBFFL_ENVIRONMENT` check anywhere in the file) after Codex review correctly flagged this document's earlier claim that all three scripts were production-guarded as wrong. This is a real, separate finding beyond a documentation gap: an operator could run this specific mutating script against a live production database and it would not refuse. This PR does not add the guard, since it is a documentation PR and the fix is an application code change (see the PR discussion for the recommendation to file a follow-up issue). A brand-new 2027 production database has no *safe* way to populate its player pool or create its ordinary competition/rounds through any production-safe surface, browser or CLI. Found by Codex review on this PR (P1, then P2 for the guard-claim correction); confirmed against the current route/script inventory. Not previously named as a v0.1 item in issue #224's own candidate list -- the 2026 replay never needed this path because every replay phase started from a script-seeded or restored database, never a fresh production bootstrap. |
 | Explicit `setup -> active` operational gate | **Outstanding / blocks v0.1** | The 2026 replay season stayed in `setup` through the entire season and was only transitioned via the supported `SeasonRepository.transition_lifecycle` CLI/domain call at closeout (`2026-finals-replay/workflow-findings.md` finding 10). This review's current route inventory (`app/routes/`) found no browser action that performs this transition. Explicitly named as a "likely v0.1" item in issue #224. |
 | Season completion (`active -> completed`) and Premiership/Wooden Spoon award creation | Domain/test-proven and replay-proven in a non-production replay environment; **no viable production entry point today** | `app.season_completion.complete_season` is fully domain- and test-proven and was exercised successfully in the replay (`2026-finals-replay/provenance-manifest.md`), but the only wired entry point, `scripts/season_completion_2026.py`, explicitly refuses to run at all while `BBBFFL_ENVIRONMENT=production` (its own production guard). This review's route inventory found no browser route calling `complete_season`/`preview_complete_season` either. A live 2027 production deployment therefore currently has **no way to complete a season** through any surface. Not previously named as a v0.1 item in issue #224's own candidate list; recorded here as a finding from this documentation review's inspection of the current route/script inventory, not from replay evidence. |
 | Archival verification (`scripts/season_archival_checkpoint_2026.py`) | Replay-proven as a non-production operator/CLI recovery procedure; **same production guard applies** | Archival verification and a post-completion write-fence smoke test both passed in the replay environment (`2026-finals-replay/workflow-findings.md` findings 14-15), but this script's `verify` subcommand -- read-only, never mutating -- also refuses to run while `BBBFFL_ENVIRONMENT=production`, confirmed in this review's inspection of its `main()`. A production deployment cannot currently run even the read-only archival check. This compounds the season-completion gap above rather than mitigating it, and should be resolved together with it. |
@@ -272,14 +272,20 @@ they touch have already passed.
    at every phase boundary.** Every 2026 replay phase started from a
    script-seeded or restored database, so this class of gap was invisible
    to the replay itself. Confirmed by this review and by Codex review on
-   this PR (all P1) against the current route/script inventory: the only
-   non-test callers of each of the following are `BBBFFL_ENVIRONMENT=
-   production`-guarded scripts, with no browser route as an alternative --
+   this PR (P1, across several review rounds) against the current
+   route/script inventory. The only non-test callers of each of the
+   following are 2026-specific operator scripts, with no browser route as
+   an alternative:
    - player pool population and ordinary rules/competition/round creation
-     (`scripts/bootstrap_round1_2026.py`, `bootstrap_2026_first_half.py`);
+     (`scripts/bootstrap_round1_2026.py`, `scripts/bootstrap_2026_first_half.py`);
    - preseason draft initialization -- squad-limit configuration and
      initial draft-order acceptance (`scripts/bootstrap_round1_2026.py`,
-     `replay_2026_draft.py`);
+     `scripts/replay_2026_draft.py`);
+   - if 2027 retains an AFL Opening Round: the club-to-compensating-bye
+     rules deferred scoring depends on, accepted only by
+     `app.replay_bootstrap`'s `accept_locked` path -- Season Centre's
+     browser routes manage nominations against an existing rule but do not
+     create one;
    - Finals bracket creation, the first entry into Finals from a completed
      ladder (`scripts/finals_bracket_2026.py`, which also depends on the
      2026-only seeding snapshot for its non-ladder path);
@@ -288,14 +294,24 @@ they touch have already passed.
      completion for any season that never had these rounds created, since
      `app.season_completion` requires all four to exist and be final.
 
+   Most of these scripts explicitly refuse to run under `BBBFFL_ENVIRONMENT
+   =production` (confirmed individually). **`scripts/bootstrap_2026_first_
+   half.py` is the one exception: it has no such guard at all**, confirmed
+   by inspecting its `main()` after Codex review correctly caught an
+   earlier draft of this document wrongly claiming otherwise. That is a
+   real, separate safety gap in the script itself, not only a documentation
+   accuracy issue, and this documentation-only PR does not add the missing
+   guard -- see the PR discussion for the recommendation to file a
+   follow-up issue for that specific fix.
+
    Taken together, a genuinely new 2027 production season cannot be
-   started, drafted, or carried through to Finals/SuperScore without
-   either running a script with `BBBFFL_ENVIRONMENT=production` unset (a
-   real risk if done against a production database by mistake) or adding
-   browser/production-safe equivalents of each `ensure_*`/`create_*`/
-   `configure_*`/`accept_order` call above. This is the single largest
-   gap this document records, and the most consequential correction this
-   PR's review produced.
+   started, drafted, taken through an Opening Round, or carried through to
+   Finals/SuperScore without either running a script against a production
+   database (unsafe for the one script above, and a route around the
+   guard everywhere else) or adding browser/production-safe equivalents of
+   each `ensure_*`/`create_*`/`configure_*`/`accept_order`/`accept_locked`
+   call above. This is the single largest gap this document records, and
+   the most consequential correction this PR's review produced.
 2. **Initial coach credential provisioning.** `POST /api/admin/coach-
    credential` is a JSON API with no browser form; onboarding every coach
    before their first login currently requires a script/`curl` invocation.
@@ -356,4 +372,9 @@ convenience/polish under the stated criterion and does not block
   exist.
 - It does not claim #233 is fixed. It is recorded as outstanding tidy-up.
 - It does not claim a production staging rehearsal has occurred.
+- It does not claim `scripts/bootstrap_2026_first_half.py` is production-
+  guarded. An earlier draft of this document said it was, alongside its
+  sibling scripts; that was wrong, and is corrected here after Codex
+  review caught it. This PR does not add the missing guard, since that is
+  an application code change and this is a documentation PR.
 - It does not treat any v0.2/deferred item as blocking `v0.1.0`.

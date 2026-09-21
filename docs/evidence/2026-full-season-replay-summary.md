@@ -73,15 +73,23 @@ browser acceptance pass** against a disposable restored pre-draft checkpoint
 (issue #224, 2026-09-20 comment). The second pass is the evidence that the
 *current* mid-season draft is a normal-user workflow, not the first.
 
-By contrast, **SuperScore round lifecycle setup** (stream/round creation,
-AFL-mapping confirmation, opening) now has a browser path through the
-combined Finals+SuperScore preflight action
-(`app.finals_superscore_open.open_finals_and_superscore_week`,
-issue #221), so the 2026-replay-era CLI gap for that specific step has
-since closed. **Season completion** (`preview_complete_season` /
-`complete_season`) and the `setup -> active` season-activation transition
-still have no browser route as of this document -- see the readiness
-document's v0.1-outstanding list.
+By contrast, **SuperScore round *creation* remains CLI-only.** The paired
+Finals+SuperScore preflight action
+(`app.finals_superscore_open.open_finals_and_superscore_week`, issue #221)
+gives the browser a path to synchronise mapping/triggers and open an
+**already-created** SuperScore round alongside its concurrent Finals week;
+it does not create the SuperScore stream or the SS1-SS4 round itself.
+Those calls (`app.superscore_round.ensure_stream`/`ensure_round`) have no
+browser route at all -- their only non-test caller is the production-
+guarded `scripts/superscore_round_2026.py`. An earlier draft of this
+document overstated this as a closed gap; corrected after Codex review on
+PR #234 caught the contradiction with the readiness document's own
+findings. **Season completion** (`preview_complete_season` /
+`complete_season`), the `setup -> active` season-activation transition,
+and several other fresh-season/fresh-phase creation steps also have no
+browser route as of this document -- see the readiness document's
+v0.1-outstanding list, which is the authoritative record of exactly which
+creation steps are CLI-only.
 
 ## Historically reconstructed / synthetic / exceptional versus ordinary supported workflows
 
@@ -127,7 +135,7 @@ SHA-256 records (filenames and hashes are never committed):
 
 | Boundary | Phase | Detail |
 |---|---|---|
-| Pre-pick-1 / draft-after-pick-200 | Preseason | First-half evidence manifest; also the source for the Stage A/B current-code regression below |
+| Pre-pick-1 / picks-201-220 preseason restore points | Preseason | First-half evidence manifest; also the source for the Stage A/B current-code regression below |
 | Round 9 / first-half close | First half -> second half | `2026-first-half-replay/phase-one-closeout.md` |
 | Pre-Round-10 | Second half | `2026-second-half-replay/provenance-manifest.md` |
 | Round 16 | Second half (interim) | `2026-second-half-replay/provenance-manifest.md` |

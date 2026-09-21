@@ -90,10 +90,12 @@ replay database or checkpoint was mutated.
 
 | Stage | Source checkpoint | Scope | Result |
 |---|---|---|---|
-| A | Pre-pick-1 preseason restore point, migrated from `0022_acting_context` | Coach-facing pre-season draft access (#229/#230), Scorer/Admin proxy picks (#231), private shortlists, immediate unavailability, fail-closed turn ownership | PASS |
-| B | `draft-after-pick-200.sql` | Picks 201-220 (mixed Coach/proxy), shortlist updates, draft navigation, finalisation, ten 22-player squads, opening-squad freeze, fixture assignment, ordinary competition/round creation through to weekly-selection readiness | PASS |
-| C | `opening-squads-frozen.dump` / Round 1 checkpoint lineage | Opening Round/Round 1 setup and selections, `early-1` and `main` lockout activation, calculation/review/finalisation/publication | PASS (one disposable-checkpoint AFL-round-id setup correction; not an application defect) |
-| D | `first-half-complete-20260907T171603Z.dump` | First-half migration to current schema; 9-to-20-round continuation; Round 10 full weekly lifecycle; post-Round-10 Scorer surface exposing the mid-season draft entry point; a deliberately misconfigured `main`/`selective` trigger correctly rejected by preflight and corrected via **Remove this trigger** | PASS |
+| A | The preserved pre-pick-1 preseason restore point, migrated from `0022_acting_context` | Coach-facing pre-season draft access (#229/#230), Scorer/Admin proxy picks (#231), private shortlists, immediate unavailability, fail-closed turn ownership | PASS |
+| B | The preserved picks-201-220 preseason restore point | Picks 201-220 (mixed Coach/proxy), shortlist updates, draft navigation, finalisation, ten 22-player squads, opening-squad freeze, fixture assignment, ordinary competition/round creation through to weekly-selection readiness | PASS |
+| C | The preserved opening-squads-frozen / Round 1 checkpoint lineage | Opening Round/Round 1 setup and selections, `early-1` and `main` lockout activation, calculation/review/finalisation/publication | PASS (one disposable-checkpoint AFL-round-id setup correction; not an application defect) |
+| D | The preserved first-half-complete recovery point | First-half migration to current schema; 9-to-20-round continuation; Round 10 full weekly lifecycle; post-Round-10 Scorer surface exposing the mid-season draft entry point; a deliberately misconfigured `main`/`selective` trigger correctly rejected by preflight and corrected via **Remove this trigger** | PASS |
+
+Per this repository's evidence policy (`docs/evidence/2026-first-half-replay/README.md`'s "Evidence policy"), backup/checkpoint filenames are never committed; only their identity/boundary description is recorded here, matching how the phase provenance manifests describe the same boundaries.
 
 Full narrative and citations: issue #224 comments, 2026-09-20 and
 2026-09-21.
@@ -217,7 +219,7 @@ auto-pick automation are v0.2.
 |---|---|---|
 | Bracket progression, seeding (from the mathematical ladder, or the 2026-only historical snapshot), publication, once a bracket already exists | Replay-proven at the Finals/SuperScore phase's own baseline (`5561a63`) | `2026-finals-replay/` |
 | Finals preflight discoverability and the paired Finals+SuperScore weekly open action | Replay-proven | Issue #211/#221, exercised as part of the same replay |
-| **Finals bracket creation** (the first entry into Finals from a live, completed ladder) | **Outstanding / blocks v0.1** | `app.finals.FinalsBracketRepository.create_bracket` has no browser route; every `app/routes/finals_preflight.py` route takes an already-existing `bracket_id`. Its only non-test caller is `scripts/finals_bracket_2026.py`, which is production-guarded and additionally depends on the 2026-only historical seeding snapshot for its non-ladder path. A live 2027 season reaching the end of Round 20 currently has no production-safe way to start Finals. Found by Codex review on this PR (P1). |
+| **Finals competition-stream and bracket creation** (the first entry into Finals from a live, completed ladder) | **Outstanding / blocks v0.1** | `app.finals.FinalsBracketRepository.create_bracket` has no browser route; every `app/routes/finals_preflight.py` route takes an already-existing `bracket_id`. Its only non-test caller is `scripts/finals_bracket_2026.py`, which is production-guarded, depends on the 2026-only historical seeding snapshot for its non-ladder path, and itself requires an already-existing `finals`-typed `competition_stream` id as an argument. That stream is one level further back: `SeasonRepository.create_competition(..., "finals")` has no non-test caller outside `scripts/bootstrap_round1_2026.py` (which creates only an `"ordinary"` stream, not a `"finals"` one) -- nothing in this repository currently creates a finals competition stream for a fresh season, production-safe or otherwise. A live 2027 season reaching the end of Round 20 currently has no production-safe way to start Finals at either level. Found by Codex review on this PR (P1, then P2 for the deeper stream-creation layer). |
 | Coach weekly-selection chronology across ordinary/Finals/SuperScore | Deferred / v0.2 | `2026-finals-replay/ux-findings.md` |
 | Not re-run in the current-code regression | Staging/rehearsal-needed if a future change touches this area | See "Scope note" above |
 
@@ -286,9 +288,12 @@ they touch have already passed.
      `app.replay_bootstrap`'s `accept_locked` path -- Season Centre's
      browser routes manage nominations against an existing rule but do not
      create one;
-   - Finals bracket creation, the first entry into Finals from a completed
-     ladder (`scripts/finals_bracket_2026.py`, which also depends on the
-     2026-only seeding snapshot for its non-ladder path);
+   - Finals competition-stream creation (`SeasonRepository.create_
+     competition(..., "finals")` has no non-test caller at all) and, one
+     level above it, bracket creation, the first entry into Finals from a
+     completed ladder (`scripts/finals_bracket_2026.py`, which requires an
+     already-existing finals stream id and also depends on the 2026-only
+     seeding snapshot for its non-ladder path);
    - SuperScore stream and SS1-SS4 round creation
      (`scripts/superscore_round_2026.py`) -- this also blocks season
      completion for any season that never had these rounds created, since

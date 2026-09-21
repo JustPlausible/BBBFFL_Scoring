@@ -143,7 +143,8 @@ remain v0.2 candidates.
 
 | Capability | Status | Evidence |
 |---|---|---|
-| Season/competition bootstrap, coach/entry identity, Season Centre | Replay-proven (all three phases) + automated-test-proven | `docs/season-centre.md`; all three evidence directories |
+| Season identity, coaches and season entries (Season Centre) | Replay-proven (all three phases) + automated-test-proven | `docs/season-centre.md`; all three evidence directories |
+| Fresh-season player pool population and rules/ordinary-competition/round creation | **Outstanding / blocks v0.1** | Season Centre creates the season, coaches and entries, but the season/replay databases behind every 2026 replay phase were populated by `scripts/bootstrap_round1_2026.py`/`bootstrap_2026_first_half.py` and `scripts/replay_2026_draft.py` -- the only callers of `app.player_pool.PlayerPoolRepository.refresh_player`, and (per this review's route inventory) the only code that creates a fresh ordinary rules version/competition/rounds outside tests. Those scripts explicitly refuse to run under `BBBFFL_ENVIRONMENT=production`. A brand-new 2027 production database therefore has no way to populate its player pool or create its ordinary competition/rounds through any production-safe surface, browser or CLI. Found by Codex review on this PR (P1); confirmed against the current route/script inventory. Not previously named as a v0.1 item in issue #224's own candidate list -- the 2026 replay never needed this path because every replay phase started from a script-seeded or restored database, never a fresh production bootstrap. |
 | Explicit `setup -> active` operational gate | **Outstanding / blocks v0.1** | The 2026 replay season stayed in `setup` through the entire season and was only transitioned via the supported `SeasonRepository.transition_lifecycle` CLI/domain call at closeout (`2026-finals-replay/workflow-findings.md` finding 10). This review's current route inventory (`app/routes/`) found no browser action that performs this transition. Explicitly named as a "likely v0.1" item in issue #224. |
 | Season completion (`active -> completed`) and Premiership/Wooden Spoon award creation | Domain/test-proven and replay-proven in a non-production replay environment; **no viable production entry point today** | `app.season_completion.complete_season` is fully domain- and test-proven and was exercised successfully in the replay (`2026-finals-replay/provenance-manifest.md`), but the only wired entry point, `scripts/season_completion_2026.py`, explicitly refuses to run at all while `BBBFFL_ENVIRONMENT=production` (its own production guard). This review's route inventory found no browser route calling `complete_season`/`preview_complete_season` either. A live 2027 production deployment therefore currently has **no way to complete a season** through any surface. Not previously named as a v0.1 item in issue #224's own candidate list; recorded here as a finding from this documentation review's inspection of the current route/script inventory, not from replay evidence. |
 | Archival verification (`scripts/season_archival_checkpoint_2026.py`) | Replay-proven as a non-production operator/CLI recovery procedure; **same production guard applies** | Archival verification and a post-completion write-fence smoke test both passed in the replay environment (`2026-finals-replay/workflow-findings.md` findings 14-15), but this script's `verify` subcommand -- read-only, never mutating -- also refuses to run while `BBBFFL_ENVIRONMENT=production`, confirmed in this review's inspection of its `main()`. A production deployment cannot currently run even the read-only archival check. This compounds the season-completion gap above rather than mitigating it, and should be resolved together with it. |
@@ -182,6 +183,7 @@ remain v0.2 candidates.
 | Capability | Status | Evidence |
 |---|---|---|
 | Login/session/CSRF mechanism, own-team-only writes | Automated-test-proven, and replay-proven for the sessions actually exercised | `docs/coach-authentication.md`; two authenticated Coach accounts retained through the final two Finals/SuperScore replay rounds, with verified Finals eligibility and cross-Coach private-lineup isolation (`2026-finals-replay/workflow-findings.md` finding 12) |
+| Initial coach credential provisioning (onboarding every coach before their first login) | **Outstanding / blocks v0.1** | The only wired operation is `POST /api/admin/coach-credential` (`app/routes/admin.py`), a JSON API gated by `X-Admin-Token` with no browser form calling it; `docs/coach-authentication.md` itself directs the operator to "a short script/`curl` invocation" against it. This is routine onboarding for every coach at the start of a season, not an exceptional recovery task, so it fails the normal-user criterion. Found by Codex review on this PR (P1); confirmed against the current route inventory. Not previously named as a v0.1 item in issue #224's own candidate list. |
 | Coach self-service mid-season delisting | Current-code regression-proven | Issue #226, `app/routes/coach_delisting.py`; part of the mid-season draft acceptance pass above |
 | Routine full-season individual Coach self-service for every weekly lineup | Automated-test-proven; **not the primary path replay-exercised** | The second-half/finals replay used delegated (Scorer/Admin proxy) entry for most rounds as "a useful proxy for future coach operation" (`2026-second-half-replay/workflow-findings.md`), reserving direct Coach sessions mainly for Finals. This is a reasonable substitute given delegated entry uses the identical validated pathway, but it means a non-technical Coach's own weekly session has had less direct replay exercise than the Scorer's. |
 
@@ -263,10 +265,26 @@ the following are outstanding. None of them invalidates the replay or
 current-code regression evidence above; the underlying domain workflows
 they touch have already passed.
 
-1. **Explicit `setup -> active` season-activation gate** (browser action).
+1. **Fresh-season player pool population and rules/ordinary-competition/
+   round creation.** Every 2026 replay phase started from a script-seeded
+   or restored database; a genuinely new 2027 production database has no
+   production-safe way (browser or CLI) to populate its player pool or
+   create its ordinary competition/rounds, since the only code that does
+   so (`scripts/bootstrap_round1_2026.py`, `bootstrap_2026_first_half.py`,
+   `replay_2026_draft.py`) refuses to run under
+   `BBBFFL_ENVIRONMENT=production`. Found by Codex review on this PR (P1);
+   confirmed against the current route/script inventory. Arguably the most
+   fundamental of the gaps recorded here: without it, a 2027 season cannot
+   be started at all through a supported production path.
+2. **Initial coach credential provisioning.** `POST /api/admin/coach-
+   credential` is a JSON API with no browser form; onboarding every coach
+   before their first login currently requires a script/`curl` invocation.
+   Found by Codex review on this PR (P1); confirmed against the current
+   route inventory.
+3. **Explicit `setup -> active` season-activation gate** (browser action).
    Issue #224 candidate; no implementation issue filed as of this
    document.
-2. **Season completion/archival production path.** `complete_season`/
+4. **Season completion/archival production path.** `complete_season`/
    `preview_complete_season` are fully domain-proven, but their only wired
    entry point (`scripts/season_completion_2026.py`) refuses to run under
    `BBBFFL_ENVIRONMENT=production`, and the read-only archival verifier
@@ -278,7 +296,7 @@ they touch have already passed.
    production. Identified during this documentation review's inspection of
    the current route/script inventory, not previously tracked by an issue
    as of this document.
-3. **Issue #233 -- two Scorer UX cleanups found during the Round 10 ->
+5. **Issue #233 -- two Scorer UX cleanups found during the Round 10 ->
    mid-season regression:**
    - remove the obsolete `Legacy Grand Final admin` link from the ordinary
      Scorer Round Centre;
@@ -289,9 +307,19 @@ they touch have already passed.
    **This documentation PR does not implement #233.** The underlying
    Round 10 -> mid-season-draft workflow itself already passed regression
    (Stage D); #233 is release tidy-up, not a re-open of that finding.
-4. **Non-technical Scorer staging/beta rehearsal**, and **a production
+6. **Non-technical Scorer staging/beta rehearsal**, and **a production
    backup/restore runbook rehearsal against a real deployment** (as
    distinct from the replay's repeatedly-proven checkpoint mechanism).
+
+Items 1-2 were surfaced by Codex's review of this PR, not by the 2026
+replay itself -- the replay never needed a fresh-production-bootstrap or
+first-time-credential path, since every phase started from a script-seeded
+or restored database with credentials already in place. They sharpen this
+document's v0.1 picture considerably (a brand-new production season
+currently cannot be started or staffed through any supported surface) but
+do not contradict any replay PASS verdict recorded elsewhere in this
+document or in `docs/evidence/2026-full-season-replay-summary.md`: no
+replay claim concerned fresh-production bootstrap in the first place.
 
 Everything else catalogued above as "Deferred / v0.2 candidate" is
 convenience/polish under the stated criterion and does not block

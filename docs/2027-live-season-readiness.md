@@ -266,7 +266,8 @@ auto-pick automation are v0.2.
 | CI quality gates (tests, lint/format, incremental type-check, migration integrity on SQLite and PostgreSQL, dependency audit, container build) | Automated-test-proven | `docs/ci-quality-gates.md` |
 | Non-technical Scorer staging/beta rehearsal | **Staging/rehearsal-needed** | Recommended explicitly in `2026-finals-replay/ux-findings.md`, "Pre-2027 rehearsal"; not yet performed |
 | Production backup/restore runbook rehearsal | **Staging/rehearsal-needed** | See "Backup/restore/archive" above |
-| Reproducible production deployment topology, TLS/reverse-proxy setup, dependency-readiness probe, structured alerting/logging, and a rollback runbook | **Outstanding / blocks v0.1** | `GET /health` (`app/routes/health.py`) returns only `{"status": "ok"}` -- a process-liveness check with no database/dependency probe. The repository has a generic `Dockerfile` and the Compose-first local/rehearsal workflow (`docs/round1-rehearsal.md`), but no reproducible production deployment topology, TLS/reverse-proxy configuration, structured alerting, or rollback runbook. The original roadmap's package 39 already marked this P0/required for 2027 (roadmap section 2, "Health/observability: ... Missing operationally"); this was never closed and is carried forward here as current-state fact rather than historical claim. Found by Codex review on this PR (P1); confirmed by inspecting `app/routes/health.py` and searching the repository for the described controls (none exist). |
+| Reproducible production deployment topology, TLS/reverse-proxy setup, dependency-readiness probe, structured alerting/logging, scheduled backups with an accepted RPO/RTO, and a rollback runbook | **Outstanding / blocks v0.1** | `GET /health` (`app/routes/health.py`) returns only `{"status": "ok"}` -- a process-liveness check with no database/dependency probe. The repository has a generic `Dockerfile` and the Compose-first local/rehearsal workflow (`docs/round1-rehearsal.md`), but no reproducible production deployment topology, TLS/reverse-proxy configuration, structured alerting, or rollback runbook. **Backups today are manual-only**: every backup taken during the 2026 replay was an ad hoc `pg_dump` run by the operator immediately before a specific boundary, never a scheduled job -- a repo-wide search found no cron/systemd-timer/scheduler configuration anywhere. The "Backup/restore/archive" rehearsal item above proves a manually created archive can be restored; it does not establish that a live production season is protected between backups, since nothing currently takes one on a schedule. The original roadmap's package 39 already marked all of this P0/required for 2027 (roadmap section 2, "Health/observability: ... Missing operationally"); it was never closed and is carried forward here as current-state fact. Found by Codex review on this PR (P1, across two rounds: deployment/observability controls, then specifically scheduled backups); confirmed by inspecting `app/routes/health.py` and searching the repository for the described controls (none exist). |
+| Notification delivery (lockout/missing-team alerts) and a live-season incident/manual-fallback operations runbook | **Deferred / v0.2** | No notification adapter or delivery configuration exists in `app/` (roadmap package 40's own scope); no incident/fallback runbook exists in the repository either. Unlike the deployment-controls row above, this does not block running an individual round end-to-end -- a season can operate without automated reminders, with the Scorer relying on the existing dashboards/attention queue instead -- so it is classified as deferred rather than outstanding, consistent with the original roadmap treating packages 39 (P0, blocking) and 40 (P1, "final launch gate" but reminder-level) differently. Found by Codex review on this PR (P2); confirmed by inspecting `app/` for any notification adapter (none exists). |
 | `Legacy Grand Final admin` link still reachable from ordinary Scorer Round Centre | **Outstanding / blocks v0.1 tidy-up** | Issue #233 (see below) |
 | Post-trigger-round mid-season handoff prominence on the Scorer dashboard | **Outstanding / blocks v0.1 tidy-up** | Issue #233 (see below) |
 
@@ -389,13 +390,20 @@ they touch have already passed.
    blocks a season that actually needs to add such a player. Found by
    Codex review on this PR (P1).
 10. **Reproducible production deployment topology, TLS/reverse-proxy
-    setup, a dependency-readiness probe, structured alerting, and a
-    rollback runbook.** `GET /health` is process-liveness only; no
-    deployment topology, TLS/reverse-proxy configuration, or rollback
-    runbook exists in the repository beyond the generic `Dockerfile` and
-    the local/rehearsal Compose workflow. The original roadmap's package
-    39 already marked this P0/required and it was never closed -- carried
-    forward here as current fact. Found by Codex review on this PR (P1).
+    setup, a dependency-readiness probe, structured alerting, scheduled
+    backups with an accepted RPO/RTO, and a rollback runbook.**
+    `GET /health` is process-liveness only; no deployment topology,
+    TLS/reverse-proxy configuration, or rollback runbook exists in the
+    repository beyond the generic `Dockerfile` and the local/rehearsal
+    Compose workflow. Backups today are entirely manual `pg_dump` runs
+    taken by an operator at a chosen boundary -- nothing schedules one, so
+    a live production season is unprotected between manual runs. The
+    original roadmap's package 39 already marked all of this P0/required
+    and it was never closed -- carried forward here as current fact.
+    Found by Codex review on this PR (P1, across two rounds). Notification
+    delivery and an incident/fallback runbook (roadmap package 40) are a
+    separate, related gap classified as deferred/v0.2 in the matrix above,
+    since they do not block running an individual round.
 
 Items 1-2 were surfaced by Codex's review of this PR, not by the 2026
 replay itself -- the replay never needed a fresh-production-bootstrap or

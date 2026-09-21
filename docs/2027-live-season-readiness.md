@@ -153,10 +153,11 @@ remain v0.2 candidates.
 
 | Capability | Status | Evidence |
 |---|---|---|
-| Draft order, snake picks, pick ownership, opening-squad freeze, preseason trades | Replay-proven (first-half) + current-code regression-proven (Stages A-B) | `2026-first-half-replay/`; Stage A/B above |
+| Draft order, snake picks, pick ownership, opening-squad freeze, preseason trades, once a draft already exists | Replay-proven (first-half) + current-code regression-proven (Stages A-B) | `2026-first-half-replay/`; Stage A/B above |
 | Coach-facing browser draft access | Current-code regression-proven | Issue #229/PR #230; Stage A above |
 | Scorer/Admin proxy picks aligned with mid-season proxy workflow | Current-code regression-proven | Issue #231/#232; Stage A above |
 | Private shortlists | Current-code regression-proven | Stage A above |
+| Draft *initialization* for a fresh season (squad-limit configuration, initial draft-order acceptance) | **Outstanding / blocks v0.1** | `app.player_pool.OwnershipRepository.configure_squad_limit` and `app.draft.DraftRepository.accept_order` have no browser route; their only non-test callers are `scripts/bootstrap_round1_2026.py` and `scripts/replay_2026_draft.py`, both production-guarded. Stages A-B above regression-tested *continuing* an already-bootstrapped draft, not starting one. Same root cause as the fresh-season bootstrap gap above; found by Codex review on this PR (P1). |
 
 ### Ordinary weekly operation
 
@@ -214,8 +215,9 @@ auto-pick automation are v0.2.
 
 | Capability | Status | Evidence |
 |---|---|---|
-| Bracket generation, seeding (from the mathematical ladder, or the 2026-only historical snapshot), progression, publication | Replay-proven at the Finals/SuperScore phase's own baseline (`5561a63`) | `2026-finals-replay/` |
+| Bracket progression, seeding (from the mathematical ladder, or the 2026-only historical snapshot), publication, once a bracket already exists | Replay-proven at the Finals/SuperScore phase's own baseline (`5561a63`) | `2026-finals-replay/` |
 | Finals preflight discoverability and the paired Finals+SuperScore weekly open action | Replay-proven | Issue #211/#221, exercised as part of the same replay |
+| **Finals bracket creation** (the first entry into Finals from a live, completed ladder) | **Outstanding / blocks v0.1** | `app.finals.FinalsBracketRepository.create_bracket` has no browser route; every `app/routes/finals_preflight.py` route takes an already-existing `bracket_id`. Its only non-test caller is `scripts/finals_bracket_2026.py`, which is production-guarded and additionally depends on the 2026-only historical seeding snapshot for its non-ladder path. A live 2027 season reaching the end of Round 20 currently has no production-safe way to start Finals. Found by Codex review on this PR (P1). |
 | Coach weekly-selection chronology across ordinary/Finals/SuperScore | Deferred / v0.2 | `2026-finals-replay/ux-findings.md` |
 | Not re-run in the current-code regression | Staging/rehearsal-needed if a future change touches this area | See "Scope note" above |
 
@@ -223,7 +225,8 @@ auto-pick automation are v0.2.
 
 | Capability | Status | Evidence |
 |---|---|---|
-| SS1-SS4 lifecycle (stream/round/mapping, staged with Finals, review, publication) | Replay-proven at the Finals/SuperScore phase's own baseline | `2026-finals-replay/`; issue #194 |
+| SS1-SS4 round lifecycle (mapping, staged open with Finals, review, publication), once the stream and rounds already exist | Replay-proven at the Finals/SuperScore phase's own baseline | `2026-finals-replay/`; issue #194 |
+| **SuperScore stream and SS1-SS4 round creation** | **Outstanding / blocks v0.1** | `app.superscore_round.ensure_stream`/`ensure_round` have no browser route; the paired Finals+SuperScore browser action (`open_finals_and_superscore_week`, issue #211/#221) sets up and opens a round that must already exist, it does not create the stream or the logical SS-round. The only non-test callers of `ensure_stream`/`ensure_round` are in `scripts/superscore_round_2026.py`, production-guarded. `app.season_completion`'s own completion check refuses unless the stream and all four SS rounds exist and are final, so this also blocks season completion for a season that never had these created. Found by Codex review on this PR (P1). |
 | Completed-season write fence on SuperScore review rulings | Replay-proven | `2026-finals-replay/workflow-findings.md` finding 3 (Codex P1 on PR #207), finding 15 (real post-closeout smoke test) |
 | Same-week Finals/SuperScore copy-to-draft convenience | Deferred / v0.2 | `2026-finals-replay/ux-findings.md` |
 | Carry-forward vs private-draft presentation clarity | Deferred / v0.2 | `2026-finals-replay/ux-findings.md` |
@@ -265,17 +268,34 @@ the following are outstanding. None of them invalidates the replay or
 current-code regression evidence above; the underlying domain workflows
 they touch have already passed.
 
-1. **Fresh-season player pool population and rules/ordinary-competition/
-   round creation.** Every 2026 replay phase started from a script-seeded
-   or restored database; a genuinely new 2027 production database has no
-   production-safe way (browser or CLI) to populate its player pool or
-   create its ordinary competition/rounds, since the only code that does
-   so (`scripts/bootstrap_round1_2026.py`, `bootstrap_2026_first_half.py`,
-   `replay_2026_draft.py`) refuses to run under
-   `BBBFFL_ENVIRONMENT=production`. Found by Codex review on this PR (P1);
-   confirmed against the current route/script inventory. Arguably the most
-   fundamental of the gaps recorded here: without it, a 2027 season cannot
-   be started at all through a supported production path.
+1. **Fresh-season / new-phase initialization has no production-safe path,
+   at every phase boundary.** Every 2026 replay phase started from a
+   script-seeded or restored database, so this class of gap was invisible
+   to the replay itself. Confirmed by this review and by Codex review on
+   this PR (all P1) against the current route/script inventory: the only
+   non-test callers of each of the following are `BBBFFL_ENVIRONMENT=
+   production`-guarded scripts, with no browser route as an alternative --
+   - player pool population and ordinary rules/competition/round creation
+     (`scripts/bootstrap_round1_2026.py`, `bootstrap_2026_first_half.py`);
+   - preseason draft initialization -- squad-limit configuration and
+     initial draft-order acceptance (`scripts/bootstrap_round1_2026.py`,
+     `replay_2026_draft.py`);
+   - Finals bracket creation, the first entry into Finals from a completed
+     ladder (`scripts/finals_bracket_2026.py`, which also depends on the
+     2026-only seeding snapshot for its non-ladder path);
+   - SuperScore stream and SS1-SS4 round creation
+     (`scripts/superscore_round_2026.py`) -- this also blocks season
+     completion for any season that never had these rounds created, since
+     `app.season_completion` requires all four to exist and be final.
+
+   Taken together, a genuinely new 2027 production season cannot be
+   started, drafted, or carried through to Finals/SuperScore without
+   either running a script with `BBBFFL_ENVIRONMENT=production` unset (a
+   real risk if done against a production database by mistake) or adding
+   browser/production-safe equivalents of each `ensure_*`/`create_*`/
+   `configure_*`/`accept_order` call above. This is the single largest
+   gap this document records, and the most consequential correction this
+   PR's review produced.
 2. **Initial coach credential provisioning.** `POST /api/admin/coach-
    credential` is a JSON API with no browser form; onboarding every coach
    before their first login currently requires a script/`curl` invocation.

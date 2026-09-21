@@ -203,7 +203,7 @@ remain v0.2 candidates.
 | Capability | Status | Evidence |
 |---|---|---|
 | Points/percentage/PF ordering (no exact equality encountered) | Replay-proven | Both `round-results.md` records; ladder order verified round-by-round, every 2026 replay ladder resolved without an exact tie at any boundary that mattered |
-| Exact ladder equality at a boundary that blocks progress (finals eligibility, last place) | **Outstanding / blocks v0.1 if it occurs** | Not replay-proven, and not resolvable through any current surface. `app.finals`'s ladder-based seed derivation and `app.season_awards`'s wooden-spoon derivation both explicitly refuse and state that resolution "requires an explicit, audited Scorer/competition-governance decision" -- but no such recording mechanism exists anywhere in the codebase (browser, CLI, or bare domain function). A live 2027 season that reaches Round 20 with an exact points/percentage/PF tie at the finals cutoff or for last place would currently have no supported way to proceed to Finals or season completion at all. Found by Codex review on this PR (P2); confirmed by inspecting `app.finals`/`app.season_awards` for any caller of the described resolution path (none exists). |
+| Any exact ladder equality, anywhere on the ladder, once Finals seeding must fall back to the mathematical ladder (no 2026-style snapshot) | **Outstanding / blocks v0.1 if it occurs** | Not replay-proven, and not resolvable through any current surface. `app.finals.FinalsBracketRepository._resolve_seed` collects every tied `LadderRow` across all ten teams and raises `UnresolvedLadderTieError` if that list is non-empty at all -- an exact tie anywhere on the ladder blocks bracket creation via the ladder-seed path, not only a tie at the finals-qualification cutoff. `app.season_awards`'s wooden-spoon derivation separately refuses specifically on a last-place tie, blocking season completion. Both explicitly state resolution "requires an explicit, audited Scorer/competition-governance decision", but no such recording mechanism exists anywhere in the codebase (browser, CLI, or bare domain function). Found by Codex review on this PR (P2, then a second P2 round correcting the scope from "cutoff/last-place only" to "anywhere on the ladder"); confirmed by inspecting `_resolve_seed`'s full tied-row collection. |
 | Public ladder future-round subtitle correctness | Replay-proven | Issue #180 |
 | PPG display without becoming a tiebreak criterion | Deferred / v0.2 (guard against regression) | `2026-first-half-replay/ux-findings.md` |
 
@@ -354,15 +354,18 @@ they touch have already passed.
 6. **Non-technical Scorer staging/beta rehearsal**, and **a production
    backup/restore runbook rehearsal against a real deployment** (as
    distinct from the replay's repeatedly-proven checkpoint mechanism).
-7. **Exact ladder equality at a boundary that blocks progress** (finals
-   eligibility cutoff or last place). No 2026 replay ladder happened to
-   land on an exact tie there, so this was never replay-exercised, and no
-   domain function, CLI or browser route implements the "explicit, audited
-   Scorer/competition-governance decision" that `app.finals` and
-   `app.season_awards` both say resolution requires. Conditional in the
-   same sense as the Opening Round item above: it only blocks a season
-   that actually produces such a tie, but that season would currently have
-   no way through Finals or completion at all. Found by Codex review on
+7. **Any exact ladder equality, anywhere on the ladder, once Finals must
+   seed from the mathematical ladder** (no 2026-style historical
+   snapshot). `_resolve_seed` refuses on *any* tied row, not only a tie at
+   the finals cutoff; a last-place tie separately blocks season completion
+   through `app.season_awards`. No 2026 replay ladder happened to land on
+   an exact tie, so this was never replay-exercised, and no domain
+   function, CLI or browser route implements the "explicit, audited
+   Scorer/competition-governance decision" both modules say resolution
+   requires. Conditional in the same sense as the Opening Round item
+   above: it only blocks a season that actually produces such a tie, but
+   that season would currently have no way through Finals or completion
+   at all. Found by Codex review on
    this PR (P2).
 8. **Finals bracket seeding from the live mathematical ladder** -- the
    branch every 2027 season without a 2026-style historical snapshot will

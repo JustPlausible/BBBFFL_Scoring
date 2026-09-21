@@ -11,9 +11,17 @@
 > (section 4) tables in particular describe major season domains --
 > preseason draft, weekly lineups/lockouts, mid-season operations, finals,
 > SuperScore, ladder, coach identity -- as "Missing" or "Prototype-only".
-> All of them have since been implemented and are replay-proven or
-> current-code-regression-proven. Do not read those tables as current
-> truth.
+> All of them have since been implemented and their ordinary-season
+> execution is replay-proven or current-code-regression-proven -- but not
+> uniformly: the readiness document also records real outstanding gaps in
+> *fresh-season and fresh-phase creation/initialization* specifically
+> (player pool population, draft initialization, the Finals competition
+> stream and bracket, SuperScore stream/round creation), which remain
+> CLI-only and mostly production-guarded rather than browser-proven. Do
+> not read either this roadmap's stale tables, or a blanket "implemented"
+> summary of them, as current truth -- see the readiness document's own
+> matrix and "Remaining items" list for the precise, capability-level
+> picture.
 >
 > For the authoritative current-state/readiness assessment, see
 > [`docs/2027-live-season-readiness.md`](../2027-live-season-readiness.md).

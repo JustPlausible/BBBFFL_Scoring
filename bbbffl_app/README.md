@@ -23,6 +23,12 @@ coexisting surfaces:
   its own) -- kept running for the Grand Final/SuperScore use case it was
   built for, not the season-long target for new season-model features.
 
+For the current 2027 live-season readiness of the regular-season surface --
+what is replay-proven, current-code-regression-proven, automated-test-
+proven, still needs a staging rehearsal, or remains outstanding before a
+`v0.1.0` tag -- see
+[`../docs/2027-live-season-readiness.md`](../docs/2027-live-season-readiness.md).
+
 Both surfaces share the same canonical scoring engine (`app/scoring.py`) and
 the same afl-api boundary, but are otherwise independent: the season model
 never depends on the Grand Final vertical, and vice versa (see
@@ -349,7 +355,15 @@ does **not** prove the full 2026 season is replay-validated. See
 [`docs/replay-harness.md`](../docs/replay-harness.md) and
 [`docs/replay-checkpoint-2026.md`](../docs/replay-checkpoint-2026.md) for
 the later, sequential Rounds 1-9 historical replay this rehearsal is a
-prerequisite checkpoint for, not a substitute for.
+prerequisite checkpoint for, not a substitute for. That full-season replay
+is now complete; see
+[`docs/evidence/2026-full-season-replay-summary.md`](../docs/evidence/2026-full-season-replay-summary.md)
+for what it proved and
+[`docs/2027-live-season-readiness.md`](../docs/2027-live-season-readiness.md)
+for the current 2027 readiness conclusion drawn from it. The replay
+checkpoint/clock mechanism referenced above is historical-replay
+infrastructure only and is never part of live 2027 operation, which always
+runs against the real `afl-api` client.
 
 ## Tests
 

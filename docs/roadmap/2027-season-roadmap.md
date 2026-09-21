@@ -1,8 +1,33 @@
 # BBBFFL 2027 full-season engineering roadmap
 
-**Status:** investigation baseline, 23 August 2026<br>
+**Status:** historical engineering roadmap -- investigation baseline, 23 August 2026<br>
 **Scope:** sequencing and validation, not implementation<br>
 **Primary product authority:** [`../plans/2027-season-model.md`](../plans/2027-season-model.md), superseded where explicit by [`../plans/2027-season-decisions.md`](../plans/2027-season-decisions.md)
+
+> **This is a historical planning document, not the current-state record.**
+> It reflects the repository's capabilities as investigated on 23 August
+> 2026, before the 2026 full-season replay ran. Its **Capability
+> classification** (section 2) and **Target 2027 capability map and gaps**
+> (section 4) tables in particular describe major season domains --
+> preseason draft, weekly lineups/lockouts, mid-season operations, finals,
+> SuperScore, ladder, coach identity -- as "Missing" or "Prototype-only".
+> All of them have since been implemented and their ordinary-season
+> execution is replay-proven or current-code-regression-proven -- but not
+> uniformly: the readiness document also records real outstanding gaps in
+> *fresh-season and fresh-phase creation/initialization* specifically
+> (player pool population, draft initialization, the Finals competition
+> stream and bracket, SuperScore stream/round creation), which remain
+> CLI-only and mostly production-guarded rather than browser-proven. Do
+> not read either this roadmap's stale tables, or a blanket "implemented"
+> summary of them, as current truth -- see the readiness document's own
+> matrix and "Remaining items" list for the precise, capability-level
+> picture.
+>
+> For the authoritative current-state/readiness assessment, see
+> [`docs/2027-live-season-readiness.md`](../2027-live-season-readiness.md).
+> This roadmap remains valuable as the original engineering plan, sequencing
+> rationale, and decision/risk register from before implementation began; it
+> is preserved unedited below rather than rewritten to match later reality.
 
 ## 1. Executive summary
 

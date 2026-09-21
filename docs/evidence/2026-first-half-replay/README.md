@@ -51,6 +51,11 @@ AFL round 1352.
   is the operational playbook for that next phase (Round 10, the mid-season
   draft, and Rounds 11–20), with its own evidence record at
   [`docs/evidence/2026-second-half-replay/`](../2026-second-half-replay/).
+- [Full-season replay summary](../2026-full-season-replay-summary.md)
+  synthesises this phase with the second-half and Finals/SuperScore
+  evidence into one full-season view, and links to the current
+  [2027 live-season readiness](../../2027-live-season-readiness.md)
+  document.
 
 ## Evidence policy
 

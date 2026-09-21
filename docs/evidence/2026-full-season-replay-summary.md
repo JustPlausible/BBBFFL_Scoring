@@ -193,10 +193,13 @@ head, scenario, expected-vs-actual, PASS/discrepancy). In summary:
   case (a misconfigured `main`/`selective` trigger correctly rejected and
   correctable by the Scorer).
 
-Combined with the already-complete second-half, Finals/SuperScore and
-mid-season-draft-UI current-code evidence, this satisfies #224's regression
-requirement across the full 2026 season timeline on current code, not only
-at each phase's original closing commit.
+Combined with the separate current-code browser acceptance of the
+mid-season draft (see above), this satisfies #224's regression requirement
+for the timeline it actually covers: preseason through the Round 10 ->
+mid-season handoff. The second-half (Rounds 11-20) and Finals/SuperScore
+evidence remains proven only at each phase's own historical baseline, not
+current code -- see the readiness document's Stage A-D scope note, which
+this summary does not restate or override.
 
 ## Replay-evidence versus automated-test-only conclusions
 

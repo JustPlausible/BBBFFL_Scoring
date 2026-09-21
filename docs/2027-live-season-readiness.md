@@ -202,7 +202,8 @@ remain v0.2 candidates.
 
 | Capability | Status | Evidence |
 |---|---|---|
-| Points/percentage/PF ordering, exact-equality escalation | Replay-proven | Both `round-results.md` records; ladder order verified round-by-round |
+| Points/percentage/PF ordering (no exact equality encountered) | Replay-proven | Both `round-results.md` records; ladder order verified round-by-round, every 2026 replay ladder resolved without an exact tie at any boundary that mattered |
+| Exact ladder equality at a boundary that blocks progress (finals eligibility, last place) | **Outstanding / blocks v0.1 if it occurs** | Not replay-proven, and not resolvable through any current surface. `app.finals`'s ladder-based seed derivation and `app.season_awards`'s wooden-spoon derivation both explicitly refuse and state that resolution "requires an explicit, audited Scorer/competition-governance decision" -- but no such recording mechanism exists anywhere in the codebase (browser, CLI, or bare domain function). A live 2027 season that reaches Round 20 with an exact points/percentage/PF tie at the finals cutoff or for last place would currently have no supported way to proceed to Finals or season completion at all. Found by Codex review on this PR (P2); confirmed by inspecting `app.finals`/`app.season_awards` for any caller of the described resolution path (none exists). |
 | Public ladder future-round subtitle correctness | Replay-proven | Issue #180 |
 | PPG display without becoming a tiebreak criterion | Deferred / v0.2 (guard against regression) | `2026-first-half-replay/ux-findings.md` |
 
@@ -217,7 +218,9 @@ auto-pick automation are v0.2.
 
 | Capability | Status | Evidence |
 |---|---|---|
-| Bracket progression, seeding (from the mathematical ladder, or the 2026-only historical snapshot), publication, once a bracket already exists | Replay-proven at the Finals/SuperScore phase's own baseline (`5561a63`) | `2026-finals-replay/` |
+| Bracket progression and publication, once a bracket already exists | Replay-proven at the Finals/SuperScore phase's own baseline (`5561a63`) | `2026-finals-replay/` |
+| Bracket seeding from the 2026-only historical snapshot | Replay-proven, but **not the path any future season uses** | `2026-finals-replay/provenance-manifest.md` records `seed_source: snapshot`; `scripts/finals_bracket_2026.py` explicitly refuses to create a bracket unless that snapshot already exists |
+| Bracket seeding from the live mathematical ladder (the path every 2027 season without a 2026-style historical snapshot will actually use) | **Automated-test-proven only; not replay-proven** | `app.finals.FinalsBracketRepository.create_bracket`'s ladder fallback (`_resolve_seed`, `seed_source == "ladder"`) was never exercised by the 2026 replay -- `scripts/finals_bracket_2026.py` deliberately refuses to take that branch. Only `tests/test_finals*.py` cover it. Found by Codex review on this PR (P2); an earlier draft of this document conflated the two seed sources under one "replay-proven" row. |
 | Finals preflight discoverability and the paired Finals+SuperScore weekly open action | Replay-proven | Issue #211/#221, exercised as part of the same replay |
 | **Finals competition-stream and bracket creation** (the first entry into Finals from a live, completed ladder) | **Outstanding / blocks v0.1** | `app.finals.FinalsBracketRepository.create_bracket` has no browser route; every `app/routes/finals_preflight.py` route takes an already-existing `bracket_id`. Its only non-test caller is `scripts/finals_bracket_2026.py`, which is production-guarded, depends on the 2026-only historical seeding snapshot for its non-ladder path, and itself requires an already-existing `finals`-typed `competition_stream` id as an argument. That stream is one level further back: `SeasonRepository.create_competition(..., "finals")` has no non-test caller outside `scripts/bootstrap_round1_2026.py` (which creates only an `"ordinary"` stream, not a `"finals"` one) -- nothing in this repository currently creates a finals competition stream for a fresh season, production-safe or otherwise. A live 2027 season reaching the end of Round 20 currently has no production-safe way to start Finals at either level. Found by Codex review on this PR (P1, then P2 for the deeper stream-creation layer). |
 | Coach weekly-selection chronology across ordinary/Finals/SuperScore | Deferred / v0.2 | `2026-finals-replay/ux-findings.md` |
@@ -351,6 +354,23 @@ they touch have already passed.
 6. **Non-technical Scorer staging/beta rehearsal**, and **a production
    backup/restore runbook rehearsal against a real deployment** (as
    distinct from the replay's repeatedly-proven checkpoint mechanism).
+7. **Exact ladder equality at a boundary that blocks progress** (finals
+   eligibility cutoff or last place). No 2026 replay ladder happened to
+   land on an exact tie there, so this was never replay-exercised, and no
+   domain function, CLI or browser route implements the "explicit, audited
+   Scorer/competition-governance decision" that `app.finals` and
+   `app.season_awards` both say resolution requires. Conditional in the
+   same sense as the Opening Round item above: it only blocks a season
+   that actually produces such a tie, but that season would currently have
+   no way through Finals or completion at all. Found by Codex review on
+   this PR (P2).
+8. **Finals bracket seeding from the live mathematical ladder** -- the
+   branch every 2027 season without a 2026-style historical snapshot will
+   actually use -- is automated-test-proven only, not replay-proven; the
+   2026 replay's own tooling deliberately always took the snapshot branch
+   instead. This does not block v0.1 by itself (the domain logic is
+   tested), but the readiness matrix no longer overstates it as
+   replay-proven. Found by Codex review on this PR (P2).
 
 Items 1-2 were surfaced by Codex's review of this PR, not by the 2026
 replay itself -- the replay never needed a fresh-production-bootstrap or

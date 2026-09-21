@@ -98,9 +98,11 @@ captured live in 2026, and it deliberately kept three kinds of evidence
 distinct:
 
 - **Ordinary supported workflows** -- the vast majority of rounds (all of
-  Rounds 1, 3-5, 7-8, 11, 13-20; the routine share of every phase) used
+  Rounds 1, 3, 5, 7-8, 11, 13-20; the routine share of every phase) used
   only the normal submit/lockout/score/review/publish path with no special
-  handling.
+  handling. Round 4 is deliberately excluded from this list: per the
+  exceptional-actions entry below, it required Opening Round
+  deferred-value resolution and is not routine-only.
 - **Historically reconstructed exceptional actions**, applied through the
   *existing* audited Scorer correction/adjudication workflows, never a
   direct database edit:

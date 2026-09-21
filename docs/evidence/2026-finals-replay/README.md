@@ -82,6 +82,11 @@ archives are both preserved and validated privately.
   checks available from the replay record.
 - [UX findings](ux-findings.md) -- operator/Coach usability observations
   retained for 2027 follow-up.
+- [Full-season replay summary](../2026-full-season-replay-summary.md)
+  synthesises this phase with the first-half and second-half evidence into
+  one full-season view, and links to the current
+  [2027 live-season readiness](../../2027-live-season-readiness.md)
+  document.
 
 ## Evidence policy
 

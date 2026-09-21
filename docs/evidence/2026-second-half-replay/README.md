@@ -54,6 +54,11 @@ for the resulting design and follow-up issue decomposition.
 - [Finals seeding 2026](finals-seeding-2026.md) records why the mathematical
   Round 20 ladder and historical finals order differ and how the replay-only
   audited seed snapshot preserves both.
+- [Full-season replay summary](../2026-full-season-replay-summary.md)
+  synthesises this phase with the first-half and Finals/SuperScore evidence
+  into one full-season view, and links to the current
+  [2027 live-season readiness](../../2027-live-season-readiness.md)
+  document.
 
 ## Evidence policy
 

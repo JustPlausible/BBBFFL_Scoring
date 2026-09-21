@@ -15,6 +15,25 @@ Application source for the **Big Bad Bustling Fantasy Football League
   Google Sheets implementation. It is retained as migration and replay
   evidence, not as the target for new feature development.
 
+## Current 2027 readiness
+
+[`docs/2027-live-season-readiness.md`](docs/2027-live-season-readiness.md)
+is the authoritative current-state document for whether a 2027 season can
+be run end-to-end by normal users (coaches, Scorer, Administrator) without
+routine CLI, database or UUID knowledge. It classifies every major season
+domain as replay-proven, current-code-regression-proven, automated-test-
+proven, staging-rehearsal-needed, outstanding, or v0.2/deferred, and lists
+what remains before a `v0.1.0` tag.
+
+It draws on the completed 2026 full-season historical replay, summarised at
+[`docs/evidence/2026-full-season-replay-summary.md`](docs/evidence/2026-full-season-replay-summary.md)
+and recorded in detail across three phase evidence directories under
+[`docs/evidence/`](docs/evidence/). The original engineering sequencing
+plan that preceded that replay is preserved as a historical baseline at
+[`docs/roadmap/2027-season-roadmap.md`](docs/roadmap/2027-season-roadmap.md)
+-- see the readiness document for current capability, not that roadmap's
+now-superseded "current state" tables.
+
 New BBBFFL features should normally be implemented in `bbbffl_app/`. The
 archive must not be treated as a second active application or ported as part
 of unrelated work.

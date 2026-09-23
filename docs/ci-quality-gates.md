@@ -250,6 +250,112 @@ triggers and to branch protection), not just leaving it enabled. See
 [`afl-api-v1-contract.md`](afl-api-v1-contract.md) for what the diagnostic
 validates and how to run it with real credentials.
 
+## Python test runtime and slow CI runs
+
+Issue #218. The `test` job runs the **full** regression suite on every PR
+and push -- no sharding, parallelism, test selection or runtime cap. It
+takes ~21-30 min normally. On a small number of runs the hosted runner is
+several times slower. This section explains how to tell that apart from a
+real regression or a hung test.
+
+### What the job reports
+
+The `Run tests` step enables the opt-in plugin
+`bbbffl_app/tests/ci_observability.py` plus two pytest built-ins. None of
+them changes which tests run, their order, fixtures, isolation or outcomes
+(`tests/test_ci_observability.py` pins that):
+
+| Signal | Where | Meaning |
+|---|---|---|
+| `[ci-progress] environment at start/end: ... fsync_p50=...ms io_pressure_avg60=...%` | top and bottom of the step log | Runner size and disk health. A normal hosted runner shows fsync around ~1 ms or less. |
+| `[ci-progress] +25m00s done 1180/2081 (+230 in last 5m00s) proc_cpu=..% iowait=..% steal=..% fsync_p50=..ms current=<test> [setup 0m03s]` | every 5 min | Progress, throughput, whether the process is computing or waiting, and what is running right now. |
+| `[ci-progress] SLOW: <test> has been in <setup/call/teardown> for 2m00s` | once per test phase past 2 min | A single test/fixture is unusually slow. Only a report: the test is not failed or interrupted. |
+| `Timeout (0:10:00)!` followed by thread stacks | if one test runs > 10 min | `faulthandler_timeout=600`: shows where every thread is stuck. The test keeps running. |
+| `slowest 25 durations` / `slowest 15 test files` | end of the step log | Slowest setup/call/teardown phases and the files that took the most time. |
+| **Summarise test timings** job summary | run summary page | Same tables. Written even if tests failed or the run was **cancelled**, in which case it's marked **INCOMPLETE** and names the last test that finished. |
+
+To check whether a slow run was slow everywhere or only in particular
+tests, compare two timing logs locally:
+
+```bash
+cd bbbffl_app
+python -m pytest -p tests.ci_observability --ci-timing-log /tmp/now.jsonl   # any pytest args
+python -m scripts.ci_test_timing_report /tmp/now.jsonl --baseline /tmp/normal.jsonl
+```
+
+Two outcomes are possible. A **uniform slowdown** across files points at the
+environment. **N file(s) slowed down at least 3x as much as the median**
+points at those files.
+
+### Baseline and what the #218 investigation found
+
+- **Normal:** the last 60 `CI` runs before #218's fix took a median of
+  25.8 min end to end (p10 22.4, p90 30.4). A normal `Run tests` step is
+  ~21-27 min for ~2,080 tests. PR #217's successful rerun on `219bed2` took
+  23 min 29 s (`2017 passed, 64 skipped`).
+- **Where the time goes:** almost all of it is SQLite-backed tests. Most of
+  those build a fresh database and run all Alembic migrations (~0.5-1 s per
+  test, once in a fixture and again in app startup for HTTP tests), then make
+  many small committed writes. Pure-Python tests (AFL client/contract,
+  config, architecture, ...) take ~1-2 s in total.
+- **The #217 "stuck" run was not stuck.** Its pytest output, still in the
+  job log, shows files finishing steadily until it was cancelled at 77 min
+  and 55% of the suite. Every DB-backed file was **~6.3x slower** (median;
+  range 2.9-8.4x) than in the rerun on the identical commit. The slowdown
+  held steady across the whole run (per-block ratios 6.0-6.8x from the first
+  file to the last). The 13 files that do no database work were **not**
+  slower: 0.9 s in the slow run vs 1.4 s in the rerun. At that pace it
+  would have finished after about 2.5 h.
+- **Another outlier** (`c747c16`, run 35428685824, 61 min, passed) shows the
+  same pattern at ~2.4x (median; per-block 1.8-3.7x throughout the run).
+  Again the non-database files were not slower: 1.3 s vs 2.0 s.
+- No single test, fixture or file stood out, and neither run failed. The
+  slowdown started with the first file, so it did not grow with test order
+  or accumulated state. It hit I/O-heavy tests and left CPU-only tests
+  alone.
+
+**Best-supported explanation:** occasional GitHub-hosted runners with much
+slower disk writes (fsync-bound SQLite work). The cause is not the tests or
+the application, not test order or leaked state, and not dependency
+installation, which took ~20 s in every run examined. This can't be proven
+from the historical logs alone, because they contain no disk metrics. The
+new `fsync_p50` / `iowait` / `io_pressure` / `steal` fields exist to confirm
+or rule it out the next time it happens.
+
+### What to do with a slow run
+
+1. **Leave it running** if the heartbeat's `done` count keeps rising. This
+   is true even at a fraction of the normal rate. Then check the
+   environment line: a high `fsync_p50` (tens of ms), `iowait` or
+   `io_pressure` with no SLOW lines means the runner is slow and the suite
+   is fine. It will finish, just late. You may still cancel and rerun
+   (step 4) to get a faster runner. That is a time trade-off, not a fix.
+2. **Look into a test** if a `SLOW:` line or `slowest durations` entry names
+   the same test or fixture across runs, or the timing-report comparison
+   flags specific files rather than a uniform slowdown. Treat that as
+   application/test work: the named phase (`setup` = fixtures, `call` = the
+   test body) says where to look.
+3. **Treat it as stalled** if two or more heartbeats in a row say
+   `NO TESTS FINISHED SINCE LAST HEARTBEAT`, on the same `current=` test,
+   and especially once `faulthandler` has dumped stacks for that test. Also
+   treat it as stalled if the step log stops advancing with no heartbeat for
+   well over 5 min, which means the process itself is wedged. A stall with
+   high `proc_cpu` usually means a loop in the code. One with ~0% CPU means
+   waiting on I/O, a lock or a subprocess. Keep the faulthandler stacks:
+   they are the evidence.
+4. **Cancel and rerun safely.** Every job is hermetic, and a rerun starts
+   on a fresh runner from a clean checkout. Cancelling can't leave state
+   behind, and "Re-run failed jobs" / "Re-run all jobs" on the same commit
+   is safe. Before cancelling, note what you've seen (heartbeat lines, SLOW
+   lines, the **INCOMPLETE** summary's last test) in the PR. A rerun that
+   passes after a stall is **not** proof of an infrastructure fault if the
+   stall named a test. Only a uniform slowdown or an environment-only stall
+   justifies calling it runner variability.
+
+There is deliberately no `timeout-minutes` below GitHub's default (6 h)
+on this job. Slow-but-progressing runs are legitimate and must not become
+flaky failures, so the signals above are for humans to act on.
+
 ## Deliberate limitations / follow-up
 
 - **Type-check scope** covers five domain/audit modules, not the routed HTTP

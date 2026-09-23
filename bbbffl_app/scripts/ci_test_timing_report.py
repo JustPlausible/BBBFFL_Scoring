@@ -28,7 +28,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 PHASES = ("setup", "call", "teardown")
-INTERRUPTED = 2  # pytest.ExitCode.INTERRUPTED; kept literal so this script needs no pytest import
+# pytest.ExitCode values for a session that ran to its natural end: OK,
+# TESTS_FAILED, NO_TESTS_COLLECTED. Anything else (2 INTERRUPTED, 3
+# INTERNAL_ERROR, 4 USAGE_ERROR, ...) did not. Literal so this script needs
+# no pytest import.
+NATURAL_EXIT_STATUSES = {0, 1, 5}
+EXIT_STATUS_NAMES = {2: "interrupted/cancelled", 3: "pytest internal error", 4: "usage error"}
 
 
 @dataclass
@@ -41,12 +46,12 @@ class TimingLog:
     def complete(self) -> bool:
         """True only for a session that ran to its natural end.
 
-        A cancelled job usually reaches pytest as SIGINT; pytest then still
-        runs ``pytest_sessionfinish``, so a ``finished`` record alone is not
-        enough -- it must also not be an interruption (exit status 2) and must
-        account for every collected test.
+        A cancelled job usually reaches pytest as SIGINT, and pytest still
+        runs ``pytest_sessionfinish`` after an interruption or an internal
+        error, so a ``finished`` record alone is not enough: the exit status
+        must be a natural end and every collected test must be accounted for.
         """
-        if self.finished is None or self.finished.get("exitstatus") == INTERRUPTED:
+        if self.finished is None or self.finished.get("exitstatus") not in NATURAL_EXIT_STATUSES:
             return False
         completed = self.finished.get("completed", len(self.tests))
         return self.collected is None or completed >= self.collected
@@ -96,10 +101,11 @@ def summarise(log: TimingLog, top: int = 15) -> str:
     if log.complete:
         status = f"completed (pytest exit status {log.finished['exitstatus']})"
     elif log.finished is not None:
-        status = (
-            f"**INCOMPLETE** -- pytest stopped early with exit status {log.finished['exitstatus']} "
-            "(2 = interrupted/cancelled; otherwise e.g. stopped by --maxfail/-x)"
+        code = log.finished["exitstatus"]
+        reason = EXIT_STATUS_NAMES.get(
+            code, "e.g. stopped by --maxfail/-x" if code in NATURAL_EXIT_STATUSES else "abnormal"
         )
+        status = f"**INCOMPLETE** -- pytest stopped early with exit status {code} ({reason})"
     else:
         status = "**INCOMPLETE** -- pytest did not reach the end of the session (cancelled, killed or crashed)"
     lines += [

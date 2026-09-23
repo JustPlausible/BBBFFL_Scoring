@@ -239,13 +239,13 @@ def test_report_flags_an_incomplete_cancelled_run_and_tolerates_a_truncated_line
 
 @pytest.mark.parametrize(
     "exitstatus, completed, collected",
-    [(2, 2, 3), (1, 2, 3)],
-    ids=["interrupted-cancellation", "stopped-early"],
+    [(2, 2, 3), (1, 2, 3), (3, 3, 3), (4, 3, 3)],
+    ids=["interrupted-cancellation", "stopped-early", "internal-error-after-all-tests", "usage-error"],
 )
 def test_report_treats_a_session_that_ended_early_as_incomplete(tmp_path, exitstatus, completed, collected):
-    # A cancelled job typically reaches pytest as SIGINT, and pytest still
-    # runs sessionfinish, so a "finished" record alone must not read as a
-    # completed run.
+    # pytest still runs sessionfinish after SIGINT (a cancelled job) or an
+    # internal error, even once every test has a timing record, so a
+    # "finished" record alone must not read as a completed run.
     path = _write_log(tmp_path / "t.jsonl", BASELINE[:completed], collected=collected)
     records = path.read_text().splitlines()
     finished = json.loads(records[-1])
@@ -256,7 +256,7 @@ def test_report_treats_a_session_that_ended_early_as_incomplete(tmp_path, exitst
     assert not log.complete
     text = report.summarise(log)
     assert f"**INCOMPLETE** -- pytest stopped early with exit status {exitstatus}" in text
-    assert "Last test to finish: `tests/test_b.py::test_one`" in text
+    assert f"Last test to finish: `{BASELINE[completed - 1][0]}`" in text
 
 
 def test_report_treats_a_full_session_as_complete_even_with_failures(tmp_path):

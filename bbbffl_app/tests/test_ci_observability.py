@@ -122,11 +122,13 @@ def test_timing_log_records_every_test_and_the_session_boundaries(pytester, run_
     result.stdout.fnmatch_lines(["*slowest 15 test files*", "*6 tests  test_inner.py"])
 
 
-def test_heartbeat_reports_progress_stalls_and_slow_setup_without_failing_the_test(run_inner):
+def test_heartbeat_reports_progress_stalls_and_slow_setup_without_failing_the_test(pytester, run_inner):
     result = run_inner(
         3.5,
         "-p",
         "tests.ci_observability",
+        "--ci-timing-log",
+        str(pytester.path / "beats.jsonl"),
         "--ci-heartbeat",
         "1",
         "--ci-slow-test",
@@ -143,6 +145,10 @@ def test_heartbeat_reports_progress_stalls_and_slow_setup_without_failing_the_te
         ]
     )
     assert "NO TESTS FINISHED SINCE LAST HEARTBEAT" in result.stdout.str()
+    beats = [
+        json.loads(line) for line in (pytester.path / "beats.jsonl").read_text().splitlines() if '"heartbeat"' in line
+    ]
+    assert beats and any(beat.get("running", {}).get("nodeid") == "test_inner.py::test_f_slow_setup" for beat in beats)
 
 
 @pytest.mark.parametrize("destination", ["unopenable", "disk-full"])
@@ -238,6 +244,24 @@ def test_report_flags_an_incomplete_cancelled_run_and_tolerates_a_truncated_line
     assert "Tests recorded: 2 of 3 collected (2 passed)" in text
     assert "Last test to finish: `tests/test_b.py::test_one`" in text
     assert text.index("tests/test_b.py") < text.index("tests/test_a.py")  # slowest first
+
+
+def test_report_uses_the_last_heartbeat_for_a_killed_session(tmp_path):
+    # SIGKILL: no finished record. One test finished at +10s, then the run
+    # hung in the next test for an hour -- heartbeats are the only evidence.
+    path = _write_log(tmp_path / "t.jsonl", [BASELINE[0]], finished=False, collected=3)
+    beat = {
+        "event": "heartbeat",
+        "elapsed": 3610.0,
+        "completed": 1,
+        "running": {"nodeid": "tests/test_b.py::test_one", "phase": "call", "seconds": 3600.0},
+    }
+    path.write_text(path.read_text() + json.dumps(beat) + "\n")
+
+    text = report.summarise(report.load(path))
+    assert "did not reach the end of the session" in text
+    assert "Wall time in pytest session: at least 60.2 min" in text
+    assert "Last heartbeat: +60.2 min, 1 done, running `tests/test_b.py::test_one` (call, 3600.0 s" in text
 
 
 @pytest.mark.parametrize(

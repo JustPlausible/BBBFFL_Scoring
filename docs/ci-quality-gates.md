@@ -272,7 +272,7 @@ them changes which tests run, their order, fixtures, isolation or outcomes
 | `[ci-progress] SLOW: <test> has been in <setup/call/teardown> for 2m00s` | once per test phase past 2 min | A single test/fixture is unusually slow. Only a report: the test is not failed or interrupted. |
 | `Timeout (0:10:00)!` followed by thread stacks | if one test runs > 10 min | `faulthandler_timeout=600`: shows where every thread is stuck. The test keeps running. |
 | `slowest 25 durations` / `slowest 15 test files` | end of the step log | Slowest setup/call/teardown phases and the files that took the most time. |
-| **Summarise test timings** job summary | run summary page | Same tables. Written even if tests failed or the run was **cancelled**. A cancelled or early-stopped run is marked **INCOMPLETE** and names the last test that finished and the test (and phase) running when it was stopped. |
+| **Summarise test timings** job summary | run summary page | Same tables. Written even if tests failed or the run was **cancelled**. A cancelled or early-stopped run is marked **INCOMPLETE** and names the last test that finished and the test (and phase) running when it was stopped. If the process was killed outright, the last heartbeat (also saved to the timing log) supplies a lower-bound wall time and the test that was running. |
 
 To check whether a slow run was slow everywhere or only in particular
 tests, compare two timing logs locally:

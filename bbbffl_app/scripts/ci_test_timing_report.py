@@ -47,6 +47,7 @@ class TimingLog:
     tests: list[dict] = field(default_factory=list)
     collected: int | None = None
     finished: dict | None = None
+    last_heartbeat: dict | None = None
 
     @property
     def complete(self) -> bool:
@@ -87,6 +88,8 @@ def load(path: Path) -> TimingLog:
                 log.collected = record.get("count")
             elif record.get("event") == "finished":
                 log.finished = record
+            elif record.get("event") == "heartbeat":
+                log.last_heartbeat = record
             elif "nodeid" in record:
                 log.tests.append(record)
     return log
@@ -102,7 +105,17 @@ def summarise(log: TimingLog, top: int = 15) -> str:
     for record in log.tests:
         outcomes[record.get("outcome", "unknown")] += 1
     in_test = sum(record_seconds(record) for record in log.tests)
-    wall = log.finished["elapsed"] if log.finished else (log.tests[-1]["elapsed"] if log.tests else 0.0)
+    if log.finished:
+        wall_text = _minutes(log.finished["elapsed"])
+    else:
+        # Killed without sessionfinish: the true wall time is unknown. The
+        # latest heartbeat or completion is only a lower bound.
+        known = max(
+            [record["elapsed"] for record in log.tests[-1:]]
+            + ([log.last_heartbeat["elapsed"]] if log.last_heartbeat else [])
+            + [0.0]
+        )
+        wall_text = f"at least {_minutes(known)} (last heartbeat/test completion; the session was not closed)"
     expected = log.collected if log.collected is not None else "?"
     if log.complete:
         status = f"completed (pytest exit status {log.finished['exitstatus']})"
@@ -119,7 +132,7 @@ def summarise(log: TimingLog, top: int = 15) -> str:
         f"- Tests recorded: {len(log.tests)} of {expected} collected ("
         + ", ".join(f"{count} {outcome}" for outcome, count in sorted(outcomes.items()))
         + ")",
-        f"- Wall time in pytest session: {_minutes(wall)}; time inside tests: {_minutes(in_test)}",
+        f"- Wall time in pytest session: {wall_text}; time inside tests: {_minutes(in_test)}",
     ]
     if log.tests and not log.complete:
         last = log.tests[-1]
@@ -130,6 +143,15 @@ def summarise(log: TimingLog, top: int = 15) -> str:
             f"- Running when the session ended: `{running['nodeid']}` "
             f"({running['phase']}, {running['seconds']:.1f} s in that phase)"
         )
+    elif not log.finished and log.last_heartbeat:
+        beat = log.last_heartbeat
+        detail = (
+            f"running `{beat['running']['nodeid']}` ({beat['running']['phase']}, "
+            f"{beat['running']['seconds']:.1f} s in that phase)"
+            if beat.get("running")
+            else "between tests"
+        )
+        lines.append(f"- Last heartbeat: +{_minutes(beat['elapsed'])}, {beat['completed']} done, {detail}")
     lines.append("")
 
     if not log.tests:

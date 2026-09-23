@@ -197,6 +197,7 @@ class CiObservability:
         self.probe_dir = tempfile.gettempdir()
 
         self._lock = threading.Lock()
+        self._log_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = None
         self._out_fd = None
@@ -302,16 +303,21 @@ class CiObservability:
         )
 
     def _write_record(self, record):
-        if self._log is None:
-            return
-        try:
-            self._log.write(json.dumps(record) + "\n")
-            self._log.flush()
-        except (OSError, ValueError) as error:
-            # Stop writing after the first failure (e.g. disk full) and say
-            # so once, instead of failing tests or repeating the error.
-            self._emit(f"{PREFIX} timing log disabled after write failure: {error}")
-            self._close_log()
+        # Called from the main thread and the heartbeat thread.
+        with self._log_lock:
+            if self._log is None:
+                return
+            try:
+                self._log.write(json.dumps(record) + "\n")
+                self._log.flush()
+                return
+            except (OSError, ValueError) as error:
+                failure = error
+        # Only reached after a failed write. Stop writing after the first
+        # failure (e.g. disk full) and say so once, instead of failing tests
+        # or repeating the error; close outside the lock (_close_log takes it).
+        self._emit(f"{PREFIX} timing log disabled after write failure: {failure}")
+        self._close_log()
 
     def pytest_sessionfinish(self, session, exitstatus):
         self._stop.set()
@@ -335,7 +341,8 @@ class CiObservability:
         self._close_log()
 
     def _close_log(self):
-        log, self._log = self._log, None
+        with self._log_lock:
+            log, self._log = self._log, None
         if log is None:
             return
         try:
@@ -417,4 +424,11 @@ class CiObservability:
             if finished == 0:
                 parts.append("NO TESTS FINISHED SINCE LAST HEARTBEAT")
             self._emit(" ".join(parts))
+            # Also persist the heartbeat, so a run that is killed outright
+            # (no sessionfinish) still records how long it really ran and
+            # what it was doing last.
+            beat = {"event": "heartbeat", "elapsed": round(now - self.started, 2), "completed": completed}
+            if current:
+                beat["running"] = {"nodeid": current[0], "phase": current[1], "seconds": round(now - current[2], 2)}
+            self._write_record(beat)
             last_beat, last_completed, last_cpu, last_sys = now, completed, cpu, sys_times

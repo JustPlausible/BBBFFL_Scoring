@@ -225,7 +225,10 @@ def _write_log(path, tests, finished=True, collected=None, truncated=False):
     return path
 
 
-BASELINE = [(f"tests/test_{name}.py::test_one", seconds) for name, seconds in (("a", 10), ("b", 20), ("c", 40))]
+BASELINE = [
+    (f"tests/test_{name}.py::test_one", seconds)
+    for name, seconds in (("a", 10), ("b", 20), ("c", 40), ("d", 15), ("e", 25))
+]
 
 
 def test_report_flags_an_incomplete_cancelled_run_and_tolerates_a_truncated_line(tmp_path):
@@ -281,6 +284,20 @@ def test_report_distinguishes_uniform_slowdown_from_specific_outliers(tmp_path):
 
     same = report.compare(baseline, baseline)
     assert "no material slowdown" in same
+
+    half = [(n, s * (2 if n < "tests/test_c" else 1)) for n, s in BASELINE]
+    assert "**mixed**" in report.compare(report.load(_write_log(tmp_path / "half.jsonl", half)), baseline)
+
+
+def test_report_does_not_call_a_sparse_comparison_uniform(tmp_path):
+    # Two comparable files, one regressed 10x: the median (5.5x) must not make
+    # this read as a runner-wide slowdown.
+    pair = BASELINE[:2]
+    baseline = report.load(_write_log(tmp_path / "base.jsonl", pair))
+    current = report.load(_write_log(tmp_path / "now.jsonl", [(pair[0][0], 100), pair[1]]))
+    text = report.compare(current, baseline)
+    assert "uniform slowdown" not in text
+    assert "only 2 comparable file(s) -- too few" in text
 
 
 def test_report_main_never_fails_ci_for_a_missing_log(tmp_path, capsys):

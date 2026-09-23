@@ -283,9 +283,11 @@ python -m pytest -p tests.ci_observability --ci-timing-log /tmp/now.jsonl   # an
 python -m scripts.ci_test_timing_report /tmp/now.jsonl --baseline /tmp/normal.jsonl
 ```
 
-Two outcomes are possible. A **uniform slowdown** across files points at the
-environment. **N file(s) slowed down at least 3x as much as the median**
-points at those files.
+A **uniform slowdown** (at least three quarters of the files materially
+slower) points at the environment. **N file(s) slowed down at least 3x as
+much as the median** points at those files. **Mixed** means some files are
+slower and others aren't: read the table. With fewer than 5 comparable
+files the report doesn't classify the result at all.
 
 ### Baseline and what the #218 investigation found
 

@@ -34,6 +34,12 @@ PHASES = ("setup", "call", "teardown")
 # no pytest import.
 NATURAL_EXIT_STATUSES = {0, 1, 5}
 EXIT_STATUS_NAMES = {2: "interrupted/cancelled", 3: "pytest internal error", 4: "usage error"}
+# compare(): a file counts as materially slower at this ratio, and a
+# "uniform"/"specific files" verdict needs at least this many comparable
+# files -- with two or three, one regressed file can drag the median up and
+# masquerade as a uniform slowdown.
+SLOWDOWN = 1.5
+MIN_FILES_FOR_PATTERN = 5
 
 
 @dataclass
@@ -200,18 +206,31 @@ def compare(
     # slowdowns alone left individual files anywhere from ~0.5x to ~2.3x of
     # that run's median slowdown, so smaller deviations are noise.
     outliers = [item for item in ratios if item[1] >= 3 * median and item[2] - item[3] >= outlier_extra_seconds]
-    if median >= 1.5 and not outliers:
+    lower_quartile = values[-1 - (len(values) - 1) // 4] if values else 0.0  # values are sorted descending
+    if len(ratios) < MIN_FILES_FOR_PATTERN:
         lines.append(
-            "- Pattern: **uniform slowdown** across files -- more consistent with runner/environment "
-            "variability than with a specific test (confirm with the heartbeat's fsync/iowait/steal figures)."
+            f"- Pattern: only {len(ratios)} comparable file(s) -- too few to call the slowdown uniform or "
+            f"specific (needs {MIN_FILES_FOR_PATTERN}); read the table below directly."
         )
     elif outliers:
         lines.append(
             f"- Pattern: **{len(outliers)} file(s) slowed down at least 3x as much as the median** -- "
             "investigate these before blaming the runner."
         )
-    else:
+    elif lower_quartile >= SLOWDOWN:
+        # At least three quarters of the files are materially slower: a broad,
+        # not a concentrated, slowdown.
+        lines.append(
+            "- Pattern: **uniform slowdown** across files -- more consistent with runner/environment "
+            "variability than with a specific test (confirm with the heartbeat's fsync/iowait/steal figures)."
+        )
+    elif max(values) < SLOWDOWN:
         lines.append("- Pattern: no material slowdown relative to the baseline.")
+    else:
+        lines.append(
+            "- Pattern: **mixed** -- some files are materially slower and others are not; "
+            "inspect the slowest files below before attributing it to the runner."
+        )
     lines += ["", "| slowdown | now s | baseline s | file |", "|---:|---:|---:|---|"]
     lines += [f"| x{ratio:.2f} | {n:.1f} | {b:.1f} | `{path}` |" for path, ratio, n, b in ratios[:top]]
     lines.append("")

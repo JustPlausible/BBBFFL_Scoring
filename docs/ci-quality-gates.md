@@ -284,8 +284,11 @@ python -m scripts.ci_test_timing_report /tmp/now.jsonl --baseline /tmp/normal.js
 ```
 
 A **uniform slowdown** (at least three quarters of the files materially
-slower) points at the environment. **N file(s) slowed down at least 3x as
-much as the median** points at those files. **Mixed** means some files are
+slower) points at the environment. **N file(s) regressed far more than the rest**
+(at least 3x the median slowdown, or a previously fast file that got at
+least 30 s slower) points at those files. Files with no baseline timing,
+usually tests added since the baseline's commit, are listed as `new` but
+don't count as regressions. **Mixed** means some files are
 slower and others aren't: read the table. With fewer than 5 comparable
 files the report doesn't classify the result at all.
 

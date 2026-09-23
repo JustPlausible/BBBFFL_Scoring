@@ -177,7 +177,10 @@ def compare(
     the ratio distribution; sub-second files are too noisy to compare. A
     narrow spread around one large median means everything slowed down
     together (points at the runner/environment); a few files far above the
-    median points at those tests.
+    median points at those tests. Separately, a file that was fast in the
+    baseline but now costs at least ``outlier_extra_seconds`` more (and
+    slowed far more than the median) is always reported: its ratio is noisy,
+    but that absolute regression is not.
     """
     now, before = current.file_seconds(), baseline.file_seconds()
     ratios = sorted(
@@ -189,33 +192,69 @@ def compare(
         key=lambda item: item[1],
         reverse=True,
     )
+    fast_regressions = sorted(
+        (
+            (path, now[path] / before[path], now[path], before[path])
+            for path in now
+            if 0 < before.get(path, 0) < min_seconds and now[path] - before[path] >= outlier_extra_seconds
+        ),
+        key=lambda item: item[2] - item[3],
+        reverse=True,
+    )
+    # Files with no baseline timing at all (usually tests added since the
+    # baseline's commit) are listed but cannot be judged as a regression.
+    new_files = sorted(
+        ((path, float("inf"), now[path], 0.0) for path in now if path not in before and now[path] >= min_seconds),
+        key=lambda item: item[2],
+        reverse=True,
+    )
     lines = ["## Comparison with baseline run", ""]
-    if not ratios:
+    if not ratios and not fast_regressions and not new_files:
         lines.append(f"No common test files with at least {min_seconds:g}s in the baseline to compare.")
         return "\n".join(lines) + "\n"
-    values = [ratio for _, ratio, _, _ in ratios]
-    median = statistics.median(values)
     common_now = sum(now[path] for path in now if path in before)
     common_before = sum(before[path] for path in now if path in before)
     lines.append(f"- Files compared: {len(ratios)} (baseline >= {min_seconds:g}s)")
     if common_before:
         lines.append(f"- Overall slowdown on common files: x{common_now / common_before:.2f}")
-    lines.append(f"- Per-file slowdown: median x{median:.2f}, min x{min(values):.2f}, max x{max(values):.2f}")
-    # A file only stands out if it slowed down far more than everything else
-    # *and* lost a material amount of time: in #218's evidence, runner-level
-    # slowdowns alone left individual files anywhere from ~0.5x to ~2.3x of
-    # that run's median slowdown, so smaller deviations are noise.
-    outliers = [item for item in ratios if item[1] >= 3 * median and item[2] - item[3] >= outlier_extra_seconds]
-    slower_share = sum(value >= SLOWDOWN for value in values) / len(values)
-    if len(ratios) < MIN_FILES_FOR_PATTERN:
+    outliers: list[tuple[str, float, float, float]] = []
+    slower_share = 0.0
+    values = [ratio for _, ratio, _, _ in ratios]
+    if values:
+        median = statistics.median(values)
+        lines.append(f"- Per-file slowdown: median x{median:.2f}, min x{min(values):.2f}, max x{max(values):.2f}")
+        # A file only stands out if it slowed down far more than everything
+        # else *and* lost a material amount of time: in #218's evidence,
+        # runner-level slowdowns alone left individual files anywhere from
+        # ~0.5x to ~2.3x of that run's median slowdown, so smaller deviations
+        # are noise.
+        outliers = [item for item in ratios if item[1] >= 3 * median and item[2] - item[3] >= outlier_extra_seconds]
+        slower_share = sum(value >= SLOWDOWN for value in values) / len(values)
+        # Same "far more than the rest" test for the fast/new files, so a
+        # uniform runner slowdown that merely scales a small file up is not
+        # mistaken for a specific regression.
+        fast_regressions = [item for item in fast_regressions if item[1] >= 3 * median]
+    if fast_regressions:
+        lines.append(
+            f"- **{len(fast_regressions)} file(s) under {min_seconds:g}s in the baseline now take at least "
+            f"{outlier_extra_seconds:g}s longer** -- investigate these regardless of the pattern below."
+        )
+    if new_files:
+        lines.append(
+            f"- {len(new_files)} file(s) have no baseline timing (marked `new`; usually tests added since the "
+            "baseline's commit) and are not used for the pattern -- compare against a baseline of the same "
+            "commit to judge them."
+        )
+    if outliers or fast_regressions:
+        lines.append(
+            f"- Pattern: **{len(outliers) + len(fast_regressions)} file(s) regressed far more than the rest** "
+            "(at least 3x the median slowdown, or a large absolute increase) -- investigate these before "
+            "blaming the runner."
+        )
+    elif len(ratios) < MIN_FILES_FOR_PATTERN:
         lines.append(
             f"- Pattern: only {len(ratios)} comparable file(s) -- too few to call the slowdown uniform or "
             f"specific (needs {MIN_FILES_FOR_PATTERN}); read the table below directly."
-        )
-    elif outliers:
-        lines.append(
-            f"- Pattern: **{len(outliers)} file(s) slowed down at least 3x as much as the median** -- "
-            "investigate these before blaming the runner."
         )
     elif slower_share >= 0.75:
         # At least three quarters of the files are materially slower: a broad,
@@ -231,8 +270,12 @@ def compare(
             "- Pattern: **mixed** -- some files are materially slower and others are not; "
             "inspect the slowest files below before attributing it to the runner."
         )
+    rows = fast_regressions + ratios[:top] + new_files[:top]
     lines += ["", "| slowdown | now s | baseline s | file |", "|---:|---:|---:|---|"]
-    lines += [f"| x{ratio:.2f} | {n:.1f} | {b:.1f} | `{path}` |" for path, ratio, n, b in ratios[:top]]
+    lines += [
+        f"| {'new' if ratio == float('inf') else f'x{ratio:.2f}'} | {n:.1f} | {b:.1f} | `{path}` |"
+        for path, ratio, n, b in rows
+    ]
     lines.append("")
     return "\n".join(lines) + "\n"
 

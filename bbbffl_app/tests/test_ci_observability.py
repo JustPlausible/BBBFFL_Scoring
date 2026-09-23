@@ -279,7 +279,7 @@ def test_report_distinguishes_uniform_slowdown_from_specific_outliers(tmp_path):
 
     one_file = [(n, s * (10 if "test_a" in n else 1)) for n, s in BASELINE]
     text = report.compare(report.load(_write_log(tmp_path / "one.jsonl", one_file)), baseline)
-    assert "**1 file(s) slowed down at least 3x as much as the median**" in text
+    assert "**1 file(s) regressed far more than the rest**" in text
     assert "| x10.00 | 100.0 | 10.0 | `tests/test_a.py` |" in text
 
     same = report.compare(baseline, baseline)
@@ -296,6 +296,41 @@ def test_report_uniform_threshold_is_exactly_three_quarters_of_files(tmp_path, s
     baseline = report.load(_write_log(tmp_path / "base.jsonl", files))
     now = [(nodeid, seconds * (2 if index < slower else 1)) for index, (nodeid, seconds) in enumerate(files)]
     assert expected in report.compare(report.load(_write_log(tmp_path / "now.jsonl", now)), baseline)
+
+
+def test_report_surfaces_a_large_regression_in_a_previously_fast_file(tmp_path):
+    steady = [(f"tests/test_s{index}.py::test_one", 10) for index in range(5)]
+    regressed = "tests/test_fast.py::test_one"
+    baseline = report.load(_write_log(tmp_path / "base.jsonl", steady + [(regressed, 1)]))
+    current = report.load(_write_log(tmp_path / "now.jsonl", steady + [(regressed, 100)]))
+
+    text = report.compare(current, baseline)
+    assert "no material slowdown" not in text
+    assert "**1 file(s) under 5s in the baseline now take at least 30s longer**" in text
+    assert "**1 file(s) regressed far more than the rest**" in text
+    assert "| x100.00 | 100.0 | 1.0 | `tests/test_fast.py` |" in text
+
+
+def test_report_lists_files_missing_from_the_baseline_without_calling_them_regressions(tmp_path):
+    steady = [(f"tests/test_s{index}.py::test_one", 10) for index in range(5)]
+    baseline = report.load(_write_log(tmp_path / "base.jsonl", steady))
+    current = report.load(_write_log(tmp_path / "now.jsonl", steady + [("tests/test_added.py::test_one", 60)]))
+
+    text = report.compare(current, baseline)
+    assert "1 file(s) have no baseline timing" in text
+    assert "| new | 60.0 | 0.0 | `tests/test_added.py` |" in text
+    assert "regressed far more" not in text
+    assert "no material slowdown" in text
+
+
+def test_report_does_not_flag_a_small_file_that_only_scaled_with_a_uniform_slowdown(tmp_path):
+    steady = [(f"tests/test_s{index}.py::test_one", 10) for index in range(5)]
+    small = [("tests/test_small.py::test_one", 4.9)]
+    baseline = report.load(_write_log(tmp_path / "base.jsonl", steady + small))
+    twelve_x = [(nodeid, seconds * 12) for nodeid, seconds in steady + small]  # small file: +53.9s, x12
+    text = report.compare(report.load(_write_log(tmp_path / "now.jsonl", twelve_x)), baseline)
+    assert "**uniform slowdown**" in text
+    assert "regressed far more" not in text
 
 
 def test_report_does_not_call_a_sparse_comparison_uniform(tmp_path):

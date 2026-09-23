@@ -296,10 +296,17 @@ files the report doesn't classify the result at all.
   ~21-27 min for ~2,080 tests. PR #217's successful rerun on `219bed2` took
   23 min 29 s (`2017 passed, 64 skipped`).
 - **Where the time goes:** almost all of it is SQLite-backed tests. Most of
-  those build a fresh database and run all Alembic migrations (~0.5-1 s per
-  test, once in a fixture and again in app startup for HTTP tests), then make
-  many small committed writes. Pure-Python tests (AFL client/contract,
-  config, architecture, ...) take ~1-2 s in total.
+  those build a fresh database and run all Alembic migrations, once in a
+  fixture and again in app startup for HTTP tests, then make many small
+  committed writes. A profiled local full run on `main` (`c750c60`: 2113
+  passed, 64 skipped) ran **1,594 Alembic upgrades totalling ~27 min of its
+  ~38 min (~72%)**. Pure-Python tests (AFL client/contract, config,
+  architecture, ...) take ~1-2 s in total. The slowest single test takes
+  ~9-13 s, so no individual test dominates.
+- **What a healthy run looks like with the new output** (this PR's first CI
+  run, `c992810`): `Run tests` took 24m35s, with 4 heartbeats of ~390-610
+  tests per 5 min, `fsync_p50` 0.25-0.75 ms, `iowait` ~4%, `steal` 0%.
+  Per-file times matched the #217 rerun (x0.98 median, x0.90-1.09).
 - **The #217 "stuck" run was not stuck.** Its pytest output, still in the
   job log, shows files finishing steadily until it was cancelled at 77 min
   and 55% of the suite. Every DB-backed file was **~6.3x slower** (median;
@@ -379,7 +386,9 @@ flaky failures, so the signals above are for humans to act on.
   optimisation is to migrate one template file per session and copy it per
   test, keeping migration tests on the real path. That would change how
   most of the suite gets its database, so it needs its own reviewed change
-  proving schema equivalence. It was deliberately not bundled into #218,
+  proving schema equivalence. It is also the largest available saving: about
+  72% of local suite time is spent in migrations, and it would also shrink
+  the fsync-heavy work that makes slow runners slow. It was deliberately not bundled into #218,
   which is about observability.
 - **Migration integrity** reuses the package 01/#16 test infrastructure as-is;
   this issue did not add new migration tests, since the existing SQLite

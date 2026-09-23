@@ -30,8 +30,31 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install --upgrade pip && pip install -r requirements-dev.txt
 
+      # Same full suite, same order, same selection as a plain `pytest`. The
+      # extra flags only add observability for slow/stalled runs (issue #218;
+      # see ../docs/ci-quality-gates.md#python-test-runtime-and-slow-ci-runs):
+      #   -p tests.ci_observability  [ci-progress] heartbeat every 5 min, a
+      #                              SLOW line for any test phase > 2 min, a
+      #                              per-file summary and a per-test timing log
+      #   --durations=25             pytest's slowest setup/call/teardown phases
+      #   faulthandler_timeout=600   dump every thread's stack if one test runs
+      #                              > 10 min; it does NOT fail or stop the test
+      # `python -m pytest` (rather than `pytest`) puts bbbffl_app on sys.path
+      # before `-p` imports the plugin; test imports are unchanged because
+      # pyproject's `pythonpath = ["."]` already provides the same path.
       - name: Run tests
-        run: pytest
+        run: >-
+          python -m pytest
+          -p tests.ci_observability
+          --ci-timing-log "$RUNNER_TEMP/pytest-timings.jsonl"
+          --durations=25
+          -o faulthandler_timeout=600
+
+      # Runs even if tests failed or the job was cancelled, so a slow or
+      # stuck run still leaves a summary of where its time went.
+      - name: Summarise test timings
+        if: always()
+        run: python -m scripts.ci_test_timing_report "$RUNNER_TEMP/pytest-timings.jsonl" >> "$GITHUB_STEP_SUMMARY"
 
   lint:
     name: Lint and formatting (Ruff)

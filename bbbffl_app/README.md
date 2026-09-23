@@ -399,7 +399,11 @@ See [`../docs/ci-quality-gates.md`](../docs/ci-quality-gates.md) (issue #39 /
 roadmap package 07) for what each gate checks, the incremental type-check
 scope and how to expand it, the dependency/security severity and exception
 policy, and how hermetic required checks stay separate from the manual,
-credentialed `afl-api` integration diagnostic below.
+credentialed `afl-api` integration diagnostic below. Its
+[Python test runtime and slow CI runs](../docs/ci-quality-gates.md#python-test-runtime-and-slow-ci-runs)
+section (issue #218) explains the `[ci-progress]` output of the CI test job
+and when a slow run should be left alone, investigated, or cancelled and
+rerun.
 
 ## afl-api contract status
 

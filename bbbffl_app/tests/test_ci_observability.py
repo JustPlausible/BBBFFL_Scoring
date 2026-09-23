@@ -289,6 +289,15 @@ def test_report_distinguishes_uniform_slowdown_from_specific_outliers(tmp_path):
     assert "**mixed**" in report.compare(report.load(_write_log(tmp_path / "half.jsonl", half)), baseline)
 
 
+@pytest.mark.parametrize("slower, expected", [(6, "**uniform slowdown**"), (5, "**mixed**")])
+def test_report_uniform_threshold_is_exactly_three_quarters_of_files(tmp_path, slower, expected):
+    # 8 files: 6 slower (exactly 3/4) is uniform; 5 slower is not.
+    files = [(f"tests/test_q{index}.py::test_one", 20) for index in range(8)]
+    baseline = report.load(_write_log(tmp_path / "base.jsonl", files))
+    now = [(nodeid, seconds * (2 if index < slower else 1)) for index, (nodeid, seconds) in enumerate(files)]
+    assert expected in report.compare(report.load(_write_log(tmp_path / "now.jsonl", now)), baseline)
+
+
 def test_report_does_not_call_a_sparse_comparison_uniform(tmp_path):
     # Two comparable files, one regressed 10x: the median (5.5x) must not make
     # this read as a runner-wide slowdown.

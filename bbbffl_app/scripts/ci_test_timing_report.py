@@ -206,7 +206,7 @@ def compare(
     # slowdowns alone left individual files anywhere from ~0.5x to ~2.3x of
     # that run's median slowdown, so smaller deviations are noise.
     outliers = [item for item in ratios if item[1] >= 3 * median and item[2] - item[3] >= outlier_extra_seconds]
-    lower_quartile = values[-1 - (len(values) - 1) // 4] if values else 0.0  # values are sorted descending
+    slower_share = sum(value >= SLOWDOWN for value in values) / len(values)
     if len(ratios) < MIN_FILES_FOR_PATTERN:
         lines.append(
             f"- Pattern: only {len(ratios)} comparable file(s) -- too few to call the slowdown uniform or "
@@ -217,7 +217,7 @@ def compare(
             f"- Pattern: **{len(outliers)} file(s) slowed down at least 3x as much as the median** -- "
             "investigate these before blaming the runner."
         )
-    elif lower_quartile >= SLOWDOWN:
+    elif slower_share >= 0.75:
         # At least three quarters of the files are materially slower: a broad,
         # not a concentrated, slowdown.
         lines.append(

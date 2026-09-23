@@ -145,6 +145,24 @@ def test_heartbeat_reports_progress_stalls_and_slow_setup_without_failing_the_te
     assert "NO TESTS FINISHED SINCE LAST HEARTBEAT" in result.stdout.str()
 
 
+@pytest.mark.parametrize("destination", ["unopenable", "disk-full"])
+def test_timing_log_failures_never_change_the_run_result(pytester, run_inner, destination):
+    if destination == "disk-full":
+        if not os.path.exists("/dev/full"):
+            pytest.skip("needs /dev/full to simulate ENOSPC")
+        target, message = "/dev/full", "timing log disabled after write failure"
+    else:
+        (pytester.path / "not_a_directory").write_text("")
+        target, message = str(pytester.path / "not_a_directory" / "t.jsonl"), "timing log disabled: cannot open"
+    plain = run_inner(0)
+    observed = run_inner(0, "-p", "tests.ci_observability", "--ci-timing-log", target)
+    observed.assert_outcomes(passed=2, failed=1, skipped=1, xfailed=1, errors=1)
+    assert observed.ret == plain.ret
+    assert "INTERNALERROR" not in observed.stdout.str() + observed.stderr.str()
+    assert "Traceback" not in observed.stderr.str()
+    observed.stdout.fnmatch_lines([f"[[]ci-progress[]] {message}*"])
+
+
 def test_cancelled_session_is_reported_incomplete_with_the_running_test(tmp_path):
     """End to end: a CI cancellation reaches pytest as SIGINT mid-test."""
     (tmp_path / "test_cancel.py").write_text(

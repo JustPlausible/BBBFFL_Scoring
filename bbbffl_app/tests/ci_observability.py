@@ -235,9 +235,15 @@ class CiObservability:
         except OSError:
             self._out_fd = None
         if self.timing_log_path:
-            directory = os.path.dirname(os.path.abspath(self.timing_log_path))
-            os.makedirs(directory, exist_ok=True)
-            self._log = open(self.timing_log_path, "w", encoding="utf-8")
+            try:
+                directory = os.path.dirname(os.path.abspath(self.timing_log_path))
+                os.makedirs(directory, exist_ok=True)
+                self._log = open(self.timing_log_path, "w", encoding="utf-8")
+            except OSError as error:
+                # Observability must never change a run's result: carry on
+                # without the timing log rather than erroring the session.
+                self._log = None
+                self._emit(f"{PREFIX} timing log disabled: cannot open {self.timing_log_path!r}: {error}")
         self.started = time.monotonic()
         self._emit(environment_line("environment at start", self.probe_dir))
         if self.heartbeat and self.heartbeat > 0:
@@ -301,8 +307,11 @@ class CiObservability:
         try:
             self._log.write(json.dumps(record) + "\n")
             self._log.flush()
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as error:
+            # Stop writing after the first failure (e.g. disk full) and say
+            # so once, instead of failing tests or repeating the error.
+            self._emit(f"{PREFIX} timing log disabled after write failure: {error}")
+            self._close_log()
 
     def pytest_sessionfinish(self, session, exitstatus):
         self._stop.set()
@@ -323,12 +332,20 @@ class CiObservability:
             nodeid, phase, since = current
             record["running"] = {"nodeid": nodeid, "phase": phase, "seconds": round(time.monotonic() - since, 2)}
         self._write_record(record)
-        if self._log is not None:
-            self._log.close()
-            self._log = None
+        self._close_log()
+
+    def _close_log(self):
+        log, self._log = self._log, None
+        if log is None:
+            return
+        try:
+            log.close()  # flushes again, so it can fail like any write (ENOSPC, EIO)
+        except (OSError, ValueError) as error:
+            self._emit(f"{PREFIX} timing log may be incomplete: {error}")
 
     def pytest_unconfigure(self, config):
         self._stop.set()
+        self._close_log()
         if self._out_fd is not None:
             try:
                 os.close(self._out_fd)

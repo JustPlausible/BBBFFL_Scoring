@@ -333,6 +333,18 @@ def test_report_does_not_flag_a_small_file_that_only_scaled_with_a_uniform_slowd
     assert "regressed far more" not in text
 
 
+def test_report_makes_no_specific_verdict_without_any_comparable_files(tmp_path):
+    # Every file is under the 5s floor in the baseline and all slow down 10x
+    # together: that is uniform, not five specific regressions.
+    files = [(f"tests/test_f{index}.py::test_one", 4) for index in range(5)]
+    baseline = report.load(_write_log(tmp_path / "base.jsonl", files))
+    current = report.load(_write_log(tmp_path / "now.jsonl", [(n, s * 10) for n, s in files]))
+    text = report.compare(current, baseline)
+    assert "regressed far more" not in text
+    assert "only 0 comparable file(s) -- too few" in text
+    assert "| x10.00 | 40.0 | 4.0 | `tests/test_f0.py` |" in text
+
+
 def test_report_does_not_call_a_sparse_comparison_uniform(tmp_path):
     # Two comparable files, one regressed 10x: the median (5.5x) must not make
     # this read as a runner-wide slowdown.

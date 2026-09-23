@@ -218,6 +218,7 @@ def compare(
     if common_before:
         lines.append(f"- Overall slowdown on common files: x{common_now / common_before:.2f}")
     outliers: list[tuple[str, float, float, float]] = []
+    unjudged: list[tuple[str, float, float, float]] = []
     slower_share = 0.0
     values = [ratio for _, ratio, _, _ in ratios]
     if values:
@@ -230,10 +231,16 @@ def compare(
         # are noise.
         outliers = [item for item in ratios if item[1] >= 3 * median and item[2] - item[3] >= outlier_extra_seconds]
         slower_share = sum(value >= SLOWDOWN for value in values) / len(values)
-        # Same "far more than the rest" test for the fast/new files, so a
+        # Same "far more than the rest" test for the fast files, so a
         # uniform runner slowdown that merely scales a small file up is not
         # mistaken for a specific regression.
         fast_regressions = [item for item in fast_regressions if item[1] >= 3 * median]
+    else:
+        # No comparable files means no median to judge them against: five
+        # files all going 4s -> 40s is as uniform as it gets. Show them in
+        # the table, but make no specific-file verdict.
+        unjudged = fast_regressions
+        fast_regressions = []
     if fast_regressions:
         lines.append(
             f"- **{len(fast_regressions)} file(s) under {min_seconds:g}s in the baseline now take at least "
@@ -270,7 +277,7 @@ def compare(
             "- Pattern: **mixed** -- some files are materially slower and others are not; "
             "inspect the slowest files below before attributing it to the runner."
         )
-    rows = fast_regressions + ratios[:top] + new_files[:top]
+    rows = fast_regressions + unjudged[:top] + ratios[:top] + new_files[:top]
     lines += ["", "| slowdown | now s | baseline s | file |", "|---:|---:|---:|---|"]
     lines += [
         f"| {'new' if ratio == float('inf') else f'x{ratio:.2f}'} | {n:.1f} | {b:.1f} | `{path}` |"

@@ -7,6 +7,11 @@ tests pin the signals an operator relies on when reading a slow CI run.
 """
 
 import json
+import os
+import signal
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -140,6 +145,41 @@ def test_heartbeat_reports_progress_stalls_and_slow_setup_without_failing_the_te
     assert "NO TESTS FINISHED SINCE LAST HEARTBEAT" in result.stdout.str()
 
 
+def test_cancelled_session_is_reported_incomplete_with_the_running_test(tmp_path):
+    """End to end: a CI cancellation reaches pytest as SIGINT mid-test."""
+    (tmp_path / "test_cancel.py").write_text(
+        "import time\n\ndef test_one():\n    pass\n\ndef test_hangs():\n    time.sleep(60)\n\ndef test_three():\n    pass\n"
+    )
+    log_path = tmp_path / "timings.jsonl"
+    process = subprocess.Popen(
+        [sys.executable, "-m", "pytest", "-p", "tests.ci_observability", "--ci-timing-log", str(log_path)]
+        + ["-p", "no:cacheprovider", "--rootdir", str(tmp_path), str(tmp_path / "test_cancel.py")],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(APP_ROOT)},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 60
+        while "test_one" not in (log_path.read_text() if log_path.exists() else ""):
+            assert time.monotonic() < deadline, "inner pytest never started"
+            time.sleep(0.1)
+        time.sleep(0.5)  # let test_hangs start
+        process.send_signal(signal.SIGINT)
+        assert process.wait(timeout=60) == pytest.ExitCode.INTERRUPTED
+    finally:
+        if process.poll() is None:
+            process.kill()
+
+    log = report.load(log_path)
+    assert log.finished is not None  # pytest still ran sessionfinish...
+    assert not log.complete  # ...but the run must not read as complete
+    text = report.summarise(log)
+    assert "**INCOMPLETE** -- pytest stopped early with exit status 2" in text
+    assert "Tests recorded: 1 of 3 collected" in text
+    assert "Running when the session ended: `test_cancel.py::test_hangs` (call," in text
+
+
 def _write_log(path, tests, finished=True, collected=None, truncated=False):
     lines = [json.dumps({"event": "collected", "count": collected or len(tests)})]
     elapsed = 0.0
@@ -177,6 +217,38 @@ def test_report_flags_an_incomplete_cancelled_run_and_tolerates_a_truncated_line
     assert "Tests recorded: 2 of 3 collected (2 passed)" in text
     assert "Last test to finish: `tests/test_b.py::test_one`" in text
     assert text.index("tests/test_b.py") < text.index("tests/test_a.py")  # slowest first
+
+
+@pytest.mark.parametrize(
+    "exitstatus, completed, collected",
+    [(2, 2, 3), (1, 2, 3)],
+    ids=["interrupted-cancellation", "stopped-early"],
+)
+def test_report_treats_a_session_that_ended_early_as_incomplete(tmp_path, exitstatus, completed, collected):
+    # A cancelled job typically reaches pytest as SIGINT, and pytest still
+    # runs sessionfinish, so a "finished" record alone must not read as a
+    # completed run.
+    path = _write_log(tmp_path / "t.jsonl", BASELINE[:completed], collected=collected)
+    records = path.read_text().splitlines()
+    finished = json.loads(records[-1])
+    finished["exitstatus"] = exitstatus
+    path.write_text("\n".join(records[:-1] + [json.dumps(finished)]) + "\n")
+
+    log = report.load(path)
+    assert not log.complete
+    text = report.summarise(log)
+    assert f"**INCOMPLETE** -- pytest stopped early with exit status {exitstatus}" in text
+    assert "Last test to finish: `tests/test_b.py::test_one`" in text
+
+
+def test_report_treats_a_full_session_as_complete_even_with_failures(tmp_path):
+    path = _write_log(tmp_path / "t.jsonl", BASELINE)
+    records = path.read_text().splitlines()
+    finished = json.loads(records[-1])
+    finished["exitstatus"] = 1  # test failures, but every test ran
+    path.write_text("\n".join(records[:-1] + [json.dumps(finished)]) + "\n")
+    assert report.load(path).complete
+    assert "completed (pytest exit status 1)" in report.summarise(report.load(path))
 
 
 def test_report_distinguishes_uniform_slowdown_from_specific_outliers(tmp_path):

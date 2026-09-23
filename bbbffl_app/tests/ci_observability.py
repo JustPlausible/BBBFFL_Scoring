@@ -309,14 +309,20 @@ class CiObservability:
         if self._thread is not None:
             self._thread.join(timeout=5)
         self._emit(environment_line("environment at end", self.probe_dir))
-        self._write_record(
-            {
-                "event": "finished",
-                "exitstatus": int(exitstatus),
-                "completed": self.completed,
-                "elapsed": round(time.monotonic() - self.started, 2),
-            }
-        )
+        record = {
+            "event": "finished",
+            "exitstatus": int(exitstatus),
+            "completed": self.completed,
+            "elapsed": round(time.monotonic() - self.started, 2),
+        }
+        with self._lock:
+            current = self.current
+        if current:
+            # Only set when the session ended mid-test (e.g. a cancelled job's
+            # SIGINT): names what was running and for how long.
+            nodeid, phase, since = current
+            record["running"] = {"nodeid": nodeid, "phase": phase, "seconds": round(time.monotonic() - since, 2)}
+        self._write_record(record)
         if self._log is not None:
             self._log.close()
             self._log = None

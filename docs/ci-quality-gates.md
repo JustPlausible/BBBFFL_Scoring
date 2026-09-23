@@ -272,7 +272,7 @@ them changes which tests run, their order, fixtures, isolation or outcomes
 | `[ci-progress] SLOW: <test> has been in <setup/call/teardown> for 2m00s` | once per test phase past 2 min | A single test/fixture is unusually slow. Only a report: the test is not failed or interrupted. |
 | `Timeout (0:10:00)!` followed by thread stacks | if one test runs > 10 min | `faulthandler_timeout=600`: shows where every thread is stuck. The test keeps running. |
 | `slowest 25 durations` / `slowest 15 test files` | end of the step log | Slowest setup/call/teardown phases and the files that took the most time. |
-| **Summarise test timings** job summary | run summary page | Same tables. Written even if tests failed or the run was **cancelled**, in which case it's marked **INCOMPLETE** and names the last test that finished. |
+| **Summarise test timings** job summary | run summary page | Same tables. Written even if tests failed or the run was **cancelled**. A cancelled or early-stopped run is marked **INCOMPLETE** and names the last test that finished and the test (and phase) running when it was stopped. |
 
 To check whether a slow run was slow everywhere or only in particular
 tests, compare two timing logs locally:
@@ -369,6 +369,16 @@ flaky failures, so the signals above are for humans to act on.
   FastAPI major-version upgrade (see above), reviewed by 2026-11-30.
   Upgrading FastAPI/Starlette is recommended as separate follow-up work, not
   part of this issue.
+- **Per-test database setup cost (#218 follow-up).** Most SQLite-backed tests
+  build a fresh database by running every Alembic migration. That happens in
+  `tests/db_helpers.migrated_connection`, in direct `migrate()` fixtures, and
+  again in app startup for HTTP tests, and it is the largest fixed cost in
+  the suite (see `--durations`: the slowest phases are `setup`). A possible
+  optimisation is to migrate one template file per session and copy it per
+  test, keeping migration tests on the real path. That would change how
+  most of the suite gets its database, so it needs its own reviewed change
+  proving schema equivalence. It was deliberately not bundled into #218,
+  which is about observability.
 - **Migration integrity** reuses the package 01/#16 test infrastructure as-is;
   this issue did not add new migration tests, since the existing SQLite
   fresh/upgrade/downgrade/refusal suite plus the PostgreSQL

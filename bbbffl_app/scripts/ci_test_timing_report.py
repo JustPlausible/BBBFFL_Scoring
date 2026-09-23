@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 PHASES = ("setup", "call", "teardown")
+INTERRUPTED = 2  # pytest.ExitCode.INTERRUPTED; kept literal so this script needs no pytest import
 
 
 @dataclass
@@ -38,7 +39,17 @@ class TimingLog:
 
     @property
     def complete(self) -> bool:
-        return self.finished is not None
+        """True only for a session that ran to its natural end.
+
+        A cancelled job usually reaches pytest as SIGINT; pytest then still
+        runs ``pytest_sessionfinish``, so a ``finished`` record alone is not
+        enough -- it must also not be an interruption (exit status 2) and must
+        account for every collected test.
+        """
+        if self.finished is None or self.finished.get("exitstatus") == INTERRUPTED:
+            return False
+        completed = self.finished.get("completed", len(self.tests))
+        return self.collected is None or completed >= self.collected
 
     def file_seconds(self) -> dict[str, float]:
         totals: dict[str, float] = defaultdict(float)
@@ -84,6 +95,11 @@ def summarise(log: TimingLog, top: int = 15) -> str:
     expected = log.collected if log.collected is not None else "?"
     if log.complete:
         status = f"completed (pytest exit status {log.finished['exitstatus']})"
+    elif log.finished is not None:
+        status = (
+            f"**INCOMPLETE** -- pytest stopped early with exit status {log.finished['exitstatus']} "
+            "(2 = interrupted/cancelled; otherwise e.g. stopped by --maxfail/-x)"
+        )
     else:
         status = "**INCOMPLETE** -- pytest did not reach the end of the session (cancelled, killed or crashed)"
     lines += [
@@ -96,6 +112,12 @@ def summarise(log: TimingLog, top: int = 15) -> str:
     if log.tests and not log.complete:
         last = log.tests[-1]
         lines.append(f"- Last test to finish: `{last['nodeid']}` at +{_minutes(last['elapsed'])}")
+    running = (log.finished or {}).get("running")
+    if running:
+        lines.append(
+            f"- Running when the session ended: `{running['nodeid']}` "
+            f"({running['phase']}, {running['seconds']:.1f} s in that phase)"
+        )
     lines.append("")
 
     if not log.tests:

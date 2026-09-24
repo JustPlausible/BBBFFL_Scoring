@@ -378,3 +378,34 @@ def test_a_freshly_authenticated_granted_scorer_can_reach_the_dashboard_via_the_
     assert switch.status_code == 200, switch.text
     now_scorer = client.get("/api/scorer/dashboard", cookies={"bbbffl_session": session_cookie})
     assert now_scorer.status_code == 200, now_scorer.text
+
+
+def test_scorer_is_directed_to_midseason_draft_operations_once_the_trigger_round_is_final(dashboard_client):
+    """Issue #233 over HTTP: the Scorer's next safe action names the
+    mid-season draft operations page for the dashboard's own season -- no
+    UUID for the operator to supply -- and is actionable by a Scorer."""
+    from app.routes.scorer_dashboard import require_scorer_dashboard
+    from tests.midseason_draft_helpers import build_season
+
+    client = dashboard_client
+    ctx = build_season(client.app.state.database, year=9133, trigger_round=10, regular_season_round_count=12)
+    season_id = ctx["season"].season_id
+    client.app.state.seasons.set_midseason_draft_trigger_round(season_id, 10)
+    client.app.state.afl_client = Facts({})
+    scorer = client.app.state.identities.create_coach("Standing Scorer", email="standing-9133@example.com")
+    client.app.state.role_grants.grant(
+        scorer.coach_id, Role.SCORER.value, season_id=None, actor=ActorContext.anonymous_operator("admin")
+    )
+    principal = Principal(
+        Role.SCORER, scorer.coach_id, "Standing Scorer", granted_roles=frozenset({Role.SCORER}), session_id="s1"
+    )
+    _override(client, require_scorer_dashboard, principal)
+    try:
+        response = client.get("/api/scorer/dashboard", params={"season_id": season_id})
+        assert response.status_code == 200, response.text
+        next_action = response.json()["dashboard"]["next_action"]
+        assert next_action["title"] == "Open mid-season draft operations"
+        assert next_action["url"] == f"/admin/midseason-draft/{season_id}"
+        assert next_action["actionable_by_you"] is True
+    finally:
+        _clear_overrides(client)

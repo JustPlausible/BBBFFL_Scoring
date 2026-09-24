@@ -523,3 +523,127 @@ def test_evidence_outage_with_no_configured_plan_still_asks_to_configure_one():
     view = _dashboard(db, afl, _season_id(lifecycle, round_), round_id=round_.bbbffl_round_id)
     assert view["next_action"]["code"] == "configure_lockout_plan"
     assert any(item["code"] == "lockout:not_configured" for item in view["attention"])
+
+
+# -- Issue #233: post-trigger-round mid-season draft handoff ------------------
+
+
+def _midseason_season(year, *, trigger_round=10, finalised_rounds=None, regular_season_round_count=12):
+    """A season built by the mid-season draft's own fixture
+    (`tests/midseason_draft_helpers.build_season`): `finalised_rounds`
+    ordinary rounds are persisted `final`, every later round is defined but
+    not yet created. `trigger_round`, when not `None`, is persisted as the
+    season's configured `midseason_draft_trigger_round` -- independently of
+    how many rounds are final, so each case exercises configuration rather
+    than a fixed round number."""
+    from tests.midseason_draft_helpers import build_season
+
+    ctx = build_season(
+        year=year,
+        trigger_round=finalised_rounds if finalised_rounds is not None else trigger_round,
+        regular_season_round_count=regular_season_round_count,
+    )
+    if trigger_round is not None:
+        SeasonRepository(ctx["database"]).set_midseason_draft_trigger_round(ctx["season"].season_id, trigger_round)
+    return ctx
+
+
+def _midseason_attention(view):
+    return [item for item in view["attention"] if item["code"].startswith("midseason:")]
+
+
+def test_midseason_handoff_absent_before_the_configured_trigger_round_is_final():
+    # Trigger configured as Round 11, only Rounds 1-10 final: the current
+    # round (11) keeps its ordinary preflight guidance.
+    ctx = _midseason_season(9301, trigger_round=11, finalised_rounds=10)
+    view = _dashboard(ctx["database"], Facts({}), ctx["season"].season_id)
+    assert view["round"]["round_label"] == "Round 11"
+    assert view["next_action"]["code"] == "complete_preflight"
+    assert _midseason_attention(view) == []
+
+
+def test_midseason_handoff_is_the_next_safe_action_once_the_trigger_round_is_final():
+    ctx = _midseason_season(9302, trigger_round=10)
+    season_id = ctx["season"].season_id
+    view = _dashboard(ctx["database"], Facts({}), season_id)
+    # Ordinary navigation is unchanged: the dashboard still selects the
+    # next ordinary round and still exposes its preflight blockers.
+    assert view["round"]["round_label"] == "Round 11"
+    assert view["round"]["preflight_url"] == f"/admin/round-preflight/{view['round']['bbbffl_round_id']}"
+    assert any(item["code"].startswith("preflight:") for item in view["attention"])
+    # ...but the season-level handoff, not Round 11's preflight, is the
+    # prominent next safe action -- and it names the correct season itself.
+    next_action = view["next_action"]
+    assert next_action["code"] == "open_midseason_draft_operations"
+    assert next_action["title"] == "Open mid-season draft operations"
+    assert next_action["url"] == f"/admin/midseason-draft/{season_id}"
+    assert next_action["capability"] == "midseason_draft.manage"
+    assert "Round 10" in next_action["detail"]
+    [item] = _midseason_attention(view)
+    assert item["url"] == f"/admin/midseason-draft/{season_id}"
+    assert item["category"] == "decision_required"
+
+
+def test_midseason_handoff_also_replaces_prepare_next_round_on_the_published_trigger_round():
+    ctx = _midseason_season(9303, trigger_round=10)
+    trigger_round_id = ctx["logical_rounds"][10].bbbffl_round_id
+    view = _dashboard(ctx["database"], Facts({}), ctx["season"].season_id, round_id=trigger_round_id)
+    assert view["round"]["state"] == "final"
+    assert view["next_action"]["code"] == "open_midseason_draft_operations"
+
+
+def test_midseason_handoff_never_displaces_an_in_flight_rounds_own_next_action():
+    ctx = _midseason_season(9304, trigger_round=10)
+    round_11 = ctx["lifecycle"].create_ordinary_round(ctx["logical_rounds"][11].bbbffl_round_id)
+    ctx["lifecycle"].transition(round_11.bbbffl_round_id, "open")
+    view = _dashboard(ctx["database"], Facts({}), ctx["season"].season_id)
+    assert view["round"]["state"] == "open"
+    assert view["next_action"]["code"] == "configure_lockout_plan"
+    # Still surfaced, just not as the round's own next action.
+    assert len(_midseason_attention(view)) == 1
+
+
+def test_midseason_handoff_follows_the_configured_trigger_round_not_round_10():
+    ctx = _midseason_season(9305, trigger_round=6, regular_season_round_count=12)
+    season_id = ctx["season"].season_id
+    view = _dashboard(ctx["database"], Facts({}), season_id)
+    assert view["round"]["round_label"] == "Round 7"
+    assert view["next_action"]["code"] == "open_midseason_draft_operations"
+    assert view["next_action"]["url"] == f"/admin/midseason-draft/{season_id}"
+    assert "Round 6" in view["next_action"]["detail"]
+
+    # Reconfiguring the same season to a later, not-yet-final trigger round
+    # withdraws the cue again: it tracks configuration, not a position.
+    SeasonRepository(ctx["database"]).set_midseason_draft_trigger_round(season_id, 8)
+    view = _dashboard(ctx["database"], Facts({}), season_id)
+    assert view["next_action"]["code"] == "complete_preflight"
+    assert _midseason_attention(view) == []
+
+
+def test_midseason_handoff_withdraws_once_the_midseason_draft_has_started():
+    from app.midseason_draft import MidseasonDraftRepository
+
+    ctx = _midseason_season(9306, trigger_round=10)
+    season_id = ctx["season"].season_id
+    midseason = MidseasonDraftRepository(ctx["database"])
+    midseason.confirm_ladder(season_id, ctx["competition"].competition_id)
+    assert midseason.get_draft(season_id).state == "ladder_confirmed"
+    view = _dashboard(ctx["database"], Facts({}), season_id)
+    # The mid-season operations page now drives the draft's own persisted
+    # lifecycle; this dashboard's ordinary per-round guidance resumes.
+    assert view["next_action"]["code"] == "complete_preflight"
+    assert _midseason_attention(view) == []
+
+    midseason.open_delisting_window(season_id)
+    assert midseason.get_draft(season_id).state == "delisting_open"
+    view = _dashboard(ctx["database"], Facts({}), season_id)
+    assert view["next_action"]["code"] == "complete_preflight"
+    assert _midseason_attention(view) == []
+
+
+def test_midseason_handoff_absent_for_a_season_without_a_configured_midseason_draft():
+    ctx = _midseason_season(9307, trigger_round=None, finalised_rounds=10)
+    view = _dashboard(ctx["database"], Facts({}), ctx["season"].season_id)
+    assert view["round"]["round_label"] == "Round 11"
+    assert view["next_action"]["code"] == "complete_preflight"
+    assert _midseason_attention(view) == []

@@ -270,8 +270,8 @@ auto-pick automation are v0.2.
 | Production backup/restore runbook rehearsal | **Staging/rehearsal-needed** | See "Backup/restore/archive" above |
 | Reproducible production deployment topology, TLS/reverse-proxy setup, dependency-readiness probe, structured alerting/logging, scheduled backups with an accepted RPO/RTO, and a rollback runbook | **Outstanding / blocks v0.1** | `GET /health` (`app/routes/health.py`) returns only `{"status": "ok"}` -- a process-liveness check with no database/dependency probe. The repository has a generic `Dockerfile` and the Compose-first local/rehearsal workflow (`docs/round1-rehearsal.md`), but no reproducible production deployment topology, TLS/reverse-proxy configuration, structured alerting, or rollback runbook. **Backups today are manual-only**: every backup taken during the 2026 replay was an ad hoc `pg_dump` run by the operator immediately before a specific boundary, never a scheduled job -- a repo-wide search found no cron/systemd-timer/scheduler configuration anywhere. The "Backup/restore/archive" rehearsal item above proves a manually created archive can be restored; it does not establish that a live production season is protected between backups, since nothing currently takes one on a schedule. The original roadmap's package 39 already marked all of this P0/required for 2027 (roadmap section 2, "Health/observability: ... Missing operationally"); it was never closed and is carried forward here as current-state fact. Found by Codex review on this PR (P1, across two rounds: deployment/observability controls, then specifically scheduled backups); confirmed by inspecting `app/routes/health.py` and searching the repository for the described controls (none exist). |
 | Notification delivery (lockout/missing-team alerts) and a live-season incident/manual-fallback operations runbook | **Deferred / v0.2** | No notification adapter or delivery configuration exists in `app/` (roadmap package 40's own scope); no incident/fallback runbook exists in the repository either. Unlike the deployment-controls row above, this does not block running an individual round end-to-end -- a season can operate without automated reminders, with the Scorer relying on the existing dashboards/attention queue instead -- so it is classified as deferred rather than outstanding, consistent with the original roadmap treating packages 39 (P0, blocking) and 40 (P1, "final launch gate" but reminder-level) differently. Found by Codex review on this PR (P2); confirmed by inspecting `app/` for any notification adapter (none exists). |
-| `Legacy Grand Final admin` link still reachable from ordinary Scorer Round Centre | **Outstanding / blocks v0.1 tidy-up** | Issue #233 (see below) |
-| Post-trigger-round mid-season handoff prominence on the Scorer dashboard | **Outstanding / blocks v0.1 tidy-up** | Issue #233 (see below) |
+| `Legacy Grand Final admin` link still reachable from ordinary Scorer Round Centre | Resolved | Issue #233: link removed from `/scorer/round-centre/{round_id}`; covered by `tests/test_round_review_api.py` |
+| Post-trigger-round mid-season handoff prominence on the Scorer dashboard | Resolved | Issue #233: once the configured trigger round is final and no mid-season draft has started, the Scorer dashboard's Next safe action is **Open mid-season draft operations**; covered by `tests/test_scorer_dashboard.py` |
 
 ## Remaining items before v0.1.0
 
@@ -355,7 +355,8 @@ they touch have already passed.
      in the Scorer's Next-safe-action/attention-queue area, instead of
      leaving a future ordinary-round preflight as the most visible action.
 
-   **This documentation PR does not implement #233.** The underlying
+   **Resolved by the #233 implementation PR** (this item is retained for
+   the record). The underlying
    Round 10 -> mid-season-draft workflow itself already passed regression
    (Stage D); #233 is release tidy-up, not a re-open of that finding.
 6. **Non-technical Scorer staging/beta rehearsal**, and **a production

@@ -45,6 +45,7 @@ from app.lockouts import (
     MatchResolutionError,
     RoundMatchFactsProvider,
 )
+from app.midseason_draft import midseason_draft_dashboard_status
 from app.round_mapping import RoundMappingRepository
 from app.round_preflight import build_round_preflight
 from app.round_review import build_round_review, calculation_staleness_for_entry
@@ -94,6 +95,7 @@ PUBLIC_ROUND_CENTRE_URL = "/seasons/{season_id}/rounds/{round_id}"
 # to hand back, whether that next thing is an ordinary round or a finals
 # week.
 SCORER_DASHBOARD_URL = "/scorer?season_id={season_id}&round_id={round_id}"
+MIDSEASON_DRAFT_URL = "/admin/midseason-draft/{season_id}"
 
 
 @dataclass(frozen=True)
@@ -820,6 +822,41 @@ def _finals_phase_next_action(database, lifecycle, season_id: str) -> dict | Non
     ).__dict__
 
 
+def _midseason_handoff_action(database, season_id: str) -> dict | None:
+    """The season-level handoff into the mid-season draft (issue #233):
+    once the season's configured `midseason_draft_trigger_round` -- and
+    every ordinary round before it -- is persisted `final` and no
+    mid-season draft has been started yet, confirming the ladder and
+    preparing the draft is the Scorer's next safe action, not an unrelated
+    later round's preflight. Reuses `midseason_draft_dashboard_status`
+    (issue #181, the same signal behind the Administrator Dashboard's
+    mid-season card) rather than a second determination: it returns
+    `None` for a season with no configured trigger round, and again as
+    soon as `confirm_ladder` creates the season's `midseason_draft` row --
+    from then on the mid-season operations page drives that draft's own
+    persisted lifecycle, and this dashboard's ordinary per-round guidance
+    resumes unchanged. Never keyed to a specific round number."""
+    status = midseason_draft_dashboard_status(database, season_id)
+    if status is None or not status["ready"]:
+        return None
+    return NextAction(
+        "open_midseason_draft_operations",
+        CATEGORY_DECISION_REQUIRED,
+        "Open mid-season draft operations",
+        f"Round {status['trigger_round']} (the configured mid-season draft trigger round) is final. Confirm the "
+        "ladder and prepare the mid-season draft before continuing with later rounds.",
+        MIDSEASON_DRAFT_URL.format(season_id=season_id),
+        capability="midseason_draft.manage",
+    ).__dict__
+
+
+# Round lifecycle states whose own next action is only preparing the round
+# or moving past an already-published one -- the only states in which the
+# mid-season handoff (issue #233) takes precedence as the next safe action.
+# A round already open/live/in review keeps its own in-flight guidance.
+_MIDSEASON_HANDOFF_PRECEDENCE_STATES = ("not_created", "upcoming", "final")
+
+
 def _determine_next_action(
     *,
     database,
@@ -1423,6 +1460,17 @@ def _build_round_dashboard(
                 "diagnostics": None,
             }
         )
+    midseason_handoff = _midseason_handoff_action(database, season.season_id)
+    if midseason_handoff is not None:
+        attention.append(
+            {
+                **midseason_handoff,
+                "code": f"midseason:{midseason_handoff['code']}",
+                "state": lifecycle_state,
+                "timestamp": None,
+                "diagnostics": None,
+            }
+        )
     attention.sort(key=_sort_key)
 
     next_round = next(
@@ -1444,6 +1492,8 @@ def _build_round_dashboard(
         trigger_plan_configured=trigger_plan_configured,
         evidence_unavailable=lockout_evidence_error is not None,
     )
+    if midseason_handoff is not None and lifecycle_state in _MIDSEASON_HANDOFF_PRECEDENCE_STATES:
+        next_action = midseason_handoff
 
     matchup_ids = [m.matchup_id for m in matchups]
     lineup_ids = [row["lineup_id"] for row in team_rows if row["lineup_id"]]

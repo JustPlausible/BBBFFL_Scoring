@@ -500,7 +500,10 @@ def test_regular_season_round_centre_browser_shell_and_authoritative_context(rev
     page = client.get(f"/scorer/round-centre/{round_id}")
     assert page.status_code == 200
     assert "Regular-season Round Centre" in page.text
-    assert "Legacy Grand Final admin" in page.text
+    # Issue #233: the ordinary Scorer Round Centre no longer links to the
+    # retained legacy Grand Final admin panel at all.
+    assert "Legacy Grand Final admin" not in page.text
+    assert 'href="/admin"' not in page.text
     assert "expected_review_version" in page.text
     assert "Conflict — this page was stale" in page.text
 

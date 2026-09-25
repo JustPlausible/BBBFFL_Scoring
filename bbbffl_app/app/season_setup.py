@@ -542,6 +542,19 @@ def _squad_limit(database, season_id: str) -> int | None:
 
 def _draft_blockers(database, season, entries, squad_limit, pool) -> list[str]:
     blockers = []
+    # Codex review, PR #247: `accept_order` materialises `squad_limit` picks
+    # for *every* entry, while `execute_pick` enforces the same limit
+    # against each entry's existing ownership -- so a team already owning a
+    # player could never complete its last pick, and the draft could never
+    # finalize. A preseason draft starts from empty squads.
+    owned = database.execute(
+        "SELECT COUNT(*) AS n FROM player_ownership_period WHERE season_id=? AND released_at IS NULL",
+        (season.season_id,),
+    ).fetchone()["n"]
+    if owned:
+        blockers.append(
+            f"{owned} player(s) are already owned by this season's teams; the preseason draft starts from empty squads"
+        )
     if len(entries) != TEAM_COUNT:
         blockers.append(f"exactly {TEAM_COUNT} season entries are required (currently {len(entries)})")
     structure = _ordinary_structure(database, season)
@@ -584,6 +597,16 @@ def _require_opening_round_decided(database, afl_client, season_id: str) -> dict
     afl_season_id = _live_pool_afl_season_id(database, season_id)
     preview = preview_opening_round(database, afl_client, season_id, afl_season_id)
     if not preview["applicable"]:
+        if preview["accepted_rule_count"]:
+            # Codex review, PR #247: rules accepted against an earlier fixture
+            # that no longer has an Opening Round would still drive round
+            # preflight's Opening Round requirements -- a conflict an
+            # operator must resolve, never a silent "not required".
+            raise SeasonSetupError(
+                f"the live AFL fixture no longer has an Opening Round, but {preview['accepted_rule_count']} "
+                "Opening Round rule(s) are accepted for this season; resolve that conflict before accepting the "
+                "draft order"
+            )
         return {"afl_season_id": afl_season_id, "opening_round": "not_required"}
     missing = [rule["afl_club_name"] for rule in preview["rules"] if not rule["accepted_matches_fixture"]]
     if preview["opening_round_id"] is None or not preview["rules"] or missing or preview["diagnostic"]:

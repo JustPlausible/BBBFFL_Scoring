@@ -95,13 +95,16 @@ The page pre-fills a sensible default reason.
      - the ordinary competition exists;
      - a squad limit is set;
      - at least `10 × squad limit` eligible players are in the pool;
+     - no team already owns a player (the preseason draft starts from
+       empty squads);
      - the pool was populated from exactly one live afl-api season;
      - an **Opening Round determination**: acceptance re-reads that AFL
        season's live fixture. If it has a round 0, every participating club
        must already have an accepted rule matching the fixture, otherwise
        the order is refused. Opening Round rules cannot be added after Pick 1,
-       so drafting can never start with that decision still open. An afl-api
-       failure also refuses (503).
+       so drafting can never start with that decision still open. Accepted
+       rules against a fixture that no longer has a round 0 are a conflict,
+       not "not required". An afl-api failure also refuses (503).
    - Re-accepting the identical order is a no-op. A different order is
      refused.
    - Once accepted, the existing Scorer draft board (`/admin/draft/{season_id}`)

@@ -727,3 +727,40 @@ def test_multiple_superscore_streams_are_refused_and_reported_as_a_conflict():
         initialize_superscore(database, season_id, actor=SCORER, reason=REASON)
     assert table_counts(database, *STRUCTURE_TABLES) == before
     assert _steps(database, season_id)["superscore"]["status"] == "conflict"
+
+
+def test_draft_order_is_refused_while_any_team_already_owns_a_player():
+    """Codex review, PR #247 (P2): a team with a pre-owned player could never
+    complete its last snake pick, so the preseason draft needs empty squads."""
+    from app.player_pool import OwnershipRepository
+
+    database = migrated_connection()
+    season, entries = fresh_season(database)
+    _ready_for_draft(database, season, NO_OPENING)
+    player = PlayerPoolRepository(database).list_available(season.season_id)[0]
+    OwnershipRepository(database).acquire(player.season_player_id, entries[0].season_entry_id)
+    before = table_counts(database, *STRUCTURE_TABLES)
+    with pytest.raises(SeasonSetupError, match="already owned"):
+        accept_draft_order(
+            database, NO_OPENING, season.season_id, [e.season_entry_id for e in entries], actor=SCORER, reason=REASON
+        )
+    assert table_counts(database, *STRUCTURE_TABLES) == before
+    assert _steps(database, season.season_id)["draft_order"]["status"] == "blocked"
+
+
+def test_draft_order_is_refused_when_accepted_rules_outlive_a_fixture_without_an_opening_round():
+    """Codex review, PR #247 (P2): stale accepted Opening Round rules plus a
+    corrected fixture with no round 0 is a conflict, not "not required"."""
+    database = migrated_connection()
+    season, entries = fresh_season(database)
+    afl = SetupAfl()
+    _ready_for_draft(database, season, afl)
+    accept_opening_round_rules(
+        database, afl, season.season_id, 77, {1: 2, 2: 2, 3: 3, 4: 4}, actor=SCORER, reason=REASON
+    )
+    before = table_counts(database, *STRUCTURE_TABLES)
+    with pytest.raises(SeasonSetupError, match="no longer has an Opening Round"):
+        accept_draft_order(
+            database, NO_OPENING, season.season_id, [e.season_entry_id for e in entries], actor=SCORER, reason=REASON
+        )
+    assert table_counts(database, *STRUCTURE_TABLES) == before

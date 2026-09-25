@@ -46,6 +46,13 @@ the existing API distinguishes them.  Operator actions continue to pass their
 real scorer/admin `ActorContext` into domain services; they do not impersonate
 a coach.
 
+Live-season initialization ([Season setup](season-setup.md), issue #237)
+requires the existing `roundsetup.manage` capability -- Scorer, Secretary/
+League Manager or Administrator; never Coach, Replay Operator or spectator
+-- plus `require_role_covers_season` for the target season, so a
+season-scoped grant only reaches its own season. Cookie-session writes
+additionally require the double-submit CSRF token, as for fixture setup.
+
 ## Coach ownership
 
 Private season-specific routes resolve the session to the persistent `coach`

@@ -97,6 +97,7 @@ __all__ = [
 ]
 
 FINALS_BRACKET_CREATED = "finals.bracket.created"
+FINALS_STREAM_CREATED = "finals.stream.created"
 FINALS_BRACKET_ADVANCED = "finals.bracket.advanced"
 FINALS_BRACKET_REWOUND = "finals.bracket.rewound"
 FINALS_ELIMINATION_RECORDED = "finals.elimination.recorded"
@@ -411,7 +412,14 @@ class FinalsBracketRepository:
         if snapshot is not None and snapshot.competition_id == ordinary_competition_id:
             seed_order = tuple(row.season_entry_id for row in snapshot.seed_rows)
             return seed_order, "snapshot", {"finals_seeding_snapshot_id": snapshot.snapshot_id}
+        return self._resolve_ladder_seed(season_id, ordinary_competition_id)
 
+    def _resolve_ladder_seed(self, season_id: str, ordinary_competition_id: str) -> tuple[tuple[str, ...], str, dict]:
+        """The live mathematical-ladder half of `_resolve_seed` -- every
+        regular-season round final, then an untied `LadderRepository.
+        snapshot` -- split out unchanged so `preview_ladder_seed` can report
+        the same prerequisites before any finals stream exists (issue
+        #237)."""
         season = self.database.execute("SELECT * FROM bbbffl_season WHERE season_id=?", (season_id,)).fetchone()
         if season is None:
             raise KeyError(season_id)
@@ -460,6 +468,93 @@ class FinalsBracketRepository:
                 "result_references": ladder.result_references,
             },
         )
+
+    def preview_ladder_seed(self, season_id: str, ordinary_competition_id: str) -> dict:
+        """Read-only (no lock, no mutation): whether the live mathematical
+        ladder can seed a finals bracket *right now* -- the same fail-closed
+        checks `create_bracket`'s ladder path applies (every regular-season
+        round final, no unresolved ladder equality), reported without
+        needing a finals competition stream to exist yet. Issue #237's
+        production Finals initialization calls this before creating the
+        finals stream, so the stream is never created prematurely.
+
+        `historical_snapshot_exists` reports a 2026-style
+        `finals_seeding_snapshot` for this season: when present,
+        `create_bracket` would seed from that snapshot instead of the live
+        ladder, which is replay-only behaviour a live-season caller must
+        refuse rather than silently inherit."""
+        report: dict = {
+            "ready": False,
+            "diagnostic": None,
+            "seed_order": None,
+            "through_round": None,
+            "historical_snapshot_exists": FinalsSeedingRepository(self.database).get_snapshot(season_id) is not None,
+        }
+        try:
+            seed_order, _source, provenance = self._resolve_ladder_seed(season_id, ordinary_competition_id)
+        except (FinalsBracketError, UnresolvedLadderTieError) as exc:
+            report["diagnostic"] = str(exc)
+            return report
+        if len(seed_order) != 10:
+            report["diagnostic"] = f"finals bracket requires exactly 10 seeded entries; found {len(seed_order)}"
+            return report
+        report.update(ready=True, seed_order=list(seed_order), through_round=provenance["through_round"])
+        return report
+
+    def ensure_finals_stream(
+        self,
+        season_id: str,
+        rules_version_id: str,
+        *,
+        stream_key: str = "finals",
+        label: str = "Finals",
+        actor: ActorContext,
+        reason: str | None = None,
+    ) -> dict:
+        """Idempotently create (or return) this season's one `finals`-typed
+        competition stream, audited (`finals.stream.created`), under the
+        season row lock `SeasonRepository.guard_writable` takes -- issue
+        #237's production counterpart to the hand-supplied finals stream id
+        `scripts/finals_bracket_2026.py` requires. Never creates a bracket:
+        callers run `preview_ladder_seed` first and `create_bracket` after,
+        which re-verifies every prerequisite under its own locks. More than
+        one existing finals stream, or a non-finals stream squatting on
+        `stream_key`, fails closed."""
+        seasons = SeasonRepository(self.database)
+        with transaction(self.database) as conn:
+            if self.database.engine.dialect.name == "sqlite":
+                conn.execute("UPDATE bbbffl_season SET updated_at=updated_at WHERE season_id=?", (season_id,))
+            seasons.guard_writable(conn, season_id)
+            finals_rows = conn.execute(
+                "SELECT * FROM competition_stream WHERE season_id=? AND stream_type='finals'", (season_id,)
+            ).fetchall()
+            if len(finals_rows) > 1:
+                raise FinalsBracketContextError(
+                    f"season {season_id} has {len(finals_rows)} finals competition streams; exactly one is supported"
+                )
+            if finals_rows:
+                return {"created": False, "competition_id": finals_rows[0]["competition_id"]}
+            squatter = conn.execute(
+                "SELECT stream_type FROM competition_stream WHERE season_id=? AND stream_key=?",
+                (season_id, stream_key),
+            ).fetchone()
+            if squatter is not None:
+                raise FinalsBracketContextError(
+                    f"stream key {stream_key!r} is already used by a {squatter['stream_type']!r} stream"
+                )
+            created = seasons.create_competition_in_transaction(
+                conn, season_id, rules_version_id, stream_key, label, "finals"
+            )
+            append_event(
+                conn,
+                actor=actor,
+                action=FINALS_STREAM_CREATED,
+                entity_type="competition.stream",
+                entity_id=created.competition_id,
+                reason=reason,
+                after_state={"season_id": season_id, "stream_type": "finals", "rules_version_id": rules_version_id},
+            )
+        return {"created": True, "competition_id": created.competition_id}
 
     def create_bracket(
         self, season_id: str, competition_id: str, ordinary_competition_id: str, *, actor: ActorContext, reason: str

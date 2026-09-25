@@ -155,6 +155,137 @@ def ensure_stream(
     return SuperScoreStream(created.competition_id, season_id, ordinary_competition_id)
 
 
+def initialize_structure(
+    database,
+    season_id: str,
+    rules_version_id: str,
+    ordinary_competition_id: str,
+    *,
+    stream_key: str = "superscore",
+    label: str = "SuperScore",
+    actor: ActorContext,
+    reason: str | None = None,
+) -> dict:
+    """Issue #237's production-safe SuperScore initialization: the
+    `superscore` competition stream *and* its four logical SS1-SS4 rounds,
+    created in one transaction -- the atomic counterpart of calling
+    `ensure_stream` then `ensure_round` four times (each of which commits on
+    its own), with identical row shapes (`ssN`/`SSN`, sequence N) and the
+    same `superscore.stream.created` audit event, so every existing reader
+    (`app.finals_superscore_open`, the dashboards, `app.season_completion`)
+    sees exactly what the 2026 tooling produced.
+
+    Idempotent: an already-complete, exactly-matching structure returns
+    `created=False` with nothing written. A stream created earlier by the
+    2026 per-step tooling with only some SS rounds is completed with the
+    missing ones (exactly what further `ensure_round` calls would do); any
+    existing round that deviates from the expected shape, or a stream
+    scoped to a different ordinary competition, fails closed. Refused for a
+    completed season (`SeasonRepository.guard_writable`, which also takes
+    the season row lock serializing concurrent initializations).
+
+    Deliberately checks nothing about Finals: the "not before Finals exists"
+    prerequisite is a Finals+SuperScore composition rule, owned by the
+    caller (`app.season_setup`), never a dependency of this module on
+    `app.finals`."""
+    expected = [(number, label_.lower(), label_) for number, label_ in sorted(ROUND_LABELS.items())]
+    season_repo = SeasonRepository(database)
+    with transaction(database) as conn:
+        if database.engine.dialect.name == "sqlite":
+            conn.execute("UPDATE bbbffl_season SET updated_at=updated_at WHERE season_id=?", (season_id,))
+        season_repo.guard_writable(conn, season_id)
+        existing = conn.execute(
+            "SELECT competition_id, ordinary_competition_id FROM superscore_stream WHERE season_id=?", (season_id,)
+        ).fetchone()
+        if existing is not None:
+            if existing["ordinary_competition_id"] != ordinary_competition_id:
+                raise SuperScoreRoundError(
+                    f"a SuperScore stream already exists for season {season_id} scoped to ordinary competition "
+                    f"{existing['ordinary_competition_id']!r}, not {ordinary_competition_id!r}"
+                )
+            competition_id = existing["competition_id"]
+            stream_created = False
+        else:
+            ordinary = conn.execute(
+                "SELECT season_id, stream_type FROM competition_stream WHERE competition_id=?",
+                (ordinary_competition_id,),
+            ).fetchone()
+            if ordinary is None or ordinary["season_id"] != season_id or ordinary["stream_type"] != "ordinary":
+                raise SuperScoreRoundError(
+                    f"ordinary_competition_id {ordinary_competition_id!r} must name this season's own ordinary "
+                    "home-and-away competition"
+                )
+            squatter = conn.execute(
+                "SELECT stream_type FROM competition_stream WHERE season_id=? AND stream_key=?",
+                (season_id, stream_key),
+            ).fetchone()
+            if squatter is not None:
+                raise SuperScoreRoundError(
+                    f"stream key {stream_key!r} is already used by a {squatter['stream_type']!r} stream with no "
+                    "SuperScore stream record; refusing to guess whether it is SuperScore"
+                )
+            created = season_repo.create_competition_in_transaction(
+                conn, season_id, rules_version_id, stream_key, label, STREAM_TYPE
+            )
+            competition_id = created.competition_id
+            conn.execute(
+                "INSERT INTO superscore_stream VALUES (?, ?, ?, ?)",
+                (competition_id, season_id, ordinary_competition_id, _now()),
+            )
+            append_event(
+                conn,
+                actor=actor,
+                action="superscore.stream.created",
+                entity_type="superscore.stream",
+                entity_id=competition_id,
+                entity_version="1",
+                reason=reason,
+                after_state={"season_id": season_id, "ordinary_competition_id": ordinary_competition_id},
+            )
+            stream_created = True
+        rows = conn.execute(
+            "SELECT bbbffl_round_id, sequence, round_key, label FROM bbbffl_round WHERE competition_id=? "
+            "ORDER BY sequence",
+            (competition_id,),
+        ).fetchall()
+        by_key = {row["round_key"]: row for row in rows}
+        unexpected = [
+            row["round_key"] for row in rows if (row["sequence"], row["round_key"], row["label"]) not in expected
+        ]
+        if unexpected:
+            raise SuperScoreRoundError(
+                f"the SuperScore stream has unexpected or differently-shaped round(s) {unexpected}; "
+                "refusing to modify a round structure this command did not create"
+            )
+        round_ids: dict[int, str] = {}
+        created_rounds: list[str] = []
+        for number, round_key, round_label in expected:
+            if round_key in by_key:
+                round_ids[number] = by_key[round_key]["bbbffl_round_id"]
+                continue
+            round_ids[number] = season_repo.create_round_in_transaction(
+                conn, competition_id, round_key, round_label, number
+            ).bbbffl_round_id
+            created_rounds.append(round_label)
+        if created_rounds:
+            append_event(
+                conn,
+                actor=actor,
+                action="superscore.rounds.initialized",
+                entity_type="superscore.stream",
+                entity_id=competition_id,
+                reason=reason,
+                after_state={"season_id": season_id, "created_rounds": created_rounds},
+            )
+    return {
+        "created": stream_created or bool(created_rounds),
+        "stream_created": stream_created,
+        "created_rounds": created_rounds,
+        "stream": SuperScoreStream(competition_id, season_id, ordinary_competition_id),
+        "round_ids": round_ids,
+    }
+
+
 def _require_superscore_competition(database, competition_id: str) -> None:
     """The `ensure_round`/`resolve_concurrent_finals_afl_mapping` sibling of
     `_require_superscore_round`: refuses a `competition_id` that does not

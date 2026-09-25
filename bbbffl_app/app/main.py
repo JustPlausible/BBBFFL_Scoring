@@ -94,6 +94,7 @@ from app.routes import round_preflight as round_preflight_routes
 from app.routes import round_review as round_review_routes
 from app.routes import scorer_dashboard as scorer_dashboard_routes
 from app.routes import season_centre as season_centre_routes
+from app.routes import season_setup as season_setup_routes
 from app.routes import shortlist as shortlist_routes
 from app.routes import superscore as superscore_routes
 from app.routes import superscore_results as superscore_result_routes
@@ -107,6 +108,7 @@ from app.scorer_decisions import (
     UnknownTeamError,
 )
 from app.season import SeasonRepository
+from app.season_setup import SeasonSetupAflError, SeasonSetupError
 from app.service import PlayerIdentityCache
 from app.shortlist import ShortlistRepository
 from app.superscore import competition_key as superscore_competition_key
@@ -315,6 +317,8 @@ app.include_router(round_preflight_routes.page_router)
 app.include_router(finals_preflight_routes.router)
 app.include_router(season_centre_routes.router)
 app.include_router(season_centre_routes.page_router)
+app.include_router(season_setup_routes.router)
+app.include_router(season_setup_routes.page_router)
 app.include_router(fixture_setup_routes.router)
 app.include_router(fixture_setup_routes.page_router)
 app.include_router(context_routes.router)
@@ -337,6 +341,20 @@ async def afl_api_error_handler(request: Request, exc: AflApiError) -> JSONRespo
         status_code=502,
         content={"detail": "afl-api is currently unavailable. Scores will resume once it recovers."},
     )
+
+
+# Issue #237's season setup commands: a refusal names the exact missing
+# prerequisite or conflicting state (409); an afl-api evidence failure behind
+# a live-provider setup step is reported as such (503), with its own
+# explanation rather than the scoring-outage message above.
+@app.exception_handler(SeasonSetupError)
+async def season_setup_error_handler(request: Request, exc: SeasonSetupError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(SeasonSetupAflError)
+async def season_setup_afl_error_handler(request: Request, exc: SeasonSetupAflError) -> JSONResponse:
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
 @app.exception_handler(LineupConflictError)

@@ -25,6 +25,14 @@ afl-api instance, superseding the earlier inferred assumptions):
                   "away_team": {"team_id": int, "name": str},
                   "score_home": int | null, "score_away": int | null}]}
 
+  GET /api/v1/seasons/{season_id}/players?limit=250&offset=N
+    {"players": [{"canonical_player_id": int, "display_name": str,
+                  "team": {"team_id": int, "name": str} | null,
+                  "identifiers": {...}}],
+     "limit": int, "offset": int}
+    (issue #237's live season player-pool population -- see
+    `AflApiClient.get_season_players`)
+
   GET /api/v1/players/{canonical_player_id}
     {"player": {"canonical_player_id": int, "display_name": str,
                 "current_team": {"team_id": int, "name": str},
@@ -178,6 +186,22 @@ class Player:
 
 
 @dataclass(frozen=True)
+class SeasonPlayerRecord:
+    """One member of afl-api's season-scoped canonical player pool
+    (`GET /api/v1/seasons/{season_id}/players`). `team` is the *requested
+    season's* club, never `current_team` -- see `AflApiClient.
+    get_season_players`. There is deliberately no `eligible` field: afl-api
+    has none, and BBBFFL eligibility is BBBFFL's own policy."""
+
+    canonical_player_id: int
+    display_name: str
+    team: Team
+
+
+SEASON_PLAYERS_PAGE_LIMIT = 250
+
+
+@dataclass(frozen=True)
 class PlayerStatLine:
     canonical_player_id: int
     goals: int | None = 0
@@ -232,6 +256,19 @@ class AflApiHttpStatusError(AflApiError):
         self.path = path
         self.status_code = status_code
         self.__cause__ = cause
+
+
+class AflSeasonPlayersContractError(AflApiError):
+    """`GET /api/v1/seasons/{season_id}/players` returned a page BBBFFL
+    cannot safely consume as a *complete* season pool: a malformed
+    envelope/row, unexpected pagination progress, a repeated canonical
+    player, an unresolved requested-season team, or an empty pool. Always
+    fails closed -- a partially-read pool must never be persisted as though
+    it were the whole season (issue #237)."""
+
+
+def _is_positive_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
 class AflApiClient:
@@ -365,6 +402,71 @@ class AflApiClient:
             name=entry.get("display_name", f"Player {canonical_player_id}"),
             current_team=Team.from_json(entry.get("current_team", {"team_id": 0, "name": ""})),
         )
+
+    def get_season_players(self, season_id: int) -> list[SeasonPlayerRecord]:
+        """Follow afl-api's season-scoped canonical player collection to
+        exhaustion (issue #237's live player-pool population), with the same
+        fail-closed pagination and row validation the 2026 replay exporter
+        (`app.replay_acquisition._acquire_season_players`) applies to the
+        identical endpoint: the requested `offset`/`limit` are advanced here
+        and must be echoed back exactly (a server-side clamp would otherwise
+        look identical to a genuine short final page), a repeated
+        `canonical_player_id` fails rather than being merged, and a row with
+        no resolved requested-season `team` fails rather than falling back to
+        `current_team`. Ordered by `canonical_player_id`."""
+        path = f"/api/{self._contract_version}/seasons/{season_id}/players"
+        limit = SEASON_PLAYERS_PAGE_LIMIT
+        offset = 0
+        players: dict[int, SeasonPlayerRecord] = {}
+        while True:
+            payload = self._get(path, params={"limit": limit, "offset": offset})
+            where = f"{path}?limit={limit}&offset={offset}"
+            if not isinstance(payload, dict):
+                raise AflSeasonPlayersContractError(f"malformed afl-api response at {where}: expected an object")
+            rows = payload.get("players")
+            if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+                raise AflSeasonPlayersContractError(f"malformed afl-api response at {where}: expected a players list")
+            if payload.get("offset") != offset or payload.get("limit") != limit:
+                raise AflSeasonPlayersContractError(
+                    f"afl-api season-player page at {where} reports offset={payload.get('offset')!r} "
+                    f"limit={payload.get('limit')!r}; expected offset={offset} limit={limit}"
+                )
+            for row in rows:
+                player_id = row.get("canonical_player_id")
+                if not _is_positive_int(player_id):
+                    raise AflSeasonPlayersContractError(
+                        f"afl-api season-player page at {where} has a malformed canonical_player_id: {player_id!r}"
+                    )
+                if player_id in players:
+                    raise AflSeasonPlayersContractError(
+                        f"afl-api season {season_id} lists canonical player {player_id} more than once"
+                    )
+                display_name = row.get("display_name")
+                if not isinstance(display_name, str) or not display_name.strip():
+                    raise AflSeasonPlayersContractError(
+                        f"afl-api season-player {player_id} has a blank or missing display_name"
+                    )
+                team = row.get("team")
+                if (
+                    not isinstance(team, dict)
+                    or not _is_positive_int(team.get("team_id"))
+                    or not isinstance(team.get("name"), str)
+                    or not team["name"].strip()
+                ):
+                    raise AflSeasonPlayersContractError(
+                        f"afl-api season-player {player_id} has no resolved season {season_id} team"
+                    )
+                players[player_id] = SeasonPlayerRecord(
+                    canonical_player_id=player_id,
+                    display_name=display_name.strip(),
+                    team=Team(team_id=team["team_id"], name=team["name"].strip()),
+                )
+            if len(rows) < limit:
+                break
+            offset += limit
+        if not players:
+            raise AflSeasonPlayersContractError(f"afl-api season {season_id} has an empty player pool")
+        return [players[player_id] for player_id in sorted(players)]
 
     def get_match_player_stats(self, match_id: int) -> dict[int, PlayerStatLine]:
         payload = self._get(f"/api/{self._contract_version}/matches/{match_id}/player-stats")

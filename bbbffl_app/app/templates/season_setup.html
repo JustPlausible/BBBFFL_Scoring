@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BBBFFL Season Setup</title>
+<style>
+:root{color-scheme:dark}body{font:15px system-ui;margin:auto;max-width:1100px;padding:20px;background:#0f1115;color:#e7e9ee}a{color:#79c0ff}.card{background:#171a21;border:1px solid #303744;border-radius:10px;padding:16px;margin:14px 0}.error{background:#4a1f1f}.success{background:#1f3a24}#message:empty{display:none}table{width:100%;border-collapse:collapse}th,td{padding:6px 8px;border-bottom:1px solid #303744;text-align:left}select,button,input{font:inherit;padding:6px;border-radius:6px;background:#222733;color:inherit;border:1px solid #454d5c}input.reason{width:60%}button{cursor:pointer}.primary{background:#2869a8}.muted{color:#aab2c0;font-size:.88rem}.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.8rem;margin-left:8px}.b-complete{background:#1f3a24}.b-available,.b-action_needed{background:#2869a8}.b-blocked,.b-conflict{background:#4a1f1f}.b-optional,.b-not_applicable,.b-read_only{background:#3a3a3a}.next{border-left:4px solid #2869a8}.blockers li{color:#ffb4a8}.warnings li{color:#e0a62b}.actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}
+</style>
+</head><body>
+<a href="/admin/season-centre/{{ season_id }}">← Season Centre</a> · <a href="/scorer/dashboard">Scorer dashboard</a>
+<h1>Season setup</h1>
+<p class="muted">Live-season initialization. Every action re-checks its prerequisites, is safe to repeat, and is recorded against your identity with the reason you give. No 2026 replay tooling is involved.</p>
+<div id="message" class="card"></div>
+<main id="app"><p>Loading season setup…</p></main>
+<script>
+const seasonId={{ season_id|tojson }}; const csrf={{ csrf_token|tojson }};
+let current=null, aflSeasons=null, opening=null;
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function headers(){const h={'Content-Type':'application/json','X-CSRF-Token':csrf};const t=localStorage.getItem('bbbffl_admin_token');if(t)h['X-Admin-Token']=t;return h}
+async function api(path,body){const r=await fetch(path,{method:body?'POST':'GET',headers:headers(),body:body?JSON.stringify(body):undefined});const d=await r.json().catch(()=>({detail:r.statusText}));if(!r.ok)throw Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail)||r.statusText);return d}
+function say(text,kind='error'){const e=document.querySelector('#message');e.textContent=text;e.className=`card ${kind}`;e.scrollIntoView({block:'nearest'})}
+const STATUS={complete:'Complete',available:'Ready',action_needed:'Action needed',blocked:'Blocked',conflict:'Conflict',optional:'Optional',not_applicable:'Not applicable',read_only:'Read-only'};
+function reason(key,text){return `<label class="muted">Reason <input class="reason" id="reason-${key}" value="${esc(text)}"></label>`}
+function reasonValue(key){return document.querySelector(`#reason-${key}`).value}
+function aflSeasonSelect(key){if(!aflSeasons)return `<button id="load-afl-${key}">Load AFL seasons from afl-api</button>`;return `<label>AFL season <select id="afl-${key}">${aflSeasons.map(s=>`<option value="${s.afl_season_id}" ${s.matches_season_year?'selected':''}>${esc(s.name||s.year)}${s.matches_season_year?' (matches this season)':''}</option>`).join('')}</select></label>`}
+function stepActions(step,season,readOnly){
+  if(readOnly||step.status==='read_only')return '';
+  const k=step.key, links=Object.entries(step.links).map(([n,u])=>`<a href="${esc(u)}">${esc(n.replaceAll('_',' '))}</a>`).join(' · ');
+  let a='';
+  if(k==='player_pool')a=`${aflSeasonSelect(k)} ${reason(k,'Populate/refresh the season player pool from live afl-api')}<div class="actions"><button class="primary" id="do-${k}" ${aflSeasons?'':'disabled'}>${step.facts.total?'Refresh':'Populate'} from live afl-api</button></div>`;
+  if(k==='ordinary_competition'&&step.status==='available')a=`${reason(k,`Initialize the ${season.year} ordinary competition`)}<div class="actions"><button class="primary" id="do-${k}">Create rules version, ordinary stream and Rounds 1–${step.facts.regular_season_round_count}</button></div>`;
+  if(k==='opening_round'&&(step.status==='optional'||step.status==='complete'))a=`${aflSeasonSelect(k)}<div class="actions"><button id="preview-${k}" ${aflSeasons?'':'disabled'}>Check the live AFL fixture for an Opening Round</button></div><div id="opening-preview"></div>`;
+  if(k==='squad_limit'&&!step.facts.frozen)a=`<label>Players per team <input type="number" min="1" id="squad-limit" value="${esc(step.facts.squad_limit||'')}"></label> ${reason(k,'Configure the preseason squad limit')}<div class="actions"><button class="primary" id="do-${k}">Save squad limit</button></div>`;
+  if(k==='draft_order'&&step.status==='available'){const entries=season.entries;a=`<p class="muted">Choose each team's pick position (1 picks first; the order snakes each round). This freezes the order and creates every pick.</p><table><tbody>${entries.map(e=>`<tr><td>${esc(e.team_name)} <span class="muted">${esc(e.coach_display_name)}</span></td><td><select data-entry="${esc(e.season_entry_id)}"><option value="">Position…</option>${entries.map((_,i)=>`<option>${i+1}</option>`).join('')}</select></td></tr>`).join('')}</tbody></table>${reason(k,'Accept the preseason draft order')}<div class="actions"><button class="primary" id="do-${k}">Accept and freeze draft order</button></div>`}
+  if(k==='finals'&&step.status==='available')a=`${step.facts.seed_order?`<p>Seeds from the final mathematical ladder:</p><ol>${step.facts.seed_order.map(s=>`<li>${esc(s.team_name)}${s.seed<=5?'':' <span class="muted">(eliminated)</span>'}</li>`).join('')}</ol>`:''}${reason(k,'Initialize Finals from the final home-and-away ladder')}<div class="actions"><button class="primary" id="do-${k}">Create Finals stream and bracket</button></div>`;
+  if(k==='superscore'&&step.status==='available')a=`${reason(k,'Initialize SuperScore alongside Finals')}<div class="actions"><button class="primary" id="do-${k}">Create SuperScore stream and SS1–SS4</button></div>`;
+  return `${a}${links?`<p class="muted">${links}</p>`:''}`;
+}
+function render(data){current=data;const season={...data.season,entries:(data.steps.find(s=>s.key==='entries').facts.entries)};
+  document.querySelector('#app').innerHTML=`<h2>${esc(data.season.year)} — ${esc(data.season.label)} <span class="muted">(${esc(data.season.lifecycle_state)})</span></h2>
+  <div class="card next">${data.read_only?'This season is completed; its setup is read-only.':data.next_step?`<strong>Next safe action:</strong> ${esc(data.next_step_title)}`:'No setup action is currently outstanding.'}</div>
+  ${data.steps.map(step=>`<section class="card" id="step-${step.key}"><h3>${esc(step.title)}<span class="badge b-${step.status}">${esc(STATUS[step.status]||step.status)}</span></h3><p>${esc(step.summary)}</p>${step.blockers.length?`<ul class="blockers">${step.blockers.map(b=>`<li>${esc(b)}</li>`).join('')}</ul>`:''}${step.warnings.length?`<ul class="warnings">${step.warnings.map(b=>`<li>${esc(b)}</li>`).join('')}</ul>`:''}${step.key==='draft_order'&&step.facts.order.length?`<p class="muted">Order: ${step.facts.order.map(o=>`${o.position}. ${esc(o.team_name)}`).join(', ')}</p>`:''}${stepActions(step,season,data.read_only)}</section>`).join('')}`;
+  bind();}
+function bind(){
+  document.querySelectorAll('[id^="load-afl-"]').forEach(b=>b.onclick=loadAflSeasons);
+  const on=(id,fn)=>{const e=document.querySelector(id);if(e)e.onclick=fn};
+  on('#do-player_pool',()=>post('player-pool',{afl_season_id:Number(document.querySelector('#afl-player_pool').value),reason:reasonValue('player_pool')},'Player pool updated from live afl-api.',r=>`${r.inserted} added, ${r.updated} updated, ${r.unchanged} unchanged (pool: ${r.pool_size}).`));
+  on('#do-ordinary_competition',()=>post('ordinary-competition',{reason:reasonValue('ordinary_competition')},'Ordinary competition initialized.'));
+  on('#preview-opening_round',previewOpening);
+  on('#do-squad_limit',()=>post('squad-limit',{squad_limit:Number(document.querySelector('#squad-limit').value),reason:reasonValue('squad_limit')},'Squad limit saved.'));
+  on('#do-draft_order',acceptOrder);
+  on('#do-finals',()=>confirm('Create the Finals stream and freeze the bracket seeds from the current ladder?')&&post('finals',{reason:reasonValue('finals')},'Finals initialized.'));
+  on('#do-superscore',()=>post('superscore',{reason:reasonValue('superscore')},'SuperScore initialized.'));
+}
+async function loadAflSeasons(){try{aflSeasons=(await api(`/api/admin/season-setup/${seasonId}/afl-seasons`)).seasons;render(current)}catch(e){say(e.message)}}
+async function post(path,body,ok,detail){try{const d=await api(`/api/admin/season-setup/${seasonId}/${path}`,body);render(d.setup);const r=d.result;const noop=r.created===false||r.changed===false;say(noop?'Already in place — nothing changed.':`${ok} ${detail?detail(r):''}`,'success')}catch(e){say(e.message)}}
+async function acceptOrder(){const picks=[...document.querySelectorAll('select[data-entry]')];const values=picks.map(x=>Number(x.value));if(values.some(x=>!x)||new Set(values).size!==picks.length)return say('Give every team a different pick position before accepting.');const ordered=Array(picks.length);picks.forEach(x=>ordered[Number(x.value)-1]=x.dataset.entry);if(!confirm('Accept this draft order? It is frozen once accepted and every pick is created.'))return;post('draft-order',{ordered_entry_ids:ordered,reason:reasonValue('draft_order')},'Draft order accepted; the draft board is ready.')}
+async function previewOpening(){const afl=Number(document.querySelector('#afl-opening_round').value);const box=document.querySelector('#opening-preview');try{opening=await api(`/api/admin/season-setup/${seasonId}/opening-round?afl_season_id=${afl}`);
+  if(!opening.applicable){box.innerHTML=`<p>${esc(opening.diagnostic)}</p>`;return}
+  const rounds=opening.bbbffl_round_numbers;
+  box.innerHTML=`<p class="muted">Configuration only: this sets which BBBFFL round each Opening Round club's players are deferred into. Coach nominations happen later on the Opening Round operations page.</p>${opening.diagnostic?`<ul class="blockers"><li>${esc(opening.diagnostic)}</li></ul>`:''}<table><thead><tr><th>Club</th><th>Compensating bye (AFL)</th><th>BBBFFL target round</th><th></th></tr></thead><tbody>${opening.rules.map(r=>`<tr><td>${esc(r.afl_club_name)}</td><td>${r.afl_bye_round_number!=null?`Round ${r.afl_bye_round_number}`:`<span class="muted">${esc(r.unresolved)}</span>`}</td><td><select data-club="${r.afl_club_id}" ${r.accepted?'disabled':''}>${rounds.map(n=>`<option ${(r.accepted?r.accepted_bbbffl_round_number:r.recommended_bbbffl_round_number)===n?'selected':''}>${n}</option>`).join('')}</select></td><td class="muted">${r.accepted?'accepted':''}</td></tr>`).join('')}</tbody></table>${opening.ready?`${reason('opening_round','Accept Opening Round compensating-bye rules from the live AFL fixture')}<div class="actions"><button class="primary" id="accept-opening">Accept these rules</button></div>`:''}`;
+  const b=document.querySelector('#accept-opening');if(b)b.onclick=()=>{const targets=[...document.querySelectorAll('select[data-club]')].map(s=>({afl_club_id:Number(s.dataset.club),bbbffl_round_number:Number(s.value)}));post('opening-round',{afl_season_id:afl,targets,reason:reasonValue('opening_round')},'Opening Round rules accepted.')}
+  }catch(e){say(e.message)}}
+api(`/api/admin/season-setup/${seasonId}`).then(render).catch(e=>say(e.message));
+</script></body></html>

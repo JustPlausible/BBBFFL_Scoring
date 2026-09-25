@@ -78,6 +78,18 @@ one action with a `title`, `detail` and a `url` pointing at the existing
 workflow that performs it; the dashboard never calls that workflow's
 mutation itself.
 
+Once every regular-season round of the season's ordinary competition is
+`final` and no Finals bracket exists yet (and the season is not completed),
+the final-round branch returns `initialize_finals` -- "Home-and-away season
+complete — initialize Finals" -- linking to the
+[Season setup](season-setup.md) page (issue #237), rather than the plain
+"season complete" advisory, which remains for any other end-of-structure
+case. Once a bracket exists, the existing Finals-phase next actions take
+over. Likewise a season with no ordinary rounds yet returns
+`no_rounds_configured` linking to Season setup, and the dashboard carries a
+persistent **Season setup** card (`#season-setup-link`) for the selected
+season, alongside the mid-season draft card.
+
 ## Attention queue
 
 Every derived fact -- a preflight blocker, an unresolved DNP/Interchange

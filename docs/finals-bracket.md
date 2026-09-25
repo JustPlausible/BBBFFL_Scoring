@@ -127,6 +127,19 @@ the round's lifecycle row, materialises any not-yet-realised pairing into a
 real `bbbffl_matchup`, and transitions the round to `open`. The HTTP surface
 is `app/routes/finals_preflight.py` (`/api/admin/finals/...`).
 
+## Live-season production path (issue #237)
+
+A live season never uses the CLI below. The browser [Season setup](season-setup.md)
+page's **Finals** step runs `preview_ladder_seed` (every regular-season
+round final, an untied mathematical ladder -- reported *before* anything is
+created), then `ensure_finals_stream` (the season's one `finals` competition
+stream, audited `finals.stream.created`), then `create_bracket`, which
+re-verifies every prerequisite under its own locks. It always seeds from the
+live ladder (`seed_source == "ladder"`) and refuses outright for a season
+carrying a 2026 historical `finals_seeding_snapshot`. An unresolved ladder
+equality is refused with the same diagnosis as before; no tie policy is
+invented.
+
 ## CLI
 
 `scripts/finals_bracket_2026.py` mirrors `scripts/finals_seeding_2026.py`'s

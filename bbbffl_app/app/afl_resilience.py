@@ -235,6 +235,11 @@ DEFAULT_CACHE_POLICIES: dict[str, EndpointCachePolicy] = {
     "matches": EndpointCachePolicy(stale_ttl_seconds=120),
     "player": EndpointCachePolicy(stale_ttl_seconds=86400),
     "player_stats": EndpointCachePolicy(stale_ttl_seconds=90),
+    # Issue #237: the season player pool is only ever read to *persist* it
+    # (`app.season_setup.refresh_player_pool`), which refuses anything but
+    # fresh evidence -- so a stale fallback would only ever be refused
+    # anyway. Zero makes that explicit rather than implied.
+    "season_players": EndpointCachePolicy(stale_ttl_seconds=0),
 }
 
 
@@ -291,6 +296,8 @@ class AflTransport(Protocol):
     def get_player(self, canonical_player_id: int) -> Any: ...
 
     def get_match_player_stats(self, match_id: int) -> Any: ...
+
+    def get_season_players(self, season_id: int) -> Any: ...
 
 
 class ResilientAflClient:
@@ -362,6 +369,9 @@ class ResilientAflClient:
 
     def get_match_player_stats(self, match_id: int):
         return self._call("player_stats", match_id, lambda: self._transport.get_match_player_stats(match_id))
+
+    def get_season_players(self, season_id: int):
+        return self._call("season_players", season_id, lambda: self._transport.get_season_players(season_id))
 
     # -- Evidence/diagnostics surface --------------------------------------
 

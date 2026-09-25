@@ -102,6 +102,9 @@ tr.action-required td:first-child{border-left:4px solid #f85149}
 <div class="card"><h3>Scorer Round Centre</h3><p class="muted">Calculation, DNP/Interchange decisions, manual overrides and atomic publication. The one place official results are produced.</p></div>
 <!-- Persistent nav entry to mid-season draft setup (issue #226): reachable
      before a trigger round is even configured, not only once it is final. -->
+<!-- Persistent nav entry to live-season initialization (issue #237): player
+     pool, ordinary competition, draft order, Finals and SuperScore setup. -->
+<div class="card"><h3>Season setup</h3><p class="muted">Initialize the season from live afl-api: player pool, ordinary competition, Opening Round rules, squad limit and draft order -- and, once the home-and-away season is complete, Finals and SuperScore.</p><p><a id="season-setup-link" href="/admin/season-setup/">Open season setup →</a></p></div>
 <div class="card"><h3>Mid-season draft setup</h3><p class="muted">Configure the mid-season draft trigger round, confirm the ladder, run the delisting/trade window and generate selections once the regular season reaches that point.</p><p><a id="midseason-draft-link" href="/admin/midseason-draft/">Open mid-season draft operations →</a></p></div>
 </section>
 </main>
@@ -652,6 +655,8 @@ async function load(){
     // from without knowing its URL or season id.
     const midseasonLink=document.querySelector('#midseason-draft-link');
     if(midseasonLink&&current.season_id)midseasonLink.href=`/admin/midseason-draft/${current.season_id}`;
+    const setupLink=document.querySelector('#season-setup-link');
+    if(setupLink&&current.season_id)setupLink.href=`/admin/season-setup/${current.season_id}`;
     if(!d.seasons.length){
       document.querySelector('#app').innerHTML='<div class="card"><p class="muted">No seasons are authorised for the active role.</p></div>';
       return;

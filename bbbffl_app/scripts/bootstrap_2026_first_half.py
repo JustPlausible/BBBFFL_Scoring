@@ -1,4 +1,11 @@
-"""Operator CLI for the deterministic 2026 first-half replay bootstrap."""
+"""Operator CLI for the deterministic 2026 first-half replay bootstrap.
+
+Replay-only tooling: it refuses outright (before connecting to any
+database) when `BBBFFL_ENVIRONMENT=production`, exactly like its sibling
+2026 replay/bootstrap scripts (`scripts/bootstrap_round1_2026.py`,
+`scripts/replay_2026_draft.py`, ...). A live season is initialized through
+the browser Season setup page instead (`/admin/season-setup/{season_id}`,
+issue #237; see docs/season-setup.md)."""
 
 from __future__ import annotations
 
@@ -31,6 +38,12 @@ def main() -> int:
     )
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     args = parser.parse_args()
+    if (os.getenv("BBBFFL_ENVIRONMENT") or "").strip().lower() == "production":
+        print(
+            "Refusing to run the 2026 first-half replay bootstrap while BBBFFL_ENVIRONMENT=production.",
+            file=sys.stderr,
+        )
+        return 1
     database = connect(args.database_url)
     try:
         config = load_replay_config(args.config)

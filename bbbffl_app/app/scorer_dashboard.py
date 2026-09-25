@@ -84,6 +84,7 @@ NO_AUTHORITATIVE_SUBMISSION_STATES = (SUBMISSION_MISSING, SUBMISSION_DRAFT_ONLY)
 
 ROUND_CENTRE_URL = "/scorer/round-centre/{round_id}"
 PREFLIGHT_URL = "/admin/round-preflight/{round_id}"
+SEASON_SETUP_URL = "/admin/season-setup/{season_id}"
 LINEUP_CORRECTION_URL = "/scorer/lineup-correction/{round_id}"
 LINEUP_ADJUDICATION_URL = "/scorer/lineup-adjudication/{round_id}"
 DELEGATED_LINEUP_URL = "/operations/rounds/{round_id}/lineup"
@@ -714,6 +715,32 @@ def _sort_key(item: dict) -> tuple:
     return (CATEGORY_ORDER.index(item["category"]), item.get("title") or "")
 
 
+def _home_and_away_complete_without_finals(database, season_id: str) -> bool:
+    """Issue #237: once every regular-season round of the season's single
+    ordinary competition is final, and no Finals bracket exists, the next
+    safe action is Finals initialization on the Season setup page -- not a
+    "season complete" dead end. A completed season, or any ambiguity (no or
+    several ordinary streams), keeps the plain advisory."""
+    season = database.execute(
+        "SELECT lifecycle_state, regular_season_round_count FROM bbbffl_season WHERE season_id=?", (season_id,)
+    ).fetchone()
+    if season is None or season["lifecycle_state"] == "completed":
+        return False
+    if database.execute("SELECT 1 FROM finals_bracket WHERE season_id=?", (season_id,)).fetchone():
+        return False
+    streams = database.execute(
+        "SELECT competition_id FROM competition_stream WHERE season_id=? AND stream_type='ordinary'", (season_id,)
+    ).fetchall()
+    if len(streams) != 1:
+        return False
+    final_rounds = database.execute(
+        "SELECT COUNT(*) AS n FROM bbbffl_round r JOIN bbbffl_round_lifecycle l ON l.bbbffl_round_id=r.bbbffl_round_id "
+        "WHERE r.competition_id=? AND r.sequence<=? AND l.state='final'",
+        (streams[0]["competition_id"], season["regular_season_round_count"]),
+    ).fetchone()["n"]
+    return final_rounds == season["regular_season_round_count"]
+
+
 def _finals_phase_next_action(database, lifecycle, season_id: str) -> dict | None:
     """Bridges ordinary-season completion into the Finals phase (issue
     #216): `_determine_next_action`'s existing `final`/no-next-ordinary-
@@ -1079,6 +1106,16 @@ def _determine_next_action(
         finals_next_action = _finals_phase_next_action(database, lifecycle, season_id)
         if finals_next_action is not None:
             return finals_next_action
+        if _home_and_away_complete_without_finals(database, season_id):
+            return NextAction(
+                "initialize_finals",
+                CATEGORY_ADVISORY,
+                "Home-and-away season complete — initialize Finals",
+                "Every regular-season round is final and no Finals bracket exists yet. Initialize Finals (and then "
+                "SuperScore) from the final ladder in Season setup.",
+                SEASON_SETUP_URL.format(season_id=season_id),
+                capability="roundsetup.manage",
+            ).__dict__
         return NextAction(
             "published_season_complete",
             CATEGORY_ADVISORY,
@@ -1217,8 +1254,10 @@ def build_scorer_dashboard(
                 "no_rounds_configured",
                 CATEGORY_ADVISORY,
                 "No ordinary rounds configured",
-                "This season has no ordinary competition rounds yet.",
-                None,
+                "This season has no ordinary competition rounds yet. Initialize the ordinary competition (and the "
+                "rest of the season's setup) in Season setup.",
+                SEASON_SETUP_URL.format(season_id=season.season_id),
+                capability="roundsetup.manage",
             ).__dict__,
             "attention": [],
             "lineups": [],

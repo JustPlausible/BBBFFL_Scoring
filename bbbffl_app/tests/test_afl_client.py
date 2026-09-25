@@ -388,3 +388,77 @@ def test_get_match_player_stats_reads_players_wrapper_and_nested_stats(client):
             tackles=0,
         )
     }
+
+
+# -- Issue #237: live season player pool ---------------------------------------
+
+
+def _season_players_client(pages):
+    """`pages` maps a requested offset to the JSON body returned for it."""
+    requested = []
+
+    def handler(request):
+        requested.append((request.url.path, dict(request.url.params)))
+        offset = int(request.url.params["offset"])
+        return httpx.Response(200, json=pages[offset])
+
+    api = AflApiClient(base_url="http://afl-api.test")
+    api._client = httpx.Client(base_url="http://afl-api.test", transport=httpx.MockTransport(handler))
+    return api, requested
+
+
+def _row(player_id, team=None):
+    return {
+        "canonical_player_id": player_id,
+        "display_name": f"Player {player_id}",
+        "team": {"team_id": 3, "name": "Carlton"} if team is None else team,
+        "identifiers": {"afl_player_id": "CD_I1"},
+    }
+
+
+def test_get_season_players_follows_every_page_and_uses_the_requested_season_team():
+    from app.afl_client import SEASON_PLAYERS_PAGE_LIMIT, SeasonPlayerRecord
+
+    first = [_row(n) for n in range(1, SEASON_PLAYERS_PAGE_LIMIT + 1)]
+    api, requested = _season_players_client(
+        {
+            0: {"players": first, "limit": SEASON_PLAYERS_PAGE_LIMIT, "offset": 0},
+            SEASON_PLAYERS_PAGE_LIMIT: {
+                "players": [_row(9999)],
+                "limit": SEASON_PLAYERS_PAGE_LIMIT,
+                "offset": SEASON_PLAYERS_PAGE_LIMIT,
+            },
+        }
+    )
+    try:
+        players = api.get_season_players(71)
+    finally:
+        api.close()
+    assert len(players) == SEASON_PLAYERS_PAGE_LIMIT + 1
+    assert players[-1] == SeasonPlayerRecord(9999, "Player 9999", Team(3, "Carlton"))
+    assert requested == [
+        ("/api/v1/seasons/71/players", {"limit": "250", "offset": "0"}),
+        ("/api/v1/seasons/71/players", {"limit": "250", "offset": "250"}),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ({"players": [_row(1), _row(1)], "limit": 250, "offset": 0}, "more than once"),
+        ({"players": [_row(1, team=None) | {"team": None}], "limit": 250, "offset": 0}, "no resolved season"),
+        ({"players": [_row(1)], "limit": 100, "offset": 0}, "expected offset=0 limit=250"),
+        ({"players": [], "limit": 250, "offset": 0}, "empty player pool"),
+        ({"players": [{"canonical_player_id": "x", "display_name": "A"}], "limit": 250, "offset": 0}, "malformed"),
+        ({"items": []}, "expected a players list"),
+    ],
+)
+def test_get_season_players_fails_closed_on_an_incomplete_or_malformed_pool(body, message):
+    from app.afl_client import AflSeasonPlayersContractError
+
+    api, _requested = _season_players_client({0: body})
+    try:
+        with pytest.raises(AflSeasonPlayersContractError, match=message):
+            api.get_season_players(71)
+    finally:
+        api.close()

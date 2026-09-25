@@ -322,3 +322,18 @@ def test_finals_then_superscore_through_the_browser_api_once_the_home_and_away_s
     rounds = client.get("/api/admin/round-preflight").json()["rounds"]
     finals_labels = [r["round_label"] for r in rounds if r["season_id"] == season_id and r["round_type"] == "finals"]
     assert finals_labels == ["Finals Week 1", "Finals Week 2", "Preliminary Final", "Grand Final"]
+
+
+def test_the_setup_page_and_post_write_view_survive_an_ambiguous_ordinary_structure(setup_client):
+    client = setup_client
+    season_id = _create_season_with_entries(client)
+    seasons = client.app.state.seasons
+    rules = seasons.create_rules_version(season_id, "ordinary", 1, "Rules")
+    seasons.create_competition(season_id, rules.rules_version_id, "ordinary", "Ordinary A", "ordinary")
+    seasons.create_competition(season_id, rules.rules_version_id, "ordinary-b", "Ordinary B", "ordinary")
+    view = client.get(f"/api/admin/season-setup/{season_id}")
+    assert view.status_code == 200
+    assert next(s for s in view.json()["steps"] if s["key"] == "ordinary_competition")["status"] == "conflict"
+    squad = client.post(f"/api/admin/season-setup/{season_id}/squad-limit", json={"squad_limit": 4, "reason": "x"})
+    assert squad.status_code == 200, squad.text
+    assert squad.json()["result"]["changed"] is True

@@ -137,7 +137,14 @@ def _ordinary_rounds(database, competition_id: str) -> dict[int, str]:
 def _ordinary_structure(database, season) -> dict:
     """Read-only view of `SeasonRepository.initialize_ordinary_competition`'s
     target shape, for the setup page and for prerequisite checks."""
-    competition = _ordinary_competition(database, season.season_id)
+    try:
+        competition = _ordinary_competition(database, season.season_id)
+    except SeasonSetupError as exc:
+        # Two ordinary streams: an ambiguous structure the page must *show*
+        # as a conflict (Codex review, PR #247), never let escape from the
+        # read model -- which also rebuilds the view after a committed
+        # mutation and must not turn that success into a refusal.
+        return {"competition": None, "complete": False, "rounds": [], "diagnostic": str(exc), "conflict": True}
     if competition is None:
         return {"competition": None, "complete": False, "rounds": [], "diagnostic": None}
     rounds = SeasonRepository(database).list_rounds(competition.competition_id)
@@ -159,6 +166,8 @@ def _ordinary_structure(database, season) -> dict:
 
 def _require_ordinary(database, season):
     structure = _ordinary_structure(database, season)
+    if structure.get("conflict"):
+        raise SeasonSetupError(structure["diagnostic"])
     if structure["competition"] is None:
         raise SeasonSetupError("initialize the ordinary competition (rules version, stream and rounds) first")
     if not structure["complete"]:
@@ -826,7 +835,11 @@ def build_season_setup(database, season_id: str) -> dict:
         )
     )
 
-    ordinary_status = "complete" if structure["complete"] else ("conflict" if structure["competition"] else "available")
+    ordinary_status = (
+        "complete"
+        if structure["complete"]
+        else ("conflict" if structure["competition"] or structure.get("conflict") else "available")
+    )
     ordinary_competition = structure["competition"]
     steps.append(
         _step(

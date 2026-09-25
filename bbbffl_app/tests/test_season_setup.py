@@ -800,3 +800,23 @@ def test_an_accepted_rule_targeting_another_seasons_round_does_not_count_as_conf
             database, afl, season.season_id, [e.season_entry_id for e in entries], actor=SCORER, reason=REASON
         )
     assert DraftRepository(database).status(season.season_id) is None
+
+
+def test_two_ordinary_streams_render_as_a_conflict_and_do_not_mask_a_committed_write():
+    """Codex review, PR #247 (P2): an ambiguous second ordinary stream is
+    shown on the setup page as a conflict rather than escaping the read
+    model -- which is also rebuilt after every committed setup write."""
+    database = migrated_connection()
+    season, _entries = fresh_season(database)
+    seasons = SeasonRepository(database)
+    rules = seasons.create_rules_version(season.season_id, "ordinary", 1, "Rules")
+    seasons.create_competition(season.season_id, rules.rules_version_id, "ordinary", "Ordinary A", "ordinary")
+    seasons.create_competition(season.season_id, rules.rules_version_id, "ordinary-b", "Ordinary B", "ordinary")
+    step = _steps(database, season.season_id)["ordinary_competition"]
+    assert step["status"] == "conflict"
+    assert "2 ordinary competition streams" in step["blockers"][0]
+    # A setup write that does not depend on the ordinary structure still
+    # commits and reports normally.
+    assert configure_squad_limit(database, season.season_id, 4, actor=SCORER, reason=REASON)["changed"] is True
+    with pytest.raises(SeasonSetupError, match="2 ordinary competition streams"):
+        preview_opening_round(database, SetupAfl(), season.season_id, 77)

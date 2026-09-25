@@ -601,7 +601,17 @@ def accept_draft_order(database, season_id: str, ordered_entry_ids: list[str], *
 
 
 def _finals_streams(database, season_id: str):
-    return [c for c in SeasonRepository(database).list_competitions(season_id) if c.stream_type == "finals"]
+    """This season's `finals` competition streams -- at most one. More than
+    one is an ambiguous Finals phase: every caller (including the "already
+    initialized" no-op and the SuperScore prerequisite) must fail closed
+    rather than pick whichever stream happens to carry a bracket."""
+    streams = [c for c in SeasonRepository(database).list_competitions(season_id) if c.stream_type == "finals"]
+    if len(streams) > 1:
+        raise SeasonSetupError(
+            f"this season has {len(streams)} finals competition streams "
+            f"({', '.join(stream.stream_key for stream in streams)}); exactly one is supported"
+        )
+    return streams
 
 
 def _finals_bracket(database, season_id: str):
@@ -847,11 +857,18 @@ def build_season_setup(database, season_id: str) -> dict:
         )
     )
 
-    bracket = _finals_bracket(database, season_id)
-    finals_streams = _finals_streams(database, season_id)
+    try:
+        finals_streams = _finals_streams(database, season_id)
+        bracket = _finals_bracket(database, season_id)
+        finals_conflict = None
+    except SeasonSetupError as exc:
+        finals_streams, bracket, finals_conflict = [], None, str(exc)
     finals_blockers: list[str] = []
     finals_facts: dict = {"finals_stream_exists": bool(finals_streams)}
-    if bracket is not None:
+    if finals_conflict is not None:
+        finals_status, finals_summary = "conflict", "Ambiguous Finals structure"
+        finals_blockers.append(finals_conflict)
+    elif bracket is not None:
         finals_status = "complete"
         finals_summary = f"Bracket created (seeded from the {bracket.seed_source})"
         finals_facts.update(bracket_id=bracket.bracket_id, seed_source=bracket.seed_source)

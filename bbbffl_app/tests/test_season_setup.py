@@ -594,3 +594,24 @@ def test_fresh_season_journey_from_nothing_to_finals_and_superscore():
         "superscore": "complete",
     }
     assert final["next_step"] is None
+
+
+def test_an_ambiguous_second_finals_stream_fails_closed_even_after_a_bracket_exists():
+    """Codex review, PR #247 (P2): the "already initialized" no-op and the
+    SuperScore prerequisite must not accept a bracket while a second
+    `finals` stream makes the Finals phase ambiguous."""
+    built = build_2026_replay_season(year=2056)
+    database, season_id = built["database"], built["season"].season_id
+    initialize_finals(database, season_id, actor=SCORER, reason=REASON)
+    SeasonRepository(database).create_competition(
+        season_id, built["competition"].rules_version_id, "finals-extra", "Extra Finals", "finals"
+    )
+    before = table_counts(database, *STRUCTURE_TABLES)
+    with pytest.raises(SeasonSetupError, match="2 finals competition streams"):
+        initialize_finals(database, season_id, actor=SCORER, reason=REASON)
+    with pytest.raises(SeasonSetupError, match="2 finals competition streams"):
+        initialize_superscore(database, season_id, actor=SCORER, reason=REASON)
+    assert table_counts(database, *STRUCTURE_TABLES) == before
+    steps = _steps(database, season_id)
+    assert steps["finals"]["status"] == "conflict"
+    assert steps["superscore"]["status"] == "blocked"

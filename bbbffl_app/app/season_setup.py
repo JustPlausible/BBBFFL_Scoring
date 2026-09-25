@@ -557,11 +557,55 @@ def _draft_blockers(database, season, entries, squad_limit, pool) -> list[str]:
     return blockers
 
 
-def accept_draft_order(database, season_id: str, ordered_entry_ids: list[str], *, actor: ActorContext, reason):
+def _live_pool_afl_season_id(database, season_id: str) -> int:
+    """The AFL season this season's pool was populated from, read back from
+    its `source_provider` (`live_source_provider`) -- the AFL season whose
+    fixture the draft's Opening Round gate must check."""
+    providers = PlayerPoolRepository(database).summary(season_id)["source_providers"]
+    prefix = f"{LIVE_SOURCE_PROVIDER}/season-"
+    live = [p for p in providers if p.startswith(prefix) and p[len(prefix) :].isdigit()]
+    if len(providers) != 1 or len(live) != 1:
+        raise SeasonSetupError(
+            "the player pool must be populated from exactly one live afl-api season before the draft order is "
+            "accepted -- that AFL season's fixture decides whether Opening Round rules are required"
+        )
+    return int(live[0][len(prefix) :])
+
+
+def _require_opening_round_decided(database, afl_client, season_id: str) -> dict:
+    """Codex review, PR #247 (P1): Opening Round rules can only be added
+    before Pick 1, so the draft must not start while the live fixture has
+    an Opening Round whose rule set is not fully accepted. Re-checked here,
+    from fresh live evidence, at the one boundary that opens drafting: if
+    the AFL season has no round 0 the determination is "not required";
+    otherwise every participating club must already have an accepted rule
+    matching the fixture. Any afl-api failure fails closed (the draft order
+    is not accepted)."""
+    afl_season_id = _live_pool_afl_season_id(database, season_id)
+    preview = preview_opening_round(database, afl_client, season_id, afl_season_id)
+    if not preview["applicable"]:
+        return {"afl_season_id": afl_season_id, "opening_round": "not_required"}
+    missing = [rule["afl_club_name"] for rule in preview["rules"] if not rule["accepted_matches_fixture"]]
+    if preview["opening_round_id"] is None or not preview["rules"] or missing or preview["diagnostic"]:
+        detail = preview["diagnostic"] or (
+            f"no accepted rule matching the fixture for {', '.join(missing)}" if missing else "rule set incomplete"
+        )
+        raise SeasonSetupError(
+            "the live AFL fixture has an Opening Round: accept its compensating-bye rules before accepting the draft "
+            f"order, since they cannot be added after Pick 1 ({detail})"
+        )
+    return {"afl_season_id": afl_season_id, "opening_round": "configured", "rule_count": len(preview["rules"])}
+
+
+def accept_draft_order(
+    database, afl_client, season_id: str, ordered_entry_ids: list[str], *, actor: ActorContext, reason
+):
     """Accept the initial preseason draft order through the existing draft
     engine (`DraftRepository.accept_order`, which materialises every snake
     pick atomically). Re-submitting the identical accepted order is a
-    no-op; any other order once one is accepted is refused."""
+    no-op; any other order once one is accepted is refused. Refused while
+    the live fixture's Opening Round (if any) is not fully configured --
+    see `_require_opening_round_decided`."""
     reason = _reason(reason)
     season = _writable_season(database, season_id)
     ordered_entry_ids = list(ordered_entry_ids)
@@ -581,6 +625,7 @@ def accept_draft_order(database, season_id: str, ordered_entry_ids: list[str], *
         entry.season_entry_id for entry in entries
     }:
         raise SeasonSetupError("the draft order must list every one of this season's teams exactly once")
+    opening_round = _require_opening_round_decided(database, afl_client, season_id)
     try:
         draft.accept_order(season_id, ordered_entry_ids, actor=actor, reason=reason)
     except (IntegrityError, ValueError) as exc:
@@ -594,7 +639,7 @@ def accept_draft_order(database, season_id: str, ordered_entry_ids: list[str], *
         if accepted:
             raise SeasonSetupError("a different preseason draft order was accepted concurrently") from exc
         raise SeasonSetupError(str(exc)) from exc
-    return {"created": True, "order": ordered_entry_ids}
+    return {"created": True, "order": ordered_entry_ids, "opening_round": opening_round}
 
 
 # -- Finals and SuperScore ---------------------------------------------------------
@@ -812,8 +857,8 @@ def build_season_setup(database, season_id: str) -> dict:
     draft_warnings = []
     if draft_status is None and not accepted_rules:
         draft_warnings.append(
-            "If the live AFL fixture has an Opening Round, accept its compensating-bye rules before Pick 1 -- "
-            "they cannot be added once drafting starts."
+            "If the live AFL fixture has an Opening Round, its compensating-bye rules must be accepted first: "
+            "accepting the draft order re-checks the live fixture and is refused until they are."
         )
     order = draft.order(season_id)
     steps.append(
@@ -914,7 +959,10 @@ def build_season_setup(database, season_id: str) -> dict:
         )
     )
 
-    stream = get_stream(database, season_id)
+    ss_stream_count = database.execute(
+        "SELECT COUNT(*) AS n FROM superscore_stream WHERE season_id=?", (season_id,)
+    ).fetchone()["n"]
+    stream = get_stream(database, season_id) if ss_stream_count == 1 else None
     ss_rounds = [r for r in SeasonRepository(database).list_rounds(stream.competition_id)] if stream is not None else []
     # The exact `(sequence, round_key, label)` shape `initialize_structure`
     # creates and requires -- never keys alone, so a differently-shaped
@@ -923,7 +971,10 @@ def build_season_setup(database, season_id: str) -> dict:
     expected_ss = [(number, label.lower(), label) for number, label in sorted(ROUND_LABELS.items())]
     actual_ss = [(r.sequence, r.round_key, r.label) for r in ss_rounds]
     unexpected_ss = [shape[1] for shape in actual_ss if shape not in expected_ss]
-    if stream is not None and actual_ss == expected_ss:
+    if ss_stream_count > 1:
+        ss_status, ss_summary = "conflict", "Ambiguous SuperScore structure"
+        ss_blockers = [f"this season has {ss_stream_count} SuperScore streams; exactly one is supported"]
+    elif stream is not None and actual_ss == expected_ss:
         ss_status, ss_summary, ss_blockers = "complete", "SuperScore stream with SS1-SS4 created", []
     elif unexpected_ss:
         ss_status, ss_summary = "conflict", "SuperScore rounds are differently shaped"

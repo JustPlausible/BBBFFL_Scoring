@@ -48,6 +48,9 @@ from tests.season_setup_helpers import (
 )
 
 REASON = "issue #237 test"
+# The same AFL season (77) as `SetupAfl()`, but its fixture has no Opening
+# Round, so the draft's Opening Round gate passes without any rule.
+NO_OPENING = SetupAfl(rounds=opening_round_fixture(with_opening=False)[0], matches={})
 
 
 def _steps(database, season_id):
@@ -270,7 +273,9 @@ def test_squad_limit_repeat_is_a_no_op_and_change_after_draft_is_refused():
     season, entries = fresh_season(database)
     _ready_for_draft(database, season, SetupAfl())
     assert configure_squad_limit(database, season.season_id, 4, actor=SCORER, reason=REASON)["changed"] is False
-    accept_draft_order(database, season.season_id, [e.season_entry_id for e in entries], actor=SCORER, reason=REASON)
+    accept_draft_order(
+        database, NO_OPENING, season.season_id, [e.season_entry_id for e in entries], actor=SCORER, reason=REASON
+    )
     before = table_counts(database, *STRUCTURE_TABLES)
     with pytest.raises(SeasonSetupError, match="cannot change after the season draft is accepted"):
         configure_squad_limit(database, season.season_id, 5, actor=SCORER, reason=REASON)
@@ -283,7 +288,7 @@ def test_draft_order_refuses_each_missing_prerequisite_without_writing():
     order = [e.season_entry_id for e in entries]
     before = table_counts(database, *STRUCTURE_TABLES)
     with pytest.raises(SeasonSetupError) as refused:
-        accept_draft_order(database, season.season_id, order, actor=SCORER, reason=REASON)
+        accept_draft_order(database, NO_OPENING, season.season_id, order, actor=SCORER, reason=REASON)
     assert "ordinary competition must be initialized" in str(refused.value)
     assert "configure the squad limit" in str(refused.value)
     assert table_counts(database, *STRUCTURE_TABLES) == before
@@ -294,7 +299,7 @@ def test_draft_order_refuses_each_missing_prerequisite_without_writing():
     initialize_ordinary_competition(database, season.season_id, actor=SCORER, reason=REASON)
     configure_squad_limit(database, season.season_id, 4, actor=SCORER, reason=REASON)
     with pytest.raises(SeasonSetupError, match="needs at least 40"):
-        accept_draft_order(database, season.season_id, order, actor=SCORER, reason=REASON)
+        accept_draft_order(database, NO_OPENING, season.season_id, order, actor=SCORER, reason=REASON)
     assert DraftRepository(database).status(season.season_id) is None
 
 
@@ -304,7 +309,7 @@ def test_draft_order_requires_exactly_ten_entries_and_a_complete_order():
     _ready_for_draft(database, season, SetupAfl())
     with pytest.raises(SeasonSetupError, match="exactly 10 season entries"):
         accept_draft_order(
-            database, season.season_id, [e.season_entry_id for e in entries], actor=SCORER, reason=REASON
+            database, NO_OPENING, season.season_id, [e.season_entry_id for e in entries], actor=SCORER, reason=REASON
         )
 
     database = migrated_connection()
@@ -313,6 +318,7 @@ def test_draft_order_requires_exactly_ten_entries_and_a_complete_order():
     with pytest.raises(SeasonSetupError, match="exactly once"):
         accept_draft_order(
             database,
+            NO_OPENING,
             season.season_id,
             [e.season_entry_id for e in entries[:9]] * 1 + [entries[0].season_entry_id],
             actor=SCORER,
@@ -327,15 +333,21 @@ def test_draft_order_clean_start_repeat_and_conflicting_order():
     _ready_for_draft(database, season, SetupAfl())
     order = [e.season_entry_id for e in reversed(entries)]
 
-    assert accept_draft_order(database, season.season_id, order, actor=SCORER, reason=REASON)["created"] is True
+    assert (
+        accept_draft_order(database, NO_OPENING, season.season_id, order, actor=SCORER, reason=REASON)["created"]
+        is True
+    )
     status = DraftRepository(database).status(season.season_id)
     assert (status.total_picks, status.completed_picks, status.target_squad_size) == (40, 0, 4)
     assert DraftRepository(database).next_pick(season.season_id).current_season_entry_id == order[0]
 
     before = table_counts(database, *STRUCTURE_TABLES)
-    assert accept_draft_order(database, season.season_id, order, actor=SCORER, reason=REASON)["created"] is False
+    assert (
+        accept_draft_order(database, NO_OPENING, season.season_id, order, actor=SCORER, reason=REASON)["created"]
+        is False
+    )
     with pytest.raises(SeasonSetupError, match="already been accepted"):
-        accept_draft_order(database, season.season_id, list(reversed(order)), actor=SCORER, reason=REASON)
+        accept_draft_order(database, NO_OPENING, season.season_id, list(reversed(order)), actor=SCORER, reason=REASON)
     assert table_counts(database, *STRUCTURE_TABLES) == before
     [event] = AuditEventRepository(database).list_events(action="draft.order.accepted")
     assert (event.actor_id, event.actor_role) == ("scorer-coach-id", "scorer")
@@ -356,7 +368,9 @@ def test_opening_round_not_applicable_when_the_fixture_has_no_round_zero():
     with pytest.raises(SeasonSetupError, match="no Opening Round"):
         accept_opening_round_rules(database, afl, season.season_id, 77, {}, actor=SCORER, reason=REASON)
     # The season proceeds to the draft without manufacturing any rule.
-    accept_draft_order(database, season.season_id, [e.season_entry_id for e in entries], actor=SCORER, reason=REASON)
+    accept_draft_order(
+        database, afl, season.season_id, [e.season_entry_id for e in entries], actor=SCORER, reason=REASON
+    )
     assert OpeningRoundRuleRepository(database).list_accepted_for_season(season.season_id) == []
     assert _steps(database, season.season_id)["opening_round"]["status"] == "optional"
 
@@ -436,7 +450,10 @@ def test_opening_round_requires_the_ordinary_competition_and_is_refused_after_pi
         preview_opening_round(database, afl, season.season_id, 77)
 
     _ready_for_draft(database, season, afl)
-    accept_draft_order(database, season.season_id, [e.season_entry_id for e in entries], actor=SCORER, reason=REASON)
+    # A season whose draft began before its Opening Round was configured
+    # (reachable only outside this workflow, which now refuses it -- see
+    # `test_draft_order_is_refused_until_the_live_opening_round_is_configured`).
+    DraftRepository(database).accept_order(season.season_id, [e.season_entry_id for e in entries])
     draft = DraftRepository(database)
     pick = draft.next_pick(season.season_id)
     player = PlayerPoolRepository(database).list_available(season.season_id)[0]
@@ -570,7 +587,9 @@ def test_fresh_season_journey_from_nothing_to_finals_and_superscore():
     )
     configure_squad_limit(database, season.season_id, 4, actor=SCORER, reason=REASON)
     assert build_season_setup(database, season.season_id)["next_step"] == "draft_order"
-    accept_draft_order(database, season.season_id, [e.season_entry_id for e in entries], actor=SCORER, reason=REASON)
+    accept_draft_order(
+        database, afl, season.season_id, [e.season_entry_id for e in entries], actor=SCORER, reason=REASON
+    )
     steps = _steps(database, season.season_id)
     assert steps["draft_order"]["status"] == "complete"
     assert steps["draft_order"]["links"]["draft_board"] == f"/admin/draft/{season.season_id}"
@@ -635,3 +654,76 @@ def test_a_complete_but_differently_shaped_superscore_structure_is_a_conflict_no
     assert "ss4" in step["blockers"][0]
     with pytest.raises(SeasonSetupError, match="differently-shaped"):
         initialize_superscore(database, season_id, actor=SCORER, reason=REASON)
+
+
+def test_draft_order_is_refused_until_the_live_opening_round_is_configured():
+    """Codex review, PR #247 (P1): Opening Round rules cannot be added after
+    Pick 1, so while the live fixture has an Opening Round the draft order
+    is refused until every participating club's rule is accepted -- the
+    draft can never start with the decision still open."""
+    database = migrated_connection()
+    season, entries = fresh_season(database)
+    afl = SetupAfl()
+    _ready_for_draft(database, season, afl)
+    order = [e.season_entry_id for e in entries]
+    before = table_counts(database, *STRUCTURE_TABLES)
+    with pytest.raises(SeasonSetupError, match="has an Opening Round: accept its compensating-bye rules"):
+        accept_draft_order(database, afl, season.season_id, order, actor=SCORER, reason=REASON)
+    assert table_counts(database, *STRUCTURE_TABLES) == before
+
+    class Down(SetupAfl):
+        def get_rounds(self, afl_season_id):
+            from app.afl_client import AflApiConnectionError
+
+            raise AflApiConnectionError("/api/v1/seasons/77/rounds")
+
+    with pytest.raises(SeasonSetupAflError):
+        accept_draft_order(database, Down(), season.season_id, order, actor=SCORER, reason=REASON)
+    assert table_counts(database, *STRUCTURE_TABLES) == before
+
+    accept_opening_round_rules(
+        database, afl, season.season_id, 77, {1: 2, 2: 2, 3: 3, 4: 4}, actor=SCORER, reason=REASON
+    )
+    result = accept_draft_order(database, afl, season.season_id, order, actor=SCORER, reason=REASON)
+    assert result["created"] is True
+    assert result["opening_round"] == {"afl_season_id": 77, "opening_round": "configured", "rule_count": 4}
+
+
+def test_draft_order_requires_a_live_populated_pool_for_the_opening_round_check():
+    database = migrated_connection()
+    season, entries = fresh_season(database)
+    initialize_ordinary_competition(database, season.season_id, actor=SCORER, reason=REASON)
+    configure_squad_limit(database, season.season_id, 1, actor=SCORER, reason=REASON)
+    pool = PlayerPoolRepository(database)
+    for n in range(10):
+        pool.refresh_player(season.season_id, 70_000 + n, f"Legacy {n}", source_provider="afl-api-v1")
+    with pytest.raises(SeasonSetupError, match="populated from exactly one live afl-api season"):
+        accept_draft_order(
+            database, NO_OPENING, season.season_id, [e.season_entry_id for e in entries], actor=SCORER, reason=REASON
+        )
+    assert DraftRepository(database).status(season.season_id) is None
+
+
+def test_multiple_superscore_streams_are_refused_and_reported_as_a_conflict():
+    """Codex review, PR #247 (P2): the schema permits two `superscore_stream`
+    rows for one season; initialization must not pick one arbitrarily."""
+    from app.db import transaction as tx
+    from app.superscore_round import SuperScoreRoundError  # noqa: F401 -- mapped to SeasonSetupError
+
+    built = build_2026_replay_season(year=2058)
+    database, season_id = built["database"], built["season"].season_id
+    initialize_finals(database, season_id, actor=SCORER, reason=REASON)
+    rules_id, ordinary_id = built["competition"].rules_version_id, built["competition"].competition_id
+    seasons = SeasonRepository(database)
+    for key in ("superscore", "superscore-b"):
+        competition = seasons.create_competition(season_id, rules_id, key, key, "superscore")
+        with tx(database) as conn:
+            conn.execute(
+                "INSERT INTO superscore_stream VALUES (?, ?, ?, ?)",
+                (competition.competition_id, season_id, ordinary_id, "2026-01-01T00:00:00+00:00"),
+            )
+    before = table_counts(database, *STRUCTURE_TABLES)
+    with pytest.raises(SeasonSetupError, match="2 SuperScore streams"):
+        initialize_superscore(database, season_id, actor=SCORER, reason=REASON)
+    assert table_counts(database, *STRUCTURE_TABLES) == before
+    assert _steps(database, season_id)["superscore"]["status"] == "conflict"

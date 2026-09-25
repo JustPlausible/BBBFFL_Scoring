@@ -185,8 +185,14 @@ def draft_order(
     season_id: str, payload: DraftOrderRequest, request: Request, principal: Principal = Depends(require_setup_operator)
 ):
     _authorise(request, principal, season_id, write=True)
+    state = request.app.state
     result = accept_draft_order(
-        request.app.state.database, season_id, payload.ordered_entry_ids, actor=_actor(principal), reason=payload.reason
+        state.database,
+        state.afl_client,
+        season_id,
+        payload.ordered_entry_ids,
+        actor=_actor(principal),
+        reason=payload.reason,
     )
     return _result(request, season_id, result)
 

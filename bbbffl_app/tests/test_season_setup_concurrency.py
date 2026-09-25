@@ -23,7 +23,7 @@ from app.season_setup import (
     initialize_ordinary_competition,
     refresh_player_pool,
 )
-from tests.season_setup_helpers import SCORER, SetupAfl, fresh_season
+from tests.season_setup_helpers import SCORER, SetupAfl, fresh_season, opening_round_fixture
 from tests.test_replay_bootstrap_concurrency import postgres_url  # noqa: F401 -- fixture
 
 REASON = "issue #237 concurrency test"
@@ -72,8 +72,10 @@ def test_concurrent_identical_draft_order_acceptance_creates_one_draft(postgres_
     initialize_ordinary_competition(database, season.season_id, actor=SCORER, reason=REASON)
     configure_squad_limit(database, season.season_id, 4, actor=SCORER, reason=REASON)
     order = [entry.season_entry_id for entry in entries]
+    no_opening = SetupAfl(rounds=opening_round_fixture(with_opening=False)[0], matches={})
     results, errors = _race(
-        postgres_url, lambda db: accept_draft_order(db, season.season_id, order, actor=SCORER, reason=REASON)
+        postgres_url,
+        lambda db: accept_draft_order(db, no_opening, season.season_id, order, actor=SCORER, reason=REASON),
     )
     assert errors == []
     assert sorted(result["created"] for result in results) == [False, True]
@@ -87,7 +89,10 @@ def test_opening_round_acceptance_blocks_behind_a_completing_pick_then_refuses(p
     refresh_player_pool(database, afl, season.season_id, 77, actor=SCORER, reason=REASON)
     initialize_ordinary_competition(database, season.season_id, actor=SCORER, reason=REASON)
     configure_squad_limit(database, season.season_id, 4, actor=SCORER, reason=REASON)
-    accept_draft_order(database, season.season_id, [e.season_entry_id for e in entries], actor=SCORER, reason=REASON)
+    # A draft already accepted before the Opening Round was configured
+    # (only reachable outside Season setup, whose draft-order step now
+    # refuses it) -- the before-Pick-1 lock is still what must serialize.
+    DraftRepository(database).accept_order(season.season_id, [e.season_entry_id for e in entries])
     player = PlayerPoolRepository(database).list_available(season.season_id)[0]
 
     # Hold the exact lock DraftRepository._locked_draft takes before a pick.

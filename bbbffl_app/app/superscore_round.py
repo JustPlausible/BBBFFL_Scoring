@@ -194,9 +194,19 @@ def initialize_structure(
         if database.engine.dialect.name == "sqlite":
             conn.execute("UPDATE bbbffl_season SET updated_at=updated_at WHERE season_id=?", (season_id,))
         season_repo.guard_writable(conn, season_id)
-        existing = conn.execute(
+        streams = conn.execute(
             "SELECT competition_id, ordinary_competition_id FROM superscore_stream WHERE season_id=?", (season_id,)
-        ).fetchone()
+        ).fetchall()
+        # `uq_superscore_stream_season_competition` is on (season_id,
+        # competition_id), not season_id alone, so more than one row is
+        # representable -- an ambiguous SuperScore phase this command must
+        # refuse rather than complete an arbitrary one of (Codex review,
+        # PR #247).
+        if len(streams) > 1:
+            raise SuperScoreRoundError(
+                f"season {season_id} has {len(streams)} SuperScore streams; exactly one is supported"
+            )
+        existing = streams[0] if streams else None
         if existing is not None:
             if existing["ordinary_competition_id"] != ordinary_competition_id:
                 raise SuperScoreRoundError(

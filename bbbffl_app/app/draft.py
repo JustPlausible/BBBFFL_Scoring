@@ -134,12 +134,27 @@ class DraftRepository:
         self.ownership = OwnershipRepository(database)
 
     def accept_order(
-        self, season_id, ordered_entry_ids, *, actor=ActorContext.anonymous_operator("admin"), reason=None
+        self,
+        season_id,
+        ordered_entry_ids,
+        *,
+        actor=ActorContext.anonymous_operator("admin"),
+        reason=None,
+        require_empty_squads=False,
     ):
         """Freeze a complete preseason order and materialise every stable
         pick atomically -- a snake draft over the season's configured squad
         limit. See `materialize_draft_in_transaction` for the shared,
-        kind-agnostic mechanics this delegates to."""
+        kind-agnostic mechanics this delegates to.
+
+        `require_empty_squads` (issue #237's live Season setup): refuse, in
+        this same transaction, if any season entry already owns a player --
+        a pre-owned player would count against the squad limit and leave
+        that entry unable to complete its last materialised pick. The check
+        locks every season entry row first, the same row
+        `OwnershipRepository.acquire_in_transaction` locks before acquiring,
+        so a concurrent acquisition either commits first (and is seen) or
+        waits until the order is frozen."""
         ordered_entry_ids = list(ordered_entry_ids)
         with transaction(self.database) as conn:
             if self.database.engine.dialect.name == "sqlite":
@@ -151,6 +166,21 @@ class DraftRepository:
             ).fetchone()
             if not config:
                 raise DraftOrderError("season squad limit must be configured before accepting the draft order")
+            if require_empty_squads:
+                conn.execute(
+                    "SELECT season_entry_id FROM season_entry WHERE season_id=? ORDER BY season_entry_id"
+                    + _for_update_suffix(self.database),
+                    (season_id,),
+                ).fetchall()
+                owned = conn.execute(
+                    "SELECT COUNT(*) AS n FROM player_ownership_period WHERE season_id=? AND released_at IS NULL",
+                    (season_id,),
+                ).fetchone()["n"]
+                if owned:
+                    raise DraftOrderError(
+                        f"{owned} player(s) are already owned by this season's teams; the preseason draft starts "
+                        "from empty squads"
+                    )
             draft_id = self.materialize_draft_in_transaction(
                 conn,
                 season_id,

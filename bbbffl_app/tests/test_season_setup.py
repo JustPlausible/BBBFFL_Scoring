@@ -764,3 +764,39 @@ def test_draft_order_is_refused_when_accepted_rules_outlive_a_fixture_without_an
             database, NO_OPENING, season.season_id, [e.season_entry_id for e in entries], actor=SCORER, reason=REASON
         )
     assert table_counts(database, *STRUCTURE_TABLES) == before
+
+
+def test_an_accepted_rule_targeting_another_seasons_round_does_not_count_as_configured():
+    """Codex review, PR #247 (P2): a rule whose AFL ids match the fixture
+    but whose BBBFFL target is not one of this season's ordinary rounds is
+    never applied by round preflight, so it must not satisfy the draft gate."""
+    from tests.midseason_draft_helpers import KnownRound
+
+    database = migrated_connection()
+    other, _other_entries = fresh_season(database, year=2031)
+    initialize_ordinary_competition(database, other.season_id, actor=SCORER, reason=REASON)
+    [other_competition] = SeasonRepository(database).list_competitions(other.season_id)
+    foreign_round = SeasonRepository(database).list_rounds(other_competition.competition_id)[1]
+
+    season, entries = fresh_season(database)
+    afl = SetupAfl()
+    _ready_for_draft(database, season, afl)
+    rules = OpeningRoundRuleRepository(database)
+    known = KnownRound({(77, 500), (77, 502), (77, 503), (77, 504)})
+    own_rounds = {
+        r.sequence: r.bbbffl_round_id
+        for r in SeasonRepository(database).list_rounds(
+            SeasonRepository(database).list_competitions(season.season_id)[0].competition_id
+        )
+    }
+    for club, bye, target in ((1, 502, own_rounds[2]), (2, 502, own_rounds[2]), (3, 503, own_rounds[3])):
+        rules.accept(season.season_id, club, 77, 500, bye, target, known)
+    rules.accept(season.season_id, 4, 77, 500, 504, foreign_round.bbbffl_round_id, known)
+
+    preview = preview_opening_round(database, afl, season.season_id, 77)
+    assert [r["afl_club_id"] for r in preview["rules"] if not r["accepted_matches_fixture"]] == [4]
+    with pytest.raises(SeasonSetupError, match="Collingwood"):
+        accept_draft_order(
+            database, afl, season.season_id, [e.season_entry_id for e in entries], actor=SCORER, reason=REASON
+        )
+    assert DraftRepository(database).status(season.season_id) is None

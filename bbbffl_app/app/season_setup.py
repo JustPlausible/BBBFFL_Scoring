@@ -382,7 +382,11 @@ def preview_opening_round(database, afl_client, season_id: str, afl_season_id: i
                 "unresolved": unresolved,
                 "accepted": existing is not None,
                 "accepted_bbbffl_round_number": existing_number,
+                # The target must also be one of *this* season's ordinary
+                # rounds -- a rule pointing anywhere else is never applied
+                # by round preflight (Codex review, PR #247).
                 "accepted_matches_fixture": existing is not None
+                and existing_number is not None
                 and existing.afl_season_id == afl_season_id
                 and existing.afl_opening_round_id == opening[0].round_id
                 and bye_round is not None
@@ -650,7 +654,7 @@ def accept_draft_order(
         raise SeasonSetupError("the draft order must list every one of this season's teams exactly once")
     opening_round = _require_opening_round_decided(database, afl_client, season_id)
     try:
-        draft.accept_order(season_id, ordered_entry_ids, actor=actor, reason=reason)
+        draft.accept_order(season_id, ordered_entry_ids, actor=actor, reason=reason, require_empty_squads=True)
     except (IntegrityError, ValueError) as exc:
         # A concurrent acceptance may have won between the read above and
         # this transaction (`accept_order` then refuses the now-frozen

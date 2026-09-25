@@ -155,3 +155,64 @@ def test_concurrent_finals_then_superscore_initialization_converge(postgres_url)
     assert sorted(result["created"] for result in results) == [False, True]
     stream = get_stream(database, season_id)
     assert len(SeasonRepository(database).list_rounds(stream.competition_id)) == 4
+
+
+def test_draft_order_acceptance_blocks_behind_an_in_flight_acquisition_then_refuses(postgres_url):  # noqa: F811
+    """Codex review, PR #247 (P2): the empty-squad requirement is re-checked
+    inside the draft transaction, under the season-entry row lock an
+    ownership acquisition takes -- a concurrent acquisition cannot slip in
+    between the check and the frozen order."""
+    import uuid
+
+    database = connect(postgres_url)
+    season, entries = fresh_season(database)
+    no_opening = SetupAfl(rounds=opening_round_fixture(with_opening=False)[0], matches={})
+    refresh_player_pool(database, no_opening, season.season_id, 77, actor=SCORER, reason=REASON)
+    initialize_ordinary_competition(database, season.season_id, actor=SCORER, reason=REASON)
+    configure_squad_limit(database, season.season_id, 4, actor=SCORER, reason=REASON)
+    player = PlayerPoolRepository(database).list_available(season.season_id)[0]
+    now = datetime.now(timezone.utc).isoformat()
+
+    # An acquisition in flight: the entry row is locked and its ownership
+    # period inserted, but not yet committed.
+    lock_conn = connect(postgres_url).engine.connect()
+    lock_txn = lock_conn.begin()
+    lock_conn.execute(
+        text("SELECT season_entry_id FROM season_entry WHERE season_entry_id=:e FOR UPDATE"),
+        {"e": entries[0].season_entry_id},
+    )
+    lock_conn.execute(
+        text("INSERT INTO player_ownership_period VALUES (:id, :player, :season, :entry, :at, NULL, 'in flight', :at)"),
+        {
+            "id": str(uuid.uuid4()),
+            "player": player.season_player_id,
+            "season": season.season_id,
+            "entry": entries[0].season_entry_id,
+            "at": now,
+        },
+    )
+
+    outcome = {}
+
+    def accept():
+        db = connect(postgres_url)
+        try:
+            accept_draft_order(
+                db, no_opening, season.season_id, [e.season_entry_id for e in entries], actor=SCORER, reason=REASON
+            )
+            outcome["result"] = "accepted"
+        except SeasonSetupError as exc:
+            outcome["result"] = str(exc)
+        finally:
+            db.close()
+
+    thread = Thread(target=accept)
+    thread.start()
+    thread.join(timeout=2)
+    assert thread.is_alive(), "draft-order acceptance did not wait for the in-flight acquisition's entry lock"
+    lock_txn.commit()
+    lock_conn.close()
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+    assert "already owned" in outcome["result"]
+    assert DraftRepository(database).status(season.season_id) is None

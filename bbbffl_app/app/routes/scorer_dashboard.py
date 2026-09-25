@@ -190,6 +190,11 @@ def get_dashboard(
         "acting_context": _acting_context(principal),
         "seasons": seasons,
         "dashboard": dashboard,
+        # Issue #237: the persistent Season setup card is shown only to a
+        # role that can use it (every setup endpoint needs
+        # `roundsetup.manage`; a Replay Operator reaches this dashboard
+        # without it).
+        "season_setup_actionable_by_you": principal_has_capability(principal, "roundsetup.manage"),
     }
 
 

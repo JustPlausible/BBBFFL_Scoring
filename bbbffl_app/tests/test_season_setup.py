@@ -615,3 +615,23 @@ def test_an_ambiguous_second_finals_stream_fails_closed_even_after_a_bracket_exi
     steps = _steps(database, season_id)
     assert steps["finals"]["status"] == "conflict"
     assert steps["superscore"]["status"] == "blocked"
+
+
+def test_a_complete_but_differently_shaped_superscore_structure_is_a_conflict_not_complete():
+    """Codex review, PR #247 (P2): all four `ss1`-`ss4` keys present but one
+    with the wrong sequence must not read as complete -- it is exactly the
+    structure `initialize_structure` refuses."""
+    built = build_2026_replay_season(year=2057)
+    database, season_id = built["database"], built["season"].season_id
+    initialize_finals(database, season_id, actor=SCORER, reason=REASON)
+    stream = ensure_stream(
+        database, season_id, built["competition"].rules_version_id, built["competition"].competition_id
+    )
+    for number in (1, 2, 3):
+        ensure_round(database, stream.competition_id, number, number)
+    SeasonRepository(database).create_round(stream.competition_id, "ss4", "SS4", 9)
+    step = _steps(database, season_id)["superscore"]
+    assert step["status"] == "conflict"
+    assert "ss4" in step["blockers"][0]
+    with pytest.raises(SeasonSetupError, match="differently-shaped"):
+        initialize_superscore(database, season_id, actor=SCORER, reason=REASON)

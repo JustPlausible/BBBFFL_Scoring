@@ -916,11 +916,20 @@ def build_season_setup(database, season_id: str) -> dict:
 
     stream = get_stream(database, season_id)
     ss_rounds = [r for r in SeasonRepository(database).list_rounds(stream.competition_id)] if stream is not None else []
-    ss_complete = stream is not None and sorted(r.round_key for r in ss_rounds) == sorted(
-        label.lower() for label in ROUND_LABELS.values()
-    )
-    if ss_complete:
+    # The exact `(sequence, round_key, label)` shape `initialize_structure`
+    # creates and requires -- never keys alone, so a differently-shaped
+    # structure is reported as the conflict that command would refuse, not
+    # as usable (Codex review, PR #247).
+    expected_ss = [(number, label.lower(), label) for number, label in sorted(ROUND_LABELS.items())]
+    actual_ss = [(r.sequence, r.round_key, r.label) for r in ss_rounds]
+    unexpected_ss = [shape[1] for shape in actual_ss if shape not in expected_ss]
+    if stream is not None and actual_ss == expected_ss:
         ss_status, ss_summary, ss_blockers = "complete", "SuperScore stream with SS1-SS4 created", []
+    elif unexpected_ss:
+        ss_status, ss_summary = "conflict", "SuperScore rounds are differently shaped"
+        ss_blockers = [
+            f"unexpected or differently-shaped SuperScore round(s) {unexpected_ss}; setup will not modify them"
+        ]
     elif bracket is None:
         ss_status, ss_summary = "blocked", "Available once the Finals bracket exists"
         ss_blockers = ["initialize Finals first"]

@@ -72,7 +72,8 @@ def test_root_without_regular_season_is_a_useful_empty_state(client):
     response = client.get("/")
     assert response.status_code == 200
     assert "No regular season is available yet" in response.text
-    assert 'href="/legacy/grand-final"' in response.text
+    assert 'href="/legacy/grand-final"' not in response.text
+    assert 'href="/superscore"' not in response.text
     assert "/api/public/state" not in response.text
     assert "Loading…" not in response.text
 
@@ -80,7 +81,8 @@ def test_root_without_regular_season_is_a_useful_empty_state(client):
 def test_legacy_grand_final_page_remains_available(client):
     response = client.get("/legacy/grand-final")
     assert response.status_code == 200
-    assert "Legacy prototype surface" in response.text
+    assert "<title>BBBFFL Scoring</title>" in response.text
+    assert "prototype" not in response.text.lower()
     assert "/api/public/state" in response.text
     assert 'href="/"' in response.text
 

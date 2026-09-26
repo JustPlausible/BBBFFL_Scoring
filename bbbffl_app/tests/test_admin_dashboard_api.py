@@ -489,6 +489,7 @@ def test_admin_dashboard_page_renders_accessible_mobile_first_shell(dashboard_cl
     html = response.text
     assert '<meta name="viewport" content="width=device-width,initial-scale=1">' in html
     assert re.search(r"<h1>[^<]*Administrator Dashboard", html)
+    assert 'href="/admin/season-centre"' in html
     assert 'aria-live="polite"' in html
     assert 'role="alert"' in html
     assert 'role="status"' in html

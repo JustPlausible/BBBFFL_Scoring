@@ -1,6 +1,8 @@
 # 2027 live-season readiness
 
-**Status:** current-state readiness assessment, 21 September 2026.
+**Status:** current-state readiness assessment, 21 September 2026;
+remaining item 1 (fresh-season/phase initialization) updated 25 September
+2026 for issue #237.
 **Supersedes:** the current-state claims in
 [`docs/roadmap/2027-season-roadmap.md`](roadmap/2027-season-roadmap.md),
 which is now a historical planning baseline from 23 August 2026 -- see that
@@ -146,7 +148,7 @@ remain v0.2 candidates.
 | Capability | Status | Evidence |
 |---|---|---|
 | Season Centre browser routes exist (`POST /seasons`, `POST /coaches`, `POST /{season_id}/entries`) and are readiness-proven for viewing/administering an already-created season | Automated-test-proven; **creation itself is not replay-proven** | `docs/season-centre.md`. The 2026 replay's season/coach/entry records were created by the CLI bootstrap scripts (`scripts/bootstrap_round1_2026.py` et al.), not by exercising these Season Centre creation routes through a browser; every phase after the first started from a restored database where these records already existed. Found by Codex review on this PR (P2); an earlier draft of this document conflated the persisted data's existence with the browser creation workflow having been exercised. |
-| Fresh-season player pool population and rules/ordinary-competition/round creation | **Outstanding / blocks v0.1**, plus a **separate confirmed safety gap** | Season Centre creates the season, coaches and entries, but the season/replay databases behind every 2026 replay phase were populated by `scripts/bootstrap_round1_2026.py`, `scripts/bootstrap_2026_first_half.py` and `scripts/replay_2026_draft.py` -- the only callers of `app.player_pool.PlayerPoolRepository.refresh_player`, and (per this review's route inventory) the only code that creates a fresh ordinary rules version/competition/rounds outside tests. `bootstrap_round1_2026.py` and `replay_2026_draft.py` both explicitly refuse to run under `BBBFFL_ENVIRONMENT=production`. **`scripts/bootstrap_2026_first_half.py` does not** -- confirmed by inspecting its `main()` (no `BBBFFL_ENVIRONMENT` check anywhere in the file) after Codex review correctly flagged this document's earlier claim that all three scripts were production-guarded as wrong. This is a real, separate finding beyond a documentation gap: an operator could run this specific mutating script against a live production database and it would not refuse. This PR does not add the guard, since it is a documentation PR and the fix is an application code change (see the PR discussion for the recommendation to file a follow-up issue). A brand-new 2027 production database has no *safe* way to populate its player pool or create its ordinary competition/rounds through any production-safe surface, browser or CLI. Found by Codex review on this PR (P1, then P2 for the guard-claim correction); confirmed against the current route/script inventory. Not previously named as a v0.1 item in issue #224's own candidate list -- the 2026 replay never needed this path because every replay phase started from a script-seeded or restored database, never a fresh production bootstrap. |
+| Fresh-season player pool population and rules/ordinary-competition/round creation | **Automated-test-proven + clean-database acceptance run (issue #237); staging/rehearsal-needed** | Issue #237 added the browser [Season setup](season-setup.md) page (`/admin/season-setup/{season_id}`, Scorer/Secretary/Admin): the player pool is populated/refreshed from the live afl-api season player list (`AflApiClient.get_season_players` -> `PlayerPoolRepository.refresh_season_pool`, one audited transaction, idempotent, year/AFL-season cross-checked, never from a stale cache), and the ordinary rules version, competition stream and Rounds 1-N are created in one audited transaction (`SeasonRepository.initialize_ordinary_competition`, idempotent, fail-closed on partial structure). Covered by `tests/test_season_setup*.py` and exercised against a clean disposable PostgreSQL database ([`evidence/season-setup-acceptance-2026-09-25.md`](evidence/season-setup-acceptance-2026-09-25.md)). The previously confirmed safety gap is closed: `scripts/bootstrap_2026_first_half.py` now refuses under `BBBFFL_ENVIRONMENT=production` before connecting to any database (`tests/test_bootstrap_2026_first_half_cli.py`). Not yet rehearsed against the real production afl-api deployment -- see the separate live afl-api validation row below, on which the live pool read depends. |
 | Provisional (not-yet-`afl-api`) player creation and later canonical reconciliation | **Outstanding / blocks v0.1 if it occurs** | Fixing the player-pool population workflow above still would not let a live 2027 season include a legitimate rookie or mid-season recruit `afl-api` does not yet represent: migration `0006_player_pool_ownership` requires a positive, non-null `canonical_player_id`, and `app.player_pool.PlayerPoolRepository` exposes only canonical `refresh_player` ingestion. `docs/plans/2027-season-model.md` requires provisional creation followed by audited canonical reconciliation, but no domain function, CLI or browser route implements it. Conditional in the same sense as the Opening Round item below: it only blocks a season that actually needs to add such a player, but that season would currently have no supported way to do so. Found by Codex review on this PR (P1); confirmed against migration `0006` and `app.player_pool`. |
 | Explicit `setup -> active` operational gate | **Outstanding / blocks v0.1** | The 2026 replay season stayed in `setup` through the entire season and was only transitioned via the supported `SeasonRepository.transition_lifecycle` CLI/domain call at closeout (`2026-finals-replay/workflow-findings.md` finding 10). This review's current route inventory (`app/routes/`) found no browser action that performs this transition. Explicitly named as a "likely v0.1" item in issue #224. |
 | Season completion (`active -> completed`) and Premiership/Wooden Spoon award creation | Domain/test-proven and replay-proven in a non-production replay environment; **no viable production entry point today** | `app.season_completion.complete_season` is fully domain- and test-proven and was exercised successfully in the replay (`2026-finals-replay/provenance-manifest.md`), but the only wired entry point, `scripts/season_completion_2026.py`, explicitly refuses to run at all while `BBBFFL_ENVIRONMENT=production` (its own production guard). This review's route inventory found no browser route calling `complete_season`/`preview_complete_season` either. A live 2027 production deployment therefore currently has **no way to complete a season** through any surface. Not previously named as a v0.1 item in issue #224's own candidate list; recorded here as a finding from this documentation review's inspection of the current route/script inventory, not from replay evidence. |
@@ -160,7 +162,7 @@ remain v0.2 candidates.
 | Coach-facing browser draft access | Current-code regression-proven | Issue #229/PR #230; Stage A above |
 | Scorer/Admin proxy picks aligned with mid-season proxy workflow | Current-code regression-proven | Issue #231/#232; Stage A above |
 | Private shortlists | Current-code regression-proven | Stage A above |
-| Draft *initialization* for a fresh season (squad-limit configuration, initial draft-order acceptance) | **Outstanding / blocks v0.1** | `app.player_pool.OwnershipRepository.configure_squad_limit` and `app.draft.DraftRepository.accept_order` have no browser route; their only non-test callers are `scripts/bootstrap_round1_2026.py` and `scripts/replay_2026_draft.py`, both production-guarded. Stages A-B above regression-tested *continuing* an already-bootstrapped draft, not starting one. Same root cause as the fresh-season bootstrap gap above; found by Codex review on this PR (P1). |
+| Draft *initialization* for a fresh season (squad-limit configuration, initial draft-order acceptance) | **Automated-test-proven + clean-database acceptance run (issue #237); staging/rehearsal-needed** | The Season setup page's squad-limit and draft-order steps call `OwnershipRepository.configure_squad_limit` and `DraftRepository.accept_order` unchanged (team names on screen, no UUIDs), gated on ten entries, the ordinary competition, a squad limit and a sufficient pool; identical re-acceptance is a no-op, concurrent duplicates converge (PostgreSQL test). `tests/test_season_setup_api.py` drives a real Scorer session from a clean database to a Coach making Pick 1 on their own draft page. |
 
 ### Ordinary weekly operation
 
@@ -224,7 +226,7 @@ auto-pick automation are v0.2.
 | Bracket seeding from the 2026-only historical snapshot | Replay-proven, but **not the path any future season uses** | `2026-finals-replay/provenance-manifest.md` records `seed_source: snapshot`; `scripts/finals_bracket_2026.py` explicitly refuses to create a bracket unless that snapshot already exists |
 | Bracket seeding from the live mathematical ladder (the path every 2027 season without a 2026-style historical snapshot will actually use) | **Automated-test-proven only; not replay-proven** | `app.finals.FinalsBracketRepository.create_bracket`'s ladder fallback (`_resolve_seed`, `seed_source == "ladder"`) was never exercised by the 2026 replay -- `scripts/finals_bracket_2026.py` deliberately refuses to take that branch. Only `tests/test_finals*.py` cover it. Found by Codex review on this PR (P2); an earlier draft of this document conflated the two seed sources under one "replay-proven" row. |
 | Finals preflight discoverability and the paired Finals+SuperScore weekly open action | Replay-proven | Issue #211/#221, exercised as part of the same replay |
-| **Finals competition-stream and bracket creation** (the first entry into Finals from a live, completed ladder) | **Outstanding / blocks v0.1** | `app.finals.FinalsBracketRepository.create_bracket` has no browser route; every `app/routes/finals_preflight.py` route takes an already-existing `bracket_id`. Its only non-test caller is `scripts/finals_bracket_2026.py`, which is production-guarded, depends on the 2026-only historical seeding snapshot for its non-ladder path, and itself requires an already-existing `finals`-typed `competition_stream` id as an argument. That stream is one level further back: `SeasonRepository.create_competition(..., "finals")` has no non-test caller outside `scripts/bootstrap_round1_2026.py` (which creates only an `"ordinary"` stream, not a `"finals"` one) -- nothing in this repository currently creates a finals competition stream for a fresh season, production-safe or otherwise. A live 2027 season reaching the end of Round 20 currently has no production-safe way to start Finals at either level. Found by Codex review on this PR (P1, then P2 for the deeper stream-creation layer). |
+| **Finals competition-stream and bracket creation** (the first entry into Finals from a live, completed ladder) | **Automated-test-proven + clean-database acceptance run (issue #237); staging/rehearsal-needed** | The Season setup page's Finals step (`FinalsBracketRepository.preview_ladder_seed` -> `ensure_finals_stream` -> `create_bracket`) is available only once every regular-season round is final and the live mathematical ladder is untied; it always seeds from the ladder and refuses a season carrying the 2026 historical snapshot. The existing fail-closed exact-tie behaviour is preserved (still a separate outstanding item below). Not replay-proven: no live season has yet reached this boundary. |
 | Coach weekly-selection chronology across ordinary/Finals/SuperScore | Deferred / v0.2 | `2026-finals-replay/ux-findings.md` |
 | Not re-run in the current-code regression | Staging/rehearsal-needed if a future change touches this area | See "Scope note" above |
 
@@ -233,7 +235,7 @@ auto-pick automation are v0.2.
 | Capability | Status | Evidence |
 |---|---|---|
 | SS1-SS4 round lifecycle (mapping, staged open with Finals, review, publication), once the stream and rounds already exist | Replay-proven at the Finals/SuperScore phase's own baseline | `2026-finals-replay/`; issue #194 |
-| **SuperScore stream and SS1-SS4 round creation** | **Outstanding / blocks v0.1** | `app.superscore_round.ensure_stream`/`ensure_round` have no browser route; the paired Finals+SuperScore browser action (`open_finals_and_superscore_week`, issue #211/#221) sets up and opens a round that must already exist, it does not create the stream or the logical SS-round. The only non-test callers of `ensure_stream`/`ensure_round` are in `scripts/superscore_round_2026.py`, production-guarded. `app.season_completion`'s own completion check refuses unless the stream and all four SS rounds exist and are final, so this also blocks season completion for a season that never had these created. Found by Codex review on this PR (P1). |
+| **SuperScore stream and SS1-SS4 round creation** | **Automated-test-proven + clean-database acceptance run (issue #237); staging/rehearsal-needed** | The Season setup page's SuperScore step (`app.superscore_round.initialize_structure`: stream + SS1-SS4 in one audited transaction, idempotent) is available only once the Finals bracket exists; weekly mapping/setup/opening continues through the existing paired "Open week" action. |
 | Completed-season write fence on SuperScore review rulings | Replay-proven | `2026-finals-replay/workflow-findings.md` finding 3 (Codex P1 on PR #207), finding 15 (real post-closeout smoke test) |
 | Cross-round SuperScore standings, prize-allocation configuration, and a separate SuperScore records/history context | **Deferred / v0.2, not implemented** | `app.season_award` accepts only `premiership`/`wooden_spoon` award kinds; `app.superscore_round`'s own module docstring states it "deliberately does **not** implement ... cumulative/aggregate standings across the four rounds". The retained roadmap's package 38 lists this as required domain scope, but each SuperScore round's individual result is proven published (replay-proven above) independently of this aggregate/prize/records layer. Not a v0.1 blocker under the stated criterion: a season can complete SS1-SS4 without it, and the gap is presentation/records depth, not an inability to run the round. Found by Codex review on this PR (P2); confirmed against `app.season_award` and `app.superscore_round`'s own docstring. |
 | Same-week Finals/SuperScore copy-to-draft convenience | Deferred / v0.2 | `2026-finals-replay/ux-findings.md` |
@@ -280,53 +282,35 @@ the following are outstanding. None of them invalidates the replay or
 current-code regression evidence above; the underlying domain workflows
 they touch have already passed.
 
-1. **Fresh-season / new-phase initialization has no production-safe path,
-   at every phase boundary.** Every 2026 replay phase started from a
-   script-seeded or restored database, so this class of gap was invisible
-   to the replay itself. Confirmed by this review and by Codex review on
-   this PR (P1, across several review rounds) against the current
-   route/script inventory. The only non-test callers of each of the
-   following are 2026-specific operator scripts, with no browser route as
-   an alternative:
-   - player pool population and ordinary rules/competition/round creation
-     (`scripts/bootstrap_round1_2026.py`, `scripts/bootstrap_2026_first_half.py`);
-   - preseason draft initialization -- squad-limit configuration and
-     initial draft-order acceptance (`scripts/bootstrap_round1_2026.py`,
-     `scripts/replay_2026_draft.py`);
-   - if 2027 retains an AFL Opening Round: the club-to-compensating-bye
-     rules deferred scoring depends on, accepted only by
-     `app.replay_bootstrap`'s `accept_locked` path -- Season Centre's
-     browser routes manage nominations against an existing rule but do not
-     create one;
-   - Finals competition-stream creation (`SeasonRepository.create_
-     competition(..., "finals")` has no non-test caller at all) and, one
-     level above it, bracket creation, the first entry into Finals from a
-     completed ladder (`scripts/finals_bracket_2026.py`, which requires an
-     already-existing finals stream id and also depends on the 2026-only
-     seeding snapshot for its non-ladder path);
-   - SuperScore stream and SS1-SS4 round creation
-     (`scripts/superscore_round_2026.py`) -- this also blocks season
-     completion for any season that never had these rounds created, since
-     `app.season_completion` requires all four to exist and be final.
+1. **Fresh-season / new-phase initialization -- addressed by issue #237.**
+   The browser [Season setup](season-setup.md) page
+   (`/admin/season-setup/{season_id}`, Scorer/Secretary/Administrator) is now
+   the supported production path for every boundary this item listed, each
+   reusing the existing domain function rather than the replay bootstrap:
+   - player pool population/refresh from the live afl-api season player
+     list, and ordinary rules version/competition/Rounds 1-N creation;
+   - preseason draft initialization -- squad limit and initial draft-order
+     acceptance through `DraftRepository.accept_order`;
+   - Opening Round compensating-bye rules, derived from the live AFL fixture
+     (round 0 participants and each club's first later bye), offered only
+     when the fixture has an Opening Round and refused after Pick 1;
+   - Finals stream and bracket creation from the live mathematical ladder,
+     only after every regular-season round is final;
+   - SuperScore stream and SS1-SS4 creation, only after the Finals bracket
+     exists.
 
-   Most of these scripts explicitly refuse to run under `BBBFFL_ENVIRONMENT
-   =production` (confirmed individually). **`scripts/bootstrap_2026_first_
-   half.py` is the one exception: it has no such guard at all**, confirmed
-   by inspecting its `main()` after Codex review correctly caught an
-   earlier draft of this document wrongly claiming otherwise. That is a
-   real, separate safety gap in the script itself, not only a documentation
-   accuracy issue, and this documentation-only PR does not add the missing
-   guard -- see the PR discussion for the recommendation to file a
-   follow-up issue for that specific fix.
+   Every step is idempotent or fails closed with a named conflict, is
+   transactional and audited against the acting operator, and re-checks its
+   prerequisites server-side. `scripts/bootstrap_2026_first_half.py` now has
+   the production refusal its siblings already had.
 
-   Taken together, a genuinely new 2027 production season cannot be
-   started, drafted, taken through an Opening Round, or carried through to
-   Finals/SuperScore without either running a script against a production
-   database (unsafe for the one script above, and a route around the
-   guard everywhere else) or adding browser/production-safe equivalents of
-   each `ensure_*`/`create_*`/`configure_*`/`accept_order`/`accept_locked`
-   call above. This is the single largest gap this document records, and
-   the most consequential correction this PR's review produced.
+   **Evidence level:** automated-test-proven (`tests/test_season_setup*.py`,
+   including PostgreSQL concurrency) plus a clean disposable-database
+   acceptance run ([`evidence/season-setup-acceptance-2026-09-25.md`](evidence/season-setup-acceptance-2026-09-25.md)). It is **not**
+   replay-proven or staging-proven: it still needs the non-technical Scorer
+   rehearsal (item 6) and depends on live afl-api validation (item 11) for
+   the player-pool read. Conditional gaps adjacent to it remain separate:
+   provisional players (item 9) and exact ladder ties (item 7).
 2. **Initial coach credential provisioning.** `POST /api/admin/coach-
    credential` is a JSON API with no browser form; onboarding every coach
    before their first login currently requires a script/`curl` invocation.
@@ -442,9 +426,9 @@ convenience/polish under the stated criterion and does not block
   exist.
 - It does not claim #233 is fixed. It is recorded as outstanding tidy-up.
 - It does not claim a production staging rehearsal has occurred.
-- It does not claim `scripts/bootstrap_2026_first_half.py` is production-
-  guarded. An earlier draft of this document said it was, alongside its
-  sibling scripts; that was wrong, and is corrected here after Codex
-  review caught it. This PR does not add the missing guard, since that is
-  an application code change and this is a documentation PR.
+- It does not claim the issue #237 Season setup workflow is replay- or
+  staging-proven; it is automated-test-proven plus one clean disposable-
+  database acceptance run. (`scripts/bootstrap_2026_first_half.py`'s
+  production guard, missing when this document was first written, was
+  added by #237 and is covered by an automated test.)
 - It does not treat any v0.2/deferred item as blocking `v0.1.0`.

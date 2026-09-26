@@ -27,7 +27,11 @@ this issue.
 ## What it does not do
 
 Season Centre only links to draft, player pool, opening squads, fixture and
-round setup -- it does not implement any of that behaviour itself. It shows
+round setup -- it does not implement any of that behaviour itself. Its
+**Season setup** link (issue #237) leads to the live-season initialization
+page -- player pool from live afl-api, ordinary competition, Opening Round
+rules, squad limit and draft order, and later Finals and SuperScore -- see
+[`season-setup.md`](season-setup.md). It shows
 each workflow's current status (from the same repositories those workflows
 already use) and links to the existing page when one is reachable; where no
 admin page exists yet (player pool, opening squads, fixture setup), it says

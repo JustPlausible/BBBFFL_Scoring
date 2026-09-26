@@ -409,3 +409,20 @@ def test_scorer_is_directed_to_midseason_draft_operations_once_the_trigger_round
         assert next_action["actionable_by_you"] is True
     finally:
         _clear_overrides(client)
+
+
+@pytest.mark.parametrize(("role", "expected"), [(Role.SCORER, True), (Role.REPLAY_OPERATOR, False)])
+def test_season_setup_card_is_only_offered_to_roles_that_can_use_it(dashboard_client, role, expected):
+    """Issue #237 (Codex review, PR #247): every Season setup endpoint needs
+    `roundsetup.manage`, which a Replay Operator lacks even though it can
+    reach this dashboard -- the dashboard must not offer it that link."""
+    from app.routes.scorer_dashboard import require_scorer_dashboard
+
+    client = dashboard_client
+    season_id, _round, _entries = _seed(client, 9120 + int(expected))
+    _override(client, require_scorer_dashboard, Principal(role, None, "Operator", granted_roles=frozenset({role})))
+    try:
+        body = client.get("/api/scorer/dashboard", params={"season_id": season_id}).json()
+    finally:
+        _clear_overrides(client)
+    assert body["season_setup_actionable_by_you"] is expected

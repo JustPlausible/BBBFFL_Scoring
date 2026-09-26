@@ -14,6 +14,9 @@ from app.db import DatabaseConnection, _for_update_suffix, transaction
 
 SEASON_LIFECYCLE_CHANGED = "season.lifecycle.changed"
 RULES_VERSION_CREATED = "season.rules_version.created"
+ORDINARY_COMPETITION_INITIALIZED = "season.ordinary_competition.initialized"
+ORDINARY_STREAM_KEY = "ordinary"
+ORDINARY_RULES_KEY = "ordinary"
 LEGAL_TRANSITIONS = {
     "setup": {"active"},
     "active": {"completed"},
@@ -36,6 +39,15 @@ class SeasonCompletedError(RuntimeError):
     docs/2026-finals-superscore-design.md's "Completed-season write
     fence"). There is deliberately no bypass: once raised, the caller's
     transaction still rolls back and nothing is written."""
+
+
+class SeasonInitializationConflictError(ValueError):
+    """Issue #237: a fresh-season/phase initialization command found
+    persisted structure it cannot safely reconcile -- e.g. a partial or
+    differently-shaped ordinary round set, or two candidate rules versions.
+    Always raised before anything is written; the message names exactly
+    what conflicts so an operator can diagnose it rather than retry
+    blindly."""
 
 
 class SeasonNotFoundError(KeyError):
@@ -403,6 +415,32 @@ class SeasonRepository:
         scoring_rules: dict | None = None,
         actor: ActorContext = ActorContext.anonymous_operator("admin"),
     ) -> RulesVersion:
+        with transaction(self.database) as connection:
+            return self.create_rules_version_in_transaction(
+                connection,
+                season_id,
+                rules_key,
+                version_number,
+                name,
+                notes=notes,
+                scoring_rules=scoring_rules,
+                actor=actor,
+            )
+
+    def create_rules_version_in_transaction(
+        self,
+        connection: ConnectionLike,
+        season_id: str,
+        rules_key: str,
+        version_number: int,
+        name: str,
+        *,
+        notes: str | None = None,
+        scoring_rules: dict | None = None,
+        actor: ActorContext,
+    ) -> RulesVersion:
+        """`create_rules_version` (insert and its audit event) on a caller-
+        owned transaction -- see `create_competition_in_transaction`."""
         item = RulesVersion(
             _id(),
             season_id,
@@ -414,35 +452,160 @@ class SeasonRepository:
             actor.actor_id,
             scoring_rules,
         )
+        columns = {column["name"] for column in inspect(self.database.engine).get_columns("season_rules_version")}
+        if "scoring_rules" in columns:
+            connection.execute(
+                "INSERT INTO season_rules_version (rules_version_id, season_id, rules_key, version_number, name, notes, created_at, created_by, scoring_rules) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    *tuple(item.__dict__.values())[:-1],
+                    json.dumps(scoring_rules, sort_keys=True) if scoring_rules is not None else None,
+                ),
+            )
+        else:
+            connection.execute(
+                "INSERT INTO season_rules_version VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                tuple(item.__dict__.values())[:-1],
+            )
+        append_event(
+            connection,
+            actor=actor,
+            action=RULES_VERSION_CREATED,
+            entity_type="season.rules_version",
+            entity_id=item.rules_version_id,
+            entity_version=str(version_number),
+            after_state={
+                "season_id": season_id,
+                "rules_key": rules_key,
+                "version_number": version_number,
+            },
+        )
+        return item
+
+    def initialize_ordinary_competition(
+        self,
+        season_id: str,
+        *,
+        actor: ActorContext,
+        reason: str | None = None,
+    ) -> dict:
+        """Create -- or exactly confirm -- a fresh season's ordinary
+        home-and-away structure in one transaction (issue #237): the
+        `ordinary` rules version, the single `ordinary`-typed competition
+        stream, and logical rounds 1..`regular_season_round_count`
+        (`round-N`/`Round N`, the same shape every existing ordinary-season
+        caller and read model already assumes).
+
+        Idempotent: a second call against an already-complete, exactly-
+        matching structure writes nothing and returns `created=False`. Any
+        other existing structure (a partial round set, extra rounds, a
+        second ordinary stream, ambiguous rules versions, a non-ordinary
+        stream squatting on the `ordinary` key) fails closed with
+        `SeasonInitializationConflictError` before any write -- this never
+        "repairs" state it did not create. Refused for a completed season
+        (`guard_writable`), which also takes the season row lock that
+        serializes concurrent initializations; a concurrent loser then
+        observes the winner's structure and returns `created=False`."""
         with transaction(self.database) as connection:
-            columns = {column["name"] for column in inspect(self.database.engine).get_columns("season_rules_version")}
-            if "scoring_rules" in columns:
-                connection.execute(
-                    "INSERT INTO season_rules_version (rules_version_id, season_id, rules_key, version_number, name, notes, created_at, created_by, scoring_rules) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        *tuple(item.__dict__.values())[:-1],
-                        json.dumps(scoring_rules, sort_keys=True) if scoring_rules is not None else None,
-                    ),
+            if self.database.engine.dialect.name == "sqlite":
+                connection.execute("UPDATE bbbffl_season SET updated_at=updated_at WHERE season_id=?", (season_id,))
+            season = self.guard_writable(connection, season_id)
+            round_count = season.regular_season_round_count
+            expected_rounds = [(n, f"round-{n}", f"Round {n}") for n in range(1, round_count + 1)]
+            streams = connection.execute(
+                "SELECT * FROM competition_stream WHERE season_id=? ORDER BY stream_key", (season_id,)
+            ).fetchall()
+            ordinary = [row for row in streams if row["stream_type"] == "ordinary"]
+            if len(ordinary) > 1:
+                raise SeasonInitializationConflictError(
+                    f"season {season.year} already has {len(ordinary)} ordinary competition streams "
+                    f"({', '.join(row['stream_key'] for row in ordinary)}); exactly one is supported"
                 )
+            if ordinary:
+                competition = ordinary[0]
+                rounds = connection.execute(
+                    "SELECT sequence, round_key, label FROM bbbffl_round WHERE competition_id=? ORDER BY sequence",
+                    (competition["competition_id"],),
+                ).fetchall()
+                actual = [(row["sequence"], row["round_key"], row["label"]) for row in rounds]
+                if actual != expected_rounds:
+                    present = {row[0] for row in actual}
+                    missing = sorted(set(range(1, round_count + 1)) - present)
+                    unexpected = sorted(row[0] for row in actual if row not in expected_rounds)
+                    raise SeasonInitializationConflictError(
+                        f"the existing ordinary competition '{competition['label']}' does not have exactly rounds "
+                        f"1-{round_count} (missing: {missing}; unexpected or differently-labelled: {unexpected}); "
+                        "refusing to modify a round structure this command did not create"
+                    )
+                rules = self.get_rules_version(competition["rules_version_id"])
+                return {
+                    "created": False,
+                    "competition": CompetitionStream(**dict(competition)),
+                    "rules_version": rules,
+                    "round_count": round_count,
+                }
+            squatter = next((row for row in streams if row["stream_key"] == ORDINARY_STREAM_KEY), None)
+            if squatter is not None:
+                raise SeasonInitializationConflictError(
+                    f"stream key '{ORDINARY_STREAM_KEY}' is already used by a {squatter['stream_type']!r} stream"
+                )
+            if streams:
+                raise SeasonInitializationConflictError(
+                    f"season {season.year} already has {', '.join(row['stream_type'] for row in streams)} "
+                    "competition stream(s) but no ordinary competition; refusing to create the ordinary "
+                    "competition after a later-phase stream"
+                )
+            rules_rows = connection.execute(
+                "SELECT rules_version_id FROM season_rules_version WHERE season_id=? AND rules_key=?",
+                (season_id, ORDINARY_RULES_KEY),
+            ).fetchall()
+            if len(rules_rows) > 1:
+                raise SeasonInitializationConflictError(
+                    f"season {season.year} has {len(rules_rows)} '{ORDINARY_RULES_KEY}' rules versions and no "
+                    "ordinary competition; refusing to guess which one it should use"
+                )
+            if rules_rows:
+                rules_version_id = rules_rows[0]["rules_version_id"]
+                rules_created = False
             else:
-                connection.execute(
-                    "INSERT INTO season_rules_version VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    tuple(item.__dict__.values())[:-1],
-                )
+                rules_version_id = self.create_rules_version_in_transaction(
+                    connection,
+                    season_id,
+                    ORDINARY_RULES_KEY,
+                    1,
+                    f"{season.year} ordinary rules",
+                    actor=actor,
+                ).rules_version_id
+                rules_created = True
+            competition = self.create_competition_in_transaction(
+                connection,
+                season_id,
+                rules_version_id,
+                ORDINARY_STREAM_KEY,
+                f"{season.year} Ordinary Season",
+                "ordinary",
+            )
+            for sequence, round_key, label in expected_rounds:
+                self.create_round_in_transaction(connection, competition.competition_id, round_key, label, sequence)
             append_event(
                 connection,
                 actor=actor,
-                action=RULES_VERSION_CREATED,
-                entity_type="season.rules_version",
-                entity_id=item.rules_version_id,
-                entity_version=str(version_number),
+                action=ORDINARY_COMPETITION_INITIALIZED,
+                entity_type="season",
+                entity_id=season_id,
+                reason=reason,
                 after_state={
-                    "season_id": season_id,
-                    "rules_key": rules_key,
-                    "version_number": version_number,
+                    "competition_id": competition.competition_id,
+                    "rules_version_id": rules_version_id,
+                    "rules_version_created": rules_created,
+                    "round_count": round_count,
                 },
             )
-        return item
+        return {
+            "created": True,
+            "competition": competition,
+            "rules_version": self.get_rules_version(rules_version_id),
+            "round_count": round_count,
+        }
 
     def get_rules_version(self, rules_version_id: str) -> RulesVersion | None:
         """Single-row lookup by id -- issue #151's human-readable rules
@@ -488,12 +651,37 @@ class SeasonRepository:
         if not rules or rules["season_id"] != season_id:
             raise ValueError("rules version must belong to competition season")
 
-        item = CompetitionStream(_id(), season_id, rules_version_id, stream_key, label, stream_type, _now())
         with transaction(self.database) as connection:
-            connection.execute(
-                "INSERT INTO competition_stream VALUES (?, ?, ?, ?, ?, ?, ?)",
-                tuple(item.__dict__.values()),
+            return self.create_competition_in_transaction(
+                connection, season_id, rules_version_id, stream_key, label, stream_type
             )
+
+    def create_competition_in_transaction(
+        self,
+        connection: ConnectionLike,
+        season_id: str,
+        rules_version_id: str,
+        stream_key: str,
+        label: str,
+        stream_type: str,
+    ) -> CompetitionStream:
+        """`create_competition`'s insert on a caller-owned transaction, for a
+        compound command (issue #237's fresh-season/phase initialization)
+        that must create a stream atomically alongside its rules version,
+        rounds or audit event. Validates the rules version on `connection`
+        itself, so a rules version created earlier in the same transaction
+        is visible."""
+        rules = connection.execute(
+            "SELECT season_id FROM season_rules_version WHERE rules_version_id=?",
+            (rules_version_id,),
+        ).fetchone()
+        if not rules or rules["season_id"] != season_id:
+            raise ValueError("rules version must belong to competition season")
+        item = CompetitionStream(_id(), season_id, rules_version_id, stream_key, label, stream_type, _now())
+        connection.execute(
+            "INSERT INTO competition_stream VALUES (?, ?, ?, ?, ?, ?, ?)",
+            tuple(item.__dict__.values()),
+        )
         return item
 
     def list_competitions(self, season_id: str) -> list[CompetitionStream]:
@@ -504,12 +692,20 @@ class SeasonRepository:
         return [CompetitionStream(**dict(row)) for row in rows]
 
     def create_round(self, competition_id: str, round_key: str, label: str, sequence: int) -> BBBFFLRound:
-        item = BBBFFLRound(_id(), competition_id, round_key, label, sequence, _now())
         with transaction(self.database) as connection:
-            connection.execute(
-                "INSERT INTO bbbffl_round VALUES (?, ?, ?, ?, ?, ?)",
-                tuple(item.__dict__.values()),
-            )
+            return self.create_round_in_transaction(connection, competition_id, round_key, label, sequence)
+
+    @staticmethod
+    def create_round_in_transaction(
+        connection: ConnectionLike, competition_id: str, round_key: str, label: str, sequence: int
+    ) -> BBBFFLRound:
+        """`create_round`'s insert on a caller-owned transaction -- see
+        `create_competition_in_transaction`."""
+        item = BBBFFLRound(_id(), competition_id, round_key, label, sequence, _now())
+        connection.execute(
+            "INSERT INTO bbbffl_round VALUES (?, ?, ?, ?, ?, ?)",
+            tuple(item.__dict__.values()),
+        )
         return item
 
     def list_rounds(self, competition_id: str) -> list[BBBFFLRound]:

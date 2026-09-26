@@ -202,10 +202,10 @@ function linksHtml(links) {
     : `<span class="pill off">${esc(label)}: not yet available</span>`;
   return `
     <div class="links-row">
+      ${item('Season setup (player pool, competition, draft, Finals, SuperScore)', links.season_setup)}
       ${item('Draft', links.draft)}
       ${item('Preseason squads / transactions', links.preseason)}
       ${item('Round Centre', links.round_centre)}
-      <span class="pill off">Player pool: not yet available in UI</span>
       <span class="pill off">Opening squads: not yet available in UI</span>
       ${SEASON_ID ? item('Fixture setup', `/admin/fixture-setup/${SEASON_ID}`) : ''}
       ${item('Prepare / open a round', '/admin/round-preflight')}

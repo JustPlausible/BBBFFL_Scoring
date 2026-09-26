@@ -299,6 +299,24 @@ separate field on the same event, not a substitute for it.
 complete set of round ids the readiness gate verified `final` -- so a reader
 can confirm exactly what was checked without re-deriving it.
 
+## Live-season initialization action catalogue (issue #237)
+
+The production-safe [Season setup](season-setup.md) commands record these,
+each in the same transaction as its domain write, attributed to the acting
+Scorer/Secretary/Administrator (`anonymous_operator`, `actor_id` = their
+`coach_id` for a session, `actor_role` = their active role) with the
+operator's reason. Existing actions they reuse unchanged:
+`season.rules_version.created`, `ownership.squad_limit.configured`,
+`draft.order.accepted`, `opening_round.rule.accepted`,
+`finals.bracket.created`, `superscore.stream.created`.
+
+| Action | `entity_type` / `entity_id` | When |
+|---|---|---|
+| `player_pool.season.refreshed` | `season.player_pool` / `season_id` | A complete live afl-api season player list was upserted (`PlayerPoolRepository.refresh_season_pool`): counts inserted/updated/unchanged, pool size, source provider. |
+| `season.ordinary_competition.initialized` | `season` / `season_id` | `SeasonRepository.initialize_ordinary_competition` created the ordinary stream and Rounds 1-N (plus the rules version, which records its own `season.rules_version.created`). Not recorded for an idempotent no-op. |
+| `finals.stream.created` | `competition.stream` / `competition_id` | `FinalsBracketRepository.ensure_finals_stream` created the season's `finals` competition stream, immediately before bracket creation. |
+| `superscore.rounds.initialized` | `superscore.stream` / `competition_id` | `app.superscore_round.initialize_structure` created one or more of SS1-SS4 (listed in `after_state.created_rounds`). |
+
 ## Replay
 
 Audit events are **not** replayed to reconstruct current scoring. What the

@@ -385,6 +385,16 @@ FINALS_SUPERSCORE_OPEN = {"app.finals_superscore_open"}
 # back on it.
 ADMIN_DASHBOARD = {"app.admin_dashboard"}
 
+# Production-safe fresh-season and phase initialization (issue #237): the
+# orchestration layer above the season model, player pool/draft, Opening
+# Round, Finals and SuperScore boundaries that lets a Scorer/Secretary/
+# Administrator initialize a live season without replay scripts. Like
+# `app.season_centre`/`app.round_preflight`, it is meant to be imported
+# directly by its thin route (`app.routes.season_setup`); it must never
+# depend on routes, the Grand Final vertical, replay tooling or the
+# composition root, and nothing below it may depend back on it.
+SEASON_SETUP = {"app.season_setup"}
+
 ROUTES = {
     "app.routes",
     "app.routes.admin",
@@ -413,6 +423,7 @@ ROUTES = {
     "app.routes.shortlist",
     "app.routes.finals_preflight",
     "app.routes.superscore_review",
+    "app.routes.season_setup",
 }
 
 COMPOSITION_ROOT = {"app.main"}
@@ -444,6 +455,7 @@ ALL_GROUPS = (
     | SCORER_DASHBOARD
     | FINALS_SUPERSCORE_OPEN
     | ADMIN_DASHBOARD
+    | SEASON_SETUP
     | ROUTES
     | COMPOSITION_ROOT
 )
@@ -878,6 +890,22 @@ def test_admin_dashboard_is_an_application_service(graph):
     for module in sorted(SEASON_MODEL | LOCKOUTS | WEEKLY_SUBMISSION_SOURCES | SEASON_CENTRE | SCORER_DASHBOARD):
         offending = graph[module] & ADMIN_DASHBOARD
         assert not offending, f"{module} must not depend on application orchestration {sorted(offending)}"
+
+
+def test_season_setup_is_an_application_service(graph):
+    """Issue #237: fresh-season/phase initialization orchestrates existing
+    domain boundaries; it must not reach into routes, the Grand Final
+    vertical, replay tooling or the composition root, and no lower layer
+    may depend back on it."""
+    forbidden = GRAND_FINAL_VERTICAL | ROUTES | COMPOSITION_ROOT | REPLAY | REPLAY_BOOTSTRAP
+    for module in sorted(SEASON_SETUP):
+        offending = graph[module] & forbidden
+        assert not offending, f"{module} must not depend on {sorted(offending)}"
+    for module, deps in graph.items():
+        if module in SEASON_SETUP or module in ROUTES or module in COMPOSITION_ROOT:
+            continue
+        offending = deps & SEASON_SETUP
+        assert not offending, f"{module} must not depend on season setup orchestration {sorted(offending)}"
 
 
 def test_routes_never_import_persistence_or_season_model_directly(graph):

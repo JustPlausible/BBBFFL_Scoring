@@ -255,11 +255,31 @@ def test_successful_progression_apply_navigates_directly_to_the_prepared_next_we
 # -- 5. Finals-phase next-action guidance ------------------------------------
 
 
-def test_ordinary_dashboard_still_reports_season_complete_without_a_finals_bracket():
+def test_ordinary_dashboard_points_to_finals_initialization_without_a_finals_bracket():
+    """Issue #237: once every regular-season round is final and no bracket
+    exists, the next safe action is Finals initialization on the Season
+    setup page (previously a "season complete" dead end, since no
+    production path to create a bracket existed)."""
     built = build_2026_replay_season(year=2809)
-    dashboard = _dashboard(built["database"], built["season"].season_id)
-    assert dashboard["next_action"]["code"] == "published_season_complete"
+    season_id = built["season"].season_id
+    dashboard = _dashboard(built["database"], season_id)
+    assert dashboard["next_action"]["code"] == "initialize_finals"
     assert dashboard["next_action"]["category"] == "advisory"
+    assert dashboard["next_action"]["url"] == f"/admin/season-setup/{season_id}"
+    assert dashboard["next_action"]["capability"] == "roundsetup.manage"
+
+
+def test_a_fresh_season_with_no_rounds_points_to_season_setup():
+    """Issue #237: before the ordinary competition exists, the next safe
+    action leads to Season setup rather than a link-less advisory."""
+    from tests.db_helpers import migrated_connection
+
+    database = migrated_connection()
+    season = SeasonRepository(database).create_season(2808, "Fresh season")
+    dashboard = _dashboard(database, season.season_id)
+    assert dashboard["next_action"]["code"] == "no_rounds_configured"
+    assert dashboard["next_action"]["url"] == f"/admin/season-setup/{season.season_id}"
+    assert dashboard["next_action"]["capability"] == "roundsetup.manage"
 
 
 def test_ordinary_dashboard_bridges_to_finals_week_ready_to_open_once_a_bracket_exists():

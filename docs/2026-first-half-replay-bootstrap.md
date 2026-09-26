@@ -2,6 +2,8 @@
 
 This is the operator runbook section intended for inclusion in the full 2026 replay playbook. The command creates prerequisites only: it never selects, reserves, or auto-drafts a player.
 
+**Replay-only.** `scripts/bootstrap_2026_first_half.py` refuses to run at all -- before connecting to any database, in every mode including `--readiness-only` -- when `BBBFFL_ENVIRONMENT=production` (issue #237), like its sibling 2026 scripts. A live season is initialized through the browser [Season setup](season-setup.md) page instead.
+
 ## Prerequisites and explicit replay facts
 
 1. Obtain the genuine historical coach names, login emails, BBBFFL team names, durable licence keys, accepted draft positions, authoritative squad limit, and identify one of those coaches as `operator_email`. That one account receives the Administrator role needed for this browser checkpoint; the other nine coaches do not need passwords merely to inspect Pick 1 readiness.

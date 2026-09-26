@@ -257,6 +257,12 @@ def _links(season_id: str, draft_started: bool, ordinary_rounds_created: bool, o
     that page's own "Set up" block, which accepts the initial trigger-round
     configuration this link is the only way to reach before it exists."""
     return {
+        # Issue #237: the live-season initialization surface (player pool,
+        # ordinary competition, Opening Round rules, squad limit/draft
+        # order, Finals and SuperScore) -- always reachable for a season,
+        # since it is where the prerequisites for every other link below
+        # are established.
+        "season_setup": f"/admin/season-setup/{season_id}",
         "draft": f"/admin/draft/{season_id}" if draft_started else None,
         "preseason": f"/admin/preseason/{season_id}" if draft_started else None,
         "round_centre": "/scorer/round-centre" if ordinary_rounds_created else None,

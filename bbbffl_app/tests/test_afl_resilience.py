@@ -87,6 +87,9 @@ class ScriptedTransport:
     def get_match_player_stats(self, match_id):
         return self._next()
 
+    def get_season_players(self, season_id):
+        return self._next()
+
 
 # -- classify_failure ---------------------------------------------------
 
@@ -599,3 +602,18 @@ def test_diagnostics_never_expose_the_api_key_or_headers():
     assert secret not in serialized
     assert "x-api-key" not in serialized.lower()
     assert "authorization" not in serialized.lower()
+
+
+def test_season_players_are_never_served_from_a_stale_cache():
+    """Issue #237: the season player pool is only read in order to persist
+    it, so a failed live read must surface -- never a cached earlier pool."""
+    clock = FakeClock()
+    transport = ScriptedTransport(["pool-v1", AflApiConnectionError("/players"), AflApiConnectionError("/players")])
+    client = ResilientAflClient(
+        transport, clock=clock, sleeper=FakeSleeper(clock), retry_policy=RetryPolicy(max_attempts=2)
+    )
+    assert client.get_season_players(71) == "pool-v1"
+    with client.evidence_batch() as batch:
+        with pytest.raises(AflEvidenceUnavailableError):
+            client.get_season_players(71)
+    assert batch.is_evidence_fresh() is False

@@ -252,6 +252,144 @@ class PlayerPoolRepository:
             fetched,
         )
 
+    def refresh_season_pool(self, season_id, players, *, source_provider, source_fetched_at=None, actor, reason=None):
+        """Upsert a *complete* provider season pool atomically (issue #237's
+        live fresh-season population) -- one transaction and one audit event
+        for the whole pool, rather than `refresh_player`'s one-transaction-
+        per-player shape, so a failure part-way through leaves the pool
+        exactly as it was.
+
+        `players` is an iterable of `(canonical_player_id, display_name,
+        afl_team_id, afl_team_name)`. Like `refresh_player`, this only ever
+        touches cached afl-api facts: ownership history is never read or
+        changed, a newly-seen player is inserted eligible, and an existing
+        row keeps its current `eligible` value (eligibility is BBBFFL
+        policy, never an afl-api fact -- a refresh must not silently change
+        it). A player already in the pool but absent from `players` is left
+        untouched and reported in `missing_from_source`, never deleted: it
+        may already be owned.
+
+        Refuses (`ValueError`, nothing written) if the pool already holds
+        rows cached from a different `source_provider` -- the provider
+        string records which AFL season the pool was read from, so this is
+        what stops one BBBFFL season's pool being silently mixed with
+        another AFL season's players."""
+        rows = [(int(pid), name, team_id, team_name) for pid, name, team_id, team_name in players]
+        if not rows:
+            raise ValueError("a season pool refresh requires at least one provider player")
+        if len({row[0] for row in rows}) != len(rows):
+            raise ValueError("a season pool refresh must not repeat a canonical player")
+        fetched = source_fetched_at or _now()
+        with transaction(self.database) as conn:
+            if self.database.engine.dialect.name == "sqlite":
+                conn.execute("UPDATE bbbffl_season SET updated_at=updated_at WHERE season_id=?", (season_id,))
+            season = conn.execute(
+                "SELECT season_id, lifecycle_state FROM bbbffl_season WHERE season_id=?"
+                + _for_update_suffix(self.database),
+                (season_id,),
+            ).fetchone()
+            if season is None:
+                raise KeyError(season_id)
+            if season["lifecycle_state"] == "completed":
+                raise ValueError("a completed season's player pool is historical and cannot be refreshed")
+            existing = {
+                row["canonical_player_id"]: row
+                for row in conn.execute("SELECT * FROM season_player_pool WHERE season_id=?", (season_id,)).fetchall()
+            }
+            foreign = sorted({row["source_provider"] for row in existing.values()} - {source_provider})
+            if foreign:
+                raise ValueError(
+                    f"this season's player pool was populated from {', '.join(foreign)}, not {source_provider}; "
+                    "refusing to mix player pools from different sources"
+                )
+            inserted = updated = unchanged = 0
+            for canonical_player_id, display_name, afl_team_id, afl_team_name in rows:
+                row = existing.get(canonical_player_id)
+                if row is None:
+                    conn.execute(
+                        "INSERT INTO season_player_pool VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            _id(),
+                            season_id,
+                            canonical_player_id,
+                            display_name,
+                            afl_team_id,
+                            afl_team_name,
+                            True,
+                            source_provider,
+                            fetched,
+                            None,
+                            fetched,
+                            fetched,
+                        ),
+                    )
+                    inserted += 1
+                    continue
+                if (row["display_name"], row["afl_team_id"], row["afl_team_name"]) == (
+                    display_name,
+                    afl_team_id,
+                    afl_team_name,
+                ):
+                    conn.execute(
+                        "UPDATE season_player_pool SET source_fetched_at=? WHERE season_player_id=?",
+                        (fetched, row["season_player_id"]),
+                    )
+                    unchanged += 1
+                    continue
+                conn.execute(
+                    "UPDATE season_player_pool SET display_name=?, afl_team_id=?, afl_team_name=?, "
+                    "source_fetched_at=?, updated_at=? WHERE season_player_id=?",
+                    (display_name, afl_team_id, afl_team_name, fetched, fetched, row["season_player_id"]),
+                )
+                updated += 1
+            source_ids = {row[0] for row in rows}
+            missing = sorted(pid for pid in existing if pid not in source_ids)
+            summary = {
+                "source_provider": source_provider,
+                "source_player_count": len(rows),
+                "inserted": inserted,
+                "updated": updated,
+                "unchanged": unchanged,
+                "missing_from_source": missing,
+                "pool_size": len(existing) + inserted,
+                "source_fetched_at": fetched,
+            }
+            append_event(
+                conn,
+                actor=actor,
+                action="player_pool.season.refreshed",
+                entity_type="season.player_pool",
+                entity_id=season_id,
+                reason=reason,
+                before_state={"pool_size": len(existing)},
+                after_state={key: value for key, value in summary.items() if key != "missing_from_source"},
+                payload={"missing_from_source_count": len(missing)},
+            )
+        return summary
+
+    def summary(self, season_id):
+        """Counts and provenance for an operator setup surface (issue
+        #237): total/eligible pool size, every `source_provider` the pool
+        was cached from, and the most recent provider fetch time."""
+        row = self.database.execute(
+            "SELECT COUNT(*) AS total, SUM(CASE WHEN eligible THEN 1 ELSE 0 END) AS eligible, "
+            "MAX(source_fetched_at) AS last_fetched_at FROM season_player_pool WHERE season_id=?",
+            (season_id,),
+        ).fetchone()
+        providers = [
+            item["source_provider"]
+            for item in self.database.execute(
+                "SELECT DISTINCT source_provider FROM season_player_pool WHERE season_id=? ORDER BY source_provider",
+                (season_id,),
+            ).fetchall()
+        ]
+        return {
+            "total": row["total"] or 0,
+            "eligible": row["eligible"] or 0,
+            "last_fetched_at": row["last_fetched_at"],
+            "source_providers": providers,
+        }
+
     def list_selectable(self, season_id):
         rows = self.database.execute(
             "SELECT * FROM season_player_pool WHERE season_id=? AND eligible=TRUE ORDER BY display_name, canonical_player_id",

@@ -288,14 +288,14 @@ def test_superscore_dnp_does_not_affect_grand_final_state_for_the_same_team_key(
 # -- Public/Admin navigation between Grand Final and SuperScore --------------
 
 
-def test_public_grand_final_page_links_to_superscore_when_enabled(client_with_superscore):
+def test_empty_regular_season_page_has_no_superscore_link_when_enabled(client_with_superscore):
     r = client_with_superscore.get("/")
     assert r.status_code == 200
-    assert 'href="/superscore"' in r.text
-    assert "SuperScore" in r.text
+    assert 'href="/legacy/grand-final"' not in r.text
+    assert 'href="/superscore"' not in r.text
 
 
-def test_public_grand_final_page_has_no_superscore_link_when_disabled(client_no_superscore):
+def test_empty_regular_season_page_has_no_superscore_link_when_disabled(client_no_superscore):
     r = client_no_superscore.get("/")
     assert r.status_code == 200
     assert 'href="/superscore"' not in r.text

@@ -117,6 +117,28 @@ PLAYER_1_SEASONS = {
     "canonical_player_id": 1,
     "seasons": [{"season_id": 85, "year": 2026, "name": "2026", "team": {"team_id": 1, "name": "Home"}}],
 }
+SEASON_PLAYERS_85 = {
+    "players": [
+        {
+            "canonical_player_id": 1,
+            "display_name": "Test Player",
+            "given_name": "Test",
+            "family_name": "Player",
+            "team": {"team_id": 1, "name": "Home"},
+            "identifiers": {"afl_player_id": 100, "champion_data_player_id": "CD_I1"},
+        },
+        {
+            "canonical_player_id": 2,
+            "display_name": "Second Player",
+            "given_name": "Second",
+            "family_name": "Player",
+            "team": {"team_id": 2, "name": "Away"},
+            "identifiers": {"afl_player_id": 101, "champion_data_player_id": "CD_I2"},
+        },
+    ],
+    "limit": 50,
+    "offset": 0,
+}
 PLAYERS_SEARCH = {"players": [PLAYER_1["player"]]}
 INJURIES = {"injuries": []}
 ROSTERS_100 = {
@@ -151,6 +173,7 @@ def _handler(request: httpx.Request) -> httpx.Response:
         "/api/v1/seasons": SEASONS,
         "/api/v1/seasons/85/rounds": ROUNDS_85,
         "/api/v1/seasons/84/rounds": ROUNDS_84,
+        "/api/v1/seasons/85/players": SEASON_PLAYERS_85,
         "/api/v1/rounds/1/matches": MATCHES,
         "/api/v1/matches/100": MATCH_100,
         "/api/v1/matches/100/player-stats": PLAYER_STATS_100,
@@ -175,6 +198,7 @@ def test_diagnostic_passes_every_required_check_against_a_well_formed_mock_deplo
     required_failures = [r for r in results if r.required and r.status == "FAIL"]
     assert required_failures == [], [(r.name, r.detail) for r in required_failures]
     assert any(r.name.startswith("GET /api/v1 (discovery)") and r.status == "PASS" for r in results)
+    assert any(r.name == "GET /api/v1/seasons/{id}/players" and r.status == "PASS" for r in results)
     assert any("no key" in r.name and r.status == "PASS" for r in results)
     assert any("invalid key" in r.name and r.status == "PASS" for r in results)
     assert any("structured 404" in r.name and r.status == "PASS" for r in results)
@@ -363,6 +387,7 @@ def test_diagnostic_treats_a_required_skip_as_not_fully_validated():
         routes = {
             "/api/v1": DISCOVERY,
             "/api/v1/seasons/85/rounds": ROUNDS_85,
+            "/api/v1/seasons/85/players": SEASON_PLAYERS_85,
             "/api/v1/rounds/1/matches": MATCHES,
             "/api/v1/matches/100": MATCH_100,
             "/api/v1/matches/100/player-stats": PLAYER_STATS_100,
@@ -384,3 +409,102 @@ def test_diagnostic_treats_a_required_skip_as_not_fully_validated():
     assert historical_check.status == "SKIP"
     assert historical_check.required is True
     assert _not_fully_validated(results) == [historical_check]
+
+
+def test_diagnostic_falls_back_to_the_most_recent_season_when_none_is_flagged_current():
+    """A real off-season snapshot of the live deployment (confirmed live for
+    issue #244, the day after an AFL Grand Final): every season lists
+    is_current=false at once. That is a genuine, expected timing state --
+    identical to what AflApiClient.get_current_season would itself raise on
+    right now -- not a reason for every downstream contract check to SKIP
+    wholesale just because validation happened to run in the off-season."""
+    off_season = copy.deepcopy(SEASONS)
+    off_season["seasons"][0]["is_current"] = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("x-api-key") != VALID_KEY:
+            return httpx.Response(401, json=ERROR_401)
+        path = request.url.path
+        if path == "/api/v1/players/999999999999":
+            return httpx.Response(404, json=ERROR_404)
+        if path == "/api/v1/players" and request.url.params.get("search") == "":
+            return httpx.Response(422, json=ERROR_422)
+        if path == "/api/v1/players" and request.url.params.get("search"):
+            return httpx.Response(200, json=PLAYERS_SEARCH)
+        routes = {
+            "/api/v1": DISCOVERY,
+            "/api/v1/seasons": off_season,
+            "/api/v1/seasons/85/rounds": ROUNDS_85,
+            "/api/v1/seasons/84/rounds": ROUNDS_84,
+            "/api/v1/seasons/85/players": SEASON_PLAYERS_85,
+            "/api/v1/rounds/1/matches": MATCHES,
+            "/api/v1/matches/100": MATCH_100,
+            "/api/v1/matches/100/player-stats": PLAYER_STATS_100,
+            "/api/v1/players/1": PLAYER_1,
+            "/api/v1/players/1/seasons": PLAYER_1_SEASONS,
+            "/api/v1/injuries": INJURIES,
+            "/api/v1/matches/100/rosters": ROSTERS_100,
+        }
+        if path in routes:
+            return httpx.Response(200, json=routes[path])
+        return httpx.Response(404, json={"error": {"code": "not_found", "message": "no mock route"}})
+
+    results = run("http://afl-api.test", VALID_KEY, transport=httpx.MockTransport(handler))
+
+    seasons_check = next(r for r in results if r.name == "GET /api/v1/seasons")
+    assert seasons_check.status == "FAIL"
+    assert seasons_check.required is True
+    assert "0 flagged is_current=true" in seasons_check.detail
+
+    fallback_check = next(
+        r for r in results if r.name == "seasons: an is_current season is resolved for downstream checks"
+    )
+    assert fallback_check.status == "SKIP"
+    assert fallback_check.required is False
+    assert "season_id=85" in fallback_check.detail
+
+    for name in (
+        "GET /api/v1/seasons/{id}/rounds",
+        "GET /api/v1/seasons/{historical_id}/rounds (2026 replay prerequisite)",
+        "GET /api/v1/seasons/{id}/players",
+        "GET /api/v1/rounds/{id}/matches",
+        "GET /api/v1/matches/{id}",
+        "player-stats: lifecycle.finality is a recognised value",
+        "GET /api/v1/players/{id}",
+    ):
+        check = next(r for r in results if r.name == name)
+        assert check.status == "PASS", (name, check.detail)
+
+    # The only required, not-fully-validated check is the honest signal
+    # that no season is flagged is_current -- everything downstream still
+    # ran against real fallback data instead of skipping wholesale.
+    assert _not_fully_validated(results) == [seasons_check]
+
+
+def test_diagnostic_flags_a_season_player_row_missing_a_required_field():
+    broken = copy.deepcopy(SEASON_PLAYERS_85)
+    del broken["players"][1]["team"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("x-api-key") != VALID_KEY:
+            return httpx.Response(401, json=ERROR_401)
+        path = request.url.path
+        if path == "/api/v1/seasons/85/players":
+            return httpx.Response(200, json=broken)
+        routes = {
+            "/api/v1": DISCOVERY,
+            "/api/v1/seasons": SEASONS,
+            "/api/v1/seasons/85/rounds": ROUNDS_85,
+            "/api/v1/seasons/84/rounds": ROUNDS_84,
+        }
+        if path in routes:
+            return httpx.Response(200, json=routes[path])
+        return httpx.Response(404, json={"error": {"code": "not_found", "message": "no mock route"}})
+
+    results = run("http://afl-api.test", VALID_KEY, transport=httpx.MockTransport(handler))
+    field_check = next(
+        r for r in results if r.name == "season players: rows expose canonical_player_id/display_name/team/identifiers"
+    )
+    assert field_check.status == "FAIL"
+    assert "1" in field_check.detail  # row_index of the broken second row
+    assert "team" in field_check.detail

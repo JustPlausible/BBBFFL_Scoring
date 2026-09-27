@@ -111,6 +111,7 @@ def check_seasons(ctx: DiagnosticContext) -> None:
         ok,
         f"{len(seasons)} seasons, {len(current)} flagged is_current=true",
     )
+    historical = [s for s in seasons if not s.get("is_current")]
     if current:
         ctx.season_id = current[0]["season_id"]
         ctx.current_round_number = current[0].get("current_round_number")
@@ -119,9 +120,30 @@ def check_seasons(ctx: DiagnosticContext) -> None:
             "current_round_number" in current[0],
             required=False,
         )
-    historical = [s for s in seasons if not s.get("is_current")]
-    if historical:
-        ctx.historical_season_id = historical[0]["season_id"]
+        if historical:
+            ctx.historical_season_id = historical[0]["season_id"]
+    elif historical:
+        # No season is flagged is_current at all -- a genuine, expected
+        # off-season state (confirmed against the real deployment between
+        # AFL Grand Finals -- see docs/afl-api-v1-contract.md's "Live
+        # validation status"), identical to what AflApiClient.get_current_
+        # season would itself raise on right now. It is not a contract
+        # incompatibility, so it must not silently skip every downstream
+        # check purely because of validation timing -- fall back to the
+        # most recently listed season so rounds/matches/player-stats/player
+        # checks below can still exercise real representative data.
+        fallback = max(historical, key=lambda s: (s.get("year") or -1, s.get("season_id") or -1))
+        ctx.season_id = fallback["season_id"]
+        ctx.skip(
+            "seasons: an is_current season is resolved for downstream checks",
+            f"no season flagged is_current=true -- using most recent season_id={fallback['season_id']} "
+            f"(year={fallback.get('year')!r}) as a fallback so rounds/matches/player-stats/player checks "
+            "below still exercise real data",
+            required=False,
+        )
+        remaining = [s for s in historical if s is not fallback]
+        if remaining:
+            ctx.historical_season_id = remaining[0]["season_id"]
 
 
 def check_rounds(ctx: DiagnosticContext) -> None:
@@ -169,6 +191,46 @@ def check_historical_season(ctx: DiagnosticContext) -> None:
         if not rounds:
             detail += " -- WARNING: season listed but has no persisted rounds; replay data gap"
     ctx.record("GET /api/v1/seasons/{historical_id}/rounds (2026 replay prerequisite)", ok, detail)
+
+
+def check_season_players(ctx: DiagnosticContext) -> None:
+    """GET /api/v1/seasons/{season_id}/players -- the live season-scoped
+    canonical player pool (issue #237's `AflApiClient.get_season_players`),
+    classified **required now** in docs/afl-api-v1-contract.md but
+    previously never exercised by this diagnostic at all."""
+    if ctx.season_id is None:
+        ctx.skip("GET /api/v1/seasons/{id}/players", "no season resolved")
+        return
+    resp = _get(ctx, f"/api/v1/seasons/{ctx.season_id}/players", params={"limit": 50, "offset": 0})
+    if resp.status_code != 200:
+        ctx.record("GET /api/v1/seasons/{id}/players", False, f"status={resp.status_code}")
+        return
+    body = resp.json()
+    players = body.get("players", [])
+    # The client follows pagination to exhaustion by trusting the echoed
+    # limit/offset match what it requested -- a server-side clamp would
+    # otherwise look identical to a genuine short final page.
+    ok = bool(players) and body.get("limit") == 50 and body.get("offset") == 0
+    ctx.record(
+        "GET /api/v1/seasons/{id}/players",
+        ok,
+        f"{len(players)} players, limit={body.get('limit')!r} offset={body.get('offset')!r}",
+    )
+    if not players:
+        return
+    required_fields = {"canonical_player_id", "display_name", "team", "identifiers"}
+    missing_by_row = [(i, sorted(required_fields - set(row.keys()))) for i, row in enumerate(players)]
+    missing_by_row = [(i, fields) for i, fields in missing_by_row if fields]
+    ctx.record(
+        "season players: rows expose canonical_player_id/display_name/team/identifiers",
+        not missing_by_row,
+        "all rows complete" if not missing_by_row else f"missing (row_index, fields)={missing_by_row[:5]}",
+    )
+    ctx.record(
+        "season players: given_name/family_name present-or-null (issue #248)",
+        all("given_name" in p and "family_name" in p for p in players),
+        required=False,
+    )
 
 
 def check_matches(ctx: DiagnosticContext) -> None:
@@ -373,6 +435,7 @@ def check_openapi_optional(base_url: str, transport: httpx.BaseTransport | None 
         "/api/v1",
         "/api/v1/seasons",
         "/api/v1/seasons/{season_id}/rounds",
+        "/api/v1/seasons/{season_id}/players",
         "/api/v1/rounds/{round_id}/matches",
         "/api/v1/matches/{match_id}",
         "/api/v1/matches/{match_id}/player-stats",
@@ -397,6 +460,7 @@ REQUIRED_CHECKS: list[Callable[[DiagnosticContext], None]] = [
     check_seasons,
     check_rounds,
     check_historical_season,
+    check_season_players,
     check_matches,
     check_match_detail,
     check_player_stats,

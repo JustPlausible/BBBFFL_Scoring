@@ -97,6 +97,8 @@ class ReplayPlayer:
     afl_team_name: str
     eligible: bool = True
     source_updated_at: str | None = None
+    given_name: str | None = None
+    family_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -335,6 +337,8 @@ def load_replay_config(path: str | Path) -> ReplayConfig:
             _text(row.get("afl_team_name"), f"players[{index}].afl_team_name"),
             row.get("eligible", True),
             row.get("source_updated_at"),
+            row.get("given_name"),
+            row.get("family_name"),
         )
         for index, row in enumerate(player_rows)
     )
@@ -830,13 +834,15 @@ def bootstrap_first_half(database, config: ReplayConfig) -> dict:
                 or row["afl_team_id"] != player.afl_team_id
                 or row["afl_team_name"] != player.afl_team_name
                 or bool(row["eligible"]) != player.eligible
-                or row["source_provider"] != config.source_provider,
+                or row["source_provider"] != config.source_provider
+                or row["given_name"] != player.given_name
+                or row["family_name"] != player.family_name,
                 f"existing player {player.canonical_player_id} conflicts with captured provider facts",
             )
         if not existing_players:
             for player in config.players:
                 conn.execute(
-                    "INSERT INTO season_player_pool VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO season_player_pool VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         _id(),
                         season_id,
@@ -850,6 +856,8 @@ def bootstrap_first_half(database, config: ReplayConfig) -> dict:
                         player.source_updated_at,
                         now,
                         now,
+                        player.given_name,
+                        player.family_name,
                     ),
                 )
 

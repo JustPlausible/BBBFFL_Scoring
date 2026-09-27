@@ -8,6 +8,7 @@ home-and-away season, Finals and SuperScore."""
 
 import pytest
 
+from app.afl_client import SeasonPlayerRecord, Team
 from app.audit import AuditEventRepository
 from app.competition_lifecycle import CompetitionLifecycleRepository
 from app.db import transaction
@@ -112,6 +113,47 @@ def test_player_pool_clean_start_then_idempotent_refresh():
 
     events = AuditEventRepository(database).list_events(action="player_pool.season.refreshed")
     assert [(e.actor_id, e.actor_role, e.reason) for e in events] == [("scorer-coach-id", "scorer", REASON)] * 2
+
+
+def test_player_pool_refresh_persists_and_updates_structured_names():
+    """Issue #248: `given_name`/`family_name` flow end-to-end from the AFL
+    client's `SeasonPlayerRecord` through `refresh_player_pool` into
+    `season_player_pool`, are left `NULL` when afl-api omits them, and are
+    updated (not silently left stale) on a later refresh -- the same as the
+    existing `display_name`/club facts."""
+    database = migrated_connection()
+    season, _entries = fresh_season(database)
+    afl = SetupAfl(
+        players=[
+            SeasonPlayerRecord(9001, "Nick Daicos", Team(4, "Collingwood"), given_name="Nick", family_name="Daicos"),
+            SeasonPlayerRecord(9002, "Unnamed Player", Team(4, "Collingwood")),
+        ]
+    )
+    refresh_player_pool(database, afl, season.season_id, 77, actor=SCORER, reason=REASON)
+
+    pool = PlayerPoolRepository(database)
+    daicos = pool.get(season.season_id, 9001)
+    assert (daicos.given_name, daicos.family_name) == ("Nick", "Daicos")
+    unnamed = pool.get(season.season_id, 9002)
+    assert (unnamed.given_name, unnamed.family_name) == (None, None)
+
+    updated = refresh_player_pool(
+        database,
+        SetupAfl(
+            players=[
+                SeasonPlayerRecord(
+                    9001, "Nick Daicos", Team(4, "Collingwood"), given_name="Nicholas", family_name="Daicos"
+                ),
+                SeasonPlayerRecord(9002, "Unnamed Player", Team(4, "Collingwood")),
+            ]
+        ),
+        season.season_id,
+        77,
+        actor=SCORER,
+        reason=REASON,
+    )
+    assert (updated["updated"], updated["unchanged"]) == (1, 1)
+    assert pool.get(season.season_id, 9001).given_name == "Nicholas"
 
 
 def test_player_pool_refresh_never_deletes_or_changes_eligibility_or_ownership():

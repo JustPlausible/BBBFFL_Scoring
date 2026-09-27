@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from uuid import uuid4
 
 import pytest
 from alembic.config import Config
@@ -9,7 +10,7 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import DatabaseError
 
-from app.db import DecisionsRepository, connect
+from app.db import DecisionsRepository, connect, transaction
 from app.draft import DraftRepository
 from app.fixtures import FixtureRepository
 from app.identity import IdentityRepository
@@ -120,6 +121,39 @@ EXPECTED_TABLES = {
 
 def _url(path):
     return f"sqlite:///{path}"
+
+
+def _insert_pre_0036_season_player(
+    connection, *, season_id, canonical_player_id, display_name, afl_team_id=None, afl_team_name=None
+):
+    """Raw insert matching the pre-0036 12-column `season_player_pool` shape
+    (no `given_name`/`family_name` yet, issue #248) -- `PlayerPoolRepository.
+    refresh_player` in the current codebase already targets the post-
+    migration 14-column shape, so it cannot itself produce fixture rows at
+    an older revision, the same reasoning `test_draft_slot_provenance_is_
+    backfilled_from_the_draft_header` already applies to a pre-0026
+    `weekly_lineup_draft_slot` row."""
+    season_player_id = str(uuid4())
+    now = "2026-01-01T00:00:00+00:00"
+    with transaction(connection) as conn:
+        conn.execute(
+            "INSERT INTO season_player_pool VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                season_player_id,
+                season_id,
+                canonical_player_id,
+                display_name,
+                afl_team_id,
+                afl_team_name,
+                True,
+                "afl-api-v1",
+                now,
+                None,
+                now,
+                now,
+            ),
+        )
+    return season_player_id
 
 
 def _legacy_database(path):
@@ -539,7 +573,7 @@ def test_draft_slot_provenance_is_backfilled_from_the_draft_header(tmp_path):
     expects the post-migration 7-column shape, so it cannot itself produce
     the pre-migration state this test needs."""
     from app.lineups import POSITIONS, WeeklyLineupRepository
-    from app.player_pool import OwnershipRepository, PlayerPoolRepository
+    from app.player_pool import OwnershipRepository
     from tests.test_competition_lifecycle import operational
 
     url = _url(tmp_path / "draft-provenance-backfill.db")
@@ -553,8 +587,10 @@ def test_draft_slot_provenance_is_backfilled_from_the_draft_header(tmp_path):
         (round_.bbbffl_round_id,),
     ).fetchone()
     OwnershipRepository(connection).configure_squad_limit(scope["season_id"], 5)
-    player = PlayerPoolRepository(connection).refresh_player(scope["season_id"], 55555, "Backfill Fixture Player")
-    OwnershipRepository(connection).acquire(player.season_player_id, entries[0].season_entry_id)
+    player_id = _insert_pre_0036_season_player(
+        connection, season_id=scope["season_id"], canonical_player_id=55555, display_name="Backfill Fixture Player"
+    )
+    OwnershipRepository(connection).acquire(player_id, entries[0].season_entry_id)
     connection.close()
 
     lineup_id, header_updated_at = "pre-migration-lineup", "2025-06-01T00:00:00+00:00"
@@ -585,7 +621,7 @@ def test_draft_slot_provenance_is_backfilled_from_the_draft_header(tmp_path):
                 {
                     "lineup_id": lineup_id,
                     "position": position,
-                    "player_id": player.season_player_id if position == "F1" else None,
+                    "player_id": player_id if position == "F1" else None,
                 },
             )
     engine.dispose()
@@ -1043,12 +1079,13 @@ def test_opening_round_nomination_multiplicity_migration_removes_invalid_constra
     )
     OwnershipRepository(connection).configure_squad_limit(season_id, 30)
     entry = entries[0]
-    pool = PlayerPoolRepository(connection)
-    player = pool.refresh_player(season_id, 1, "Pre-migration Player", afl_team_id=2)
-    OwnershipRepository(connection).acquire(player.season_player_id, entry.season_entry_id)
+    player_id = _insert_pre_0036_season_player(
+        connection, season_id=season_id, canonical_player_id=1, display_name="Pre-migration Player", afl_team_id=2
+    )
+    OwnershipRepository(connection).acquire(player_id, entry.season_entry_id)
     client = MultiRoundMatchClient({1: [Match(1, Team(2, "A"), Team(3, "B"), "CONCLUDED")]})
     nomination = OpeningRoundNominationRepository(connection).nominate(
-        rule.rule_id, entry.season_entry_id, "M1", player.season_player_id, client, actor=scorer
+        rule.rule_id, entry.season_entry_id, "M1", player_id, client, actor=scorer
     )
     confirmed = OpeningRoundSubmissionRepository(connection).confirm(season_id, entry.season_entry_id, actor=admin)
     connection.close()
@@ -1109,7 +1146,9 @@ def test_opening_round_nomination_multiplicity_migration_removes_invalid_constra
     OpeningRoundSubmissionRepository(connection).reopen(
         season_id, entry.season_entry_id, actor=admin, reason="reopen to add a second same-rule nomination"
     )
-    second_player = pool.refresh_player(season_id, 2, "Post-migration Second Player", afl_team_id=2)
+    second_player = PlayerPoolRepository(connection).refresh_player(
+        season_id, 2, "Post-migration Second Player", afl_team_id=2
+    )
     OwnershipRepository(connection).acquire(second_player.season_player_id, entry.season_entry_id)
     second = OpeningRoundNominationRepository(connection).nominate(
         rule.rule_id, entry.season_entry_id, "M2", second_player.season_player_id, client, actor=scorer
@@ -1244,10 +1283,14 @@ def test_0027_upgrade_survives_an_already_accepted_preseason_draft(tmp_path):
     ]
     ownership = OwnershipRepository(connection)
     ownership.configure_squad_limit(season.season_id, 1)
-    pool = PlayerPoolRepository(connection)
-    players = [pool.refresh_player(season.season_id, n + 1, f"P{n}") for n in range(2)]
-    for entry, player in zip(entries, players):
-        ownership.acquire(player.season_player_id, entry.season_entry_id)
+    player_ids = [
+        _insert_pre_0036_season_player(
+            connection, season_id=season.season_id, canonical_player_id=n + 1, display_name=f"P{n}"
+        )
+        for n in range(2)
+    ]
+    for entry, player_id in zip(entries, player_ids):
+        ownership.acquire(player_id, entry.season_entry_id)
 
     # Raw inserts matching the pre-0027 season_draft/draft_pick shape (no
     # draft_kind column yet) -- accept_order/execute_pick on this checkout
@@ -1274,7 +1317,7 @@ def test_0027_upgrade_survives_an_already_accepted_preseason_draft(tmp_path):
                     "entry_id": entry.season_entry_id,
                 },
             )
-        for overall, (entry, player) in enumerate(zip(entries, players), 1):
+        for overall, (entry, player_id) in enumerate(zip(entries, player_ids), 1):
             conn.execute(
                 text(
                     "INSERT INTO draft_pick VALUES "
@@ -1287,7 +1330,7 @@ def test_0027_upgrade_survives_an_already_accepted_preseason_draft(tmp_path):
                     "season_id": season.season_id,
                     "overall": overall,
                     "entry_id": entry.season_entry_id,
-                    "player_id": player.season_player_id,
+                    "player_id": player_id,
                     "now": now,
                 },
             )
@@ -1436,6 +1479,54 @@ def test_stream_lifecycle_downgrade_succeeds_when_every_round_has_a_fixture_cont
     assert columns["fixture_draw_id"] is False
     matchup_columns = {c["name"]: c["nullable"] for c in inspect(engine).get_columns("bbbffl_matchup")}
     assert matchup_columns["fixture_matchup_id"] is False
+    engine.dispose()
+    migrate(url)  # re-upgrading afterward remains harmless
+
+
+def test_season_player_structured_names_upgrade_and_downgrade_round_trip(tmp_path):
+    """Issue #248: `season_player_pool.given_name`/`family_name` are
+    additive and nullable. A pre-0036 row has no structured names and stays
+    valid with `NULL` after upgrading; a post-upgrade refresh can populate
+    them; and downgrading drops both columns cleanly since they carry no
+    BBBFFL-authored state (cached afl-api facts only)."""
+    url = _url(tmp_path / "season-player-structured-names.db")
+    migrate(url, "0035_coach_draft_shortlist")
+    connection = connect(url)
+    season = SeasonRepository(connection).create_season(2073, "2073 structured names")
+    pre_migration_canonical_id = 111
+    _insert_pre_0036_season_player(
+        connection,
+        season_id=season.season_id,
+        canonical_player_id=pre_migration_canonical_id,
+        display_name="Pre-migration Player",
+    )
+    connection.close()
+
+    migrate(url)
+    connection = connect(url)
+    engine = create_engine(url)
+    columns = {c["name"]: c["nullable"] for c in inspect(engine).get_columns("season_player_pool")}
+    assert columns["given_name"] is True
+    assert columns["family_name"] is True
+    engine.dispose()
+
+    pool = PlayerPoolRepository(connection)
+    existing = pool.get(season.season_id, pre_migration_canonical_id)
+    assert (existing.given_name, existing.family_name) == (None, None)
+
+    fresh = pool.refresh_player(season.season_id, 222, "Post-migration Player", given_name="Nick", family_name="Daicos")
+    assert (fresh.given_name, fresh.family_name) == ("Nick", "Daicos")
+    assert (pool.get(season.season_id, 222).given_name, pool.get(season.season_id, 222).family_name) == (
+        "Nick",
+        "Daicos",
+    )
+    connection.close()
+
+    downgrade(url, "0035_coach_draft_shortlist")
+    engine = create_engine(url)
+    remaining = {c["name"] for c in inspect(engine).get_columns("season_player_pool")}
+    assert "given_name" not in remaining
+    assert "family_name" not in remaining
     engine.dispose()
     migrate(url)  # re-upgrading afterward remains harmless
 

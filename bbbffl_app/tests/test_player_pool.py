@@ -79,6 +79,52 @@ def test_canonical_player_is_independent_between_replay_and_live_seasons():
     assert [p.canonical_player_id for p in pool.list_selectable(live.season_id)] == [396]
 
 
+def test_refresh_player_persists_structured_names_and_tolerates_none():
+    """Issue #248: `given_name`/`family_name` are cached the same way as
+    `display_name` and club facts, and a player with no structured names
+    (the historical/default case) remains a valid `None`-valued row."""
+    _db, season, _entries, pool, _ownership = setup_domain()
+    named = pool.refresh_player(season.season_id, 396, "Nick Daicos", given_name="Nick", family_name="Daicos")
+    assert (named.given_name, named.family_name) == ("Nick", "Daicos")
+    assert (pool.get(season.season_id, 396).given_name, pool.get(season.season_id, 396).family_name) == (
+        "Nick",
+        "Daicos",
+    )
+
+    unnamed = pool.refresh_player(season.season_id, 584, "Unresolved Player")
+    assert (unnamed.given_name, unnamed.family_name) == (None, None)
+    assert (pool.get(season.season_id, 584).given_name, pool.get(season.season_id, 584).family_name) == (None, None)
+
+    updated = pool.refresh_player(season.season_id, 396, "Nick Daicos", given_name="Nicholas", family_name="Daicos")
+    assert updated.given_name == "Nicholas"
+    assert pool.get(season.season_id, 396).given_name == "Nicholas"
+
+
+def test_browse_search_matches_given_and_family_name_without_changing_order():
+    """The shared player browser (`app.draft_board.player_browse_view`'s
+    `PlayerPoolRepository.browse`) can match a structured-name field, and
+    default ordering (by `display_name`) is unaffected by it -- issue #248
+    is additive to search, not a resort."""
+    _db, season, _entries, pool, _ownership = setup_domain()
+    pool.refresh_player(season.season_id, 1, "Alpha Player", given_name="Zebra", family_name="Zoot")
+    pool.refresh_player(season.season_id, 2, "Beta Player", given_name="Nick", family_name="Daicos")
+    pool.refresh_player(season.season_id, 3, "Gamma Player")
+
+    all_items = pool.browse(season.season_id)
+    assert [item.display_name for item in all_items] == ["Alpha Player", "Beta Player", "Gamma Player"]
+
+    by_given = pool.browse(season.season_id, query="Nick")
+    assert [item.display_name for item in by_given] == ["Beta Player"]
+
+    by_family = pool.browse(season.season_id, query="Zoot")
+    assert [item.display_name for item in by_family] == ["Alpha Player"]
+
+    no_structured_name = pool.browse(season.season_id, query="Gamma")
+    assert [item.display_name for item in no_structured_name] == ["Gamma Player"]
+    assert no_structured_name[0].given_name is None
+    assert no_structured_name[0].family_name is None
+
+
 def test_squad_capacity_rejects_excess_player():
     _db, season, entries, pool, ownership = setup_domain(limit=1)
     first = pool.refresh_player(season.season_id, 396, "First")

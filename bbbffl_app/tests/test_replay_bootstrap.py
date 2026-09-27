@@ -207,11 +207,36 @@ def test_invalid_entry_and_order_input_fails_before_writes(tmp_path, entry_count
         (lambda rows: rows[0].update(canonical_player_id=None), "canonical_player_id"),
         (lambda rows: rows[0].update(afl_team_id=None), "afl_team_id"),
         (lambda rows: rows[1].update(canonical_player_id=rows[0]["canonical_player_id"]), "duplicate"),
+        (lambda rows: rows[0].update(given_name="   "), "given_name"),
+        (lambda rows: rows[0].update(family_name=123), "family_name"),
     ],
 )
 def test_unresolved_or_duplicate_player_identity_is_rejected(tmp_path, mutation, match):
     with pytest.raises(ReplayBootstrapError, match=match):
         load_replay_config(_files(tmp_path, mutate_player=mutation))
+
+
+def test_structured_player_names_are_preserved_and_optional(tmp_path):
+    """Issue #248: `given_name`/`family_name` in a replay player-pool
+    capture load through to `ReplayPlayer` and are persisted by
+    `bootstrap_first_half`, the same way as `display_name`/club facts, and
+    stay `None` for a player whose capture omits them -- never inferred
+    from `display_name`."""
+    database = migrated_connection()
+    config = load_replay_config(
+        _files(tmp_path, mutate_player=lambda rows: rows[0].update(given_name="Nick", family_name="Daicos"))
+    )
+    named, unnamed = config.players[0], config.players[1]
+    assert (named.given_name, named.family_name) == ("Nick", "Daicos")
+    assert (unnamed.given_name, unnamed.family_name) == (None, None)
+
+    bootstrap_first_half(database, config)
+    pool = PlayerPoolRepository(database)
+    season_id = SeasonRepository(database).get_season_by_year(2026).season_id
+    persisted_named = pool.get(season_id, named.canonical_player_id)
+    persisted_unnamed = pool.get(season_id, unnamed.canonical_player_id)
+    assert (persisted_named.given_name, persisted_named.family_name) == ("Nick", "Daicos")
+    assert (persisted_unnamed.given_name, persisted_unnamed.family_name) == (None, None)
 
 
 def test_bootstrap_is_idempotent_and_preserves_provider_identity(tmp_path):

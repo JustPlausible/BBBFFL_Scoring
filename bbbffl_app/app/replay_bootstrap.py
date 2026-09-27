@@ -162,6 +162,18 @@ def _text(value: Any, field: str) -> str:
     return value.strip()
 
 
+def _optional_text(value: Any, field: str) -> str | None:
+    """Issue #248's `given_name`/`family_name`: authoritative but nullable
+    -- absent or `null` is valid, but a present value must be a non-blank
+    string, same as the live client/acquisition paths' `_is_optional_
+    structured_name`."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ReplayBootstrapError(f"{field} must be null or a non-empty string")
+    return value.strip()
+
+
 def _positive_int(value: Any, field: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ReplayBootstrapError(f"{field} must be a positive integer")
@@ -337,8 +349,8 @@ def load_replay_config(path: str | Path) -> ReplayConfig:
             _text(row.get("afl_team_name"), f"players[{index}].afl_team_name"),
             row.get("eligible", True),
             row.get("source_updated_at"),
-            row.get("given_name"),
-            row.get("family_name"),
+            _optional_text(row.get("given_name"), f"players[{index}].given_name"),
+            _optional_text(row.get("family_name"), f"players[{index}].family_name"),
         )
         for index, row in enumerate(player_rows)
     )

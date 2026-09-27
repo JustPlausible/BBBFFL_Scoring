@@ -290,11 +290,10 @@ chosen together with the accepted recovery targets.
 
 ## RPO and RTO
 
-**Proposed, not yet product-owner-accepted** -- Steve should confirm or
-adjust these before v0.1 is considered operationally deployed (see
-`docs/2027-live-season-readiness.md`).
+**Accepted by Steve** (JustPlausible/BBBFFL_Scoring#249, 27 September
+2026) as the production recovery targets for v0.1.
 
-| Target | Proposed value | What it means operationally |
+| Target | Accepted value | What it means operationally |
 |---|---|---|
 | **RPO** (Recovery Point Objective) | **24 hours** | With daily backups at 02:15 UTC, the worst case is losing up to a day's lineup submissions/scoring decisions if the database is lost immediately before the next scheduled backup. For a competition that runs on a weekly (not daily) cadence -- one round's lineups/scores per week -- a day's worth of writes is, at most, one evening's lineup edits by however many coaches touched their team that day, never a full round's results (which are only computed after matches conclude, well inside a 24h window of the next backup). |
 | **RTO** (Recovery Time Objective) | **4 hours** | Time from "the production database is confirmed lost/corrupted" to "a coach can submit a lineup again," assuming the operator is available: `docker compose down`, restore the latest backup into the `database` volume (or a freshly created one), `docker compose up -d`, verify readiness -- see ["Restore procedure"](#restore-procedure). The bulk of this budget is operator response time and verification, not the restore itself, which this issue's rehearsal completed in well under a minute against a small database (see the evidence document). |
@@ -304,10 +303,9 @@ not enterprise-style numbers the implementation cannot support: there is no
 continuous replication or point-in-time-recovery WAL archiving here (which
 would tighten RPO toward zero at meaningfully more operational complexity
 than a small self-hosted league needs), and there is no standby database
-to fail over to (which would tighten RTO). If Steve's actual tolerance is
-tighter than 24h/4h, the schedule (more frequent backups) or topology
-(WAL archiving, a standby) would need to change to match -- this document
-does not silently assert acceptance of figures that need his confirmation.
+to fail over to (which would tighten RTO). If Steve's actual tolerance ever
+becomes tighter than 24h/4h, the schedule (more frequent backups) or
+topology (WAL archiving, a standby) would need to change to match.
 
 ## Restore procedure
 

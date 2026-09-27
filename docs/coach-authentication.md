@@ -240,14 +240,26 @@ revoke_all_for_coach`). This matters for the case the reset exists to cover
 sessions alive would let a stolen cookie keep authenticating for up to
 `BBBFFL_SESSION_LIFETIME_SECONDS` regardless of the reset. It also means an
 Administrator resetting *their own* credential revokes the very session
-authenticating that request; the JSON API still returns its response
-normally (FastAPI never re-checks authorization to send a response it
-already computed), and the page's JS updates the same page in place rather
-than navigating to a freshly-gated URL, so there is no follow-up request
-for the just-revoked session to fail. A `coach_id` that does not name a
+authenticating that request; the plural JSON API's response carries a
+`self_reset` flag (`principal.coach_id == payload.coach_id`, so it is
+never set for the legacy shared token, which has no per-operator identity)
+so the page's JS can tell the two cases apart without needing to know its
+own identity in advance -- on a self-reset it shows a "you have been
+signed out, sign in again" state instead of making any further
+authenticated request against the now-revoked session (an earlier version
+of this page still called the roster-refresh endpoint unconditionally
+afterwards, which failed the same way). A `coach_id` that does not name a
 real coach is rejected with HTTP 404 by both endpoints (the singular
 endpoint via `KeyError`, mapped by `app/main.py`'s existing handler; the
 plural endpoint checks `IdentityRepository.get_coach` itself first).
+
+A coach with no email on file (a supported state -- see
+`app/identity.py`'s module docstring) cannot sign in regardless of any
+password set for them, since `AuthenticationService.login` resolves only
+by email. Provisioning one anyway is not refused server-side (an operator
+may deliberately be doing so ahead of adding an email), but the page's
+picker disables and labels such a coach's row rather than presenting the
+operation as completed onboarding.
 
 Audit attribution for the browser page follows the same pattern already
 established by `app.routes.season_centre`/`app.routes.finals_preflight`
@@ -366,8 +378,12 @@ contains a password, password hash, session secret, or session token.
   response rather than a broken redirect); a mismatched password
   confirmation; a weak password; a missing/unknown coach selection; audit
   attribution to the authenticated operator rather than the affected
-  coach; that no password hash or password material is ever exposed; and
-  human-readable coach/team selection (never a typed `coach_id`).
+  coach; that no password hash or password material is ever exposed;
+  human-readable coach/team selection (never a typed `coach_id`); that a
+  reset's `self_reset` flag is only ever true for the real coach-session
+  principal it applies to, never the legacy shared token; and that a coach
+  with no email on file is exposed as such in the roster, for the page to
+  flag rather than present a login-incapable "success".
 
 The existing full API, scoring, replay, audit and architecture suites all
 remain green -- see this file's "Scorer/admin proxy provenance is

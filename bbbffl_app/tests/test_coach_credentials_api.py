@@ -233,7 +233,7 @@ def test_administrator_can_provision_a_new_coachs_password(dashboard_client):
         client, coach_id=coach.coach_id, new_password="brand-new-password-456", principal=_admin_principal()
     )
     assert response.status_code == 200, response.text
-    assert response.json() == {"coach_id": coach.coach_id, "status": "provisioned"}
+    assert response.json() == {"coach_id": coach.coach_id, "status": "provisioned", "self_reset": False}
     _clear_overrides(client)
 
     csrf_token, cookies = _login_form(client)
@@ -265,7 +265,7 @@ def test_administrator_can_reset_an_existing_coachs_password(dashboard_client):
         client, coach_id=coach.coach_id, new_password="brand-new-password-456", principal=_admin_principal()
     )
     assert response.status_code == 200, response.text
-    assert response.json() == {"coach_id": coach.coach_id, "status": "reset"}
+    assert response.json() == {"coach_id": coach.coach_id, "status": "reset", "self_reset": False}
     _clear_overrides(client)
 
     # The coach's previous session must no longer authenticate.
@@ -312,7 +312,7 @@ def test_administrator_can_reset_their_own_password_without_a_broken_response(da
         cookies={"bbbffl_session": session_token, "bbbffl_csrf": page_csrf},
     )
     assert response.status_code == 200, response.text
-    assert response.json() == {"coach_id": coach.coach_id, "status": "reset"}
+    assert response.json() == {"coach_id": coach.coach_id, "status": "reset", "self_reset": True}
 
     # The session that authenticated this very request is now revoked.
     assert client.app.state.sessions.get_valid(session_token) is None
@@ -517,6 +517,46 @@ def test_human_readable_team_selection_no_uuid_entry_required(dashboard_client):
     row = next(r for r in response.json()["roster"] if r["coach_id"] == coach.coach_id)
     assert row["display_name"] == "Jordan Example"
     assert row["teams"] == ["Jordan's Juggernauts (2027 Season)"]
+
+
+def test_roster_flags_a_coach_with_no_email(dashboard_client):
+    """Codex review, PR #252 (P2): `AuthenticationService.login` resolves
+    only by email, so a coach with none on file cannot sign in regardless
+    of any password set for them. The roster response exposes `email` as
+    falsy for such a coach so the page's JS can disable/flag that row
+    rather than presenting a provisioning "success" that the coach still
+    cannot use."""
+    from app.routes.coach_credentials import require_admin_credentials
+
+    client = dashboard_client
+    coach = client.app.state.identities.create_coach("No Email Yet")
+
+    _override(client, require_admin_credentials, _admin_principal())
+    try:
+        response = client.get("/api/admin/coach-credentials")
+    finally:
+        _clear_overrides(client)
+    assert response.status_code == 200
+    row = next(r for r in response.json()["roster"] if r["coach_id"] == coach.coach_id)
+    assert not row["email"]
+
+
+def test_legacy_admin_token_reset_is_never_flagged_as_self_reset(dashboard_client):
+    """`self_reset` is only meaningful for a real coach-session principal --
+    the legacy shared `X-Admin-Token` has no per-operator identity
+    (`principal.coach_id is None`), so it must never be reported as
+    resetting "its own" session regardless of which coach_id it targets."""
+    client = dashboard_client
+    coach = _register_coach(client)
+
+    response = _submit(
+        client,
+        coach_id=coach.coach_id,
+        new_password="brand-new-password-456",
+        principal=_admin_principal(coach_id=None),
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["self_reset"] is False
 
 
 def _login_form(client):

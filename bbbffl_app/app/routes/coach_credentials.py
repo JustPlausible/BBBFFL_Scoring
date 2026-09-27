@@ -69,17 +69,38 @@ trail records *which* operator performed the reset wherever that is known
 (`None` for the legacy shared `X-Admin-Token`, which has no per-operator
 identity).
 
-## Self-reset (Codex review, PR #252, P2)
+## Self-reset (Codex review, PR #252, P2, two rounds)
 
 `AuthenticationService.reset_password` revokes every currently-valid
 session for the affected coach -- including, if an Administrator resets
 their *own* credential, the very session cookie authenticating this
-request. That is harmless here specifically because the JSON API returns
-its response synchronously from the already-authorized request (FastAPI
-never re-checks authorization to *send* a response it already computed);
-the page's JS then updates the same page in place rather than triggering a
-fresh navigation to a `require_admin_principal`-gated URL, so there is no
-follow-up request for the just-revoked session to fail.
+request. The JSON API still returns its response normally for the
+already-authorized request in flight (FastAPI never re-checks
+authorization to *send* a response it already computed), but the page's
+JS must not then make a *second*, newly-unauthorized request against the
+same now-revoked session -- the first round of this fix stopped the POST's
+own success handler from redirecting to a freshly-gated page, but still
+called `loadRoster()` (a fresh authenticated `GET`) unconditionally
+afterwards, which fails exactly the same way for a coach-session-only
+self-reset. `set_coach_credential` below reports `self_reset` in its
+response so the page's JS can tell the two cases apart without needing to
+know its own identity in advance, and shows a "you have been signed out,
+sign in again" state instead of attempting the roster refresh.
+
+## Coaches with no email on file (Codex review, PR #252, P2)
+
+`app.identity.Coach.email` may be unset (see `app/identity.py`'s module
+docstring) -- a real, supported state for a coach with no login access yet
+-- but `AuthenticationService.login` resolves an email exclusively via
+`IdentityRepository.get_coach_by_email`, so a coach with no email cannot
+sign in no matter what password is set. Provisioning one is not itself
+illegal (the domain permits setting a password before an email exists, and
+an operator may be doing so ahead of adding one), so this is left as
+existing credential-service behaviour rather than a new server-side
+refusal -- but the page must not present it as completed onboarding.
+`app/templates/coach_credentials.html` disables and labels these coach
+rows in the picker instead, directing the operator to add an email (via
+Season Centre) first.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -167,7 +188,15 @@ def set_coach_credential(
     request.app.state.auth_service.reset_password(
         payload.coach_id, payload.new_password, actor=_actor(principal), reason=payload.reason
     )
-    return {"coach_id": payload.coach_id, "status": "reset" if was_provisioned else "provisioned"}
+    return {
+        "coach_id": payload.coach_id,
+        "status": "reset" if was_provisioned else "provisioned",
+        # See module docstring, "Self-reset": lets the page's JS recognise
+        # that *this* request's own session was just revoked (a real
+        # coach-session Administrator resetting their own credential),
+        # without needing to know its own coach_id ahead of time.
+        "self_reset": principal.coach_id is not None and principal.coach_id == payload.coach_id,
+    }
 
 
 @page_router.get("/admin/coach-credentials", response_class=HTMLResponse)

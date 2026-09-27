@@ -46,7 +46,17 @@ umask 077
 
 TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
 OUT="$BACKUP_DIR/bbbffl-${PGDATABASE}-${TIMESTAMP}.dump"
-TMP_OUT="${OUT}.in-progress"
+# Suffixed with this shell's own PID (issue #243 review): the documented
+# on-demand pre-release backup (docs/production-operations.md#release-
+# procedure) can start in the same second as the scheduled cron run, and a
+# bare ".in-progress" name would then have both pg_dump processes writing
+# concurrently to the same inode -- corrupting whichever one's `mv` below
+# runs first, and crashing the second under `set -e` with no alert at all
+# (a bare `mv` failure isn't caught by the `pg_dump` success/failure
+# branching below). A per-process name gives each invocation an entirely
+# separate temporary file, so two concurrent runs never share one, however
+# unlikely that same-second overlap is.
+TMP_OUT="${OUT}.in-progress.$$"
 
 bbbffl_log "INFO" "starting backup of database '${PGDATABASE}' to ${OUT}"
 

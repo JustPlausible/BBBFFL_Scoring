@@ -39,12 +39,20 @@ bbbffl_alert() {
     if [ -n "${BBBFFL_ALERT_WEBHOOK_URL:-}" ]; then
         # A caller (readiness_watch.sh) may embed the readiness endpoint's
         # own JSON response body in $message, which itself contains double
-        # quotes -- escaping backslashes and quotes (and collapsing any
-        # newline, which JSON strings cannot contain literally) here keeps
-        # the outer payload valid JSON regardless of what the message
-        # contains, rather than only for the fixed, simple messages this
-        # directory's other scripts happen to pass today.
-        escaped=$(printf '%s' "$message" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
+        # quotes -- escaping backslashes and quotes here keeps the outer
+        # payload valid JSON regardless of what the message contains,
+        # rather than only for the fixed, simple messages this directory's
+        # other scripts happen to pass today. JSON strings also cannot
+        # contain any literal U+0000-U+001F control character, not just
+        # newline (issue #243 review, follow-up): a carriage return, tab,
+        # or any other character in that range would otherwise still
+        # produce invalid JSON a webhook parser rejects. Newline/CR/tab are
+        # each collapsed to a single space (matching newline's existing
+        # treatment -- an alert message is short diagnostic text, not
+        # something that needs its exact whitespace preserved); anything
+        # else remaining in that range is simply deleted, since by that
+        # point nothing worth keeping is left in it.
+        escaped=$(printf '%s' "$message" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n\r\t' '   ' | tr -d '\000-\037')
         payload=$(printf '{"text":"BBBFFL: %s"}' "$escaped")
         if ! _bbbffl_http_post_json "$BBBFFL_ALERT_WEBHOOK_URL" "$payload"; then
             bbbffl_log "WARNING" "alert webhook delivery failed (BBBFFL_ALERT_WEBHOOK_URL unreachable)"

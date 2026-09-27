@@ -723,6 +723,62 @@ document had genuinely missed, and explained exactly why:
   the exported env file, not an inherited container environment, is what
   supplied them.
 
+## Q. Eleventh review pass: concurrent backup temp paths and incomplete JSON control-character escaping
+
+An eleventh Codex pass found two more P2s:
+
+- **A concurrent on-demand backup could race the scheduled cron backup on
+  a shared temp path**: `backup_postgres.sh`'s temporary file name was
+  derived only from the target database and a second-granularity
+  timestamp (`${OUT}.in-progress`), so the documented on-demand
+  pre-release backup starting in the same second as the scheduled cron
+  run would have both `pg_dump` processes writing to the *same* temp
+  file -- at best one process's `mv` failing outright (uncaught by the
+  `pg_dump` success/failure branching, since the failure is in the `mv`,
+  not the dump itself, so no alert would fire), at worst genuinely
+  interleaved data being exposed at the published name. Fixed by
+  suffixing the temporary file with the invoking shell's own PID
+  (`${OUT}.in-progress.$$`), so two concurrent invocations never share a
+  temp file regardless of timing.
+
+  Reproduced the underlying hazard first: forced two `pg_dump` processes
+  to write to a single, deliberately fixed (non-PID) temporary path at
+  the same instant -- the second process's own `pg_dump` call failed
+  outright (`could not open file ... No such file or directory`),
+  demonstrating that sharing one temp path between concurrent runs is
+  genuinely unsafe, not just a theoretical concern. Then ran two
+  concurrent invocations of the *real, fixed* script at the exact same
+  second against a 100,000-row table (large enough to give both
+  `pg_dump` processes a real overlapping write window): both completed
+  successfully (`exit=0` for each) with no errors, no leftover
+  `.in-progress` files, and the resulting published dump validated
+  cleanly with `pg_restore --list`. (Because both processes still target
+  the same second-granularity final filename, the second one to `mv`
+  simply supersedes the first's equally-valid dump at that path --
+  harmless, since both capture the database at essentially the same
+  instant; the actual hazard, corruption or a silent crash, is what the
+  PID-suffixed temp file eliminates.)
+
+- **JSON escaping still let other control characters through**: the
+  section I fix escaped backslashes, quotes, and newlines, but a
+  readiness-endpoint body embedded in an alert message could also
+  contain a carriage return, tab, or other U+0000-U+001F character,
+  which JSON strings cannot contain literally either -- producing
+  invalid JSON a webhook parser rejects, exactly the malformed-JSON
+  failure class section I originally fixed for quotes. Fixed by
+  collapsing carriage return and tab to a space alongside newline (the
+  same information-lossy treatment newline already got, appropriate for
+  short diagnostic text), then deleting any other remaining
+  U+0000-U+001F byte.
+
+  Reproduced first with a message containing an embedded CR, LF, tab,
+  and a bell character (0x07): the *old* escaping pipeline produced a
+  payload that a strict JSON parser (Python's `json.loads`) rejected
+  outright (`Invalid control character at: ...`). The *fixed* pipeline,
+  given the identical input, produced a payload that parses correctly
+  and preserves the message's readable content (tabs/CR/LF collapsed to
+  spaces, the bell character silently dropped).
+
 ## What this rehearsal does not prove
 
 - It does not prove the real production afl-api deployment is reachable or

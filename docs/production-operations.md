@@ -583,7 +583,6 @@ reflected there:
 - filling in `bbbffl_app/.env.production`'s real secrets (this document's
   ["Secrets and configuration"](#secrets-and-configuration) section) and
   confirming the real `AFL_API_BASE_URL`/`AFL_API_KEY`;
-- accepting (or adjusting) the proposed RPO/RTO targets above;
 - validating the real deployed afl-api contract from a network position
   that can actually reach it -- a separate, already-tracked readiness gap
   this issue does not resolve (see `docs/afl-api-v1-contract.md`'s "Live

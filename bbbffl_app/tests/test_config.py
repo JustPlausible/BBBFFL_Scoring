@@ -319,6 +319,26 @@ def test_readiness_timeout_rejects_non_finite_values(clean_env, bad_value):
     assert any("BBBFFL_READINESS_TIMEOUT_SECONDS" in e for e in excinfo.value.errors)
 
 
+def test_readiness_timeout_rejects_a_non_numeric_value_without_crashing(clean_env):
+    """A bare float() call raises ValueError directly for a non-numeric
+    value (e.g. "five"), bypassing the accumulated `errors` list -- unlike
+    every other misconfiguration, get_settings() would crash with a raw
+    ValueError instead of the structured SettingsError lifespan() catches to
+    log and fail closed (issue #243 review, follow-up). Also proves it is
+    reported together with an unrelated error, exactly the "together" the
+    review's concern was about, by additionally clearing a required
+    production value."""
+    clean_env.setenv("BBBFFL_ENVIRONMENT", "production")
+    clean_env.setenv("BBBFFL_DATABASE_URL", "postgresql+psycopg://bbbffl:s3cret@db.internal/bbbffl")
+    clean_env.setenv("BBBFFL_READINESS_TIMEOUT_SECONDS", "five")
+
+    with pytest.raises(SettingsError) as excinfo:
+        get_settings()
+
+    assert any("BBBFFL_READINESS_TIMEOUT_SECONDS" in e for e in excinfo.value.errors)
+    assert any("BBBFFL_ADMIN_TOKEN" in e for e in excinfo.value.errors)
+
+
 def test_production_refuses_missing_database_url(clean_env):
     _set_valid_production_env(clean_env)
     clean_env.delenv("BBBFFL_DATABASE_URL", raising=False)

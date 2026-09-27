@@ -779,6 +779,38 @@ An eleventh Codex pass found two more P2s:
   and preserves the message's readable content (tabs/CR/LF collapsed to
   spaces, the bell character silently dropped).
 
+## R. Twelfth review pass: a malformed readiness timeout crashing raw, and a stale checklist item
+
+A twelfth Codex pass, re-reviewing the RPO/RTO acceptance documentation
+update, found one genuine code defect and one documentation
+inconsistency the acceptance update itself introduced:
+
+- **A non-numeric `BBBFFL_READINESS_TIMEOUT_SECONDS` crashed with a raw
+  `ValueError` instead of the structured `SettingsError`** (P2): the bare
+  `float(os.getenv(...))` call raises `ValueError` directly for a value
+  like `"five"`, before the surrounding `errors` list -- which every
+  other misconfiguration reports through -- is ever consulted.
+  `app/main.py`'s `lifespan()` only catches `SettingsError` for its
+  structured "log critically, then fail closed" startup path, so this
+  specific misconfiguration would bypass that logging entirely and crash
+  with an unhandled exception instead, and would never be reported
+  alongside any other configuration problem present at the same time.
+  Wrapped the conversion in `try`/`except ValueError`, appending the same
+  kind of `errors` entry every other invalid value already produces.
+  Verified directly: `BBBFFL_READINESS_TIMEOUT_SECONDS=five` now raises
+  `SettingsError` with a clear message (`must be a positive, finite
+  number of seconds (got 'five')`) instead of an unhandled `ValueError`;
+  and, reproducing the review's own "together" concern, a new regression
+  test confirms it is reported in the same `SettingsError.errors` list as
+  an unrelated missing `BBBFFL_ADMIN_TOKEN`, not swallowed by the crash.
+
+- **The production-host checklist still told Steve to accept the RPO/RTO
+  targets, after the "RPO and RTO" section itself had just been updated
+  to record that he already had** (P3): removed that now-stale bullet
+  from `production-operations.md`'s "What remains
+  environment-specific" list, so the document no longer contradicts
+  itself about whether this is still outstanding.
+
 ## What this rehearsal does not prove
 
 - It does not prove the real production afl-api deployment is reachable or

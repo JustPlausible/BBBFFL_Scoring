@@ -354,13 +354,29 @@ def get_settings() -> Settings:
     if session_lifetime_seconds <= 0:
         errors.append("BBBFFL_SESSION_LIFETIME_SECONDS: must be a positive number of seconds")
 
-    readiness_timeout_seconds = float(os.getenv("BBBFFL_READINESS_TIMEOUT_SECONDS", "5"))
-    # math.isfinite() rejects "inf"/"nan" (both valid float() input): an
-    # infinite timeout would remove GET /health/ready's promised bound on a
-    # stuck dependency call entirely, and NaN's comparisons are always
-    # False, which would silently defeat the `<= 0` check below without it.
-    if not math.isfinite(readiness_timeout_seconds) or readiness_timeout_seconds <= 0:
-        errors.append("BBBFFL_READINESS_TIMEOUT_SECONDS: must be a positive, finite number of seconds")
+    raw_readiness_timeout_seconds = os.getenv("BBBFFL_READINESS_TIMEOUT_SECONDS", "5")
+    try:
+        readiness_timeout_seconds = float(raw_readiness_timeout_seconds)
+    except ValueError:
+        # A non-numeric value (e.g. "five") makes float() raise ValueError
+        # directly, rather than returning something the `errors` list below
+        # can report alongside every other problem (issue #243 review):
+        # get_settings() would otherwise crash with a raw ValueError instead
+        # of the structured SettingsError lifespan() specifically catches to
+        # log and fail closed, silently skipping that path and reporting
+        # neither this setting nor any other configuration problem together.
+        readiness_timeout_seconds = 0.0
+        errors.append(
+            f"BBBFFL_READINESS_TIMEOUT_SECONDS: must be a positive, finite number of seconds "
+            f"(got '{raw_readiness_timeout_seconds}')"
+        )
+    else:
+        # math.isfinite() rejects "inf"/"nan" (both valid float() input): an
+        # infinite timeout would remove GET /health/ready's promised bound on
+        # a stuck dependency call entirely, and NaN's comparisons are always
+        # False, which would silently defeat the `<= 0` check below without it.
+        if not math.isfinite(readiness_timeout_seconds) or readiness_timeout_seconds <= 0:
+            errors.append("BBBFFL_READINESS_TIMEOUT_SECONDS: must be a positive, finite number of seconds")
 
     if errors:
         raise SettingsError(errors)

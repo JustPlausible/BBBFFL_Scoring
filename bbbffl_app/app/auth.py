@@ -230,6 +230,16 @@ class CredentialRepository:
                 after_state={"change": change},
             )
 
+    def has_credential(self, coach_id: str) -> bool:
+        """Whether `coach_id` already has a managed password on file --
+        issue #238's browser provisioning/reset workflow uses this only to
+        label which action a coach picker row represents ("set" vs
+        "reset"), never to decide whether the write is legal (`set_password`
+        already handles create-or-reset atomically). Reveals no hash or
+        password material, only presence."""
+        row = self.database.execute("SELECT 1 FROM coach_credential WHERE coach_id = ?", (coach_id,)).fetchone()
+        return row is not None
+
     def verify_password(self, coach_id: str | None, password: str) -> bool:
         """`coach_id=None` covers "no coach resolved at all" (an unknown
         login identifier) as well as "a real coach with no credential row

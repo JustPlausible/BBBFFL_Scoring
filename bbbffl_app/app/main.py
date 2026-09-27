@@ -78,6 +78,7 @@ from app.round_review import (
 from app.routes import admin, health, public
 from app.routes import admin_dashboard as admin_dashboard_routes
 from app.routes import auth as auth_routes
+from app.routes import coach_credentials as coach_credentials_routes
 from app.routes import coach_delisting as coach_delisting_routes
 from app.routes import coach_lineup as coach_lineup_routes
 from app.routes import context as context_routes
@@ -312,6 +313,8 @@ app.include_router(coach_lineup_routes.router)
 app.include_router(lineup_routes.router)
 app.include_router(admin.router)
 app.include_router(admin.page_router)
+app.include_router(coach_credentials_routes.router)
+app.include_router(coach_credentials_routes.page_router)
 app.include_router(superscore_routes.router)
 app.include_router(superscore_routes.page_router)
 app.include_router(superscore_result_routes.router)

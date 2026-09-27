@@ -476,7 +476,7 @@ AFL_API_BASE_URL=https://afl-api.thehardinghams.net AFL_API_KEY=*** \
 
 No secret was printed, logged, retained, or committed at any point; the
 value above is a placeholder, not the credential actually used (see
-"Authentication/configuration conclusion" below).
+"Authentication/configuration — partially confirmed" below).
 
 ### Endpoint/contract coverage — confirmed positive
 
@@ -521,30 +521,35 @@ rule:
   they are "pre-v1 legacy behaviour, not a permanently supported parallel
   API" and are not used by BBBFFL.
 
-### Authentication/configuration conclusion
+### Authentication/configuration — partially confirmed; credential validation still open
 
 `AFL_API_BASE_URL` (service root) and `AFL_API_KEY`, read only through
-`app.config.get_settings()`, are sufficient to reach every endpoint above
-with no code or naming change required. The `X-Api-Key` header name and
-both the unstructured 401 body and structured `{"error": {...}}` 404/422
-bodies match this document's existing source-level analysis in
+`app.config.get_settings()`, need no code or naming change to build every
+request path exercised above, and the `X-Api-Key` header name and both the
+unstructured 401 body and structured `{"error": {...}}` 404/422 bodies
+match this document's existing source-level analysis in
 [§1.7](#17-authentication-and-configuration) exactly.
 
-**One caveat, specific to how this validation session reached the
-deployment:** its egress proxy authenticates every outbound request to
+**What this run does *not* establish:** whether a real, deployment-issued
+`AFL_API_KEY` is actually honoured end-to-end. This validation session's
+egress proxy authenticates every outbound request to
 `afl-api.thehardinghams.net` at the transport level, regardless of what
-(if any) `x-api-key` header the calling code sends. This meant the
-diagnostic's own negative-path checks (`GET /api/v1/seasons` with no key,
-and with a deliberately invalid key, both expected to return `401`)
-observed `200` in this run and are recorded as `FAIL` — not because
-afl-api accepted an invalid credential, but because this session could
-not send a request that actually omitted or mismatched the real one. This
-is a property of the validation session's network path, not of afl-api or
-of a production BBBFFL deployment reaching the same host directly; it does
-not change the header-name/error-shape conclusion above, which is
-otherwise unchanged from source-level review. A future validation run from
-a network path that does not auto-authenticate should re-confirm these two
-checks directly.
+(if any) `x-api-key` header the calling code sends — every request in
+this run succeeded through that proxy-injected credential, not through
+the placeholder, non-secret `AFL_API_KEY` value this session actually set
+locally. Consequently the diagnostic's own negative-path checks
+(`GET /api/v1/seasons` with no key, and with a deliberately invalid key,
+both expected to return `401`) observed `200` and are correctly recorded
+as `FAIL`, and this run cannot distinguish "the deployment accepts any
+key" from "the deployment enforces a real key and this session's proxy
+happened to already be authenticated" — both look identical from here. A
+production BBBFFL deployment reaching this host directly, without this
+session's proxy, could still receive `401` on its configured key if that
+key is wrong, unprovisioned, or revoked. **Authentication/configuration
+should be treated as unresolved, not confirmed working, until the real
+application key path is exercised from a network path that does not
+auto-authenticate** — re-running the diagnostic's two key-check assertions
+from such a path is the concrete follow-up.
 
 ### UTC and status semantics — confirmed
 

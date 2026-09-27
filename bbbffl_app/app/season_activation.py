@@ -276,8 +276,21 @@ def _draft_check(conn, database, season_id: str, *, for_update: bool) -> Activat
     is closed -- a finalized draft alone only permits *opening* that
     window; `close_window` is what validates squads and freezes the
     authoritative opening-squad snapshot (Codex review, PR #254, P1;
-    see `app/preseason.py`'s module docstring)."""
+    see `app/preseason.py`'s module docstring).
+
+    Reads (and, on the locked path, locks) `season_preseason_window`
+    *before* `season_draft`/`draft_pick` -- the same order
+    `PreseasonRepository.close_window`/`correct_opening_snapshot` already
+    lock window-before-draft/window-before-ownership -- and this check
+    runs before `_player_pool_check` in `_evaluate_checks` for the same
+    reason: one consistent lock order (window, then draft, then
+    ownership) across every caller avoids a PostgreSQL deadlock between
+    `activate_season` and a concurrent `close_window`/
+    `correct_opening_snapshot` (Codex review, PR #254, second P2)."""
     suffix = _suffix(database, for_update=for_update)
+    window = conn.execute(
+        "SELECT closed_at FROM season_preseason_window WHERE season_id=?" + suffix, (season_id,)
+    ).fetchone()
     draft = conn.execute(
         "SELECT draft_id, finalized_at FROM season_draft WHERE season_id=? AND draft_kind='preseason'" + suffix,
         (season_id,),
@@ -301,9 +314,6 @@ def _draft_check(conn, database, season_id: str, *, for_update: bool) -> Activat
             False,
             "every pick is complete, but the draft has not been finalized (opening-squad freeze) yet",
         )
-    window = conn.execute(
-        "SELECT closed_at FROM season_preseason_window WHERE season_id=?" + suffix, (season_id,)
-    ).fetchone()
     if window is None:
         return ActivationCheck(
             "preseason_draft",
@@ -327,12 +337,18 @@ def _draft_check(conn, database, season_id: str, *, for_update: bool) -> Activat
 
 
 def _evaluate_checks(conn, database, season: Season, *, for_update: bool) -> list[ActivationCheck]:
+    # `_draft_check` runs first: it locks `season_preseason_window` before
+    # `season_draft`, and every other check that could contend with a
+    # concurrent preseason operation (`_player_pool_check`'s ownership
+    # rows) must lock *after* it, matching `PreseasonRepository.
+    # close_window`/`correct_opening_snapshot`'s own window-first lock
+    # order (see `_draft_check`'s docstring).
     return [
+        _draft_check(conn, database, season.season_id, for_update=for_update),
         _entries_check(conn, database, season.season_id, for_update=for_update),
         _player_pool_check(conn, database, season.season_id, for_update=for_update),
         _ordinary_competition_check(conn, database, season, for_update=for_update),
         _fixture_check(conn, database, season.season_id, for_update=for_update),
-        _draft_check(conn, database, season.season_id, for_update=for_update),
     ]
 
 

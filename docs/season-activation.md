@@ -77,6 +77,18 @@ check is never satisfied by a snapshot that a concurrent write then
 invalidates before the lifecycle transition commits (Codex review, PR
 #254, P2; see `tests/test_season_activation_postgresql.py`).
 
+The checks lock in a fixed order -- `season_preseason_window`, then
+`season_draft`/`draft_pick`, then `season_entry`/`player_ownership_period`,
+then the remaining tables -- matching the order
+`app.preseason.PreseasonRepository.close_window`/`correct_opening_snapshot`
+already lock in (window before draft, window before ownership). A second
+review round found the first version of this locking lock-ordered the
+opposite way for one pair (ownership before window), which could deadlock
+against a concurrent `close_window`/`correct_opening_snapshot` on
+PostgreSQL rather than cleanly serializing; `tests/test_season_activation_
+postgresql.py::test_activation_locks_the_preseason_window_before_the_draft_
+avoiding_deadlock` proves the corrected order.
+
 ## Activation is always explicit
 
 Activation never happens as a side effect of another workflow -- not draft

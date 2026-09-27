@@ -558,6 +558,92 @@ and one more P2:
   connection-string parameter) and that an ordinary query still succeeds
   unchanged with keepalive enabled.
 
+## N. Eighth review pass: data-block corruption and a stalled (not dead) backend
+
+An eighth Codex pass, re-reviewing the section M fixes, found the same two
+underlying gaps had not yet been fully closed:
+
+- **`pg_restore --list` cannot catch corruption in the archive's data,
+  only its table of contents** (P1): section M's fix validated the
+  archive before dropping the target, but `--list` only parses the
+  header/TOC -- a dump truncated or corrupted further in (inside a
+  table's actual data) would still pass that check and only fail once
+  the real restore reached that point, which, under section M's design,
+  was already running directly against the (already-dropped) target.
+  Fixed by restoring into a fresh, uniquely-named temporary database
+  first (`<target>__bbbffl_restore_tmp`), and only replacing the named
+  target -- drop, then a fast catalog-only rename of the temporary
+  database in as the target -- once that restore has fully succeeded. A
+  `pg_restore` failure at any point, including deep in the data, now
+  never touches the target at all; a stale temporary database left by a
+  previous crashed/killed attempt is dropped and recreated fresh on the
+  next run, making the script safe to simply re-run.
+
+  Reproduced the exact failure mode the review described, not just the
+  header/TOC corruption section M's rehearsal covered: took a real
+  ~560KB backup of a database with 20,000 bulk rows, then flipped bytes
+  at 90% through the file -- deep in the compressed data, well past the
+  table of contents:
+
+  ```
+  --- confirm pg_restore --list still succeeds (TOC intact) ---
+  pg_restore --list exit code: 0
+  ```
+
+  Confirming the review's exact point: the corrupted file still passes
+  `--list`. Then ran the actual restore script against it, against a
+  target database holding its own pre-existing data:
+
+  ```
+  2026-09-27T05:33:58Z [INFO] creating temporary database 'bbbffl_restore_target__bbbffl_restore_tmp' for the restore
+  pg_restore: error: could not uncompress data: incorrect data check
+  2026-09-27T05:33:59Z [CRITICAL] PostgreSQL restore of /backups/deep-corrupt-test.dump into temporary database 'bbbffl_restore_target__bbbffl_restore_tmp' FAILED -- 'bbbffl_restore_target' was never touched
+  exit code: 1
+  ```
+
+  The target's pre-existing data survived untouched, and no leftover
+  temporary database remained afterward. Then confirmed the legitimate
+  path is unaffected: the same script, given the real (uncorrupted) dump,
+  restored into the temporary database and swapped it in successfully
+  (`exit=0`, correct 20,000-row table present, old target data gone --
+  the full replace-on-success contract preserved). Finally re-rehearsed
+  the database-affecting rollback path itself (`BBBFFL_ALLOW_RESTORE_
+  OVER_LIVE_DATABASE=yes`, target equal to `PGDATABASE`) against the new
+  swap logic end-to-end, confirming it still restores the live database
+  correctly.
+
+- **TCP keepalive detects a dead network peer, not a live one that stalls**
+  (P2): section M's keepalive fix bounds a query stuck because the
+  *network* partitioned, but does nothing when the PostgreSQL host is
+  still reachable and answering keepalive probes while its backend
+  simply never finishes the query (lock contention, resource
+  starvation) -- exactly the scenario `asyncio.wait_for` already returns
+  a 503 for without freeing the underlying worker/connection. Fixed by
+  giving the readiness probe's own query a PostgreSQL `statement_timeout`
+  scoped to just that one call: `app.db.DatabaseConnection.
+  execute_bounded` issues `SET LOCAL statement_timeout = <ms>` (from the
+  same `readiness_timeout_seconds` value the probe is already bounded
+  by) immediately before the `SELECT 1`, on the same short-lived pooled
+  connection -- `SET LOCAL` is transaction-scoped, so it reverts the
+  moment that connection is released and can never leak onto whatever
+  query a later, unrelated caller runs on the same pooled connection.
+  SQLite (dev/tests) has no equivalent setting, so the timeout is simply
+  not applied there -- the query still runs normally.
+
+  Rehearsed against a real disposable PostgreSQL container with three
+  new regression tests (`tests/test_db_connection_lifecycle_postgresql.py`,
+  gated on `BBBFFL_DATABASE_URL` like the repository's other
+  `*_postgresql.py` suites): a `pg_sleep(1)` query with
+  `timeout_seconds=0.1` is aborted by PostgreSQL itself
+  (`canceling statement due to statement timeout`); an ordinary fast
+  query with a 5s timeout is unaffected; and, most directly addressing
+  the "never leak" requirement, a `pg_sleep(1)` call that times out is
+  immediately followed by a genuinely slow (`pg_sleep(0.3)`) but
+  legitimate query run with *no* timeout at all on the connection pool,
+  which completes normally -- proving the prior call's `statement_timeout`
+  did not survive onto it. All three tests pass against a real
+  `postgres:16-alpine` container.
+
 ## What this rehearsal does not prove
 
 - It does not prove the real production afl-api deployment is reachable or

@@ -64,3 +64,25 @@ def test_concurrent_requests_do_not_share_a_connection_or_transaction(tmp_path):
     assert len(dnp_map) == 10
     assert all(dnp_map[(f"team_{i}", "Forward1")] is True for i in range(10))
     assert database.engine.pool.checkedout() == 0
+
+
+def test_execute_bounded_runs_normally_on_sqlite_ignoring_the_timeout(tmp_path):
+    """execute_bounded's statement_timeout is PostgreSQL-only (issue #243
+    review): SQLite has no equivalent setting, so a timeout_seconds value
+    must be silently ignored there rather than raising, and the query must
+    still run and release its connection normally."""
+    database = _migrated_database(tmp_path)
+
+    result = database.execute_bounded("SELECT 1 AS one", timeout_seconds=5)
+
+    assert result.fetchone()["one"] == 1
+    assert database.engine.pool.checkedout() == 0
+
+
+def test_execute_bounded_without_a_timeout_behaves_like_execute(tmp_path):
+    database = _migrated_database(tmp_path)
+
+    result = database.execute_bounded("SELECT 1 AS one")
+
+    assert result.fetchone()["one"] == 1
+    assert database.engine.pool.checkedout() == 0

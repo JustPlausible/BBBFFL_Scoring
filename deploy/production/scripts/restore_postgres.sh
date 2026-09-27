@@ -74,31 +74,54 @@ if ! pg_restore --list "$DUMP_FILE" >/dev/null 2>&1; then
     exit 1
 fi
 
-# Drop and recreate the target rather than restoring into it with
-# pg_restore --clean: --clean only drops objects present in the archive
-# being restored, so a table/sequence/type/function a later migration
-# introduced -- absent from an older pre-release archive -- would
-# otherwise survive the restore even as alembic_version goes back to that
-# older revision, and a subsequent re-attempt at that same migration would
-# then fail because its object already exists (issue #243 review). A
-# fresh, empty target database has no such leftover to worry about.
-# dropdb/createdb connect to PostgreSQL's own "postgres" maintenance
-# database to issue these commands, never to the target itself (dropping a
-# database you are connected to is impossible), so this is safe even when
-# TARGET_DB is the live database this script's own env is otherwise
-# configured to talk to.
-if psql -lqtA | cut -d '|' -f1 | grep -qxF "$TARGET_DB"; then
-    bbbffl_log "INFO" "dropping existing target database '${TARGET_DB}' for a clean restore"
-    dropdb "$TARGET_DB"
+# Restore into a fresh, uniquely-named temporary database first, and only
+# ever touch TARGET_DB once that restore has fully succeeded (issue #243
+# review, follow-up to the pg_restore --list check above): --list only
+# reads the archive's table of contents, not its data blocks, so a dump
+# truncated or corrupted past the header could still pass that check and
+# then fail partway through the real restore -- if that restore were
+# running directly against TARGET_DB (as an in-place drop-and-recreate
+# does), the failure would leave TARGET_DB empty or missing instead of
+# preserving its last usable state. Restoring into a disposable name
+# means a failed pg_restore here never touches TARGET_DB at all.
+TMP_DB="${TARGET_DB}__bbbffl_restore_tmp"
+
+_drop_if_exists() {
+    if psql -lqtA | cut -d '|' -f1 | grep -qxF "$1"; then
+        dropdb "$1"
+    fi
+}
+
+# A prior run that crashed or was killed between creating TMP_DB and
+# renaming it away could leave a stale one behind; clear it before
+# reusing the name so this script is safe to simply re-run.
+if psql -lqtA | cut -d '|' -f1 | grep -qxF "$TMP_DB"; then
+    bbbffl_log "INFO" "dropping stale temporary database '${TMP_DB}' left over from a previous attempt"
+    dropdb "$TMP_DB"
 fi
-bbbffl_log "INFO" "creating target database '${TARGET_DB}'"
-createdb "$TARGET_DB"
+bbbffl_log "INFO" "creating temporary database '${TMP_DB}' for the restore"
+createdb "$TMP_DB"
 
 # --no-owner: tolerates a target cluster whose roles do not exactly match
 # the dump's origin cluster (e.g. a differently-provisioned staging host).
-if pg_restore --no-owner --dbname="$TARGET_DB" "$DUMP_FILE"; then
-    bbbffl_log "INFO" "restore into '${TARGET_DB}' completed"
-else
-    bbbffl_alert "PostgreSQL restore of ${DUMP_FILE} into '${TARGET_DB}' FAILED"
+if ! pg_restore --no-owner --dbname="$TMP_DB" "$DUMP_FILE"; then
+    bbbffl_alert "PostgreSQL restore of ${DUMP_FILE} into temporary database '${TMP_DB}' FAILED -- '${TARGET_DB}' was never touched"
+    _drop_if_exists "$TMP_DB"
     exit 1
 fi
+bbbffl_log "INFO" "restore into temporary database '${TMP_DB}' completed -- swapping it in as '${TARGET_DB}'"
+
+# Only now, with a fully-restored and verified-complete database sitting
+# under TMP_DB, replace TARGET_DB: drop it if it already exists (dropdb
+# connects to PostgreSQL's own "postgres" maintenance database to do this,
+# never to TARGET_DB itself, so this is safe even when TARGET_DB is the
+# live database this script's own env is otherwise configured to talk to),
+# then rename TMP_DB to TARGET_DB -- a fast, atomic catalog-only operation,
+# not a second data copy. Dropping first (rather than renaming TARGET_DB
+# aside as a backup) matches this script's existing "drop and recreate the
+# target" contract from before this fix: a schema object a later migration
+# introduced, absent from an older pre-release archive, must not survive
+# the restore alongside alembic_version going back to that older revision.
+_drop_if_exists "$TARGET_DB"
+psql -d postgres -c "ALTER DATABASE \"${TMP_DB}\" RENAME TO \"${TARGET_DB}\""
+bbbffl_log "INFO" "restore into '${TARGET_DB}' completed"

@@ -160,6 +160,32 @@ class DatabaseConnection:
         with self.engine.connect() as connection:
             return _Result(connection.execute(text(statement), parameters))
 
+    def execute_bounded(self, statement, parameters=(), timeout_seconds: float | None = None):
+        """Like `execute`, but on PostgreSQL also gives the statement its own
+        `statement_timeout` (milliseconds), scoped to this one call via `SET
+        LOCAL` -- it reverts automatically once this connection is released,
+        so it can never leak onto whatever query a later caller runs on the
+        same pooled connection (unlike setting `statement_timeout` for the
+        whole session/connect_args, which would).
+
+        `connect()`'s TCP keepalive settings only detect a *dead* network
+        peer -- they do nothing when the server is reachable but simply
+        never finishes (lock contention, resource starvation): the readiness
+        probe (`app/routes/health.py`) needs a bound for that case too, or a
+        stalled backend could hold a worker/connection slot indefinitely even
+        though `GET /health/ready` itself has already returned 503 (issue
+        #243 review). No-ops the timeout on SQLite, which has no equivalent
+        and is never the production database this guards.
+        """
+        from sqlalchemy import text
+
+        statement, parameters = _translate(statement, parameters)
+        with self.engine.connect() as connection:
+            if timeout_seconds is not None and connection.dialect.name == "postgresql":
+                statement_timeout_ms = max(1, int(timeout_seconds * 1000))
+                connection.execute(text(f"SET LOCAL statement_timeout = {statement_timeout_ms}"))
+            return _Result(connection.execute(text(statement), parameters))
+
     def close(self):
         self.engine.dispose()
 

@@ -332,14 +332,21 @@ rehearsal always targets a differently named clean/staging database and
 never needs that flag. Before touching any database, the script first validates the archive with
 `pg_restore --list` (which parses the custom-format archive's table of
 contents without connecting to a database) and refuses outright if that
-fails, so a truncated, corrupted, or wrong-format dump file is caught
-before anything is dropped, not after. Only once that passes does it drop
-the target database if it already exists and create it fresh before
-restoring into it -- deliberately stronger than `pg_restore --clean` (which
+fails, so a truncated, corrupted, or wrong-format dump file's header is
+caught before anything is touched at all. That check alone cannot catch
+corruption in the archive's *data*, though (`--list` never reads past the
+table of contents) -- so the script always restores into a fresh,
+uniquely-named temporary database first, and only replaces the named
+target once that restore has fully succeeded: it drops the target if it
+already exists (deliberately stronger than `pg_restore --clean`, which
 only drops objects present in the archive being restored, so a schema
 object a later migration introduced would otherwise survive a restore to
 an older backup and collide with that migration being re-attempted
-afterward).
+afterward) and then renames the temporary database in as the target -- a
+fast, catalog-only rename, not a second data copy. A `pg_restore` failure
+partway through the temporary database's data therefore never touches the
+target at all, whether that target is a disposable staging name or the
+live production database itself (the deliberate rollback path above).
 
 **This was rehearsed, not just written down**, during this issue's work:
 backup taken from a real running production-topology database (with

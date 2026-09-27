@@ -29,7 +29,12 @@ probe is a bare `SELECT 1` and the afl-api probe is
 its own docstring for why this -- not the unauthenticated bare discovery
 route -- is what actually proves the configured `AFL_API_KEY` still works)
 -- never a write, and never an endpoint that pulls a large or fantasy-
-domain-specific dataset.
+domain-specific dataset. The database probe also gives its `SELECT 1` its
+own PostgreSQL `statement_timeout` (`app.db.DatabaseConnection.
+execute_bounded`), so a backend that is reachable but simply never
+finishes the query cannot hold a worker/connection slot past this
+endpoint's own bound, on top of `app.db.connect()`'s TCP keepalive (which
+only covers a genuinely dead network peer, not a live one that stalls).
 
 Failure detail is deliberately asymmetric: afl-api errors are already
 secret-safe by construction (`app/afl_client.py`'s error classes never
@@ -76,7 +81,9 @@ async def readiness(request: Request) -> JSONResponse:
 
     checks: dict[str, dict[str, str]] = {}
 
-    db_error = await _bounded_check(lambda: database.execute("SELECT 1"), timeout_seconds)
+    db_error = await _bounded_check(
+        lambda: database.execute_bounded("SELECT 1", timeout_seconds=timeout_seconds), timeout_seconds
+    )
     checks["database"] = (
         {"status": "ok"} if db_error is None else {"status": "error", "detail": type(db_error).__name__}
     )

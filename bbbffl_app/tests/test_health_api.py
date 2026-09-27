@@ -56,7 +56,7 @@ def test_readiness_fails_when_database_is_unavailable(client):
     from app.main import app
 
     class _BrokenDatabase:
-        def execute(self, statement, parameters=()):
+        def execute_bounded(self, statement, parameters=(), timeout_seconds=None):
             raise RuntimeError("connection refused")
 
     app.state.database = _BrokenDatabase()
@@ -112,7 +112,7 @@ def test_readiness_is_bounded_by_a_timeout_and_does_not_hang(client):
     from app.main import app
 
     class _SlowDatabase:
-        def execute(self, statement, parameters=()):
+        def execute_bounded(self, statement, parameters=(), timeout_seconds=None):
             time.sleep(1.0)
 
     app.state.database = _SlowDatabase()

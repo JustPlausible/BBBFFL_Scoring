@@ -35,7 +35,7 @@ from typing import Any, Callable
 
 import httpx
 
-from app.afl_client import SEASON_PLAYERS_PAGE_LIMIT
+from app.afl_client import SEASON_PLAYERS_PAGE_LIMIT, _is_optional_structured_name, _is_positive_int
 from app.config import get_settings
 
 REQUIRED_STAT_FIELDS = {"goals", "behinds", "disposals", "marks", "tackles", "hitouts"}
@@ -198,6 +198,31 @@ def check_historical_season(ctx: DiagnosticContext) -> None:
 SEASON_PLAYERS_MAX_PAGES = 20
 
 
+def _season_player_row_problems(row: dict[str, Any]) -> list[str]:
+    """Mirrors `AflApiClient.get_season_players`'s exact row-value
+    validation -- not just key presence -- so this check cannot certify a
+    deployment on which Season Setup would immediately fail with
+    `AflSeasonPlayersContractError`."""
+    problems = []
+    if not _is_positive_int(row.get("canonical_player_id")):
+        problems.append(f"malformed canonical_player_id: {row.get('canonical_player_id')!r}")
+    display_name = row.get("display_name")
+    if not isinstance(display_name, str) or not display_name.strip():
+        problems.append(f"blank/missing display_name: {display_name!r}")
+    for name_field in ("given_name", "family_name"):
+        if not _is_optional_structured_name(row.get(name_field)):
+            problems.append(f"malformed {name_field}: {row.get(name_field)!r}")
+    team = row.get("team")
+    if (
+        not isinstance(team, dict)
+        or not _is_positive_int(team.get("team_id"))
+        or not isinstance(team.get("name"), str)
+        or not team["name"].strip()
+    ):
+        problems.append(f"no resolved team: {team!r}")
+    return problems
+
+
 def check_season_players(ctx: DiagnosticContext) -> None:
     """GET /api/v1/seasons/{season_id}/players -- the live season-scoped
     canonical player pool (issue #237's `AflApiClient.get_season_players`),
@@ -210,7 +235,11 @@ def check_season_players(ctx: DiagnosticContext) -> None:
     version of this check used) would report a deployment compatible even
     if it rejected or clamped the production page size, or returned
     malformed/duplicate rows past the first page, while Season Setup would
-    still fail against it."""
+    still fail against it. Every row's *values* -- not just which keys are
+    present -- are validated against the same rules
+    `AflApiClient.get_season_players` enforces (a deployment that returns
+    all named keys but a null/blank/malformed value would otherwise be
+    reported compatible while Season Setup fails against it)."""
     if ctx.season_id is None:
         ctx.skip("GET /api/v1/seasons/{id}/players", "no season resolved")
         return
@@ -218,6 +247,7 @@ def check_season_players(ctx: DiagnosticContext) -> None:
     offset = 0
     seen: dict[int, dict[str, Any]] = {}
     duplicates: list[int] = []
+    invalid_rows: list[str] = []
     problems: list[str] = []
     pages = 0
     while True:
@@ -235,8 +265,12 @@ def check_season_players(ctx: DiagnosticContext) -> None:
             break
         rows = body.get("players", [])
         for row in rows:
+            row_problems = _season_player_row_problems(row)
             player_id = row.get("canonical_player_id")
-            if player_id in seen:
+            if row_problems:
+                label = player_id if _is_positive_int(player_id) else f"offset={offset} id={player_id!r}"
+                invalid_rows.append(f"{label}: {'; '.join(row_problems)}")
+            elif player_id in seen:
                 duplicates.append(player_id)
             else:
                 seen[player_id] = row
@@ -246,24 +280,16 @@ def check_season_players(ctx: DiagnosticContext) -> None:
             problems.append(f"did not terminate with a short page after {pages} pages")
             break
         offset += limit
-    ok = not problems and not duplicates and bool(seen)
-    detail = f"{len(seen)} players across {pages} page(s) (limit={limit})"
+    ok = not problems and not duplicates and not invalid_rows and bool(seen)
+    detail = f"{len(seen)} valid players across {pages} page(s) (limit={limit})"
     if not ok:
-        detail += f"; duplicates={duplicates[:5]} problems={problems}"
+        detail += f"; duplicates={duplicates[:5]} invalid_rows={invalid_rows[:5]} problems={problems}"
     ctx.record("GET /api/v1/seasons/{id}/players", ok, detail)
     if not seen:
         return
-    required_fields = {"canonical_player_id", "display_name", "team", "identifiers"}
-    missing_by_row = [(pid, sorted(required_fields - set(row.keys()))) for pid, row in seen.items()]
-    missing_by_row = [(pid, fields) for pid, fields in missing_by_row if fields]
     ctx.record(
-        "season players: rows expose canonical_player_id/display_name/team/identifiers",
-        not missing_by_row,
-        "all rows complete" if not missing_by_row else f"missing (canonical_player_id, fields)={missing_by_row[:5]}",
-    )
-    ctx.record(
-        "season players: given_name/family_name present-or-null (issue #248)",
-        all("given_name" in row and "family_name" in row for row in seen.values()),
+        "season players: rows carry provider identifiers (informational; get_season_players does not persist them)",
+        all("identifiers" in row for row in seen.values()),
         required=False,
     )
 

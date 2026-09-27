@@ -502,12 +502,43 @@ def test_diagnostic_flags_a_season_player_row_missing_a_required_field():
         return httpx.Response(404, json={"error": {"code": "not_found", "message": "no mock route"}})
 
     results = run("http://afl-api.test", VALID_KEY, transport=httpx.MockTransport(handler))
-    field_check = next(
-        r for r in results if r.name == "season players: rows expose canonical_player_id/display_name/team/identifiers"
-    )
-    assert field_check.status == "FAIL"
-    assert "2" in field_check.detail  # canonical_player_id of the broken second row
-    assert "team" in field_check.detail
+    season_players_check = next(r for r in results if r.name == "GET /api/v1/seasons/{id}/players")
+    assert season_players_check.status == "FAIL"
+    assert "invalid_rows=" in season_players_check.detail
+    assert "no resolved team" in season_players_check.detail
+
+
+def test_diagnostic_flags_season_player_rows_with_malformed_values_not_just_missing_keys():
+    """A deployment can return every named key with a value the production
+    client (`AflApiClient.get_season_players`) actually rejects -- a null
+    canonical_player_id, a blank display_name, a non-string structured
+    name, or an unresolved team. Codex review on PR #251 (P1): key-presence
+    alone must not certify such a deployment as compatible."""
+    broken = copy.deepcopy(SEASON_PLAYERS_85)
+    broken["players"][0]["canonical_player_id"] = None
+    broken["players"][1]["display_name"] = "   "
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("x-api-key") != VALID_KEY:
+            return httpx.Response(401, json=ERROR_401)
+        path = request.url.path
+        if path == "/api/v1/seasons/85/players":
+            return httpx.Response(200, json=broken)
+        routes = {
+            "/api/v1": DISCOVERY,
+            "/api/v1/seasons": SEASONS,
+            "/api/v1/seasons/85/rounds": ROUNDS_85,
+            "/api/v1/seasons/84/rounds": ROUNDS_84,
+        }
+        if path in routes:
+            return httpx.Response(200, json=routes[path])
+        return httpx.Response(404, json={"error": {"code": "not_found", "message": "no mock route"}})
+
+    results = run("http://afl-api.test", VALID_KEY, transport=httpx.MockTransport(handler))
+    season_players_check = next(r for r in results if r.name == "GET /api/v1/seasons/{id}/players")
+    assert season_players_check.status == "FAIL"
+    assert "malformed canonical_player_id" in season_players_check.detail
+    assert "blank/missing display_name" in season_players_check.detail
 
 
 def test_diagnostic_follows_season_player_pagination_to_exhaustion():
@@ -528,11 +559,11 @@ def test_diagnostic_follows_season_player_pagination_to_exhaustion():
             "team": {"team_id": 1, "name": "Home"},
             "identifiers": {"afl_player_id": 1000 + i, "champion_data_player_id": f"CD_I{i}"},
         }
-        for i in range(limit)
+        for i in range(1, limit + 1)
     ]
     page1_players = [
         {
-            "canonical_player_id": limit,
+            "canonical_player_id": limit + 1,
             "display_name": "Last Player",
             "given_name": "Last",
             "family_name": "Player",
@@ -565,7 +596,7 @@ def test_diagnostic_follows_season_player_pagination_to_exhaustion():
     results = run("http://afl-api.test", VALID_KEY, transport=httpx.MockTransport(handler))
     season_players_check = next(r for r in results if r.name == "GET /api/v1/seasons/{id}/players")
     assert season_players_check.status == "PASS", season_players_check.detail
-    assert f"{limit + 1} players across 2 page(s)" in season_players_check.detail
+    assert f"{limit + 1} valid players across 2 page(s)" in season_players_check.detail
 
 
 def test_diagnostic_flags_a_repeated_canonical_player_id_across_season_player_pages():
@@ -579,7 +610,7 @@ def test_diagnostic_flags_a_repeated_canonical_player_id_across_season_player_pa
             "team": {"team_id": 1, "name": "Home"},
             "identifiers": {},
         }
-        for i in range(limit)
+        for i in range(1, limit + 1)
     ]
     # The first row of the "second page" repeats a canonical_player_id
     # already seen on the first page instead of the real deployment's next

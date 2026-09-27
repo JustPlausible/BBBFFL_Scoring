@@ -488,7 +488,7 @@ against real data and returned a contract-compatible shape:
 | `GET /api/v1` | `{"name": "AFL-api", "version": "0.7.0", "documentation": "/docs"}` |
 | `GET /api/v1/seasons` | 15 persisted seasons (2012–2026); confirms multi-year historical access, not only the most recent season |
 | `GET /api/v1/seasons/{season_id}/rounds` | Season 85 (2026): 30 rounds, Opening Round through Grand Final, `byes` correctly array-or-null |
-| `GET /api/v1/seasons/{season_id}/players` | Season 85: complete pool followed to exhaustion at the production page size (812 players across 4 pages of `SEASON_PLAYERS_PAGE_LIMIT`=250, `limit`/`offset` echoed exactly on every page, no repeated `canonical_player_id` across pages), rows carrying `canonical_player_id`, `display_name`, `given_name`/`family_name`, season-scoped `team`, `identifiers` |
+| `GET /api/v1/seasons/{season_id}/players` | Season 85: complete pool followed to exhaustion at the production page size (812 players across 4 pages of `SEASON_PLAYERS_PAGE_LIMIT`=250, `limit`/`offset` echoed exactly on every page, no repeated `canonical_player_id` across pages), every row's *values* -- not just key presence -- validated against `AflApiClient.get_season_players`'s own rules (positive `canonical_player_id`, non-blank `display_name`, optional non-blank `given_name`/`family_name`, a resolved season-scoped `team`) |
 | `GET /api/v1/rounds/{round_id}/matches` | Every one of season 85's 218 matches, across all 30 rounds, reports `status="CONCLUDED"` (the 2026 season has fully finished) |
 | `GET /api/v1/matches/{match_id}` | Round 1 and Grand Final match detail, correct `home_team`/`away_team`/`score_home`/`score_away` shape |
 | `GET /api/v1/matches/{match_id}/player-stats` | Round 1 match (Carlton v Richmond): `lifecycle.finality="final"`, 46 player rows, every BBBFFL-scored field (`goals, behinds, disposals, marks, tackles, hitouts`) present on every row |
@@ -611,11 +611,22 @@ production page size (`SEASON_PLAYERS_PAGE_LIMIT`, 250), or returned
 malformed/duplicate rows past the first page. The check now requests the
 identical production page size and follows pagination to the terminating
 short page, failing if the echoed `limit`/`offset` ever stops matching
-what was requested or if a `canonical_player_id` repeats across pages —
-against the live deployment this now positively confirms 812 players
-across 4 pages with no such defect. Both changes are covered by hermetic
-offline tests in `tests/test_afl_contract_diagnostic.py`; no production
-application code changed.
+what was requested or if a `canonical_player_id` repeats across pages.
+
+A second Codex review pass (P1) on the same check then pointed out that
+validating only which *keys* each row carries would still certify a
+deployment that sends every named key but a value the production client
+rejects — a null `canonical_player_id`, a blank `display_name`, a
+non-string structured name, or an unresolved `team` — even though
+`AflApiClient.get_season_players` raises `AflSeasonPlayersContractError`
+on exactly those values. The check now runs the identical row-value
+validation `get_season_players` does (reusing its own `_is_positive_int`/
+`_is_optional_structured_name` predicates rather than restating the
+rules) before counting a row as valid. Against the live deployment this
+now positively confirms 812 players across 4 pages with no such defect.
+Both fixes are covered by hermetic offline tests in
+`tests/test_afl_contract_diagnostic.py`; no production application code
+changed.
 
 ## Running the opt-in live integration diagnostic
 

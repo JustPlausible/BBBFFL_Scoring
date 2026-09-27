@@ -7,7 +7,7 @@
 :root{color-scheme:dark}body{font:15px system-ui;margin:auto;max-width:1100px;padding:20px;background:#0f1115;color:#e7e9ee}a{color:#79c0ff}.card{background:#171a21;border:1px solid #303744;border-radius:10px;padding:16px;margin:14px 0}.error{background:#4a1f1f}.success{background:#1f3a24}#message:empty{display:none}table{width:100%;border-collapse:collapse}th,td{padding:6px 8px;border-bottom:1px solid #303744;text-align:left}select,button,input{font:inherit;padding:6px;border-radius:6px;background:#222733;color:inherit;border:1px solid #454d5c}input.reason{width:60%}button{cursor:pointer}.primary{background:#2869a8}.muted{color:#aab2c0;font-size:.88rem}.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.8rem;margin-left:8px}.b-complete{background:#1f3a24}.b-available,.b-action_needed{background:#2869a8}.b-blocked,.b-conflict{background:#4a1f1f}.b-optional,.b-not_applicable,.b-read_only{background:#3a3a3a}.next{border-left:4px solid #2869a8}.blockers li{color:#ffb4a8}.warnings li{color:#e0a62b}.actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}
 </style>
 </head><body>
-<a href="/admin/season-centre/{{ season_id }}">← Season Centre</a> · <a href="/scorer/dashboard">Scorer dashboard</a>
+<a href="/admin/season-centre/{{ season_id }}">← Season Centre</a> · <a href="/scorer/season-activation/{{ season_id }}">Season activation</a> · <a href="/scorer/dashboard">Scorer dashboard</a>
 <h1>Season setup</h1>
 <p class="muted">Live-season initialization. Every action re-checks its prerequisites, is safe to repeat, and is recorded against your identity with the reason you give. No 2026 replay tooling is involved.</p>
 <div id="message" class="card"></div>

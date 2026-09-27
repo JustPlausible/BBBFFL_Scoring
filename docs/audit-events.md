@@ -317,6 +317,19 @@ operator's reason. Existing actions they reuse unchanged:
 | `finals.stream.created` | `competition.stream` / `competition_id` | `FinalsBracketRepository.ensure_finals_stream` created the season's `finals` competition stream, immediately before bracket creation. |
 | `superscore.rounds.initialized` | `superscore.stream` / `competition_id` | `app.superscore_round.initialize_structure` created one or more of SS1-SS4 (listed in `after_state.created_rounds`). |
 
+## Season activation (issue #239)
+
+The explicit [`setup → active` gate](season-activation.md) introduces no new
+action: `activate_season` calls the same `SeasonRepository.
+_transition_lifecycle_in_transaction` every other lifecycle transition
+uses, which appends the existing `season.lifecycle.changed` event (see
+"Season awards and completion" above) -- `before_state={"lifecycle_state":
+"setup"}`, `after_state={"lifecycle_state": "active"}`, attributed to the
+acting Scorer/Administrator with their supplied reason. A rejected
+activation attempt -- missing prerequisites, the wrong lifecycle state, a
+missing reason, or a role other than Scorer/Administrator -- writes no
+audit event at all.
+
 ## Replay
 
 Audit events are **not** replayed to reconstruct current scoring. What the

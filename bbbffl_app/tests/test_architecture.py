@@ -395,6 +395,16 @@ ADMIN_DASHBOARD = {"app.admin_dashboard"}
 # composition root, and nothing below it may depend back on it.
 SEASON_SETUP = {"app.season_setup"}
 
+# Explicit `setup -> active` season-activation gate (issue #239): the
+# sibling application service to `app.season_completion`'s
+# `active -> completed` command, over the same season model
+# (`app.season`/`app.identity`/`app.draft`/`app.fixtures`/`app.player_pool`).
+# Deliberately kept a sibling of `app.season_setup` -- neither imports the
+# other -- so it may be composed by more than just its own thin route
+# (`app.routes.season_activation`); `app.admin_dashboard` also reads its
+# read-only preview for its additive "ready to activate" dashboard card.
+SEASON_ACTIVATION = {"app.season_activation"}
+
 ROUTES = {
     "app.routes",
     "app.routes.admin",
@@ -425,6 +435,7 @@ ROUTES = {
     "app.routes.finals_preflight",
     "app.routes.superscore_review",
     "app.routes.season_setup",
+    "app.routes.season_activation",
 }
 
 COMPOSITION_ROOT = {"app.main"}
@@ -457,6 +468,7 @@ ALL_GROUPS = (
     | FINALS_SUPERSCORE_OPEN
     | ADMIN_DASHBOARD
     | SEASON_SETUP
+    | SEASON_ACTIVATION
     | ROUTES
     | COMPOSITION_ROOT
 )
@@ -907,6 +919,25 @@ def test_season_setup_is_an_application_service(graph):
             continue
         offending = deps & SEASON_SETUP
         assert not offending, f"{module} must not depend on season setup orchestration {sorted(offending)}"
+
+
+def test_season_activation_is_an_application_service(graph):
+    """Issue #239: the explicit `setup -> active` season-activation gate
+    sits directly on the season model (`app.season`/`app.identity`/
+    `app.draft`/`app.fixtures`/`app.player_pool`), the same shape as
+    `app.season_completion` for the sibling `active -> completed`
+    transition -- it must not reach into the Grand Final vertical, routes,
+    replay tooling or the composition root. Unlike `app.season_setup`, it
+    is deliberately *not* restricted to being imported only by its own
+    route: `app.admin_dashboard` also composes its read-only preview (see
+    this file's SEASON_ACTIVATION comment), so only the reverse edge from
+    the season model/lockouts/weekly-submission-sources is forbidden."""
+    forbidden = GRAND_FINAL_VERTICAL | ROUTES | COMPOSITION_ROOT | REPLAY | REPLAY_BOOTSTRAP
+    for module in sorted(SEASON_ACTIVATION):
+        offending = graph[module] & forbidden
+        assert not offending, f"{module} must not depend on {sorted(offending)}"
+    for module in sorted(SEASON_MODEL | LOCKOUTS | WEEKLY_SUBMISSION_SOURCES):
+        assert "app.season_activation" not in graph[module], f"{module} must not depend on app.season_activation"
 
 
 def test_routes_never_import_persistence_or_season_model_directly(graph):

@@ -263,6 +263,11 @@ def _links(season_id: str, draft_started: bool, ordinary_rounds_created: bool, o
         # since it is where the prerequisites for every other link below
         # are established.
         "season_setup": f"/admin/season-setup/{season_id}",
+        # Issue #239: the explicit `setup -> active` activation gate --
+        # always reachable, like `season_setup` above, since the page
+        # itself shows readiness/blockers and refuses cleanly once the
+        # season is not currently `setup` (already active, or completed).
+        "season_activation": f"/scorer/season-activation/{season_id}",
         "draft": f"/admin/draft/{season_id}" if draft_started else None,
         "preseason": f"/admin/preseason/{season_id}" if draft_started else None,
         "round_centre": "/scorer/round-centre" if ordinary_rounds_created else None,

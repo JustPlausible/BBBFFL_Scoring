@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BBBFFL Season Activation</title>
+<style>
+:root{color-scheme:dark}body{font:15px system-ui;margin:auto;max-width:900px;padding:20px;background:#0f1115;color:#e7e9ee}a{color:#79c0ff}.card{background:#171a21;border:1px solid #303744;border-radius:10px;padding:16px;margin:14px 0}.error{background:#4a1f1f}.success{background:#1f3a24}#message:empty{display:none}input,button{font:inherit;padding:6px;border-radius:6px;background:#222733;color:inherit;border:1px solid #454d5c}input.reason{width:60%}button{cursor:pointer}button.primary{background:#2869a8}button:disabled{opacity:.5;cursor:not-allowed}.muted{color:#aab2c0;font-size:.88rem}.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.8rem;margin-left:8px}.b-ready{background:#1f3a24}.b-not_ready{background:#4a1f1f}ul.checks{list-style:none;padding:0;margin:10px 0}ul.checks li{padding:6px 8px;border-radius:6px;margin:4px 0}li.ok{background:#1f3a24}li.blocked{background:#4a1f1f}.actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}
+</style>
+</head><body>
+<a href="/admin/season-centre/{{ season_id }}">← Season Centre</a> · <a href="/admin/season-setup/{{ season_id }}">Season setup</a> · <a href="/scorer/dashboard">Scorer dashboard</a>
+<h1>Season activation</h1>
+<p class="muted">The explicit, audited <code>setup → active</code> gate (issue #239). Activation is available only to a Scorer or an Administrator, requires an explicit reason, and never happens automatically from another workflow.</p>
+<div id="message" class="card"></div>
+<main id="app"><p>Loading season activation readiness…</p></main>
+<script>
+const seasonId={{ season_id|tojson }}; const csrf={{ csrf_token|tojson }};
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function headers(){const h={'Content-Type':'application/json','X-CSRF-Token':csrf};const t=localStorage.getItem('bbbffl_admin_token');if(t)h['X-Admin-Token']=t;return h}
+async function api(path,body){const r=await fetch(path,{method:body?'POST':'GET',headers:headers(),body:body?JSON.stringify(body):undefined});const d=await r.json().catch(()=>({detail:r.statusText}));if(!r.ok)throw Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail)||r.statusText);return d}
+function say(text,kind='error'){const e=document.querySelector('#message');e.textContent=text;e.className=`card ${kind}`;e.scrollIntoView({block:'nearest'})}
+function render(data){
+  const already=data.lifecycle_state!=='setup';
+  const badge=data.ready?'<span class="badge b-ready">Ready</span>':'<span class="badge b-not_ready">Not ready</span>';
+  const checks=(data.checks||[]).map(c=>`<li class="${c.ready?'ok':'blocked'}">${c.ready?'✓':'✗'} <strong>${esc(c.label)}</strong> — ${esc(c.detail)}</li>`).join('');
+  let action='';
+  if(already){
+    action=`<p>${esc(data.diagnostic)}</p>`;
+  }else if(data.ready){
+    action=`<p>Every prerequisite is satisfied. Activating is an explicit, one-way step: the season moves from <code>setup</code> to <code>active</code> and the transition is recorded against your identity with the reason you give.</p>
+      <label class="muted">Reason <input class="reason" id="reason" value="Season setup complete; activating for live operation"></label>
+      <div class="actions"><button class="primary" id="do-activate">Activate this season</button></div>`;
+  }else{
+    action=`<p>${esc(data.diagnostic||'This season is not ready to activate yet.')}</p>`;
+  }
+  document.querySelector('#app').innerHTML=`<div class="card"><h2>Lifecycle state: <code>${esc(data.lifecycle_state)}</code> ${badge}</h2>
+    ${checks?`<ul class="checks">${checks}</ul>`:''}
+    ${action}</div>`;
+  const b=document.querySelector('#do-activate');
+  if(b)b.onclick=activate;
+}
+async function activate(){
+  const reason=document.querySelector('#reason').value;
+  if(!confirm('Activate this season now? This moves it from setup to active and is recorded in the audit trail.'))return;
+  try{
+    const result=await api(`/api/scorer/season-activation/${seasonId}/activate`,{reason});
+    say(`Season activated (lifecycle state: ${result.season.lifecycle_state}).`,'success');
+    render(result.activation);
+  }catch(e){say(e.message)}
+}
+async function load(){try{render(await api(`/api/scorer/season-activation/${seasonId}`))}catch(e){say(e.message)}}
+load();
+</script></body></html>

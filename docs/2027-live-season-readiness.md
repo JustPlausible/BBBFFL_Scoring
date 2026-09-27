@@ -2,10 +2,11 @@
 
 **Status:** current-state readiness assessment, 21 September 2026;
 remaining item 1 (fresh-season/phase initialization) updated 25 September
-2026 for issue #237; remaining item 10 (production deployment/readiness/
-backup/rollback baseline) updated 27 September 2026 for issue #243;
-remaining item 11 (live `afl-api` deployment validation) updated 27
-September 2026 for issue #244.
+2026 for issue #237; remaining item 3 (explicit `setup -> active`
+season-activation gate) updated 27 September 2026 for issue #239; remaining
+item 10 (production deployment/readiness/backup/rollback baseline) updated
+27 September 2026 for issue #243; remaining item 11 (live `afl-api`
+deployment validation) updated 27 September 2026 for issue #244.
 **Supersedes:** the current-state claims in
 [`docs/roadmap/2027-season-roadmap.md`](roadmap/2027-season-roadmap.md),
 which is now a historical planning baseline from 23 August 2026 -- see that
@@ -157,7 +158,7 @@ remain v0.2 candidates.
 | Season Centre browser routes exist (`POST /seasons`, `POST /coaches`, `POST /{season_id}/entries`) and are readiness-proven for viewing/administering an already-created season | Automated-test-proven; **creation itself is not replay-proven** | `docs/season-centre.md`. The 2026 replay's season/coach/entry records were created by the CLI bootstrap scripts (`scripts/bootstrap_round1_2026.py` et al.), not by exercising these Season Centre creation routes through a browser; every phase after the first started from a restored database where these records already existed. Found by Codex review on this PR (P2); an earlier draft of this document conflated the persisted data's existence with the browser creation workflow having been exercised. |
 | Fresh-season player pool population and rules/ordinary-competition/round creation | **Automated-test-proven + clean-database acceptance run (issue #237); staging/rehearsal-needed** | Issue #237 added the browser [Season setup](season-setup.md) page (`/admin/season-setup/{season_id}`, Scorer/Secretary/Admin): the player pool is populated/refreshed from the live afl-api season player list (`AflApiClient.get_season_players` -> `PlayerPoolRepository.refresh_season_pool`, one audited transaction, idempotent, year/AFL-season cross-checked, never from a stale cache), and the ordinary rules version, competition stream and Rounds 1-N are created in one audited transaction (`SeasonRepository.initialize_ordinary_competition`, idempotent, fail-closed on partial structure). Covered by `tests/test_season_setup*.py` and exercised against a clean disposable PostgreSQL database ([`evidence/season-setup-acceptance-2026-09-25.md`](evidence/season-setup-acceptance-2026-09-25.md)). The previously confirmed safety gap is closed: `scripts/bootstrap_2026_first_half.py` now refuses under `BBBFFL_ENVIRONMENT=production` before connecting to any database (`tests/test_bootstrap_2026_first_half_cli.py`). The live afl-api deployment itself is now confirmed reachable and contract-compatible, including the `get_season_players` endpoint specifically (issue #244, see the separate live afl-api validation row below) -- but not yet rehearsed end-to-end through this browser page against that deployment, and afl-api has not yet published a 2027 season for it to read. |
 | Provisional (not-yet-`afl-api`) player creation and later canonical reconciliation | **Outstanding / blocks v0.1 if it occurs** | Fixing the player-pool population workflow above still would not let a live 2027 season include a legitimate rookie or mid-season recruit `afl-api` does not yet represent: migration `0006_player_pool_ownership` requires a positive, non-null `canonical_player_id`, and `app.player_pool.PlayerPoolRepository` exposes only canonical `refresh_player` ingestion. `docs/plans/2027-season-model.md` requires provisional creation followed by audited canonical reconciliation, but no domain function, CLI or browser route implements it. Conditional in the same sense as the Opening Round item below: it only blocks a season that actually needs to add such a player, but that season would currently have no supported way to do so. Found by Codex review on this PR (P1); confirmed against migration `0006` and `app.player_pool`. |
-| Explicit `setup -> active` operational gate | **Outstanding / blocks v0.1** | The 2026 replay season stayed in `setup` through the entire season and was only transitioned via the supported `SeasonRepository.transition_lifecycle` CLI/domain call at closeout (`2026-finals-replay/workflow-findings.md` finding 10). This review's current route inventory (`app/routes/`) found no browser action that performs this transition. Explicitly named as a "likely v0.1" item in issue #224. |
+| Explicit `setup -> active` operational gate -- **resolved by issue #239** | Automated-test-proven; **staging/rehearsal-needed** | `GET`/`POST /api/scorer/season-activation/{season_id}` (`app/routes/season_activation.py`, page at `/scorer/season-activation/{season_id}`) is now the browser workflow: a read-only readiness preview (season entries, player pool/completed squads, ordinary competition structure, fixture-draw freeze, preseason draft finalisation -- see [`season-activation.md`](season-activation.md)) followed by an explicit, reason-required Scorer/Administrator confirmation. Reuses the existing `season.lifecycle.changed` audit event and the completed-season write fence; the lower-level `SeasonRepository.transition_lifecycle` capability is unchanged. Available from the Season Centre, Season setup's nav bar and the Administrator Dashboard's additive "ready to activate" card. Covered by `tests/test_season_activation.py`/`tests/test_season_activation_api.py`. Not yet exercised against a real production deployment or a non-technical operator. |
 | Season completion (`active -> completed`) and Premiership/Wooden Spoon award creation | Domain/test-proven and replay-proven in a non-production replay environment; **no viable production entry point today** | `app.season_completion.complete_season` is fully domain- and test-proven and was exercised successfully in the replay (`2026-finals-replay/provenance-manifest.md`), but the only wired entry point, `scripts/season_completion_2026.py`, explicitly refuses to run at all while `BBBFFL_ENVIRONMENT=production` (its own production guard). This review's route inventory found no browser route calling `complete_season`/`preview_complete_season` either. A live 2027 production deployment therefore currently has **no way to complete a season** through any surface. Not previously named as a v0.1 item in issue #224's own candidate list; recorded here as a finding from this documentation review's inspection of the current route/script inventory, not from replay evidence. |
 | Archival verification (`scripts/season_archival_checkpoint_2026.py`) | Replay-proven as a non-production operator/CLI recovery procedure; **same production guard applies** | Archival verification and a post-completion write-fence smoke test both passed in the replay environment (`2026-finals-replay/workflow-findings.md` findings 14-15), but this script's `verify` subcommand -- read-only, never mutating -- also refuses to run while `BBBFFL_ENVIRONMENT=production`, confirmed in this review's inspection of its `main()`. A production deployment cannot currently run even the read-only archival check. This compounds the season-completion gap above rather than mitigating it, and should be resolved together with it. |
 
@@ -324,9 +325,22 @@ they touch have already passed.
    coach-credentials` JSON API) is now the browser workflow every
    Administrator onboarding a coach uses; see "Coach authentication,
    ownership and privacy" above.
-3. **Explicit `setup -> active` season-activation gate** (browser action).
-   Issue #224 candidate; no implementation issue filed as of this
-   document.
+3. **Explicit `setup -> active` season-activation gate -- resolved by issue
+   #239.** `GET`/`POST /api/scorer/season-activation/{season_id}`
+   (`app/routes/season_activation.py`, page at
+   `/scorer/season-activation/{season_id}`) is now the browser workflow
+   every Scorer or Administrator uses: a read-only readiness preview
+   (season entries, player pool/completed squads, ordinary competition
+   structure, fixture-draw freeze, preseason draft finalisation) followed
+   by an explicit, reason-required confirmation, reusing the existing
+   `season.lifecycle.changed` audit event and completed-season write
+   fence -- see [`season-activation.md`](season-activation.md). Available
+   only to Scorer/Administrator authority (narrower than Season setup's
+   Scorer/Secretary/Administrator), with the readiness link surfaced from
+   the Season Centre, Season setup's own nav bar and an additive
+   Administrator Dashboard card. **Evidence level:** automated-test-proven
+   (`tests/test_season_activation.py`, `tests/test_season_activation_api.py`);
+   not yet staging/production-rehearsed.
 4. **Season completion/archival production path.** `complete_season`/
    `preview_complete_season` are fully domain-proven, but their only wired
    entry point (`scripts/season_completion_2026.py`) refuses to run under

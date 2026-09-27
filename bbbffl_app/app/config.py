@@ -90,6 +90,11 @@ _DEV_SESSION_SECRET = "dev-insecure-session-secret-change-in-production"
 # production would have handed out their admin token/session secret to
 # everyone who has ever read this file.
 _EXAMPLE_PLACEHOLDER_SECRET = "CHANGE-ME"
+# .env.production.example's checked-in POSTGRES_PASSWORD placeholder, also
+# embedded in that file's BBBFFL_DATABASE_URL example (issue #243 review,
+# follow-up) -- rejected the same way as _EXAMPLE_PLACEHOLDER_SECRET above,
+# for the same reason.
+_EXAMPLE_DB_PASSWORD_PLACEHOLDER = "CHANGE-ME-a-long-random-password"
 DEFAULT_SESSION_LIFETIME_SECONDS = 12 * 60 * 60
 
 
@@ -247,6 +252,17 @@ def get_settings() -> Settings:
     elif database_url and is_production and not database_url.split("://", 1)[0].startswith("postgresql"):
         errors.append(
             "BBBFFL_DATABASE_URL: must be a PostgreSQL URL in production (SQLite is development/test/replay only)"
+        )
+    elif database_url and is_production and urlsplit(database_url).password == _EXAMPLE_DB_PASSWORD_PLACEHOLDER:
+        # .env.production.example's own checked-in POSTGRES_PASSWORD
+        # placeholder, also embedded in its BBBFFL_DATABASE_URL example
+        # (issue #243 review, follow-up to the admin-token/session-secret
+        # placeholder checks below): unlike those two, PostgreSQL itself
+        # would happily start with this password (it has no way to know it
+        # is a public, checked-in value), so only the application refusing
+        # to run with it closes this gap.
+        errors.append(
+            "BBBFFL_DATABASE_URL: must not embed the checked-in .env.production.example placeholder PostgreSQL password"
         )
 
     raw_public_base_url = (os.getenv("BBBFFL_PUBLIC_BASE_URL") or "").strip() or None

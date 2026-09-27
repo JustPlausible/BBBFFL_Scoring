@@ -644,6 +644,39 @@ underlying gaps had not yet been fully closed:
   did not survive onto it. All three tests pass against a real
   `postgres:16-alpine` container.
 
+## O. Ninth review pass: the database password's own checked-in placeholder
+
+A ninth Codex pass, re-reviewing section L's admin-token/session-secret
+placeholder fix, found the same gap still open for a third secret:
+
+- **The checked-in `POSTGRES_PASSWORD` placeholder could satisfy
+  production startup, unlike the two secrets already fixed** (P2):
+  section L's `_EXAMPLE_PLACEHOLDER_SECRET` check covers
+  `BBBFFL_ADMIN_TOKEN`/`BBBFFL_SESSION_SECRET`, but not the database
+  password -- an operator who filled in those two correctly but left
+  `POSTGRES_DB`/`POSTGRES_USER`/`POSTGRES_PASSWORD` (and the matching
+  `BBBFFL_DATABASE_URL`) untouched would still get a deployment that
+  starts and reports healthy, using a publicly-known database-owner
+  credential. Unlike the admin token/session secret, PostgreSQL itself
+  has no way to know `POSTGRES_PASSWORD` is a checked-in public value and
+  cannot be made to refuse it -- only the application can close this gap,
+  by refusing to start if the password embedded in its own
+  `BBBFFL_DATABASE_URL` is the checked-in placeholder. Added a new
+  `_EXAMPLE_DB_PASSWORD_PLACEHOLDER` constant and a production check in
+  `get_settings()` that parses the password out of `BBBFFL_DATABASE_URL`
+  (`urllib.parse.urlsplit(...).password`) and refuses to start if it
+  matches. `.env.production.example` already keeps `POSTGRES_PASSWORD`
+  and `BBBFFL_DATABASE_URL`'s embedded password in sync (its own existing
+  comment requires this), so an unedited copy of the file now fails
+  closed at startup instead of running with a public credential.
+
+  Verified with a new regression test
+  (`test_production_refuses_the_checked_in_example_database_password_placeholder`)
+  confirming `get_settings()` raises `SettingsError` when
+  `BBBFFL_DATABASE_URL` embeds the exact checked-in placeholder password,
+  and manually confirmed `urlsplit` extracts the password correctly from
+  the documented `postgresql+psycopg://user:pass@host/db` URL shape.
+
 ## What this rehearsal does not prove
 
 - It does not prove the real production afl-api deployment is reachable or

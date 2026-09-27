@@ -355,6 +355,26 @@ def test_production_refuses_sqlite_database_url(clean_env):
     assert any("BBBFFL_DATABASE_URL" in e and "PostgreSQL" in e for e in excinfo.value.errors)
 
 
+def test_production_refuses_the_checked_in_example_database_password_placeholder(clean_env):
+    """bbbffl_app/.env.production.example's checked-in POSTGRES_PASSWORD
+    placeholder is also embedded in that file's own BBBFFL_DATABASE_URL
+    example -- PostgreSQL itself would happily start with it (it has no
+    way to know it is a public, checked-in value), so only the
+    application refusing to run with it closes this gap (issue #243
+    review, follow-up to the admin-token/session-secret placeholder
+    checks above)."""
+    _set_valid_production_env(clean_env)
+    clean_env.setenv(
+        "BBBFFL_DATABASE_URL",
+        "postgresql+psycopg://bbbffl:CHANGE-ME-a-long-random-password@database/bbbffl",
+    )
+
+    with pytest.raises(SettingsError) as excinfo:
+        get_settings()
+
+    assert any("BBBFFL_DATABASE_URL" in e for e in excinfo.value.errors)
+
+
 def test_production_refuses_missing_public_base_url(clean_env):
     _set_valid_production_env(clean_env)
     clean_env.delenv("BBBFFL_PUBLIC_BASE_URL", raising=False)

@@ -8,6 +8,26 @@ system of record. In particular, refreshing AFL club membership never changes
 fantasy ownership. Consumers should use `PlayerPoolRepository.list_selectable`
 rather than query an upstream database or match names.
 
+`given_name`/`family_name` (issue #248, afl-api commit `d21d15a`) are the
+same kind of cached, replaceable afl-api fact as `display_name` and the club
+columns: nullable, refreshed the same way, and never a second authority.
+BBBFFL never derives either field by splitting `display_name` -- a player
+with no upstream structured name simply has `NULL` in both columns,
+including every row cached before this pair existed. In short:
+
+- `canonical_player_id` -- stable AFL player identity;
+- `display_name` -- the required, preferred presentation name;
+- `given_name` / `family_name` -- cached authoritative structured-name facts
+  from afl-api, present only where afl-api resolves them;
+- AFL team ID/name -- cached season-scoped club facts.
+
+`PlayerPoolRepository.browse`'s searchable text (the shared player browser
+behind the live draft, the coach shortlist and mid-season delisting screens)
+matches `given_name`/`family_name` alongside `display_name`, the AFL club
+and the canonical ID, but default ordering stays by `display_name` -- an
+explicit given/family-name sort is later UI work building on these columns,
+not part of this cache boundary.
+
 The cache records its public-contract provider, fetch time and (when supplied)
 upstream update time. Thus a 2026 replay snapshot and a 2027 live snapshot of
 the same canonical player can coexist and can have different club facts.

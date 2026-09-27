@@ -54,6 +54,8 @@ def main() -> int:
                         {
                             "canonical_player_id": x["canonical_player_id"],
                             "display_name": x["display_name"],
+                            "given_name": x["given_name"],
+                            "family_name": x["family_name"],
                             "afl_team_id": x["team_id"],
                             "afl_team_name": x["team_name"],
                             # BBBFFL replay output policy, not an AFL-api field: every

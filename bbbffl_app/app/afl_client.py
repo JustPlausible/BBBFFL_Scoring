@@ -27,11 +27,15 @@ afl-api instance, superseding the earlier inferred assumptions):
 
   GET /api/v1/seasons/{season_id}/players?limit=250&offset=N
     {"players": [{"canonical_player_id": int, "display_name": str,
+                  "given_name": str | null, "family_name": str | null,
                   "team": {"team_id": int, "name": str} | null,
                   "identifiers": {...}}],
      "limit": int, "offset": int}
     (issue #237's live season player-pool population -- see
-    `AflApiClient.get_season_players`)
+    `AflApiClient.get_season_players`. `given_name`/`family_name` are
+    issue #248's structured-name facts, added upstream in afl-api commit
+    `d21d15a`: authoritative but optional, and never derived from
+    `display_name`.)
 
   GET /api/v1/players/{canonical_player_id}
     {"player": {"canonical_player_id": int, "display_name": str,
@@ -191,11 +195,20 @@ class SeasonPlayerRecord:
     (`GET /api/v1/seasons/{season_id}/players`). `team` is the *requested
     season's* club, never `current_team` -- see `AflApiClient.
     get_season_players`. There is deliberately no `eligible` field: afl-api
-    has none, and BBBFFL eligibility is BBBFFL's own policy."""
+    has none, and BBBFFL eligibility is BBBFFL's own policy.
+
+    `given_name`/`family_name` are issue #248's authoritative structured-name
+    facts (afl-api commit `d21d15a`): a nullable presentation-independent
+    given/family name pair supplied by afl-api. `display_name` remains the
+    required presentation/compatibility field. Neither structured field is
+    ever derived by splitting `display_name` -- a missing upstream value
+    stays `None`."""
 
     canonical_player_id: int
     display_name: str
     team: Team
+    given_name: str | None = None
+    family_name: str | None = None
 
 
 SEASON_PLAYERS_PAGE_LIMIT = 250
@@ -269,6 +282,17 @@ class AflSeasonPlayersContractError(AflApiError):
 
 def _is_positive_int(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _is_optional_structured_name(value) -> bool:
+    """`given_name`/`family_name` (issue #248) are authoritative but
+    nullable: absent or explicit `null` is valid, but a present value must
+    be a non-blank string -- afl-api never sends a blank structured name for
+    a resolved player, so a blank string here is malformed, not merely
+    unknown."""
+    if value is None:
+        return True
+    return isinstance(value, str) and bool(value.strip())
 
 
 class AflApiClient:
@@ -434,7 +458,12 @@ class AflApiClient:
         look identical to a genuine short final page), a repeated
         `canonical_player_id` fails rather than being merged, and a row with
         no resolved requested-season `team` fails rather than falling back to
-        `current_team`. Ordered by `canonical_player_id`."""
+        `current_team`. Ordered by `canonical_player_id`.
+
+        `given_name`/`family_name` (issue #248) are preserved as-supplied:
+        optional and never inferred by splitting `display_name`. A present
+        structured-name value must be non-blank or the row fails closed the
+        same as a malformed `display_name`."""
         path = f"/api/{self._contract_version}/seasons/{season_id}/players"
         limit = SEASON_PLAYERS_PAGE_LIMIT
         offset = 0
@@ -467,6 +496,16 @@ class AflApiClient:
                     raise AflSeasonPlayersContractError(
                         f"afl-api season-player {player_id} has a blank or missing display_name"
                     )
+                given_name = row.get("given_name")
+                if not _is_optional_structured_name(given_name):
+                    raise AflSeasonPlayersContractError(
+                        f"afl-api season-player {player_id} has a malformed given_name: {given_name!r}"
+                    )
+                family_name = row.get("family_name")
+                if not _is_optional_structured_name(family_name):
+                    raise AflSeasonPlayersContractError(
+                        f"afl-api season-player {player_id} has a malformed family_name: {family_name!r}"
+                    )
                 team = row.get("team")
                 if (
                     not isinstance(team, dict)
@@ -481,6 +520,8 @@ class AflApiClient:
                     canonical_player_id=player_id,
                     display_name=display_name.strip(),
                     team=Team(team_id=team["team_id"], name=team["name"].strip()),
+                    given_name=given_name.strip() if given_name else None,
+                    family_name=family_name.strip() if family_name else None,
                 )
             if len(rows) < limit:
                 break

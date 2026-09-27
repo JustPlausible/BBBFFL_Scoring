@@ -109,6 +109,8 @@ class SeasonPlayer:
     source_updated_at: str | None
     created_at: str
     updated_at: str
+    given_name: str | None = None
+    family_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -165,6 +167,8 @@ class SeasonPlayerPoolItem:
     owner_season_entry_id: str | None
     owner_team_name: str | None
     diagnostic: str | None
+    given_name: str | None = None
+    family_name: str | None = None
 
 
 def _player(row):
@@ -183,6 +187,8 @@ class PlayerPoolRepository:
         canonical_player_id,
         display_name,
         *,
+        given_name=None,
+        family_name=None,
         afl_team_id=None,
         afl_team_name=None,
         eligible=True,
@@ -190,7 +196,11 @@ class PlayerPoolRepository:
         source_fetched_at=None,
         source_updated_at=None,
     ):
-        """Upsert public afl-api facts without touching ownership history."""
+        """Upsert public afl-api facts without touching ownership history.
+
+        `given_name`/`family_name` (issue #248) are cached the same way as
+        `display_name`/the AFL club facts: authoritative, nullable afl-api
+        facts, never derived from `display_name`."""
         fetched = source_fetched_at or _now()
         with transaction(self.database) as conn:
             existing = conn.execute(
@@ -200,9 +210,13 @@ class PlayerPoolRepository:
             ).fetchone()
             if existing:
                 conn.execute(
-                    "UPDATE season_player_pool SET display_name=?, afl_team_id=?, afl_team_name=?, eligible=?, source_provider=?, source_fetched_at=?, source_updated_at=?, updated_at=? WHERE season_player_id=?",
+                    "UPDATE season_player_pool SET display_name=?, given_name=?, family_name=?, afl_team_id=?, "
+                    "afl_team_name=?, eligible=?, source_provider=?, source_fetched_at=?, source_updated_at=?, "
+                    "updated_at=? WHERE season_player_id=?",
                     (
                         display_name,
+                        given_name,
+                        family_name,
                         afl_team_id,
                         afl_team_name,
                         bool(eligible),
@@ -221,7 +235,7 @@ class PlayerPoolRepository:
                 player_id = _id()
                 created = fetched
                 conn.execute(
-                    "INSERT INTO season_player_pool VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO season_player_pool VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         player_id,
                         season_id,
@@ -235,6 +249,8 @@ class PlayerPoolRepository:
                         source_updated_at,
                         created,
                         fetched,
+                        given_name,
+                        family_name,
                     ),
                 )
         return SeasonPlayer(
@@ -250,6 +266,8 @@ class PlayerPoolRepository:
             source_updated_at,
             created,
             fetched,
+            given_name,
+            family_name,
         )
 
     def refresh_season_pool(self, season_id, players, *, source_provider, source_fetched_at=None, actor, reason=None):
@@ -260,21 +278,28 @@ class PlayerPoolRepository:
         exactly as it was.
 
         `players` is an iterable of `(canonical_player_id, display_name,
-        afl_team_id, afl_team_name)`. Like `refresh_player`, this only ever
-        touches cached afl-api facts: ownership history is never read or
-        changed, a newly-seen player is inserted eligible, and an existing
-        row keeps its current `eligible` value (eligibility is BBBFFL
-        policy, never an afl-api fact -- a refresh must not silently change
-        it). A player already in the pool but absent from `players` is left
-        untouched and reported in `missing_from_source`, never deleted: it
-        may already be owned.
+        given_name, family_name, afl_team_id, afl_team_name)`. Like
+        `refresh_player`, this only ever touches cached afl-api facts:
+        ownership history is never read or changed, a newly-seen player is
+        inserted eligible, and an existing row keeps its current `eligible`
+        value (eligibility is BBBFFL policy, never an afl-api fact -- a
+        refresh must not silently change it). A player already in the pool
+        but absent from `players` is left untouched and reported in
+        `missing_from_source`, never deleted: it may already be owned.
+
+        `given_name`/`family_name` (issue #248) are refreshed the same way
+        as `display_name` and the AFL club facts -- authoritative, nullable
+        afl-api facts, never derived by splitting `display_name`.
 
         Refuses (`ValueError`, nothing written) if the pool already holds
         rows cached from a different `source_provider` -- the provider
         string records which AFL season the pool was read from, so this is
         what stops one BBBFFL season's pool being silently mixed with
         another AFL season's players."""
-        rows = [(int(pid), name, team_id, team_name) for pid, name, team_id, team_name in players]
+        rows = [
+            (int(pid), name, given_name, family_name, team_id, team_name)
+            for pid, name, given_name, family_name, team_id, team_name in players
+        ]
         if not rows:
             raise ValueError("a season pool refresh requires at least one provider player")
         if len({row[0] for row in rows}) != len(rows):
@@ -303,11 +328,11 @@ class PlayerPoolRepository:
                     "refusing to mix player pools from different sources"
                 )
             inserted = updated = unchanged = 0
-            for canonical_player_id, display_name, afl_team_id, afl_team_name in rows:
+            for canonical_player_id, display_name, given_name, family_name, afl_team_id, afl_team_name in rows:
                 row = existing.get(canonical_player_id)
                 if row is None:
                     conn.execute(
-                        "INSERT INTO season_player_pool VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "INSERT INTO season_player_pool VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             _id(),
                             season_id,
@@ -321,15 +346,19 @@ class PlayerPoolRepository:
                             None,
                             fetched,
                             fetched,
+                            given_name,
+                            family_name,
                         ),
                     )
                     inserted += 1
                     continue
-                if (row["display_name"], row["afl_team_id"], row["afl_team_name"]) == (
-                    display_name,
-                    afl_team_id,
-                    afl_team_name,
-                ):
+                if (
+                    row["display_name"],
+                    row["given_name"],
+                    row["family_name"],
+                    row["afl_team_id"],
+                    row["afl_team_name"],
+                ) == (display_name, given_name, family_name, afl_team_id, afl_team_name):
                     conn.execute(
                         "UPDATE season_player_pool SET source_fetched_at=? WHERE season_player_id=?",
                         (fetched, row["season_player_id"]),
@@ -337,9 +366,18 @@ class PlayerPoolRepository:
                     unchanged += 1
                     continue
                 conn.execute(
-                    "UPDATE season_player_pool SET display_name=?, afl_team_id=?, afl_team_name=?, "
-                    "source_fetched_at=?, updated_at=? WHERE season_player_id=?",
-                    (display_name, afl_team_id, afl_team_name, fetched, fetched, row["season_player_id"]),
+                    "UPDATE season_player_pool SET display_name=?, given_name=?, family_name=?, afl_team_id=?, "
+                    "afl_team_name=?, source_fetched_at=?, updated_at=? WHERE season_player_id=?",
+                    (
+                        display_name,
+                        given_name,
+                        family_name,
+                        afl_team_id,
+                        afl_team_name,
+                        fetched,
+                        fetched,
+                        row["season_player_id"],
+                    ),
                 )
                 updated += 1
             source_ids = {row[0] for row in rows}
@@ -487,7 +525,14 @@ class PlayerPoolRepository:
             if owner_season_entry_id is not None and row["owner_season_entry_id"] != owner_season_entry_id:
                 continue
             searchable = " ".join(
-                str(value or "") for value in (row["display_name"], row["afl_team_name"], row["canonical_player_id"])
+                str(value or "")
+                for value in (
+                    row["display_name"],
+                    row["given_name"],
+                    row["family_name"],
+                    row["afl_team_name"],
+                    row["canonical_player_id"],
+                )
             ).casefold()
             if needles and not all(needle in searchable for needle in needles):
                 continue
@@ -511,6 +556,8 @@ class PlayerPoolRepository:
                     owner_season_entry_id=row["owner_season_entry_id"],
                     owner_team_name=row["owner_team_name"],
                     diagnostic=diagnostic,
+                    given_name=row["given_name"],
+                    family_name=row["family_name"],
                 )
             )
         return items[: max(limit, 0)]

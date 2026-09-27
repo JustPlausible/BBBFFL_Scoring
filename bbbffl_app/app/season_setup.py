@@ -258,7 +258,10 @@ def refresh_player_pool(database, afl_client, season_id: str, afl_season_id: int
     try:
         summary = PlayerPoolRepository(database).refresh_season_pool(
             season_id,
-            [(p.canonical_player_id, p.display_name, p.team.team_id, p.team.name) for p in players],
+            [
+                (p.canonical_player_id, p.display_name, p.given_name, p.family_name, p.team.team_id, p.team.name)
+                for p in players
+            ],
             source_provider=live_source_provider(afl_season_id),
             actor=actor,
             reason=reason,

@@ -15,6 +15,8 @@ DEFAULT_PLAYERS = [
     {
         "canonical_player_id": 44,
         "display_name": "Participant",
+        "given_name": "Part",
+        "family_name": "Icipant",
         "team": {"team_id": 1, "name": "A"},
         "identifiers": {"provider": "p44"},
     },
@@ -581,6 +583,12 @@ def test_successful_acquisition_writes_bootstrap_compatible_player_pool(tmp_path
     assert pool["source"] == {"provider": "afl-api-v1", "season_year": 2026}
     assert {p["canonical_player_id"] for p in pool["players"]} == {44, 99}
     assert all(p["eligible"] is True for p in pool["players"])
+    # Issue #248: given_name/family_name flow from the acquired evidence into
+    # the bootstrap-compatible pool output, and stay None when afl-api didn't
+    # supply them for a player -- never derived from display_name.
+    by_id = {p["canonical_player_id"]: p for p in pool["players"]}
+    assert (by_id[44]["given_name"], by_id[44]["family_name"]) == ("Part", "Icipant")
+    assert (by_id[99]["given_name"], by_id[99]["family_name"]) == (None, None)
 
 
 def test_write_json_pair_atomic_stages_every_output_before_replacing_any(tmp_path):

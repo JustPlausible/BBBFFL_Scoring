@@ -451,13 +451,18 @@ def _season_players_client(pages):
     return api, requested
 
 
-def _row(player_id, team=None):
-    return {
+def _row(player_id, team=None, *, given_name=None, family_name=None):
+    row = {
         "canonical_player_id": player_id,
         "display_name": f"Player {player_id}",
         "team": {"team_id": 3, "name": "Carlton"} if team is None else team,
         "identifiers": {"afl_player_id": "CD_I1"},
     }
+    if given_name is not None:
+        row["given_name"] = given_name
+    if family_name is not None:
+        row["family_name"] = family_name
+    return row
 
 
 def test_get_season_players_follows_every_page_and_uses_the_requested_season_team():
@@ -486,6 +491,42 @@ def test_get_season_players_follows_every_page_and_uses_the_requested_season_tea
     ]
 
 
+def test_get_season_players_preserves_structured_names_when_present():
+    """Issue #248: `given_name`/`family_name` are read from afl-api's
+    response and preserved on `SeasonPlayerRecord` unchanged -- never
+    inferred by splitting `display_name`."""
+    from app.afl_client import SeasonPlayerRecord
+
+    body = {
+        "players": [_row(1, given_name="Nick", family_name="Daicos")],
+        "limit": 250,
+        "offset": 0,
+    }
+    api, _requested = _season_players_client({0: body})
+    try:
+        players = api.get_season_players(71)
+    finally:
+        api.close()
+    assert players == [SeasonPlayerRecord(1, "Player 1", Team(3, "Carlton"), given_name="Nick", family_name="Daicos")]
+
+
+def test_get_season_players_leaves_missing_structured_names_as_none():
+    """A row with no `given_name`/`family_name` at all (the common case for
+    upstream players without resolved structured names) is valid, and both
+    fields stay `None` rather than being derived from `display_name`."""
+    from app.afl_client import SeasonPlayerRecord
+
+    body = {"players": [_row(1)], "limit": 250, "offset": 0}
+    api, _requested = _season_players_client({0: body})
+    try:
+        players = api.get_season_players(71)
+    finally:
+        api.close()
+    assert players == [SeasonPlayerRecord(1, "Player 1", Team(3, "Carlton"))]
+    assert players[0].given_name is None
+    assert players[0].family_name is None
+
+
 @pytest.mark.parametrize(
     ("body", "message"),
     [
@@ -495,6 +536,14 @@ def test_get_season_players_follows_every_page_and_uses_the_requested_season_tea
         ({"players": [], "limit": 250, "offset": 0}, "empty player pool"),
         ({"players": [{"canonical_player_id": "x", "display_name": "A"}], "limit": 250, "offset": 0}, "malformed"),
         ({"items": []}, "expected a players list"),
+        (
+            {"players": [_row(1, given_name=123)], "limit": 250, "offset": 0},
+            "malformed given_name",
+        ),
+        (
+            {"players": [_row(1, family_name="   ")], "limit": 250, "offset": 0},
+            "malformed family_name",
+        ),
     ],
 )
 def test_get_season_players_fails_closed_on_an_incomplete_or_malformed_pool(body, message):

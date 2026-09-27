@@ -156,6 +156,16 @@ no-delete triggers as `0011`/`0012`. See
 [`weekly-lineups.md`](weekly-lineups.md#authorised-correction-of-an-already-locked-lineup-issue-137).
 Downgrade refuses once `weekly_lineup_correction` holds any row.
 
+Revision `0036_player_structured_names` (issue #248) adds nullable
+`given_name`/`family_name` columns to `season_player_pool`, preserving
+afl-api's structured player-name facts (afl-api commit `d21d15a`) alongside
+the existing `display_name`/club cache columns. Purely additive: existing
+rows keep `NULL` in both columns, and there is no backfill (BBBFFL never
+derives a structured name by splitting `display_name`). Downgrade drops both
+columns outright with no refusal case, since they carry no BBBFFL-authored
+state -- only cached, replaceable afl-api facts, unlike this file's other
+history-preserving revisions above.
+
 ## Migration authoring and rollback
 
 Every relational change must be a new ordered revision. Do not add startup DDL

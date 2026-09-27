@@ -45,6 +45,16 @@ def _is_positive_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
+def _is_optional_structured_name(value: Any) -> bool:
+    """`given_name`/`family_name` (issue #248) are authoritative but
+    nullable, mirroring `app.afl_client._is_optional_structured_name` --
+    duplicated rather than imported so replay evidence acquisition stays
+    independent of the live client module."""
+    if value is None:
+        return True
+    return isinstance(value, str) and bool(value.strip())
+
+
 def _acquire_season_players(api: ConsumerApi, players_path: str) -> tuple[dict[int, dict], int]:
     """Follow the AFL-api #248 season-player collection to exhaustion.
 
@@ -103,6 +113,16 @@ def _acquire_season_players(api: ConsumerApi, players_path: str) -> tuple[dict[i
                 raise ReplayEvidenceError(
                     f"AFL season-player {player_id} at {page_path} has a blank or missing display_name"
                 )
+            given_name = row.get("given_name")
+            if not _is_optional_structured_name(given_name):
+                raise ReplayEvidenceError(
+                    f"AFL season-player {player_id} at {page_path} has a malformed given_name: {given_name!r}"
+                )
+            family_name = row.get("family_name")
+            if not _is_optional_structured_name(family_name):
+                raise ReplayEvidenceError(
+                    f"AFL season-player {player_id} at {page_path} has a malformed family_name: {family_name!r}"
+                )
             # BBBFFL requires a resolved requested-season team even though
             # AFL-api permits team: null for unresolved membership; never
             # fall back to current_team, another season, or match-stat team
@@ -126,6 +146,8 @@ def _acquire_season_players(api: ConsumerApi, players_path: str) -> tuple[dict[i
             players[player_id] = {
                 "canonical_player_id": player_id,
                 "display_name": display_name,
+                "given_name": given_name.strip() if given_name else None,
+                "family_name": family_name.strip() if family_name else None,
                 "team_id": team_id,
                 "team_name": team_name,
                 "identifiers": row.get("identifiers", {}),

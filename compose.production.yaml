@@ -76,6 +76,23 @@ services:
       database:
         condition: service_healthy
     entrypoint: ["/scripts/backup_entrypoint.sh"]
+    # A cron child job's exit code does not change this container's own
+    # status (PID 1 stays the foreground crond daemon regardless), so a
+    # backup that has silently stopped succeeding would otherwise be
+    # visible only in logs or an optional webhook. This makes
+    # `docker compose ps` itself report "unhealthy" once no successful
+    # backup is newer than BBBFFL_BACKUP_MAX_AGE_HOURS -- see
+    # deploy/production/scripts/check_backup_freshness.sh and
+    # docs/production-operations.md#scheduled-backups. start_period covers
+    # the time before the first scheduled backup has ever run; an operator
+    # changing BBBFFL_BACKUP_SCHEDULE to something less frequent than daily
+    # must widen both BBBFFL_BACKUP_MAX_AGE_HOURS and start_period to match.
+    healthcheck:
+      test: ["CMD", "/scripts/check_backup_freshness.sh"]
+      interval: 1h
+      timeout: 10s
+      start_period: 26h
+      retries: 1
     volumes:
       - ./deploy/production/scripts:/scripts:ro
       - ./deploy/production/backups:/backups

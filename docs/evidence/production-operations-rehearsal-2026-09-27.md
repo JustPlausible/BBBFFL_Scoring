@@ -269,6 +269,59 @@ preserved replay database):
     0035_coach_draft_shortlist                <- unchanged
    ```
 
+## H. Post-review fixes, re-verified
+
+Codex review on the PR found six issues across two passes, all fixed and
+re-verified against real containers before being marked resolved (none
+required re-running the full rehearsal above -- each was independently
+reproducible in isolation):
+
+- **`PGHOST` unset for a direct backup invocation** (P1): reproduced the
+  documented pre-release-backup command
+  (`docker compose exec -T backup /scripts/backup_postgres.sh`, no
+  `PGHOST` set) failing with `could not connect to server: No such file or
+  directory` (local socket), matching the review's description exactly.
+  After defaulting `PGHOST=database` in the script, the same command
+  succeeded.
+- **World-readable dumps** (P2): confirmed the pre-fix dump was
+  `-rw-r--r--` (0644); after adding `umask 077`, a fresh dump was
+  `-rw-------` (0600).
+- **Malformed alert JSON** (P1): confirmed the pre-fix payload embedding a
+  readiness-endpoint JSON body (with its own embedded double quotes) was
+  not valid JSON; after JSON-escaping the message, the same input produced
+  a payload that parsed cleanly with `python3 -c "import json; ..."`.
+- **`$POSTGRES_DB` expanding on the host, not the container** (P1):
+  reasoned fix (host shell has no `POSTGRES_DB`; only `env_file:` injects
+  it into the container) -- corrected the documented command to
+  `sh -c '... "$POSTGRES_DB"'` so it expands inside the container.
+- **ntfy.sh payload-schema mismatch** (P2): narrowed the documented
+  `BBBFFL_ALERT_WEBHOOK_URL` claim to the one schema actually implemented
+  (Slack-compatible `{"text": ...}`), rather than falsely advertising
+  compatibility with a destination whose JSON schema differs.
+- **Cron child failures invisible in container status** (P2): confirmed by
+  reasoning (PID 1 is `crond`, unaffected by a child job's exit code) --
+  addressed by adding a real `HEALTHCHECK`
+  (`deploy/production/scripts/check_backup_freshness.sh`) to the `backup`
+  service. Rehearsed all three states directly:
+  ```
+  $ docker compose exec -T backup /scripts/check_backup_freshness.sh   # no backup yet
+  no successful backup in /backups newer than 26h
+  exit=1
+  $ docker compose exec -T backup /scripts/backup_postgres.sh          # take one
+  ...backup succeeded...
+  $ docker compose exec -T backup /scripts/check_backup_freshness.sh   # now fresh
+  exit=0
+  $ docker compose exec -T backup sh -c 'BBBFFL_BACKUP_MAX_AGE_HOURS=0 /scripts/check_backup_freshness.sh'
+  no successful backup in /backups newer than 0h
+  exit=1
+  ```
+  and confirmed `docker compose ps`/`docker inspect .State.Health` reflect
+  it: `Up ... (health: starting)` before the first backup (the 26h
+  `start_period` means Docker reports `starting`, not `unhealthy`, during
+  that initial window -- an operator would still notice a container stuck
+  in `starting` well past its first expected backup), then
+  `Up ... (healthy)` immediately after one succeeds.
+
 ## What this rehearsal does not prove
 
 - It does not prove the real production afl-api deployment is reachable or

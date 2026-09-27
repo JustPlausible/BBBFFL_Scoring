@@ -105,7 +105,7 @@ into the repository):
 | `BBBFFL_ADMIN_TOKEN` | Shared legacy admin-interface token | `openssl rand -hex 32`. Required in production -- `get_settings()` refuses to start without it (see `docs/settings.md`). |
 | `BBBFFL_SESSION_SECRET` | Coach sign-in/sign-out CSRF signing key | `openssl rand -hex 32`. The development placeholder is refused outright in production. |
 | `AFL_API_KEY` | afl-api credential, if the deployment requires one | Supplied by the afl-api operator; never logged (see `app/config.py`'s module docstring). |
-| `BBBFFL_ALERT_WEBHOOK_URL` | Optional alert delivery | A Slack incoming webhook, ntfy.sh topic, or similar. Not a secret in the same sense as the above, but still kept out of the repository since it is deployment-specific. |
+| `BBBFFL_ALERT_WEBHOOK_URL` | Optional alert delivery | A Slack (or Slack-compatible) incoming webhook URL -- see ["Logging and alerting"](#logging-and-alerting) for the exact payload shape and what a different destination would need. Not a secret in the same sense as the above, but still kept out of the repository since it is deployment-specific. |
 
 **What is safe to commit:** `bbbffl_app/.env.production.example` and
 `deploy/production/Caddyfile.example` only -- both contain placeholder
@@ -245,9 +245,25 @@ runs Alpine's `crond` in the foreground as its PID 1
 - prunes files older than `BBBFFL_BACKUP_RETENTION_DAYS` (default `14`)
   after a successful run only -- a failed run never deletes anything;
 - on failure, logs `CRITICAL` and, if `BBBFFL_ALERT_WEBHOOK_URL` is
-  configured, POSTs a short alert, then exits non-zero (visible via
-  `docker compose -f compose.production.yaml logs backup` and via the
-  container's own exit-status history in `docker compose ps -a`).
+  configured, POSTs a short alert, then exits non-zero. **This exit code is
+  not, by itself, visible in container status for a scheduled run**: the
+  failing run is a cron child job, and the container's PID 1 stays the
+  foreground `crond` daemon regardless of that job's exit code, so
+  `docker compose ps` alone does not go "unhealthy" just because one
+  scheduled backup failed. `docker compose -f compose.production.yaml logs
+  backup` always shows it.
+
+Because of that gap, the `backup` service also carries its own `HEALTHCHECK`
+(`deploy/production/scripts/check_backup_freshness.sh`): it fails whenever
+no successful backup exists newer than `BBBFFL_BACKUP_MAX_AGE_HOURS`
+(default 26h -- the daily schedule plus a two-hour grace window), so
+`docker compose ps` itself reports the `backup` service `unhealthy` once
+backups have silently stopped succeeding for roughly a day, independent of
+the log/webhook path and even when `BBBFFL_ALERT_WEBHOOK_URL` is left
+unset. An operator changing `BBBFFL_BACKUP_SCHEDULE` to something less
+frequent than daily must widen both `BBBFFL_BACKUP_MAX_AGE_HOURS` and the
+healthcheck's `start_period`/`interval` in `compose.production.yaml` to
+match, or this check will report unhealthy between every expected run.
 
 Files land in `deploy/production/backups/` -- a host bind mount, outside
 every container's writable/ephemeral layer, so removing or recreating the
@@ -346,17 +362,35 @@ Backup failures log the same way (`CRITICAL`, from
 `docker compose -f compose.production.yaml logs backup`.
 
 **Alerting.** A log nobody tails does not detect anything, so this issue
-adds one lightweight, reproducible mechanism used consistently by both the
-backup script and the readiness watchdog below: `BBBFFL_ALERT_WEBHOOK_URL`,
-an optional generic webhook URL (a Slack incoming webhook, an ntfy.sh topic
-URL, a healthchecks.io "fail" URL, or anything else that accepts an HTTP
-POST) that a failure POSTs a short JSON payload to. This was chosen over a
-dedicated observability stack because a ten-coach league does not need
-one, and because the same primitive (`lib_alert.sh`'s `bbbffl_alert`)
-covers every failure mode this issue lists:
+adds two complementary, reproducible mechanisms rather than one that only
+works when correctly configured:
+
+1. `BBBFFL_ALERT_WEBHOOK_URL`, an optional webhook URL that a failure POSTs
+   a short JSON payload to (`{"text": "BBBFFL: <message>"}`) -- the same
+   schema a **Slack (or Slack-compatible) incoming webhook** expects. This
+   is deliberately the one payload shape this issue implements, not a
+   generic multi-destination adapter: a destination with a different JSON
+   schema (ntfy.sh's JSON publish API expects `{"message": ...}`, for
+   example) needs `lib_alert.sh`'s payload adjusted to match before use --
+   check the destination's own documented schema first. `healthchecks.io`
+   remains a good fit for `BBBFFL_BACKUP_SUCCESS_PING_URL` below, whose
+   dead-man's-switch usage needs no JSON body at all.
+2. The `backup` service's own `HEALTHCHECK` (see
+   ["Scheduled backups"](#scheduled-backups)) -- a real, `docker compose
+   ps`-visible failure signal that works even when
+   `BBBFFL_ALERT_WEBHOOK_URL` is left unset, specifically because a cron
+   child job's exit code does not otherwise change the container's own
+   status.
+
+Both were chosen over a dedicated observability stack because a ten-coach
+league does not need one. The webhook primitive (`lib_alert.sh`'s
+`bbbffl_alert`) covers every failure mode this issue lists that a webhook
+can meaningfully report:
 
 - **backup failure**: `backup_postgres.sh` alerts directly (rehearsed --
-  see the evidence document).
+  see the evidence document), and the `HEALTHCHECK` above catches a
+  backup that has silently stopped succeeding even without the webhook
+  configured.
 - **critical service/dependency failure**: **not** the Docker
   `HEALTHCHECK`/`condition: service_healthy` (those drive restart/liveness
   decisions only, per ["Readiness vs liveness"](#readiness-vs-liveness))

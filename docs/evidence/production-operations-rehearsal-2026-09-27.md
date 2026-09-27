@@ -407,6 +407,30 @@ rehearsal:
   fails to even resolve the hostname (`NXDOMAIN`) -- proxy has no network
   path to the database at all, not merely no credential for it.
 
+## K. Fifth review pass: backup/restore serialization and a config-validation gap
+
+A fifth Codex pass found two more P2s:
+
+- **A scheduled backup could race a live database-affecting rollback**:
+  the documented rollback procedure stopped `app` but left `backup`'s
+  cron running, so a scheduled `pg_dump` firing mid-restore could hold a
+  connection that makes `dropdb` fail, or archive a database
+  `restore_postgres.sh` had only half-rebuilt. Fixed the documented
+  procedure to stop `backup` too, run the restore from a disposable
+  one-off container (`docker compose run --rm --entrypoint sh backup -c
+  '...'` -- overriding the entrypoint, since the service's own
+  `backup_entrypoint.sh` ignores any command passed to it and always
+  starts `crond`), then restart the real `backup` service afterward.
+  Rehearsed the exact corrected command sequence against a real database:
+  stopped `backup`, ran the one-off restore container successfully
+  (`exit=0`, same drop/create/restore behaviour as section E/I), then
+  confirmed `backup` restarts cleanly afterward.
+- **`BBBFFL_READINESS_TIMEOUT_SECONDS` accepted `inf`/`nan`**: `float()`
+  parses both, and the existing `<= 0` check does not reject either
+  (`inf > 0`, and every comparison with `nan` is `False`). Added a
+  `math.isfinite()` check alongside the positivity check, and parametrized
+  regression tests for `inf`, `-inf` and `nan`.
+
 ## What this rehearsal does not prove
 
 - It does not prove the real production afl-api deployment is reachable or

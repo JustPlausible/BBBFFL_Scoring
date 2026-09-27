@@ -63,6 +63,7 @@ requesting an unimplemented version fails at startup instead of BBBFFL
 silently trying to speak a contract it does not support.
 """
 
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -322,8 +323,12 @@ def get_settings() -> Settings:
         errors.append("BBBFFL_SESSION_LIFETIME_SECONDS: must be a positive number of seconds")
 
     readiness_timeout_seconds = float(os.getenv("BBBFFL_READINESS_TIMEOUT_SECONDS", "5"))
-    if readiness_timeout_seconds <= 0:
-        errors.append("BBBFFL_READINESS_TIMEOUT_SECONDS: must be a positive number of seconds")
+    # math.isfinite() rejects "inf"/"nan" (both valid float() input): an
+    # infinite timeout would remove GET /health/ready's promised bound on a
+    # stuck dependency call entirely, and NaN's comparisons are always
+    # False, which would silently defeat the `<= 0` check below without it.
+    if not math.isfinite(readiness_timeout_seconds) or readiness_timeout_seconds <= 0:
+        errors.append("BBBFFL_READINESS_TIMEOUT_SECONDS: must be a positive, finite number of seconds")
 
     if errors:
         raise SettingsError(errors)

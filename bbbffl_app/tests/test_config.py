@@ -277,6 +277,20 @@ def test_readiness_timeout_must_be_positive(clean_env):
     assert any("BBBFFL_READINESS_TIMEOUT_SECONDS" in e for e in excinfo.value.errors)
 
 
+@pytest.mark.parametrize("bad_value", ["inf", "-inf", "nan"])
+def test_readiness_timeout_rejects_non_finite_values(clean_env, bad_value):
+    """float() itself accepts "inf"/"nan" -- an infinite timeout would
+    remove GET /health/ready's promised bound on a stuck dependency call
+    entirely, and NaN's comparisons are always False, silently defeating a
+    bare `<= 0` check (issue #243 review)."""
+    clean_env.setenv("BBBFFL_READINESS_TIMEOUT_SECONDS", bad_value)
+
+    with pytest.raises(SettingsError) as excinfo:
+        get_settings()
+
+    assert any("BBBFFL_READINESS_TIMEOUT_SECONDS" in e for e in excinfo.value.errors)
+
+
 def test_production_refuses_missing_database_url(clean_env):
     _set_valid_production_env(clean_env)
     clean_env.delenv("BBBFFL_DATABASE_URL", raising=False)

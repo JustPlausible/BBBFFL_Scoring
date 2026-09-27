@@ -516,17 +516,26 @@ would discard, **restoring the pre-release backup taken in the release
 procedure's step 2 is the correct safe recovery path**:
 
 ```bash
-docker compose -f compose.production.yaml stop app        # stop writes first
-# $POSTGRES_DB must expand *inside* the backup container (env_file: only
-# injects it there, not into the operator's host shell) -- a bare
-# "$POSTGRES_DB" on the host expands to empty and both silently bypasses
-# the live-database safety guard below and passes an empty target name.
-docker compose -f compose.production.yaml exec -T backup sh -c '
+docker compose -f compose.production.yaml stop app backup  # stop writes first --
+                                                             # "backup" too: a
+                                                             # scheduled pg_dump
+                                                             # firing mid-restore
+                                                             # could hold a
+                                                             # connection that
+                                                             # makes dropdb fail,
+                                                             # or dump a database
+                                                             # only half-restored
+# $POSTGRES_DB must expand *inside* a container carrying that env_file
+# (the host shell has no such variable), and "backup" is stopped, so run a
+# disposable one-off container from the same image/env, overriding its
+# entrypoint (which would otherwise ignore this command and start crond
+# again) to run the restore directly instead.
+docker compose -f compose.production.yaml run --rm --entrypoint sh backup -c '
   BBBFFL_ALLOW_RESTORE_OVER_LIVE_DATABASE=yes \
     /scripts/restore_postgres.sh /backups/<pre-release-backup>.dump "$POSTGRES_DB"
 '
 export BBBFFL_RELEASE_TAG=<previous-known-good-tag>
-docker compose -f compose.production.yaml up -d app
+docker compose -f compose.production.yaml up -d app backup  # restart both
 curl -f https://<domain>/health/ready
 ```
 

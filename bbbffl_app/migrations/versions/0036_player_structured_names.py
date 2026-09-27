@@ -24,7 +24,7 @@ data-loss refusal, unlike this codebase's submitted-history migrations.
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0036_season_player_structured_names"
+revision = "0036_player_structured_names"
 down_revision = "0035_coach_draft_shortlist"
 branch_labels = None
 depends_on = None

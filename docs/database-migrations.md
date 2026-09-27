@@ -156,7 +156,7 @@ no-delete triggers as `0011`/`0012`. See
 [`weekly-lineups.md`](weekly-lineups.md#authorised-correction-of-an-already-locked-lineup-issue-137).
 Downgrade refuses once `weekly_lineup_correction` holds any row.
 
-Revision `0036_season_player_structured_names` (issue #248) adds nullable
+Revision `0036_player_structured_names` (issue #248) adds nullable
 `given_name`/`family_name` columns to `season_player_pool`, preserving
 afl-api's structured player-name facts (afl-api commit `d21d15a`) alongside
 the existing `display_name`/club cache columns. Purely additive: existing

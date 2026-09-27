@@ -63,6 +63,7 @@ requesting an unimplemented version fails at startup instead of BBBFFL
 silently trying to speak a contract it does not support.
 """
 
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -81,6 +82,19 @@ SUPPORTED_AFL_API_CONTRACT_VERSIONS = ("v1",)
 # when BBBFFL_ENVIRONMENT=production, in case a deployment ever copies
 # .env.example without changing it.
 _DEV_SESSION_SECRET = "dev-insecure-session-secret-change-in-production"
+# bbbffl_app/.env.production.example's own placeholder for every secret an
+# operator must fill in (issue #243 review): that file's fields are left
+# empty precisely so a forgotten one fails closed on its own, but this is
+# rejected outright as belt-and-suspenders -- a public repository's example
+# file is not a secret, so anyone who left this exact literal value in
+# production would have handed out their admin token/session secret to
+# everyone who has ever read this file.
+_EXAMPLE_PLACEHOLDER_SECRET = "CHANGE-ME"
+# .env.production.example's checked-in POSTGRES_PASSWORD placeholder, also
+# embedded in that file's BBBFFL_DATABASE_URL example (issue #243 review,
+# follow-up) -- rejected the same way as _EXAMPLE_PLACEHOLDER_SECRET above,
+# for the same reason.
+_EXAMPLE_DB_PASSWORD_PLACEHOLDER = "CHANGE-ME-a-long-random-password"
 DEFAULT_SESSION_LIFETIME_SECONDS = 12 * 60 * 60
 
 
@@ -192,6 +206,11 @@ class Settings:
     public_base_url: str | None
     poll_interval_seconds: int
     log_level: str
+    # Bounds the dependency-readiness check (GET /health/ready, issue #243)
+    # -- both the database probe and, when afl_mode == "live", the afl-api
+    # connectivity probe are each run under this timeout, so a stuck
+    # dependency can never hang the readiness request indefinitely.
+    readiness_timeout_seconds: float
     # SuperScore is entirely opt-in: unset (the default), the app behaves
     # exactly as it does today -- no SuperScore state, routes still exist
     # but report disabled. Set BBBFFL_SUPERSCORE_CONFIG_PATH to a checked-in
@@ -233,6 +252,17 @@ def get_settings() -> Settings:
     elif database_url and is_production and not database_url.split("://", 1)[0].startswith("postgresql"):
         errors.append(
             "BBBFFL_DATABASE_URL: must be a PostgreSQL URL in production (SQLite is development/test/replay only)"
+        )
+    elif database_url and is_production and urlsplit(database_url).password == _EXAMPLE_DB_PASSWORD_PLACEHOLDER:
+        # .env.production.example's own checked-in POSTGRES_PASSWORD
+        # placeholder, also embedded in its BBBFFL_DATABASE_URL example
+        # (issue #243 review, follow-up to the admin-token/session-secret
+        # placeholder checks below): unlike those two, PostgreSQL itself
+        # would happily start with this password (it has no way to know it
+        # is a public, checked-in value), so only the application refusing
+        # to run with it closes this gap.
+        errors.append(
+            "BBBFFL_DATABASE_URL: must not embed the checked-in .env.production.example placeholder PostgreSQL password"
         )
 
     raw_public_base_url = (os.getenv("BBBFFL_PUBLIC_BASE_URL") or "").strip() or None
@@ -285,10 +315,15 @@ def get_settings() -> Settings:
             )
 
     admin_token = os.getenv("BBBFFL_ADMIN_TOKEN") or None
-    if is_production and not admin_token:
-        errors.append(
-            "BBBFFL_ADMIN_TOKEN: required in production (refusing to start with the admin interface open to any caller)"
-        )
+    if is_production:
+        if not admin_token:
+            errors.append(
+                "BBBFFL_ADMIN_TOKEN: required in production "
+                "(refusing to start with the admin interface open to any caller)"
+            )
+        elif admin_token == _EXAMPLE_PLACEHOLDER_SECRET:
+            errors.append("BBBFFL_ADMIN_TOKEN: must not be the checked-in .env.production.example placeholder value")
+            admin_token = None
 
     # Coach session/CSRF secret (roadmap package 19, issue #74): unlike
     # BBBFFL_ADMIN_TOKEN (which simply disables its check when unset),
@@ -307,6 +342,9 @@ def get_settings() -> Settings:
         elif raw_session_secret == _DEV_SESSION_SECRET:
             errors.append("BBBFFL_SESSION_SECRET: must not be the development placeholder value in production")
             session_secret = None
+        elif raw_session_secret == _EXAMPLE_PLACEHOLDER_SECRET:
+            errors.append("BBBFFL_SESSION_SECRET: must not be the checked-in .env.production.example placeholder value")
+            session_secret = None
         else:
             session_secret = raw_session_secret
     else:
@@ -315,6 +353,30 @@ def get_settings() -> Settings:
     session_lifetime_seconds = int(os.getenv("BBBFFL_SESSION_LIFETIME_SECONDS", str(DEFAULT_SESSION_LIFETIME_SECONDS)))
     if session_lifetime_seconds <= 0:
         errors.append("BBBFFL_SESSION_LIFETIME_SECONDS: must be a positive number of seconds")
+
+    raw_readiness_timeout_seconds = os.getenv("BBBFFL_READINESS_TIMEOUT_SECONDS", "5")
+    try:
+        readiness_timeout_seconds = float(raw_readiness_timeout_seconds)
+    except ValueError:
+        # A non-numeric value (e.g. "five") makes float() raise ValueError
+        # directly, rather than returning something the `errors` list below
+        # can report alongside every other problem (issue #243 review):
+        # get_settings() would otherwise crash with a raw ValueError instead
+        # of the structured SettingsError lifespan() specifically catches to
+        # log and fail closed, silently skipping that path and reporting
+        # neither this setting nor any other configuration problem together.
+        readiness_timeout_seconds = 0.0
+        errors.append(
+            f"BBBFFL_READINESS_TIMEOUT_SECONDS: must be a positive, finite number of seconds "
+            f"(got '{raw_readiness_timeout_seconds}')"
+        )
+    else:
+        # math.isfinite() rejects "inf"/"nan" (both valid float() input): an
+        # infinite timeout would remove GET /health/ready's promised bound on
+        # a stuck dependency call entirely, and NaN's comparisons are always
+        # False, which would silently defeat the `<= 0` check below without it.
+        if not math.isfinite(readiness_timeout_seconds) or readiness_timeout_seconds <= 0:
+            errors.append("BBBFFL_READINESS_TIMEOUT_SECONDS: must be a positive, finite number of seconds")
 
     if errors:
         raise SettingsError(errors)
@@ -342,5 +404,6 @@ def get_settings() -> Settings:
         public_base_url=public_base_url,
         poll_interval_seconds=int(os.getenv("BBBFFL_POLL_INTERVAL_SECONDS", "25")),
         log_level=os.getenv("BBBFFL_LOG_LEVEL", "INFO"),
+        readiness_timeout_seconds=readiness_timeout_seconds,
         superscore_config_path=os.getenv("BBBFFL_SUPERSCORE_CONFIG_PATH") or None,
     )

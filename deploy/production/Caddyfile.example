@@ -1,0 +1,48 @@
+# Reverse proxy / TLS termination for a production BBBFFL deployment
+# (issue #243). Copy to deploy/production/Caddyfile and replace
+# bbbffl.example.com below with the real production domain, directly in
+# this file -- not via an environment variable. Caddy needs no application
+# secret or setting at all (see compose.production.yaml's "proxy" service
+# comment on why this deliberately has no env_file:).
+#
+# What this does, and why it satisfies issue #243's proxy requirements:
+#   - forwards to the app service on the compose-internal network only --
+#     app/database are never published to the host (see
+#     compose.production.yaml); only this proxy publishes 80/443.
+#   - Caddy's reverse_proxy sets X-Forwarded-For/-Proto/-Host and preserves
+#     the original Host header by default -- no extra header_up directives
+#     are needed for the app to see the real client IP/scheme, and nothing
+#     here strips or rewrites the Authorization/X-Admin-Token headers
+#     BBBFFL's own authorization boundary (app/authorization.py,
+#     app/routes/admin.py) depends on.
+#   - HTTPS is explicit: Caddy provisions/renews a Let's Encrypt certificate
+#     for the domain below automatically and redirects plain HTTP to
+#     HTTPS -- there is no separate certbot/manual-renewal step to
+#     maintain.
+#   - PostgreSQL is never reverse-proxied or exposed here at all -- see
+#     "does not expose PostgreSQL publicly" in docs/production-operations.md.
+#
+# What remains environment-specific (cannot be provided generically here):
+#   - The domain below must be a real hostname that already resolves (DNS
+#     A/AAAA record) to this host's public IP *before* first start, so
+#     Let's Encrypt's HTTP-01 challenge can succeed. A domain that does not
+#     yet resolve will fail certificate issuance -- this is inherent to
+#     ACME, not a BBBFFL or Caddy limitation.
+#   - Port 80 and 443 must be reachable from the public internet on this
+#     host (router port-forwarding for a home-server deployment).
+
+bbbffl.example.com {
+	reverse_proxy app:8000
+}
+
+# Rehearsal/staging alternative with no public DNS or open ports: replace
+# the site block above with the one below to get a self-signed certificate
+# Caddy trusts locally, so the full HTTPS path (including the app's own
+# BBBFFL_PUBLIC_BASE_URL=https://... expectation) can still be rehearsed on
+# a private host or a disposable container. Never use `tls internal` for
+# the real production domain -- browsers/other devices will not trust it.
+#
+# localhost {
+# 	tls internal
+# 	reverse_proxy app:8000
+# }

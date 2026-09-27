@@ -23,6 +23,7 @@ _ALL_SETTINGS_ENV_VARS = (
     "BBBFFL_ADMIN_TOKEN",
     "BBBFFL_SESSION_SECRET",
     "BBBFFL_SESSION_LIFETIME_SECONDS",
+    "BBBFFL_READINESS_TIMEOUT_SECONDS",
     "BBBFFL_AFL_MODE",
     "BBBFFL_AFL_REPLAY_EVIDENCE_PATH",
     "BBBFFL_TEAMS_CONFIG_PATH",
@@ -207,6 +208,21 @@ def test_development_admin_token_default_does_not_satisfy_production(clean_env):
     assert any("BBBFFL_ADMIN_TOKEN" in e for e in excinfo.value.errors)
 
 
+def test_production_refuses_the_checked_in_example_admin_token_placeholder(clean_env):
+    """bbbffl_app/.env.production.example's own placeholder must never
+    accidentally satisfy production's requirement -- it is a public,
+    checked-in value, so an operator who forgets to change it would be
+    handing out admin authority to anyone who has read the repository
+    (issue #243 review)."""
+    _set_valid_production_env(clean_env)
+    clean_env.setenv("BBBFFL_ADMIN_TOKEN", "CHANGE-ME")
+
+    with pytest.raises(SettingsError) as excinfo:
+        get_settings()
+
+    assert any("BBBFFL_ADMIN_TOKEN" in e for e in excinfo.value.errors)
+
+
 def test_production_refuses_missing_session_secret(clean_env):
     """Roadmap package 19 (issue #74): production startup refuses a
     missing coach session/CSRF secret, the same as it does for
@@ -235,6 +251,19 @@ def test_production_refuses_the_development_session_secret_placeholder(clean_env
     assert any("BBBFFL_SESSION_SECRET" in e for e in excinfo.value.errors)
 
 
+def test_production_refuses_the_checked_in_example_session_secret_placeholder(clean_env):
+    """Same reasoning as the admin-token placeholder check above (issue
+    #243 review): bbbffl_app/.env.production.example's own placeholder
+    must never accidentally satisfy production's requirement."""
+    _set_valid_production_env(clean_env)
+    clean_env.setenv("BBBFFL_SESSION_SECRET", "CHANGE-ME")
+
+    with pytest.raises(SettingsError) as excinfo:
+        get_settings()
+
+    assert any("BBBFFL_SESSION_SECRET" in e for e in excinfo.value.errors)
+
+
 def test_development_session_secret_default_does_not_satisfy_production(clean_env):
     clean_env.setenv("BBBFFL_ENVIRONMENT", "production")
     clean_env.setenv("BBBFFL_DATABASE_URL", "postgresql+psycopg://bbbffl:s3cret@db.internal/bbbffl")
@@ -254,6 +283,60 @@ def test_development_gets_a_usable_session_secret_by_default(clean_env):
     assert settings.environment == "development"
     assert settings.session_secret == "dev-insecure-session-secret-change-in-production"
     assert settings.session_lifetime_seconds > 0
+
+
+def test_readiness_timeout_defaults_to_five_seconds(clean_env):
+    settings = get_settings()
+    assert settings.readiness_timeout_seconds == 5.0
+
+
+def test_readiness_timeout_is_configurable(clean_env):
+    clean_env.setenv("BBBFFL_READINESS_TIMEOUT_SECONDS", "2.5")
+    settings = get_settings()
+    assert settings.readiness_timeout_seconds == 2.5
+
+
+def test_readiness_timeout_must_be_positive(clean_env):
+    clean_env.setenv("BBBFFL_READINESS_TIMEOUT_SECONDS", "0")
+
+    with pytest.raises(SettingsError) as excinfo:
+        get_settings()
+
+    assert any("BBBFFL_READINESS_TIMEOUT_SECONDS" in e for e in excinfo.value.errors)
+
+
+@pytest.mark.parametrize("bad_value", ["inf", "-inf", "nan"])
+def test_readiness_timeout_rejects_non_finite_values(clean_env, bad_value):
+    """float() itself accepts "inf"/"nan" -- an infinite timeout would
+    remove GET /health/ready's promised bound on a stuck dependency call
+    entirely, and NaN's comparisons are always False, silently defeating a
+    bare `<= 0` check (issue #243 review)."""
+    clean_env.setenv("BBBFFL_READINESS_TIMEOUT_SECONDS", bad_value)
+
+    with pytest.raises(SettingsError) as excinfo:
+        get_settings()
+
+    assert any("BBBFFL_READINESS_TIMEOUT_SECONDS" in e for e in excinfo.value.errors)
+
+
+def test_readiness_timeout_rejects_a_non_numeric_value_without_crashing(clean_env):
+    """A bare float() call raises ValueError directly for a non-numeric
+    value (e.g. "five"), bypassing the accumulated `errors` list -- unlike
+    every other misconfiguration, get_settings() would crash with a raw
+    ValueError instead of the structured SettingsError lifespan() catches to
+    log and fail closed (issue #243 review, follow-up). Also proves it is
+    reported together with an unrelated error, exactly the "together" the
+    review's concern was about, by additionally clearing a required
+    production value."""
+    clean_env.setenv("BBBFFL_ENVIRONMENT", "production")
+    clean_env.setenv("BBBFFL_DATABASE_URL", "postgresql+psycopg://bbbffl:s3cret@db.internal/bbbffl")
+    clean_env.setenv("BBBFFL_READINESS_TIMEOUT_SECONDS", "five")
+
+    with pytest.raises(SettingsError) as excinfo:
+        get_settings()
+
+    assert any("BBBFFL_READINESS_TIMEOUT_SECONDS" in e for e in excinfo.value.errors)
+    assert any("BBBFFL_ADMIN_TOKEN" in e for e in excinfo.value.errors)
 
 
 def test_production_refuses_missing_database_url(clean_env):
@@ -290,6 +373,26 @@ def test_production_refuses_sqlite_database_url(clean_env):
         get_settings()
 
     assert any("BBBFFL_DATABASE_URL" in e and "PostgreSQL" in e for e in excinfo.value.errors)
+
+
+def test_production_refuses_the_checked_in_example_database_password_placeholder(clean_env):
+    """bbbffl_app/.env.production.example's checked-in POSTGRES_PASSWORD
+    placeholder is also embedded in that file's own BBBFFL_DATABASE_URL
+    example -- PostgreSQL itself would happily start with it (it has no
+    way to know it is a public, checked-in value), so only the
+    application refusing to run with it closes this gap (issue #243
+    review, follow-up to the admin-token/session-secret placeholder
+    checks above)."""
+    _set_valid_production_env(clean_env)
+    clean_env.setenv(
+        "BBBFFL_DATABASE_URL",
+        "postgresql+psycopg://bbbffl:CHANGE-ME-a-long-random-password@database/bbbffl",
+    )
+
+    with pytest.raises(SettingsError) as excinfo:
+        get_settings()
+
+    assert any("BBBFFL_DATABASE_URL" in e for e in excinfo.value.errors)
 
 
 def test_production_refuses_missing_public_base_url(clean_env):

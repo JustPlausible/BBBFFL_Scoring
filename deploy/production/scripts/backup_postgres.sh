@@ -1,0 +1,84 @@
+#!/bin/sh
+set -eu
+
+# Scheduled PostgreSQL backup for BBBFFL production (issue #243). Runs
+# inside the compose.production.yaml "backup" service, built from the exact
+# same postgres:16-alpine image as the "database" service, so pg_dump's
+# version always matches the server it is backing up -- see
+# docs/production-operations.md#scheduled-backups for the schedule,
+# retention policy and why custom-format pg_dump was chosen.
+#
+# Naming: bbbffl-<database>-<UTC timestamp>.dump makes each file's origin
+# database and exact capture time unambiguous from the filename alone, with
+# no separate manifest to keep in sync. Never git-committed (see
+# .gitignore) -- these land only on the "backup" service's bind-mounted
+# host directory (deploy/production/backups/, outside every container's
+# writable layer).
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=./lib_alert.sh
+. "$SCRIPT_DIR/lib_alert.sh"
+
+# pg_dump/pg_restore/psql (libpq) read PG*, not POSTGRES_* -- the postgres
+# image's own env_file: convention (see bbbffl_app/.env.production.example).
+# Only defaulted when unset, so an operator/rehearsal invocation that
+# already exports PG* explicitly (e.g. to target a different host) is
+# never overridden. PGHOST defaults to the compose service name "database"
+# -- without it, a direct invocation of this script (e.g. the release
+# procedure's on-demand pre-release backup, run with no cron wrapper to
+# supply it) would have libpq try a local Unix socket inside this
+# container, where no PostgreSQL server runs, and the backup would fail.
+: "${PGHOST:=database}"
+: "${PGDATABASE:=${POSTGRES_DB:-}}"
+: "${PGUSER:=${POSTGRES_USER:-}}"
+: "${PGPASSWORD:=${POSTGRES_PASSWORD:-}}"
+export PGHOST PGDATABASE PGUSER PGPASSWORD
+
+: "${PGDATABASE:?PGDATABASE (or POSTGRES_DB) must be set}"
+BACKUP_DIR="${BACKUP_DIR:-/backups}"
+RETENTION_DAYS="${BBBFFL_BACKUP_RETENTION_DAYS:-14}"
+
+# Dumps contain full application/session data (issue #243 review) -- never
+# leave one world/group-readable on the host bind mount. Applies to the
+# temporary file pg_dump creates directly; the final atomic rename below
+# preserves this mode.
+umask 077
+
+TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
+OUT="$BACKUP_DIR/bbbffl-${PGDATABASE}-${TIMESTAMP}.dump"
+# Suffixed with this shell's own PID (issue #243 review): the documented
+# on-demand pre-release backup (docs/production-operations.md#release-
+# procedure) can start in the same second as the scheduled cron run, and a
+# bare ".in-progress" name would then have both pg_dump processes writing
+# concurrently to the same inode -- corrupting whichever one's `mv` below
+# runs first, and crashing the second under `set -e` with no alert at all
+# (a bare `mv` failure isn't caught by the `pg_dump` success/failure
+# branching below). A per-process name gives each invocation an entirely
+# separate temporary file, so two concurrent runs never share one, however
+# unlikely that same-second overlap is.
+TMP_OUT="${OUT}.in-progress.$$"
+
+bbbffl_log "INFO" "starting backup of database '${PGDATABASE}' to ${OUT}"
+
+if pg_dump -Fc -f "$TMP_OUT"; then
+    # Atomic rename: a reader (or a concurrent retention sweep) never sees
+    # a partially written file at the final name.
+    mv "$TMP_OUT" "$OUT"
+    SIZE=$(wc -c <"$OUT" 2>/dev/null || echo unknown)
+    bbbffl_log "INFO" "backup succeeded: ${OUT} (${SIZE} bytes)"
+
+    find "$BACKUP_DIR" -maxdepth 1 -name 'bbbffl-*.dump' -mtime "+${RETENTION_DAYS}" -print -delete 2>/dev/null |
+        while read -r pruned; do
+            bbbffl_log "INFO" "pruned expired backup (older than ${RETENTION_DAYS}d): ${pruned}"
+        done
+
+    if [ -n "${BBBFFL_BACKUP_SUCCESS_PING_URL:-}" ]; then
+        if ! wget -q -T 10 -O /dev/null "$BBBFFL_BACKUP_SUCCESS_PING_URL"; then
+            bbbffl_log "WARNING" "backup succeeded but the success-ping (dead man's switch) delivery failed"
+        fi
+    fi
+else
+    rm -f "$TMP_OUT"
+    bbbffl_alert "PostgreSQL backup of '${PGDATABASE}' FAILED at ${TIMESTAMP} -- see: docker compose -f compose.production.yaml logs backup"
+    exit 1
+fi

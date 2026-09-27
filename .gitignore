@@ -17,3 +17,12 @@ build/
 venv/
 __pycache__/
 *.pyc
+
+# Production deployment (issue #243): real backups, never committed --
+# deploy/production/backups/ is a bind-mount target compose.production.yaml
+# writes real pg_dump files into. .gitkeep keeps the directory present in
+# a checkout so an operator does not have to invent the path.
+deploy/production/backups/*
+!deploy/production/backups/.gitkeep
+deploy/production/Caddyfile
+*.dump

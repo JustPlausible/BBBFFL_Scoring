@@ -160,6 +160,32 @@ class DatabaseConnection:
         with self.engine.connect() as connection:
             return _Result(connection.execute(text(statement), parameters))
 
+    def execute_bounded(self, statement, parameters=(), timeout_seconds: float | None = None):
+        """Like `execute`, but on PostgreSQL also gives the statement its own
+        `statement_timeout` (milliseconds), scoped to this one call via `SET
+        LOCAL` -- it reverts automatically once this connection is released,
+        so it can never leak onto whatever query a later caller runs on the
+        same pooled connection (unlike setting `statement_timeout` for the
+        whole session/connect_args, which would).
+
+        `connect()`'s TCP keepalive settings only detect a *dead* network
+        peer -- they do nothing when the server is reachable but simply
+        never finishes (lock contention, resource starvation): the readiness
+        probe (`app/routes/health.py`) needs a bound for that case too, or a
+        stalled backend could hold a worker/connection slot indefinitely even
+        though `GET /health/ready` itself has already returned 503 (issue
+        #243 review). No-ops the timeout on SQLite, which has no equivalent
+        and is never the production database this guards.
+        """
+        from sqlalchemy import text
+
+        statement, parameters = _translate(statement, parameters)
+        with self.engine.connect() as connection:
+            if timeout_seconds is not None and connection.dialect.name == "postgresql":
+                statement_timeout_ms = max(1, int(timeout_seconds * 1000))
+                connection.execute(text(f"SET LOCAL statement_timeout = {statement_timeout_ms}"))
+            return _Result(connection.execute(text(statement), parameters))
+
     def close(self):
         self.engine.dispose()
 
@@ -169,11 +195,42 @@ def connect(database_url: str) -> DatabaseConnection:
 
     if "://" not in database_url:
         database_url = f"sqlite:///{database_url}"
-    return DatabaseConnection(
-        create_engine(
-            database_url, connect_args={"check_same_thread": False} if database_url.startswith("sqlite") else {}
-        )
-    )
+    if database_url.startswith("sqlite"):
+        connect_args: dict = {"check_same_thread": False}
+    else:
+        # connect_timeout (psycopg/libpq, seconds) bounds only the TCP-
+        # connect phase. Without it, a network partition to PostgreSQL lets
+        # a *new* connection attempt block its worker thread indefinitely;
+        # GET /health/ready's database probe (app/routes/health.py) times
+        # out its own awaiting coroutine via asyncio.wait_for, but that
+        # alone cannot stop an underlying blocking connect() call or free
+        # the pooled slot it would otherwise occupy (issue #243 review).
+        # 10s is generous for any real network, never the readiness
+        # endpoint's own bound (BBBFFL_READINESS_TIMEOUT_SECONDS).
+        #
+        # connect_timeout does nothing once a connection is already
+        # established and pooled, though: a query issued on a connection
+        # whose peer has since gone unreachable (cable pulled, route
+        # dropped) has no libpq-level timeout of its own and can block that
+        # worker/slot for as long as the OS takes to notice -- on Linux,
+        # tcp_keepalive_time defaults to two hours if TCP keepalive is off
+        # (issue #243 review, follow-up). The keepalives_* settings below
+        # turn keepalive on for every pooled connection and shorten that to
+        # a bounded ~30s: after 10s of the socket being idle, probe every
+        # 5s, and give up (killing the connection, which surfaces to the
+        # blocked query as a normal connection error) after 4 unanswered
+        # probes. This is a socket-level dead-peer detector, not a query
+        # deadline -- it never interrupts a query that is genuinely still
+        # running against a server that is still there, however long that
+        # takes, so it cannot cut off a legitimate slow migration or report.
+        connect_args = {
+            "connect_timeout": 10,
+            "keepalives": 1,
+            "keepalives_idle": 10,
+            "keepalives_interval": 5,
+            "keepalives_count": 4,
+        }
+    return DatabaseConnection(create_engine(database_url, connect_args=connect_args))
 
 
 def init_db(conn) -> None:

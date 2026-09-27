@@ -339,6 +339,50 @@ def test_connection_failure_raises_a_distinct_typed_error_from_timeout():
         api.close()
 
 
+def test_check_connectivity_succeeds_against_the_seasons_endpoint(client):
+    client.check_connectivity()  # /api/v1/seasons is mocked in _handler; no raise
+
+
+def test_check_connectivity_uses_seasons_not_the_bare_discovery_route():
+    """Issue #243 review: the bare, unauthenticated GET /api/{version}
+    discovery route would report readiness "ok" even when AFL_API_KEY is
+    missing/expired/rejected, since afl-api never requires a credential for
+    it. GET /api/{version}/seasons does require one, exercising the
+    configured key the same way every real request BBBFFL makes does."""
+    requested_paths = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        return httpx.Response(200, json={"seasons": []})
+
+    api = AflApiClient(base_url="http://afl-api.test")
+    api._client = httpx.Client(base_url="http://afl-api.test", transport=httpx.MockTransport(handler))
+    try:
+        api.check_connectivity()
+    finally:
+        api.close()
+
+    assert requested_paths == ["/api/v1/seasons"]
+
+
+def test_check_connectivity_fails_when_the_api_key_is_rejected():
+    """A 401 from a missing/expired/rejected AFL_API_KEY must surface as a
+    failure, not be swallowed the way it would be against an endpoint that
+    never required authentication in the first place."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"detail": "Invalid or missing API Key"})
+
+    api = AflApiClient(base_url="http://afl-api.test")
+    api._client = httpx.Client(base_url="http://afl-api.test", transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(AflApiHttpStatusError) as excinfo:
+            api.check_connectivity()
+        assert excinfo.value.status_code == 401
+    finally:
+        api.close()
+
+
 def test_http_status_error_carries_the_status_code():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(503, json={"detail": "unavailable"})

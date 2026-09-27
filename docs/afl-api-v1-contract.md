@@ -496,7 +496,7 @@ AFL_API_BASE_URL=https://afl-api.thehardinghams.net AFL_API_KEY=*** \
 
 No secret was printed, logged, retained, or committed at any point; the
 value above is a placeholder, not the credential actually used (see
-"Authentication/configuration — partially confirmed" below).
+"Authentication/configuration — now positively confirmed" below).
 
 ### Endpoint/contract coverage — confirmed positive
 
@@ -557,7 +557,7 @@ rule:
   they are "pre-v1 legacy behaviour, not a permanently supported parallel
   API" and are not used by BBBFFL.
 
-### Authentication/configuration — partially confirmed; credential validation still open
+### Authentication/configuration — now positively confirmed
 
 `AFL_API_BASE_URL` (service root) and `AFL_API_KEY`, read only through
 `app.config.get_settings()`, need no code or naming change to build every
@@ -566,26 +566,33 @@ unstructured 401 body and structured `{"error": {...}}` 404/422 bodies
 match this document's existing source-level analysis in
 [§1.7](#17-authentication-and-configuration) exactly.
 
-**What this run does *not* establish:** whether a real, deployment-issued
-`AFL_API_KEY` is actually honoured end-to-end. This validation session's
-egress proxy authenticates every outbound request to
+**What the validating session's own run could not establish:** whether a
+real, deployment-issued `AFL_API_KEY` is actually honoured end-to-end.
+That session's egress proxy authenticates every outbound request to
 `afl-api.thehardinghams.net` at the transport level, regardless of what
 (if any) `x-api-key` header the calling code sends — every request in
-this run succeeded through that proxy-injected credential, not through
-the placeholder, non-secret `AFL_API_KEY` value this session actually set
+that run succeeded through the proxy-injected credential, not through the
+placeholder, non-secret `AFL_API_KEY` value the session actually set
 locally. Consequently the diagnostic's own negative-path checks
 (`GET /api/v1/seasons` with no key, and with a deliberately invalid key,
-both expected to return `401`) observed `200` and are correctly recorded
-as `FAIL`, and this run cannot distinguish "the deployment accepts any
-key" from "the deployment enforces a real key and this session's proxy
-happened to already be authenticated" — both look identical from here. A
-production BBBFFL deployment reaching this host directly, without this
-session's proxy, could still receive `401` on its configured key if that
-key is wrong, unprovisioned, or revoked. **Authentication/configuration
-should be treated as unresolved, not confirmed working, until the real
-application key path is exercised from a network path that does not
-auto-authenticate** — re-running the diagnostic's two key-check assertions
-from such a path is the concrete follow-up.
+both expected to return `401`) observed `200` and were correctly recorded
+as `FAIL` in that run — it could not distinguish "the deployment accepts
+any key" from "the deployment enforces a real key and the proxy happened
+to already be authenticated".
+
+**Independently closed the same day:** the operator ran the equivalent
+three checks directly from the BBBFFL production Docker host, on a
+network path that does not auto-authenticate:
+
+- no `X-Api-Key` header → `401`
+- an invalid `X-Api-Key` value → `401`
+- the real, deployment-issued `X-Api-Key` value → `200`
+
+This is exactly the follow-up this document called for, confirms the
+deployment enforces its configured credential rather than accepting any
+request, and closes the previously open credential-validation gap. No key
+value was shared with, or is recorded by, this document or this
+session — only the pass/fail outcome above.
 
 ### UTC and status semantics — confirmed
 

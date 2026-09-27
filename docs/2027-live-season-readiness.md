@@ -276,7 +276,7 @@ auto-pick automation are v0.2.
 |---|---|---|
 | CI quality gates (tests, lint/format, incremental type-check, migration integrity on SQLite and PostgreSQL, dependency audit, container build) | Automated-test-proven | `docs/ci-quality-gates.md` |
 | Non-technical Scorer staging/beta rehearsal | **Staging/rehearsal-needed** | Recommended explicitly in `2026-finals-replay/ux-findings.md`, "Pre-2027 rehearsal"; not yet performed |
-| Live `afl-api` deployment validation (the application's sole live data dependency for 2027) | **Substantially validated (issue #244, 2026-09-27); credential validation and 2027-season publication remain open** | `docs/afl-api-v1-contract.md`'s ["Live validation status"](afl-api-v1-contract.md#live-validation-status) section now records a positive live run: the configured deployment (`AFL_API_BASE_URL`/`AFL_API_KEY`, read only via `get_settings()`) is reachable and contract-compatible, every endpoint this document classifies "required now" was exercised against real 2026-season data (30 rounds, a full paginated player pool), and `/openapi.json` was compared with no incompatible difference. Match-lifecycle `status` and player-stat `lifecycle.finality` were confirmed live as genuinely independent signals (a `CONCLUDED` match temporarily reporting `finality="not_available"`, see below); the full four-state (`UPCOMING`/`LIVE`/`POSTGAME`/`CONCLUDED`) vocabulary itself, including `POSTGAME` specifically not collapsing into `CONCLUDED`, remains source/test-confirmed rather than live-observed, since every match in this run was already `CONCLUDED`. **Player-stats completeness across all 218 matches in season 85 is now confirmed** -- a first validation pass (~11:47 UTC) found three matches (the two Preliminary Finals and the Grand Final) with `finality="not_available"` and zero player rows, correctly recording season 85 as not fully populated and blocking packages 08/32; the upstream provider backfilled those three matches from the authoritative CFS source, and a second pass (~12:51 UTC), including a season-wide sweep of all 218 matches (not a single sample), confirmed every match now reports `finality="final"` with player rows present. This no longer blocks packages 08/32. **What remains open:** (1) whether a real, deployment-issued `AFL_API_KEY` is actually honoured end-to-end is unresolved, not confirmed -- this validation session's network path auto-authenticated every request regardless of the key sent, so the diagnostic's negative-path (missing/invalid-key -> 401) checks could not be independently exercised, and a production deployment reaching this host directly could still see 401s on its configured key; (2) no 2027 season resource exists yet upstream at all, an expected off-season timing state the day after the 2026 Grand Final, not a BBBFFL gap. Season Setup (`app/season_setup.py`) does not depend on any season being flagged `is_current` -- it lists all seasons via `get_seasons()` and lets the operator select an explicit `afl_season_id` -- so gap (2) alone, not `is_current`, is what blocks it until afl-api publishes a 2027 season; an earlier draft of this row incorrectly named `AflApiClient.get_current_season()` (used only by the legacy Grand Final/SuperScore prototype's `app/service.py`, not by Season Setup) as the dependency. Neither open item is a contract incompatibility. |
+| Live `afl-api` deployment validation (the application's sole live data dependency for 2027) | **Substantially validated (issue #244, 2026-09-27); only 2027-season publication remains open** | `docs/afl-api-v1-contract.md`'s ["Live validation status"](afl-api-v1-contract.md#live-validation-status) section now records a positive live run: the configured deployment (`AFL_API_BASE_URL`/`AFL_API_KEY`, read only via `get_settings()`) is reachable and contract-compatible, every endpoint this document classifies "required now" was exercised against real 2026-season data (30 rounds, a full paginated player pool), and `/openapi.json` was compared with no incompatible difference. Match-lifecycle `status` and player-stat `lifecycle.finality` were confirmed live as genuinely independent signals (a `CONCLUDED` match temporarily reporting `finality="not_available"`, see below); the full four-state (`UPCOMING`/`LIVE`/`POSTGAME`/`CONCLUDED`) vocabulary itself, including `POSTGAME` specifically not collapsing into `CONCLUDED`, remains source/test-confirmed rather than live-observed, since every match in this run was already `CONCLUDED`. **Player-stats completeness across all 218 matches in season 85 is now confirmed** -- a first validation pass (~11:47 UTC) found three matches (the two Preliminary Finals and the Grand Final) with `finality="not_available"` and zero player rows, correctly recording season 85 as not fully populated and blocking packages 08/32; the upstream provider backfilled those three matches from the authoritative CFS source, and a second pass (~12:51 UTC), including a season-wide sweep of all 218 matches (not a single sample), confirmed every match now reports `finality="final"` with player rows present. This no longer blocks packages 08/32. **Credential validation is also now confirmed:** the validating session's own network path auto-authenticated every request regardless of the key sent, so its diagnostic run alone could not distinguish "the deployment accepts any key" from "a real key is enforced and already authenticated" -- but the operator independently ran the equivalent checks from the BBBFFL production Docker host (a network path that does not auto-authenticate) and confirmed `401` with no key, `401` with an invalid key, and `200` with the real configured key, exactly as the contract requires. **What remains open:** no 2027 season resource exists yet upstream at all, an expected off-season timing state the day after the 2026 Grand Final, not a BBBFFL gap. Season Setup (`app/season_setup.py`) does not depend on any season being flagged `is_current` -- it lists all seasons via `get_seasons()` and lets the operator select an explicit `afl_season_id` -- so this alone, not `is_current`, is what blocks it until afl-api publishes a 2027 season; an earlier draft of this row incorrectly named `AflApiClient.get_current_season()` (used only by the legacy Grand Final/SuperScore prototype's `app/service.py`, not by Season Setup) as the dependency. This remaining item is not a contract incompatibility. |
 | Production backup/restore runbook rehearsal | **Automated-test-proven + disposable-environment rehearsal (issue #243); staging/rehearsal-needed on the real production host** | See "Backup/restore/archive" above |
 | Reproducible production deployment topology, TLS/reverse-proxy setup, dependency-readiness probe, structured alerting/logging, scheduled backups with an accepted RPO/RTO, and a rollback runbook | **Implemented and disposable-environment-rehearsed (issue #243); staging/rehearsal-needed on the real production host** | `compose.production.yaml` defines a reproducible four-service topology (app, PostgreSQL, a Caddy TLS-terminating reverse proxy, and a scheduled-backup service), documented operator-by-operator in [`production-operations.md`](production-operations.md). `GET /health` (`app/routes/health.py`) remains a pure process-liveness check exactly as before; a new, separate `GET /health/ready` checks database connectivity and (only when `afl_mode == "live"`) afl-api connectivity, each bounded by a configurable timeout, never mutating state, never leaking a credential -- see `tests/test_health_api.py` and [`production-operations.md#readiness-vs-liveness`](production-operations.md#readiness-vs-liveness). Structured `CRITICAL`/`WARNING` logging now covers startup/config failure, database/migration failure, a dependency-readiness failure, an otherwise-unhandled application exception, and backup failure; a host-run `readiness_watch.sh` plus an optional alert webhook give a practical, reproducible alerting path (see [`production-operations.md#logging-and-alerting`](production-operations.md#logging-and-alerting)). Scheduled backups, the restore procedure, and both an application-only and a database-affecting rollback procedure are documented and were rehearsed end-to-end in a disposable sandbox environment, including the failure paths -- see [`evidence/production-operations-rehearsal-2026-09-27.md`](evidence/production-operations-rehearsal-2026-09-27.md) and [`production-operations.md#rollback-strategy`](production-operations.md#rollback-strategy) (which explains why a bare "`alembic downgrade` then restart the previous image" recipe is unsafe given this repository's forward-only migration refusal policy). RPO (24h) and RTO (4h) targets have been accepted by Steve as the production recovery targets for v0.1 (JustPlausible/BBBFFL_Scoring#249, 27 September 2026) -- see [`production-operations.md#rpo-and-rto`](production-operations.md#rpo-and-rto). None of the rest of this was rehearsed against the real production host, real DNS/TLS, or a non-technical operator -- see [`production-operations.md#what-remains-environment-specific`](production-operations.md#what-remains-environment-specific) for exactly what remains. This does not change the separately tracked live-`afl-api` validation gap below, which remains outstanding. |
 | Notification delivery (lockout/missing-team alerts) and a live-season incident/manual-fallback operations runbook | **Deferred / v0.2** | No notification adapter or delivery configuration exists in `app/` (roadmap package 40's own scope); no incident/fallback runbook exists in the repository either. Unlike the deployment-controls row above, this does not block running an individual round end-to-end -- a season can operate without automated reminders, with the Scorer relying on the existing dashboards/attention queue instead -- so it is classified as deferred rather than outstanding, consistent with the original roadmap treating packages 39 (P0, blocking) and 40 (P1, "final launch gate" but reminder-level) differently. Found by Codex review on this PR (P2); confirmed by inspecting `app/` for any notification adapter (none exists). |
@@ -411,7 +411,7 @@ they touch have already passed.
     separate, related gap classified as deferred/v0.2 in the matrix above,
     since they do not block running an individual round.
 11. **Live `afl-api` deployment validation -- substantially validated by
-    issue #244 (2026-09-27); two things remain open.** The entire 2026
+    issue #244 (2026-09-27); one thing remains open.** The entire 2026
     replay used `ReplayAflDataSource`, never the live client, and CI is
     hermetic, so no earlier evidence in this document validated that the
     actual production `afl-api` deployment is reachable or
@@ -442,13 +442,20 @@ they touch have already passed.
     (every match checked individually, not a sample) found zero remaining
     incomplete matches. **This no longer blocks packages 08/32.**
 
+    **Credential validation was also genuinely open, and is now closed.**
+    The validating session's own network path auto-authenticated every
+    request regardless of the key sent, so its diagnostic run could not
+    distinguish "the deployment accepts any key" from "a real key is
+    enforced and already authenticated" -- its missing/invalid-key ->
+    `401` checks could not be independently exercised from that path. The
+    operator then independently ran the equivalent three checks directly
+    from the BBBFFL production Docker host, on a network path that does
+    not auto-authenticate: no key -> `401`, an invalid key -> `401`, the
+    real configured key -> `200`. This is exactly the follow-up this
+    document called for and confirms the deployment enforces its
+    configured credential.
+
     **What genuinely remains open, and is not a BBBFFL contract defect:**
-    - Whether a real, deployment-issued `AFL_API_KEY` is actually honoured
-      end-to-end is **unresolved, not confirmed**. This validation
-      session's network path auto-authenticated every request regardless
-      of the key sent, so the missing/invalid-key -> `401` checks could
-      not be independently exercised; a production deployment reaching
-      this host directly could still see `401` on its configured key.
     - No 2027 season resource has been published upstream yet (an expected
       off-season state the day after the 2026 Grand Final). This is the
       actual blocker for exercising Season setup's live player-pool read
@@ -462,10 +469,9 @@ they touch have already passed.
       `get_current_season()`/`is_current` as the Season setup dependency;
       corrected here.
 
-    Neither item blocks v0.1 by itself, and neither is a contract
-    incompatibility -- what remains is a credential re-check from an
-    unproxied network path, and upstream timing for the 2027 season's
-    publication.
+    This remaining item does not block v0.1 by itself, and is not a
+    contract incompatibility -- what remains is upstream timing for the
+    2027 season's publication.
 
 Items 1-2 were surfaced by Codex's review of this PR, not by the 2026
 replay itself -- the replay never needed a fresh-production-bootstrap or
@@ -511,9 +517,10 @@ convenience/polish under the stated criterion and does not block
   did not, prove the real production `afl-api` deployment is reachable or
   contract-compatible. That was a separate item (11, above), substantially
   validated by issue #244 -- see that item for what genuinely still
-  remains open (no 2027 season published upstream yet; whether a real
-  application key is honoured, not independently confirmed from the
-  validating session's auto-authenticating network path). Season 85's
+  remains open (only: no 2027 season published upstream yet). Season 85's
   player-stats completeness, initially incomplete for three matches, was
-  confirmed season-wide after an upstream backfill -- see item 11.
+  confirmed season-wide after an upstream backfill, and credential
+  validation, initially unconfirmed from the validating session's
+  auto-authenticating network path, was independently confirmed by the
+  operator from an unproxied network path -- see item 11.
 - It does not treat any v0.2/deferred item as blocking `v0.1.0`.

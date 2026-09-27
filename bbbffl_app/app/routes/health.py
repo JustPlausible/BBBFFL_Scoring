@@ -25,9 +25,11 @@ access. Each check is bounded by `settings.readiness_timeout_seconds`
 (`BBBFFL_READINESS_TIMEOUT_SECONDS`) so a stuck dependency can never hang
 the response indefinitely. Neither check mutates any state: the database
 probe is a bare `SELECT 1` and the afl-api probe is
-`AflApiClient.check_connectivity`'s unauthenticated `GET /api/{version}`
-discovery call (see its own docstring) -- never a write, and never an
-endpoint that pulls a real season/round/player dataset.
+`AflApiClient.check_connectivity`'s `GET /api/{version}/seasons` call (see
+its own docstring for why this -- not the unauthenticated bare discovery
+route -- is what actually proves the configured `AFL_API_KEY` still works)
+-- never a write, and never an endpoint that pulls a large or fantasy-
+domain-specific dataset.
 
 Failure detail is deliberately asymmetric: afl-api errors are already
 secret-safe by construction (`app/afl_client.py`'s error classes never

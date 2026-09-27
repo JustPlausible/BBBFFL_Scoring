@@ -311,18 +311,25 @@ class AflApiClient:
         self._client.close()
 
     def check_connectivity(self) -> None:
-        """Cheap, stable liveness probe for the configured afl-api deployment
-        (issue #243's dependency-readiness check). Hits `GET /api/{version}`
-        -- the same unauthenticated discovery endpoint
-        `scripts/afl_contract_diagnostic.py` uses as its own connectivity
-        smoke check -- rather than any endpoint that returns season/round/
-        player data, so a readiness probe never pulls a real dataset or
-        performs fantasy-domain work. Raises `AflApiError` (a subclass
-        naming the failure phase/status, never a secret) on failure; returns
-        `None` on success. Bounded by this client's own configured connect/
-        read timeouts -- never retried, since readiness must reflect the
-        dependency's state right now, not a retried/cached view of it."""
-        self._get(f"/api/{self._contract_version}")
+        """Cheap, stable, *authenticated* readiness probe for the configured
+        afl-api deployment (issue #243's dependency-readiness check). Hits
+        `GET /api/{version}/seasons` -- a small, required-now, "Required
+        now" endpoint per docs/afl-api-v1-contract.md (BBBFFL already calls
+        it for `get_current_season`/`get_seasons`), never one that returns a
+        large or fantasy-domain-specific dataset. Deliberately not the bare
+        `GET /api/{version}` discovery route this module's `check_connectivity`
+        first used: that endpoint requires no `x-api-key` at all, so a
+        missing/expired/rejected `AFL_API_KEY` would make readiness report
+        "ok" while every real season/round/player/stat request BBBFFL
+        actually needs afl-api for returns 401 -- see issue #243's review.
+        `/seasons` exercises the configured credential the same way those
+        real requests do, while staying just as cheap and stable. Raises
+        `AflApiError` (a subclass naming the failure phase/status, never a
+        secret) on failure; returns `None` on success. Bounded by this
+        client's own configured connect/read timeouts -- never retried,
+        since readiness must reflect the dependency's state right now, not
+        a retried/cached view of it."""
+        self._get(f"/api/{self._contract_version}/seasons")
 
     def _get(self, path: str, params: dict | None = None) -> dict | list:
         try:

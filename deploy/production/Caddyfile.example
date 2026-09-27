@@ -1,7 +1,9 @@
 # Reverse proxy / TLS termination for a production BBBFFL deployment
-# (issue #243). Copy to deploy/production/Caddyfile and set BBBFFL_DOMAIN in
-# bbbffl_app/.env.production -- Caddy substitutes {$BBBFFL_DOMAIN} from the
-# container's environment at startup (env_file: in compose.production.yaml).
+# (issue #243). Copy to deploy/production/Caddyfile and replace
+# bbbffl.example.com below with the real production domain, directly in
+# this file -- not via an environment variable. Caddy needs no application
+# secret or setting at all (see compose.production.yaml's "proxy" service
+# comment on why this deliberately has no env_file:).
 #
 # What this does, and why it satisfies issue #243's proxy requirements:
 #   - forwards to the app service on the compose-internal network only --
@@ -14,21 +16,22 @@
 #     BBBFFL's own authorization boundary (app/authorization.py,
 #     app/routes/admin.py) depends on.
 #   - HTTPS is explicit: Caddy provisions/renews a Let's Encrypt certificate
-#     for BBBFFL_DOMAIN automatically and redirects plain HTTP to HTTPS --
-#     there is no separate certbot/manual-renewal step to maintain.
+#     for the domain below automatically and redirects plain HTTP to
+#     HTTPS -- there is no separate certbot/manual-renewal step to
+#     maintain.
 #   - PostgreSQL is never reverse-proxied or exposed here at all -- see
 #     "does not expose PostgreSQL publicly" in docs/production-operations.md.
 #
 # What remains environment-specific (cannot be provided generically here):
-#   - BBBFFL_DOMAIN must be a real hostname that already resolves (DNS A/AAAA
-#     record) to this host's public IP *before* first start, so Let's
-#     Encrypt's HTTP-01 challenge can succeed. A domain that does not yet
-#     resolve will fail certificate issuance -- this is inherent to ACME,
-#     not a BBBFFL or Caddy limitation.
+#   - The domain below must be a real hostname that already resolves (DNS
+#     A/AAAA record) to this host's public IP *before* first start, so
+#     Let's Encrypt's HTTP-01 challenge can succeed. A domain that does not
+#     yet resolve will fail certificate issuance -- this is inherent to
+#     ACME, not a BBBFFL or Caddy limitation.
 #   - Port 80 and 443 must be reachable from the public internet on this
 #     host (router port-forwarding for a home-server deployment).
 
-{$BBBFFL_DOMAIN} {
+bbbffl.example.com {
 	reverse_proxy app:8000
 }
 

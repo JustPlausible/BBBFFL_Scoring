@@ -75,8 +75,8 @@ Validate before treating a release as successfully deployed:
 ```bash
 docker compose -f compose.production.yaml config --quiet   # fails on any invalid/missing env_file, port conflict, etc.
 docker compose -f compose.production.yaml ps                # every service "healthy" or "running"
-curl -f https://<BBBFFL_DOMAIN>/health                       # liveness
-curl -f https://<BBBFFL_DOMAIN>/health/ready                  # dependency readiness -- see below
+curl -f https://<your-domain>/health                       # liveness
+curl -f https://<your-domain>/health/ready                  # dependency readiness -- see below
 ```
 
 `app/config.py`'s `get_settings()` fails closed at startup (before
@@ -169,7 +169,8 @@ it, and neither does anything else outside the compose project's internal
 network.
 
 What remains environment-specific (cannot be provided generically in a
-checked-in file): `BBBFFL_DOMAIN` must be a real hostname that already
+checked-in file): the domain configured directly in
+`deploy/production/Caddyfile` must be a real hostname that already
 resolves to the production host before first start, so Let's Encrypt's
 HTTP-01 challenge can succeed, and ports 80/443 must be reachable from the
 internet (router port-forwarding for a home-server deployment). The
@@ -189,14 +190,21 @@ process and trigger a restart-loop that would not fix the outage.
 `GET /health/ready` is new. It checks:
 
 - **database connectivity** -- a bare `SELECT 1`, never a write;
-- **afl-api connectivity**, only when `settings.afl_mode == "live"` -- the
-  same unauthenticated `GET /api/{version}` discovery endpoint
-  `scripts/afl_contract_diagnostic.py` already uses as its own connectivity
-  smoke check (`AflApiClient.check_connectivity`), never an endpoint that
-  pulls a real season/round/player dataset or performs fantasy-domain
-  work. Replay/test runs (`afl_mode == "replay"`) report this check
-  `"skipped"` and never make a live network call -- see the module's own
-  docstring for why this keeps the hermetic test suite deterministic.
+- **afl-api connectivity**, only when `settings.afl_mode == "live"` --
+  `AflApiClient.check_connectivity`'s `GET /api/{version}/seasons`, a
+  small, already-required (`get_current_season`/`get_seasons` call it too)
+  endpoint that exercises the configured `AFL_API_KEY` the same way real
+  requests do. Deliberately not the bare, unauthenticated
+  `GET /api/{version}` discovery route
+  `scripts/afl_contract_diagnostic.py` uses for its own connectivity smoke
+  check: that route needs no credential at all, so a missing/expired/
+  rejected key would leave readiness reporting "ok" while every real
+  afl-api request BBBFFL actually depends on returns 401 -- caught by
+  review on this PR. Never an endpoint that pulls a large or fantasy-
+  domain-specific dataset. Replay/test runs (`afl_mode == "replay"`) report
+  this check `"skipped"` and never make a live network call -- see the
+  module's own docstring for why this keeps the hermetic test suite
+  deterministic.
 
 Both checks are bounded by `BBBFFL_READINESS_TIMEOUT_SECONDS` (default `5`
 seconds each), run off the event loop via `asyncio.to_thread` +
@@ -403,7 +411,7 @@ can meaningfully report:
   with host cron or a systemd timer, e.g.:
 
   ```cron
-  */5 * * * * BBBFFL_READY_URL=https://<BBBFFL_DOMAIN>/health/ready BBBFFL_ALERT_WEBHOOK_URL=<...> /path/to/repo/deploy/production/scripts/readiness_watch.sh
+  */5 * * * * BBBFFL_READY_URL=https://<your-domain>/health/ready BBBFFL_ALERT_WEBHOOK_URL=<...> /path/to/repo/deploy/production/scripts/readiness_watch.sh
   ```
 
   Deliberately host-run rather than containerized: it keeps working even
@@ -551,8 +559,8 @@ Steve's to perform on the real production host -- see
 `docs/2027-live-season-readiness.md` for how this issue's completion is
 reflected there:
 
-- provisioning the actual production host and its DNS record for
-  `BBBFFL_DOMAIN`;
+- provisioning the actual production host and its DNS record for the
+  domain configured directly in `deploy/production/Caddyfile`;
 - filling in `bbbffl_app/.env.production`'s real secrets (this document's
   ["Secrets and configuration"](#secrets-and-configuration) section) and
   confirming the real `AFL_API_BASE_URL`/`AFL_API_KEY`;

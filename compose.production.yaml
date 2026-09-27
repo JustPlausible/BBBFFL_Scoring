@@ -8,8 +8,10 @@
 #   - this repository checked out;
 #   - bbbffl_app/.env.production (copied from .env.production.example and
 #     filled in -- never committed, see bbbffl_app/.gitignore);
-#   - deploy/production/Caddyfile (copied from Caddyfile.example);
-#   - DNS for BBBFFL_DOMAIN already pointing at this host, and ports 80/443
+#   - deploy/production/Caddyfile (copied from Caddyfile.example, with its
+#     placeholder domain replaced by the real one -- Caddy needs no
+#     secret/production env at all, see "proxy" below);
+#   - DNS for that domain already pointing at this host, and ports 80/443
 #     reachable from the internet (for Let's Encrypt + real traffic).
 #
 # Topology: app (this repository's image) <- proxy (Caddy, TLS
@@ -28,6 +30,17 @@ services:
     restart: unless-stopped
     env_file:
       - ./bbbffl_app/.env.production
+    # --forwarded-allow-ips=*: trusts the X-Forwarded-For/-Proto headers
+    # "proxy" sets on every request (issue #243 review). Safe specifically
+    # because "app" is never published (see "expose" below) -- "proxy" is
+    # the *only* thing that can reach it on this compose network, so
+    # trusting every request that arrives here is equivalent to trusting
+    # only proxy, not an open trust grant. Without this, Uvicorn's default
+    # (trust only 127.0.0.1) makes every request's client address resolve
+    # to proxy's own container IP -- collapsing app/auth_rate_limit.py's
+    # per-IP login-attempt limiter into one shared bucket for every coach,
+    # so five failed logins from any one of them locks out all of them.
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--forwarded-allow-ips=*"]
     # Never published to the host -- only the "proxy" service is reachable
     # from outside this host (see "proxy" below). Other services on this
     # compose project reach it by service name ("app") on the project's
@@ -44,6 +57,9 @@ services:
     # docs/production-operations.md#readiness-vs-liveness.
     volumes:
       - production-app-data:/app/data
+    # "backend" reaches "database"; "frontend" is what "proxy" also joins
+    # (see "proxy" below) -- app is the only service that needs both.
+    networks: [frontend, backend]
 
   database:
     image: postgres:16-alpine
@@ -60,7 +76,11 @@ services:
     # Deliberately no "ports:" -- PostgreSQL is reachable only from other
     # services on this compose project's internal network, never from the
     # host or the public internet (issue #243's "must not expose
-    # PostgreSQL publicly").
+    # PostgreSQL publicly"). "backend"-only (issue #243 review): "proxy",
+    # the one service exposed to the internet, is never even on the same
+    # Docker network as this one, so a compromised proxy has no network
+    # path to the database at all, not merely no credential for it.
+    networks: [backend]
 
   # Scheduled PostgreSQL backups (issue #243). Built from the exact same
   # postgres:16-alpine image as "database" above, so pg_dump's version
@@ -99,15 +119,26 @@ services:
     # No "ports:" -- this service only ever initiates outbound
     # pg_dump/pg_restore connections to "database" and, optionally, an
     # outbound alert-webhook request; it is never a server itself.
+    # "backend"-only, same reasoning as "database" above -- this service
+    # only ever needs to reach "database", never "proxy" or the internet-
+    # facing network.
+    networks: [backend]
 
   # Reverse proxy / TLS termination (issue #243). The only service exposed
   # to the host/internet -- see deploy/production/Caddyfile.example for
   # what it forwards, which headers it preserves, and the HTTPS approach.
+  # Deliberately no "env_file:" here (issue #243 review): Caddy needs no
+  # application secret or setting at all -- the production domain is a
+  # literal value in deploy/production/Caddyfile, edited in place when it
+  # is copied from Caddyfile.example, not injected from
+  # bbbffl_app/.env.production. Giving this internet-facing service the
+  # full production secrets file (POSTGRES_PASSWORD, BBBFFL_ADMIN_TOKEN,
+  # BBBFFL_SESSION_SECRET, AFL_API_KEY, the alert webhook) would mean a
+  # compromise of the one service exposed to the internet yields every
+  # other credential too, for no operational benefit.
   proxy:
     image: caddy:2-alpine
     restart: unless-stopped
-    env_file:
-      - ./bbbffl_app/.env.production
     ports:
       - "80:80"
       - "443:443"
@@ -118,6 +149,14 @@ services:
       - ./deploy/production/Caddyfile:/etc/caddy/Caddyfile:ro
       - production-proxy-data:/data
       - production-proxy-config:/config
+    # "frontend"-only (issue #243 review): proxy can reach "app" (also on
+    # "frontend") but has no network path to "database"/"backup" at all --
+    # see "database"'s own comment.
+    networks: [frontend]
+
+networks:
+  frontend:
+  backend:
 
 volumes:
   # PostgreSQL's own data directory -- the database's persistent state.

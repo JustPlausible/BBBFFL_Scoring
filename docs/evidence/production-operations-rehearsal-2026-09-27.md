@@ -369,6 +369,44 @@ container (`curl` absent, `wget` present) it used `wget`; on this host
 unreachable port failed with a normal connection-refused error, not a
 missing-tool error.
 
+## J. Fourth review pass: authenticated readiness probe and network/credential isolation
+
+A fourth Codex pass found two more P1s and one P2, all fixed and
+re-verified against a real four-service stack (`app`, `database`,
+`backup`, `proxy`) brought up together for the first time in this
+rehearsal:
+
+- **Readiness probed an unauthenticated endpoint** (P1): `check_connectivity`
+  originally hit the bare `GET /api/{version}` discovery route, which
+  needs no `AFL_API_KEY` at all -- a missing/expired/rejected key would
+  leave `/health/ready` reporting `"ok"` while every real afl-api request
+  BBBFFL depends on returns 401. Changed it to `GET /api/{version}/seasons`
+  (a small, already-required, credential-checked endpoint) and added
+  `tests/test_afl_client.py::test_check_connectivity_fails_when_the_api_key_is_rejected`
+  plus a test pinning the exact path hit, so a future regression back to
+  the unauthenticated route would fail CI.
+- **Uvicorn did not trust Caddy's forwarded headers** (P1): confirmed via
+  `docker inspect` that Caddy's own container IP (`172.18.0.3` in this
+  rehearsal) differs from what `app`'s access log showed for a request
+  proxied through it (`172.18.0.1` -- the address Caddy itself observed and
+  forwarded, not its own address), proving `--forwarded-allow-ips=*` makes
+  Uvicorn use the real forwarded client address rather than always
+  reporting Caddy's own IP for every request. Without this fix, every
+  coach's login attempt would have collapsed into the same
+  `LoginRateLimiter` bucket (keyed by `request.client.host`), so five
+  failed logins from any one of them would lock out all of them.
+- **The internet-facing proxy had the full secrets file and network path
+  to the database** (P2): removed `env_file:` from the `proxy` service
+  entirely (Caddy needs zero application settings -- the domain is now a
+  literal value in `deploy/production/Caddyfile`, not `{$BBBFFL_DOMAIN}`
+  substituted from `.env.production`) and split the compose network into
+  `frontend` (`app`, `proxy`) and `backend` (`app`, `database`, `backup`).
+  Verified both directly: `docker compose exec proxy env` shows none of
+  `POSTGRES_PASSWORD`/`BBBFFL_ADMIN_TOKEN`/`BBBFFL_SESSION_SECRET`/
+  `AFL_API_KEY`, and `docker compose exec proxy wget ... http://database:5432`
+  fails to even resolve the hostname (`NXDOMAIN`) -- proxy has no network
+  path to the database at all, not merely no credential for it.
+
 ## What this rehearsal does not prove
 
 - It does not prove the real production afl-api deployment is reachable or

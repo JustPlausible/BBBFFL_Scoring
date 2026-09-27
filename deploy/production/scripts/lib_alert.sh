@@ -19,7 +19,15 @@ bbbffl_alert() {
     message="$1"
     bbbffl_log "CRITICAL" "$message"
     if [ -n "${BBBFFL_ALERT_WEBHOOK_URL:-}" ]; then
-        payload=$(printf '{"text":"BBBFFL: %s"}' "$message")
+        # A caller (readiness_watch.sh) may embed the readiness endpoint's
+        # own JSON response body in $message, which itself contains double
+        # quotes -- escaping backslashes and quotes (and collapsing any
+        # newline, which JSON strings cannot contain literally) here keeps
+        # the outer payload valid JSON regardless of what the message
+        # contains, rather than only for the fixed, simple messages this
+        # directory's other scripts happen to pass today.
+        escaped=$(printf '%s' "$message" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
+        payload=$(printf '{"text":"BBBFFL: %s"}' "$escaped")
         if ! wget -q -T 10 -O /dev/null \
             --header="Content-Type: application/json" \
             --post-data="$payload" \

@@ -23,15 +23,26 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # image's own env_file: convention (see bbbffl_app/.env.production.example).
 # Only defaulted when unset, so an operator/rehearsal invocation that
 # already exports PG* explicitly (e.g. to target a different host) is
-# never overridden.
+# never overridden. PGHOST defaults to the compose service name "database"
+# -- without it, a direct invocation of this script (e.g. the release
+# procedure's on-demand pre-release backup, run with no cron wrapper to
+# supply it) would have libpq try a local Unix socket inside this
+# container, where no PostgreSQL server runs, and the backup would fail.
+: "${PGHOST:=database}"
 : "${PGDATABASE:=${POSTGRES_DB:-}}"
 : "${PGUSER:=${POSTGRES_USER:-}}"
 : "${PGPASSWORD:=${POSTGRES_PASSWORD:-}}"
-export PGDATABASE PGUSER PGPASSWORD
+export PGHOST PGDATABASE PGUSER PGPASSWORD
 
 : "${PGDATABASE:?PGDATABASE (or POSTGRES_DB) must be set}"
 BACKUP_DIR="${BACKUP_DIR:-/backups}"
 RETENTION_DAYS="${BBBFFL_BACKUP_RETENTION_DAYS:-14}"
+
+# Dumps contain full application/session data (issue #243 review) -- never
+# leave one world/group-readable on the host bind mount. Applies to the
+# temporary file pg_dump creates directly; the final atomic rename below
+# preserves this mode.
+umask 077
 
 TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
 OUT="$BACKUP_DIR/bbbffl-${PGDATABASE}-${TIMESTAMP}.dump"

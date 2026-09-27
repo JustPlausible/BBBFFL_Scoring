@@ -473,9 +473,14 @@ procedure's step 2 is the correct safe recovery path**:
 
 ```bash
 docker compose -f compose.production.yaml stop app        # stop writes first
-docker compose -f compose.production.yaml exec -T backup \
-  env BBBFFL_ALLOW_RESTORE_OVER_LIVE_DATABASE=yes \
-  /scripts/restore_postgres.sh /backups/<pre-release-backup>.dump "$POSTGRES_DB"
+# $POSTGRES_DB must expand *inside* the backup container (env_file: only
+# injects it there, not into the operator's host shell) -- a bare
+# "$POSTGRES_DB" on the host expands to empty and both silently bypasses
+# the live-database safety guard below and passes an empty target name.
+docker compose -f compose.production.yaml exec -T backup sh -c '
+  BBBFFL_ALLOW_RESTORE_OVER_LIVE_DATABASE=yes \
+    /scripts/restore_postgres.sh /backups/<pre-release-backup>.dump "$POSTGRES_DB"
+'
 export BBBFFL_RELEASE_TAG=<previous-known-good-tag>
 docker compose -f compose.production.yaml up -d app
 curl -f https://<domain>/health/ready

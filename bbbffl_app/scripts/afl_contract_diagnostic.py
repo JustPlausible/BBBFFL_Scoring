@@ -35,6 +35,7 @@ from typing import Any, Callable
 
 import httpx
 
+from app.afl_client import SEASON_PLAYERS_PAGE_LIMIT, _is_optional_structured_name, _is_positive_int
 from app.config import get_settings
 
 REQUIRED_STAT_FIELDS = {"goals", "behinds", "disposals", "marks", "tackles", "hitouts"}
@@ -111,6 +112,7 @@ def check_seasons(ctx: DiagnosticContext) -> None:
         ok,
         f"{len(seasons)} seasons, {len(current)} flagged is_current=true",
     )
+    historical = [s for s in seasons if not s.get("is_current")]
     if current:
         ctx.season_id = current[0]["season_id"]
         ctx.current_round_number = current[0].get("current_round_number")
@@ -119,9 +121,30 @@ def check_seasons(ctx: DiagnosticContext) -> None:
             "current_round_number" in current[0],
             required=False,
         )
-    historical = [s for s in seasons if not s.get("is_current")]
-    if historical:
-        ctx.historical_season_id = historical[0]["season_id"]
+        if historical:
+            ctx.historical_season_id = historical[0]["season_id"]
+    elif historical:
+        # No season is flagged is_current at all -- a genuine, expected
+        # off-season state (confirmed against the real deployment between
+        # AFL Grand Finals -- see docs/afl-api-v1-contract.md's "Live
+        # validation status"), identical to what AflApiClient.get_current_
+        # season would itself raise on right now. It is not a contract
+        # incompatibility, so it must not silently skip every downstream
+        # check purely because of validation timing -- fall back to the
+        # most recently listed season so rounds/matches/player-stats/player
+        # checks below can still exercise real representative data.
+        fallback = max(historical, key=lambda s: (s.get("year") or -1, s.get("season_id") or -1))
+        ctx.season_id = fallback["season_id"]
+        ctx.skip(
+            "seasons: an is_current season is resolved for downstream checks",
+            f"no season flagged is_current=true -- using most recent season_id={fallback['season_id']} "
+            f"(year={fallback.get('year')!r}) as a fallback so rounds/matches/player-stats/player checks "
+            "below still exercise real data",
+            required=False,
+        )
+        remaining = [s for s in historical if s is not fallback]
+        if remaining:
+            ctx.historical_season_id = remaining[0]["season_id"]
 
 
 def check_rounds(ctx: DiagnosticContext) -> None:
@@ -169,6 +192,106 @@ def check_historical_season(ctx: DiagnosticContext) -> None:
         if not rounds:
             detail += " -- WARNING: season listed but has no persisted rounds; replay data gap"
     ctx.record("GET /api/v1/seasons/{historical_id}/rounds (2026 replay prerequisite)", ok, detail)
+
+
+# ~5,000 players -- far beyond any real season pool; guards against a non-terminating page.
+SEASON_PLAYERS_MAX_PAGES = 20
+
+
+def _season_player_row_problems(row: dict[str, Any]) -> list[str]:
+    """Mirrors `AflApiClient.get_season_players`'s exact row-value
+    validation -- not just key presence -- so this check cannot certify a
+    deployment on which Season Setup would immediately fail with
+    `AflSeasonPlayersContractError`."""
+    problems = []
+    if not _is_positive_int(row.get("canonical_player_id")):
+        problems.append(f"malformed canonical_player_id: {row.get('canonical_player_id')!r}")
+    display_name = row.get("display_name")
+    if not isinstance(display_name, str) or not display_name.strip():
+        problems.append(f"blank/missing display_name: {display_name!r}")
+    for name_field in ("given_name", "family_name"):
+        if not _is_optional_structured_name(row.get(name_field)):
+            problems.append(f"malformed {name_field}: {row.get(name_field)!r}")
+    team = row.get("team")
+    if (
+        not isinstance(team, dict)
+        or not _is_positive_int(team.get("team_id"))
+        or not isinstance(team.get("name"), str)
+        or not team["name"].strip()
+    ):
+        problems.append(f"no resolved team: {team!r}")
+    return problems
+
+
+def check_season_players(ctx: DiagnosticContext) -> None:
+    """GET /api/v1/seasons/{season_id}/players -- the live season-scoped
+    canonical player pool (issue #237's `AflApiClient.get_season_players`),
+    classified **required now** in docs/afl-api-v1-contract.md but
+    previously never exercised by this diagnostic at all.
+
+    Follows pagination to exhaustion at the exact page size
+    `AflApiClient.get_season_players` actually requests in production
+    (`SEASON_PLAYERS_PAGE_LIMIT`, 250) -- a single small page (as an earlier
+    version of this check used) would report a deployment compatible even
+    if it rejected or clamped the production page size, or returned
+    malformed/duplicate rows past the first page, while Season Setup would
+    still fail against it. Every row's *values* -- not just which keys are
+    present -- are validated against the same rules
+    `AflApiClient.get_season_players` enforces (a deployment that returns
+    all named keys but a null/blank/malformed value would otherwise be
+    reported compatible while Season Setup fails against it)."""
+    if ctx.season_id is None:
+        ctx.skip("GET /api/v1/seasons/{id}/players", "no season resolved")
+        return
+    limit = SEASON_PLAYERS_PAGE_LIMIT
+    offset = 0
+    seen: dict[int, dict[str, Any]] = {}
+    duplicates: list[int] = []
+    invalid_rows: list[str] = []
+    problems: list[str] = []
+    pages = 0
+    while True:
+        resp = _get(ctx, f"/api/v1/seasons/{ctx.season_id}/players", params={"limit": limit, "offset": offset})
+        if resp.status_code != 200:
+            ctx.record("GET /api/v1/seasons/{id}/players", False, f"status={resp.status_code} at offset={offset}")
+            return
+        body = resp.json()
+        pages += 1
+        # A server-side clamp of the requested page size would otherwise
+        # look identical to a genuine short final page -- the echoed
+        # limit/offset must match exactly what was requested, on every page.
+        if body.get("limit") != limit or body.get("offset") != offset:
+            problems.append(f"offset={offset}: echoed limit={body.get('limit')!r} offset={body.get('offset')!r}")
+            break
+        rows = body.get("players", [])
+        for row in rows:
+            row_problems = _season_player_row_problems(row)
+            player_id = row.get("canonical_player_id")
+            if row_problems:
+                label = player_id if _is_positive_int(player_id) else f"offset={offset} id={player_id!r}"
+                invalid_rows.append(f"{label}: {'; '.join(row_problems)}")
+            elif player_id in seen:
+                duplicates.append(player_id)
+            else:
+                seen[player_id] = row
+        if len(rows) < limit:
+            break
+        if pages >= SEASON_PLAYERS_MAX_PAGES:
+            problems.append(f"did not terminate with a short page after {pages} pages")
+            break
+        offset += limit
+    ok = not problems and not duplicates and not invalid_rows and bool(seen)
+    detail = f"{len(seen)} valid players across {pages} page(s) (limit={limit})"
+    if not ok:
+        detail += f"; duplicates={duplicates[:5]} invalid_rows={invalid_rows[:5]} problems={problems}"
+    ctx.record("GET /api/v1/seasons/{id}/players", ok, detail)
+    if not seen:
+        return
+    ctx.record(
+        "season players: rows carry provider identifiers (informational; get_season_players does not persist them)",
+        all("identifiers" in row for row in seen.values()),
+        required=False,
+    )
 
 
 def check_matches(ctx: DiagnosticContext) -> None:
@@ -373,6 +496,7 @@ def check_openapi_optional(base_url: str, transport: httpx.BaseTransport | None 
         "/api/v1",
         "/api/v1/seasons",
         "/api/v1/seasons/{season_id}/rounds",
+        "/api/v1/seasons/{season_id}/players",
         "/api/v1/rounds/{round_id}/matches",
         "/api/v1/matches/{match_id}",
         "/api/v1/matches/{match_id}/player-stats",
@@ -397,6 +521,7 @@ REQUIRED_CHECKS: list[Callable[[DiagnosticContext], None]] = [
     check_seasons,
     check_rounds,
     check_historical_season,
+    check_season_players,
     check_matches,
     check_match_detail,
     check_player_stats,

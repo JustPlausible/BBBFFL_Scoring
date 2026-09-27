@@ -1,11 +1,14 @@
 # BBBFFL's `afl-api` `/api/v1` compatibility report
 
 **Issue:** [#18 — Validate and pin afl-api v1 consumer contract](https://github.com/JustPlausible/BBBFFL_Scoring/issues/18)
-(roadmap work package **04**, `docs/roadmap/2027-season-roadmap.md`)
+(roadmap work package **04**, `docs/roadmap/2027-season-roadmap.md`);
+live-deployment validation completed by
+[#244 — Validate live afl-api deployment and application contract before v0.1](https://github.com/JustPlausible/BBBFFL_Scoring/issues/244).
 
 **Status:** contract inventoried and pinned by hermetic tests against
-source-derived fixtures. **Live validation against the configured
-deployment is outstanding** — see [Live validation status](#live-validation-status).
+source-derived fixtures, **and now positively validated against the live
+2027 `afl-api` deployment** (2026-09-27) — see
+[Live validation status](#live-validation-status).
 
 ## Sources of truth used, and how they were weighted
 
@@ -31,7 +34,13 @@ Per the issue's descending priority order:
    attempt). This is a genuine environment restriction, not a design
    choice — see [Live validation status](#live-validation-status).
 
-Because (2) and (3) were unavailable, this report and its fixtures lean on
+**Update (issue #244, 2026-09-27):** (2) and (3) were both completed in a
+later session whose network path could reach `afl-api.thehardinghams.net`
+— see [Live validation status](#live-validation-status) for the results.
+This section is left as the historical record of what the original #18
+report could and could not do.
+
+Because (2) and (3) were unavailable at the time, this report and its fixtures lean on
 (1), which the issue itself ranks highest. Every fixture and every claim
 below cites the specific upstream file/module it is derived from.
 
@@ -326,13 +335,34 @@ not this contract-validation issue, per its explicit non-goals.
    pages. This endpoint supersedes the earlier gap recorded below and
    prevents injured, suspended, or pre-debut eligible players being omitted
    merely because they have no first-half stat row.
-2. **Historical season data presence is unverified.** The contract
-   structurally supports historical access (any persisted season/round/
-   match/player-stats resource is reachable by ID with no time-window
-   restriction), but whether the deployed instance has actually persisted
-   full 2026 season data is a live-deployment fact this session could not
-   check (see [Live validation status](#live-validation-status)). **This
-   blocks packages 08/32** until confirmed.
+2. **Historical season data presence — now fully confirmed (issue #244,
+   2026-09-27).** The contract structurally supports historical access
+   (any persisted season/round/match/player-stats resource is reachable by
+   ID with no time-window restriction), and the deployed instance has
+   confirmed persisted this completely: season 85 (2026) carries all 30
+   rounds and all 218 matches, every one reporting `CONCLUDED` — see
+   [Live validation status](#live-validation-status). Player-stats
+   completeness was checked twice, ~75 minutes apart, and genuinely
+   changed state between the two checks:
+   - **First pass (~11:47 UTC):** complete and contract-compliant for the
+     specific match sampled (Round 1's Carlton v Richmond, `match_id`
+     8045), but **not** for every match — three matches (the two
+     Preliminary Finals, `match_id` 9026/9027, and the Grand Final,
+     `match_id` 9028) reported `lifecycle.finality="not_available"` with
+     zero player rows. This correctly blocked packages 08/32 at the time.
+   - **Second pass (~12:51 UTC), after the operator reported the upstream
+     provider had backfilled those three matches:** all three now report
+     `lifecycle.finality="final"` with 46 player rows each. A full
+     season-wide sweep of all 218 matches in season 85 (every
+     `GET /api/v1/matches/{id}/player-stats`, not a single sample) found
+     **zero** incomplete matches — every match reports `finality="final"`
+     with at least one player row.
+
+   **This no longer blocks packages 08/32.** The upstream data gap was
+   real, genuinely time-bound, and is now closed by the provider's own
+   backfill, not by BBBFFL relaxing what "complete" means — see
+   [Live validation status](#live-validation-status) for the season-wide
+   sweep methodology.
 3. **No standalone team-list/team-detail resource.** Not currently a
    BBBFFL requirement, but worth tracking if a future package needs a full
    AFL club list independent of a match/player projection.
@@ -444,36 +474,214 @@ oversight:
 
 ## Live validation status
 
-**Not completed in this session.** This session's outbound network access
-is routed through a policy-enforcing egress proxy
-(`/root/.ccr/README.md`), and `afl-api.thehardinghams.net` is blocked by
-that policy — every attempted connection (via `httpx`, and via the opt-in
-diagnostic itself) returned a proxy-level `403` / `connect_rejected`,
-confirmed through the proxy's own `__agentproxy/status` diagnostic
-endpoint. Per that proxy's documented guidance, this is an organisation
-policy denial to report, not a failure to route around.
+**Completed 2026-09-27, issue #244.** An earlier session (issue #18)
+recorded this as blocked: its outbound network access was routed through a
+policy-enforcing egress proxy that rejected every connection to
+`afl-api.thehardinghams.net` with a proxy-level `403`/`connect_rejected`.
+That restriction did not apply to the session that ran this validation —
+its egress proxy has a provisioned, credential-injecting allow rule for
+`afl-api.thehardinghams.net` (the intended BBBFFL 2027 `afl-api`
+deployment), so outbound requests to that host are transport-level
+authenticated automatically without this session ever holding or seeing an
+`AFL_API_KEY` value. `AFL_API_BASE_URL=https://afl-api.thehardinghams.net`
+and a placeholder, non-secret `AFL_API_KEY` (required only to satisfy
+`get_settings()`'s "a key must be configured" check; never the credential
+actually used on the wire) were set, and the diagnostic was run unchanged
+from `bbbffl_app`:
 
-**What this means concretely:**
+```bash
+AFL_API_BASE_URL=https://afl-api.thehardinghams.net AFL_API_KEY=*** \
+  python -m scripts.afl_contract_diagnostic
+```
 
-- The fixtures in `bbbffl_app/tests/fixtures/afl_api_v1/` are
-  source-derived (see that directory's `PROVENANCE.md`), not live-captured.
-  They are still the higher-priority source per the issue's own ranking,
-  but a live-capture cross-check remains outstanding.
-- `/openapi.json` could not be compared against BBBFFL's expectations.
-- The opt-in diagnostic (`bbbffl_app/scripts/afl_contract_diagnostic.py`)
-  was run against the configured `AFL_API_BASE_URL`/`AFL_API_KEY` and
-  correctly reported every required check as a clean, credential-free
-  `FAIL` with a network-error detail (proxy `403`) rather than crashing —
-  proving the diagnostic itself is sound, but it did **not** produce a
-  positive live validation of the deployment.
-- Gap #2 in [§3](#3-known-upstream-gaps-and-unresolved-semantics)
-  (historical 2026 data presence) remains genuinely unverified as a result.
+No secret was printed, logged, retained, or committed at any point; the
+value above is a placeholder, not the credential actually used (see
+"Authentication/configuration — now positively confirmed" below).
 
-**Required follow-up before packages 08/32 begin:** run
-`python -m scripts.afl_contract_diagnostic` (see below) from an environment
-with network access to the configured `afl-api` deployment, and reconcile
-any discrepancy between its findings and this report's source-derived
-fixtures before trusting them for replay evidence.
+### Endpoint/contract coverage — confirmed positive
+
+Every endpoint this document classifies **required now** was exercised
+against real data and returned a contract-compatible shape:
+
+| Endpoint | Representative evidence retrieved |
+| --- | --- |
+| `GET /api/v1` | `{"name": "AFL-api", "version": "0.7.0", "documentation": "/docs"}` |
+| `GET /api/v1/seasons` | 15 persisted seasons (2012–2026); confirms multi-year historical access, not only the most recent season |
+| `GET /api/v1/seasons/{season_id}/rounds` | Season 85 (2026): 30 rounds, Opening Round through Grand Final, `byes` correctly array-or-null |
+| `GET /api/v1/seasons/{season_id}/players` | Season 85: complete pool followed to exhaustion at the production page size (812 players across 4 pages of `SEASON_PLAYERS_PAGE_LIMIT`=250, `limit`/`offset` echoed exactly on every page, no repeated `canonical_player_id` across pages), every row's *values* -- not just key presence -- validated against `AflApiClient.get_season_players`'s own rules (positive `canonical_player_id`, non-blank `display_name`, optional non-blank `given_name`/`family_name`, a resolved season-scoped `team`) |
+| `GET /api/v1/rounds/{round_id}/matches` | Every one of season 85's 218 matches, across all 30 rounds, reports `status="CONCLUDED"` (the 2026 season has fully finished) |
+| `GET /api/v1/matches/{match_id}` | Round 1 and Grand Final match detail, correct `home_team`/`away_team`/`score_home`/`score_away` shape |
+| `GET /api/v1/matches/{match_id}/player-stats` | Round 1 match (Carlton v Richmond): `lifecycle.finality="final"`, 46 player rows, every BBBFFL-scored field (`goals, behinds, disposals, marks, tackles, hitouts`) present on every row. **Season-wide sweep** (second validation pass, ~12:51 UTC): all 218 matches in season 85 checked individually, all report `lifecycle.finality="final"` with player rows present -- zero incomplete matches |
+| `GET /api/v1/players/{canonical_player_id}` | Resolved a real `canonical_player_id` from the match player-stats above and confirmed `display_name`/`current_team`/`identifiers` |
+| `GET /api/v1/players?search=` | Non-empty result for a real surname |
+| `GET /api/v1/injuries` | 245 current records, correct shape |
+| `GET /api/v1/matches/{match_id}/rosters` | Correct `home_team`/`away_team` shape |
+| 404/422 structured error shapes | Confirmed: `player_not_found` / `search_required`, exactly as documented in [§1.7](#17-authentication-and-configuration) |
+
+This closes gap #2 in
+[§3](#3-known-upstream-gaps-and-unresolved-semantics) (historical 2026 data
+presence was genuinely unverified before this session): season 85 (2026)'s
+round/match structure is confirmed fully present (30 rounds, 218 matches,
+all `CONCLUDED`), and player-stats are now confirmed complete and
+contract-compliant **season-wide, not just for one sampled match**.
+
+This was not true on the first validation pass (~11:47 UTC): the 2026
+Grand Final (`match_id` 9028) and both Preliminary Finals (`match_id`
+9026/9027) reported `lifecycle.finality="not_available"` with zero player
+rows, and this document correctly recorded season 85 as not fully
+populated end-to-end and continuing to block packages 08/32. The operator
+reported the upstream provider had since backfilled those three matches
+from the authoritative CFS source; a second validation pass (~12:51 UTC)
+confirmed all three now report `lifecycle.finality="final"` with 46
+player rows each, and a full sweep of all 218 matches in season 85 (every
+`GET /api/v1/matches/{id}/player-stats`, not a sample) found zero
+remaining incomplete matches. **Packages 08/32 are no longer blocked by
+this gap** — see §3 item 2.
+
+### OpenAPI comparison — completed, no incompatible difference found
+
+The live `GET /openapi.json` (`AFL-api 0.7.0`) advertises every path this
+document's contract requires, including
+`/api/v1/seasons/{season_id}/players` (added to the diagnostic's optional
+cross-check by this issue — see "Diagnostic change" below). Differences
+found, both benign and non-blocking under the
+[compatibility policy](#compatibility-and-pinning-policy)'s additive-change
+rule:
+
+- New, additive endpoints BBBFFL does not consume and has no documented
+  need for: `/api/v1/players/{id}/movements`,
+  `/api/v1/players/{id}/seasons/{season_id}/player-stat-summary`,
+  `/api/v1/seasons/{season_id}/player-stat-summaries`.
+- The legacy unversioned `/api/...` routes (`/api/matches`, `/api/players`,
+  etc.) remain present, matching this document's existing statement that
+  they are "pre-v1 legacy behaviour, not a permanently supported parallel
+  API" and are not used by BBBFFL.
+
+### Authentication/configuration — now positively confirmed
+
+`AFL_API_BASE_URL` (service root) and `AFL_API_KEY`, read only through
+`app.config.get_settings()`, need no code or naming change to build every
+request path exercised above, and the `X-Api-Key` header name and both the
+unstructured 401 body and structured `{"error": {...}}` 404/422 bodies
+match this document's existing source-level analysis in
+[§1.7](#17-authentication-and-configuration) exactly.
+
+**What the validating session's own run could not establish:** whether a
+real, deployment-issued `AFL_API_KEY` is actually honoured end-to-end.
+That session's egress proxy authenticates every outbound request to
+`afl-api.thehardinghams.net` at the transport level, regardless of what
+(if any) `x-api-key` header the calling code sends — every request in
+that run succeeded through the proxy-injected credential, not through the
+placeholder, non-secret `AFL_API_KEY` value the session actually set
+locally. Consequently the diagnostic's own negative-path checks
+(`GET /api/v1/seasons` with no key, and with a deliberately invalid key,
+both expected to return `401`) observed `200` and were correctly recorded
+as `FAIL` in that run — it could not distinguish "the deployment accepts
+any key" from "the deployment enforces a real key and the proxy happened
+to already be authenticated".
+
+**Independently closed the same day:** the operator ran the equivalent
+three checks directly from the BBBFFL production Docker host, on a
+network path that does not auto-authenticate:
+
+- no `X-Api-Key` header → `401`
+- an invalid `X-Api-Key` value → `401`
+- the real, deployment-issued `X-Api-Key` value → `200`
+
+This is exactly the follow-up this document called for, confirms the
+deployment enforces its configured credential rather than accepting any
+request, and closes the previously open credential-validation gap. No key
+value was shared with, or is recorded by, this document or this
+session — only the pass/fail outcome above.
+
+### UTC and status semantics — confirmed
+
+- Every timestamp observed (`rounds[].start_time`/`.end_time`,
+  `matches[].start_time_utc`) was UTC ISO 8601, using either an explicit
+  `+0000` offset or a `Z` suffix depending on the field — both pass through
+  `AflApiClient` unparsed as opaque strings, so the formatting difference
+  is not a compatibility concern.
+- `matches[].status` was `CONCLUDED` for all 218 observed 2026-season
+  matches (the season has fully finished); no `LIVE`, `UPCOMING`, or
+  `POSTGAME` match was available to observe directly during this
+  validation window, since no 2027 season has been published by afl-api
+  yet (see "Known non-blocking gap" below). The full four-value vocabulary
+  itself remains confirmed by source review ([§1.3](#13-match-lifecycle))
+  and by the diagnostic's `VALID_MATCH_STATES` check.
+- **A concrete, live confirmation that `POSTGAME`/`CONCLUDED` and
+  player-stat finality are genuinely independent signals, not aliases:**
+  at the first validation pass (~11:47 UTC), the 2026 Grand Final match
+  reported `matches.status="CONCLUDED"` (with a final score) while its own
+  `player-stats` resource independently reported
+  `lifecycle.finality="not_available"` with zero player rows (stats not
+  yet loaded for that specific match at that time) — the match-lifecycle
+  and player-stat-finality fields disagreed on "done-ness" while both
+  stayed internally consistent with their own semantics. This is exactly
+  the distinction [§1.3](#13-match-lifecycle) and
+  [§1.4](#14-player-stat-finality-and-corrections) already document as two
+  separately-sourced facts — BBBFFL must never collapse them — now backed
+  by a real, non-hypothetical example. (The upstream provider has since
+  backfilled this match's stats — see "Historical season data presence"
+  in [§3](#3-known-upstream-gaps-and-unresolved-semantics) — so it no
+  longer reports `not_available`; the independent-signals finding itself
+  remains valid regardless of that match's current state.)
+
+### Known, non-blocking gap: no season is currently flagged `is_current`
+
+Validated the day after the 2026 AFL Grand Final (2026-09-26), the
+deployment correctly reports **zero** of its 15 seasons with
+`is_current=true`, and no 2027 season resource exists yet at all. This is
+the same outcome `AflApiClient.get_current_season()` would itself raise
+`AflApiError` on right now — it is a genuine, expected off-season timing
+state (afl-api has not yet published the 2027 season), not a contract
+incompatibility, and per this document's compatibility policy it is not
+weakened or masked here. It is expected to resolve once afl-api publishes
+the 2027 season ahead of that season's start; `app/round_preflight.py`'s
+human-readable season selection (`AflApiClient.get_seasons()`) already
+gives BBBFFL's Season Setup workflow (issue #237) a supported path that
+does not require `is_current` to be set. See
+[`docs/2027-live-season-readiness.md`](2027-live-season-readiness.md) item
+11 for how this affects release readiness.
+
+### Diagnostic change made because of this validation
+
+Before this run, `check_seasons` treated "no season flagged
+`is_current`" as a reason for every downstream check (rounds, matches,
+match detail, player-stats, player identity) to `SKIP` outright — accurate
+for the `is_current` check itself, but it meant the diagnostic could not
+produce any of the representative-data evidence above during the exact
+off-season window it was actually run in. `scripts/afl_contract_diagnostic.py`
+now falls back to the most recently listed season when no season is
+flagged current, so the rest of the contract is still positively exercised
+with real data; the `is_current` check itself still fails honestly and is
+recorded as an informational, non-required note when the fallback is used.
+A separate, previously-missing required check for
+`GET /api/v1/seasons/{season_id}/players` — classified **required now** by
+this document since issue #237, but never exercised by the diagnostic —
+was added at the same time (see the table above). Its first version
+requested only a single small page (`limit=50`); a PR review (Codex,
+P1) correctly pointed out that this would report a deployment compatible
+even if it rejected or clamped `AflApiClient.get_season_players`'s actual
+production page size (`SEASON_PLAYERS_PAGE_LIMIT`, 250), or returned
+malformed/duplicate rows past the first page. The check now requests the
+identical production page size and follows pagination to the terminating
+short page, failing if the echoed `limit`/`offset` ever stops matching
+what was requested or if a `canonical_player_id` repeats across pages.
+
+A second Codex review pass (P1) on the same check then pointed out that
+validating only which *keys* each row carries would still certify a
+deployment that sends every named key but a value the production client
+rejects — a null `canonical_player_id`, a blank `display_name`, a
+non-string structured name, or an unresolved `team` — even though
+`AflApiClient.get_season_players` raises `AflSeasonPlayersContractError`
+on exactly those values. The check now runs the identical row-value
+validation `get_season_players` does (reusing its own `_is_positive_int`/
+`_is_optional_structured_name` predicates rather than restating the
+rules) before counting a row as valid. Against the live deployment this
+now positively confirms 812 players across 4 pages with no such defect.
+Both fixes are covered by hermetic offline tests in
+`tests/test_afl_contract_diagnostic.py`; no production application code
+changed.
 
 ## Running the opt-in live integration diagnostic
 

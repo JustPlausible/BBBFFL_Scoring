@@ -77,17 +77,33 @@ check is never satisfied by a snapshot that a concurrent write then
 invalidates before the lifecycle transition commits (Codex review, PR
 #254, P2; see `tests/test_season_activation_postgresql.py`).
 
-The checks lock in a fixed order -- `season_preseason_window`, then
-`season_draft`/`draft_pick`, then `season_entry`/`player_ownership_period`,
-then the remaining tables -- matching the order
-`app.preseason.PreseasonRepository.close_window`/`correct_opening_snapshot`
-already lock in (window before draft, window before ownership). A second
-review round found the first version of this locking lock-ordered the
-opposite way for one pair (ownership before window), which could deadlock
-against a concurrent `close_window`/`correct_opening_snapshot` on
-PostgreSQL rather than cleanly serializing; `tests/test_season_activation_
-postgresql.py::test_activation_locks_the_preseason_window_before_the_draft_
-avoiding_deadlock` proves the corrected order.
+The checks lock in a fixed order -- `season_squad_configuration`, then
+`season_preseason_window`, then `season_draft`/`draft_pick`, then
+`season_entry`/`player_ownership_period`, then the remaining tables --
+matching the order `app.preseason.PreseasonRepository.close_window`/
+`correct_opening_snapshot` and `app.player_pool.OwnershipRepository.
+configure_squad_limit` already lock in (window before draft, window
+before ownership, squad configuration before draft). Two review rounds
+each found one pair locked in the opposite order from an existing
+caller, which could deadlock against a concurrent `close_window`/
+`correct_opening_snapshot`/`configure_squad_limit` on PostgreSQL rather
+than cleanly serializing; `tests/test_season_activation_postgresql.py`'s
+three lock-order tests prove the corrected order, and a 40-iteration
+real-concurrency stress run (`activate_season` racing
+`configure_squad_limit` via a `threading.Barrier`, not merely a held
+lock) produced no deadlock or hang.
+
+**What this does not claim.** `app.preseason`/`app.draft`/
+`app.player_pool` do not themselves follow one documented global lock
+order today -- for example `DraftRepository.execute_pick`'s ordinary
+ownership-acquisition path locks `season_draft` before
+`season_preseason_window`, the opposite of `close_window`'s own order,
+a pre-existing inconsistency this issue did not introduce and does not
+fix. This module locks in the order needed to avoid a deadlock against
+every caller identified during review that could plausibly run
+concurrently with activation; a comprehensive lock-order audit across
+the whole season/preseason/draft/ownership domain is a separate,
+valuable follow-up, not part of issue #239's scope.
 
 ## Activation is always explicit
 

@@ -337,7 +337,22 @@ def _draft_check(conn, database, season_id: str, *, for_update: bool) -> Activat
 
 
 def _evaluate_checks(conn, database, season: Season, *, for_update: bool) -> list[ActivationCheck]:
-    # `_draft_check` runs first: it locks `season_preseason_window` before
+    # Lock `season_squad_configuration` before anything else:
+    # `OwnershipRepository.configure_squad_limit` locks it before
+    # `season_draft` (Codex review, PR #254, third P2 round), and
+    # `_draft_check` below locks `season_preseason_window` before
+    # `season_draft`/`draft_pick`. No existing caller orders squad
+    # configuration against the window, so locking it first here satisfies
+    # `configure_squad_limit`'s order without disturbing the window-before-
+    # draft-before-ownership order established below. `_player_pool_check`
+    # re-reads the same row later; re-locking a row this transaction
+    # already holds is a no-op, never a second wait.
+    conn.execute(
+        "SELECT squad_limit FROM season_squad_configuration WHERE season_id=?"
+        + _suffix(database, for_update=for_update),
+        (season.season_id,),
+    )
+    # `_draft_check` runs next: it locks `season_preseason_window` before
     # `season_draft`, and every other check that could contend with a
     # concurrent preseason operation (`_player_pool_check`'s ownership
     # rows) must lock *after* it, matching `PreseasonRepository.

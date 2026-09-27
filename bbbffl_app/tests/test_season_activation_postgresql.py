@@ -108,3 +108,46 @@ def test_activation_locks_the_preseason_window_before_the_draft_avoiding_deadloc
     assert not thread.is_alive()
     assert outcome["result"] == "activated", outcome["result"]
     assert SeasonRepository(database).get_season(season_id).lifecycle_state == "active"
+
+
+def test_activation_locks_squad_configuration_before_the_draft_avoiding_deadlock(postgres_url):  # noqa: F811
+    """Codex review, PR #254 (a third P2 round): `OwnershipRepository.
+    configure_squad_limit` locks `season_squad_configuration` *before*
+    `season_draft`. `_evaluate_checks` must lock in the same order --
+    squad configuration first -- so a concurrent (redundant, and
+    ultimately refused) squad-limit request against an already-drafted
+    season can never each hold what the other wants next."""
+    database = connect(postgres_url)
+    built = build_activation_ready_season(database, year=9241)
+    season_id = built["season"].season_id
+
+    lock_conn = connect(postgres_url).engine.connect()
+    lock_txn = lock_conn.begin()
+    lock_conn.execute(
+        text("SELECT * FROM season_squad_configuration WHERE season_id=:sid FOR UPDATE"), {"sid": season_id}
+    )
+
+    outcome = {}
+
+    def activate():
+        db = connect(postgres_url)
+        try:
+            activate_season(db, season_id, actor=ACTOR, reason=REASON)
+            outcome["result"] = "activated"
+        except Exception as exc:  # noqa: BLE001 -- any exception, including a deadlock error, fails the test below
+            outcome["result"] = f"{type(exc).__name__}: {exc}"
+        finally:
+            db.close()
+
+    thread = Thread(target=activate)
+    thread.start()
+    thread.join(timeout=1)
+    assert thread.is_alive(), "activation did not wait for the concurrently held squad-configuration lock"
+
+    lock_txn.commit()
+    lock_conn.close()
+
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+    assert outcome["result"] == "activated", outcome["result"]
+    assert SeasonRepository(database).get_season(season_id).lifecycle_state == "active"

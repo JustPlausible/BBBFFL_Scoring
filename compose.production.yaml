@@ -1,0 +1,117 @@
+# Production deployment topology for BBBFFL (issue #243). See
+# docs/production-operations.md for the full operator procedure --
+# clean-host reproduction, secrets setup, TLS, scheduled backups, restore
+# rehearsal, and the release/rollback runbook. Do not run this from
+# prose/memory; that document is the source of truth for the commands.
+#
+# Reproducible on a clean Docker-capable host with only:
+#   - this repository checked out;
+#   - bbbffl_app/.env.production (copied from .env.production.example and
+#     filled in -- never committed, see bbbffl_app/.gitignore);
+#   - deploy/production/Caddyfile (copied from Caddyfile.example);
+#   - DNS for BBBFFL_DOMAIN already pointing at this host, and ports 80/443
+#     reachable from the internet (for Let's Encrypt + real traffic).
+#
+# Topology: app (this repository's image) <- proxy (Caddy, TLS
+# termination) is the only service reachable from outside this host;
+# database (PostgreSQL) and backup are never published -- see each
+# service's own comment below for why.
+services:
+  app:
+    build:
+      context: ./bbbffl_app
+    # Tag every build with a release identifier (default: latest) so a
+    # rollback can re-run `up -d` against a previously built tag without
+    # rebuilding -- see docs/production-operations.md#release-procedure.
+    # Set before build/up, e.g.: export BBBFFL_RELEASE_TAG=$(git rev-parse --short HEAD)
+    image: bbbffl-app:${BBBFFL_RELEASE_TAG:-latest}
+    restart: unless-stopped
+    env_file:
+      - ./bbbffl_app/.env.production
+    # Never published to the host -- only the "proxy" service is reachable
+    # from outside this host (see "proxy" below). Other services on this
+    # compose project reach it by service name ("app") on the project's
+    # default network.
+    expose:
+      - "8000"
+    depends_on:
+      database:
+        condition: service_healthy
+    # Liveness only (Dockerfile's own HEALTHCHECK hits GET /health) --
+    # deliberately not GET /health/ready, so a transient afl-api or
+    # database outage never looks like a crashed process and triggers a
+    # restart-loop that would not fix the outage. See
+    # docs/production-operations.md#readiness-vs-liveness.
+    volumes:
+      - production-app-data:/app/data
+
+  database:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file:
+      - ./bbbffl_app/.env.production
+    volumes:
+      - production-database:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    # Deliberately no "ports:" -- PostgreSQL is reachable only from other
+    # services on this compose project's internal network, never from the
+    # host or the public internet (issue #243's "must not expose
+    # PostgreSQL publicly").
+
+  # Scheduled PostgreSQL backups (issue #243). Built from the exact same
+  # postgres:16-alpine image as "database" above, so pg_dump's version
+  # always matches the server it backs up. See
+  # docs/production-operations.md#scheduled-backups for the schedule,
+  # retention policy, and the restore procedure these backups feed.
+  backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file:
+      - ./bbbffl_app/.env.production
+    depends_on:
+      database:
+        condition: service_healthy
+    entrypoint: ["/scripts/backup_entrypoint.sh"]
+    volumes:
+      - ./deploy/production/scripts:/scripts:ro
+      - ./deploy/production/backups:/backups
+    # No "ports:" -- this service only ever initiates outbound
+    # pg_dump/pg_restore connections to "database" and, optionally, an
+    # outbound alert-webhook request; it is never a server itself.
+
+  # Reverse proxy / TLS termination (issue #243). The only service exposed
+  # to the host/internet -- see deploy/production/Caddyfile.example for
+  # what it forwards, which headers it preserves, and the HTTPS approach.
+  proxy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    env_file:
+      - ./bbbffl_app/.env.production
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      app:
+        condition: service_healthy
+    volumes:
+      - ./deploy/production/Caddyfile:/etc/caddy/Caddyfile:ro
+      - production-proxy-data:/data
+      - production-proxy-config:/config
+
+volumes:
+  # PostgreSQL's own data directory -- the database's persistent state.
+  production-database:
+  # The season model's authoritative store is PostgreSQL above; this only
+  # holds the legacy Grand Final prototype's teams config path mount point
+  # (app/config.py's BBBFFL_TEAMS_CONFIG_PATH) and any other file the app
+  # image expects under /app/data -- see bbbffl_app/Dockerfile.
+  production-app-data:
+  # Caddy's certificate storage (Let's Encrypt account key + issued certs)
+  # and its runtime config -- both must survive a container
+  # restart/recreate so a certificate is not re-requested unnecessarily.
+  production-proxy-data:
+  production-proxy-config:

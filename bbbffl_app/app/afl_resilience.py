@@ -299,6 +299,8 @@ class AflTransport(Protocol):
 
     def get_season_players(self, season_id: int) -> Any: ...
 
+    def check_connectivity(self) -> None: ...
+
 
 class ResilientAflClient:
     """Wraps an `AflTransport` with retry/backoff, per-endpoint caching, and
@@ -344,6 +346,18 @@ class ResilientAflClient:
         close = getattr(self._transport, "close", None)
         if callable(close):
             close()
+
+    def check_connectivity(self) -> None:
+        """Direct passthrough to the wrapped transport's own connectivity
+        probe (issue #243's dependency-readiness check) -- deliberately
+        bypasses `_call`'s retry/backoff and stale-cache fallback, since
+        readiness must reflect whether afl-api is reachable *right now*,
+        not a retried or cached view of it. Only meaningful when the
+        transport is a live `AflApiClient`; `app/main.py` never constructs
+        this wrapper around a replay transport (see app/config.py's
+        BBBFFL_AFL_MODE), so callers gate this on settings.afl_mode == "live"
+        rather than this class doing so itself."""
+        self._transport.check_connectivity()
 
     # -- AflDataSource-compatible surface ---------------------------------
 

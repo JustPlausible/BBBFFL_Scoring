@@ -2,7 +2,8 @@
 
 **Status:** current-state readiness assessment, 21 September 2026;
 remaining item 1 (fresh-season/phase initialization) updated 25 September
-2026 for issue #237.
+2026 for issue #237; remaining item 10 (production deployment/readiness/
+backup/rollback baseline) updated 27 September 2026 for issue #243.
 **Supersedes:** the current-state claims in
 [`docs/roadmap/2027-season-roadmap.md`](roadmap/2027-season-roadmap.md),
 which is now a historical planning baseline from 23 August 2026 -- see that
@@ -11,8 +12,10 @@ sequencing/decision record, only its capability claims.
 **Evidence base:** the completed 2026 full-season replay
 ([`docs/evidence/2026-full-season-replay-summary.md`](evidence/2026-full-season-replay-summary.md)
 and the three phase evidence directories it synthesises), the targeted
-current-code regression run under issue #224 (Stages A-D, below), and the
-repository's automated test suite.
+current-code regression run under issue #224 (Stages A-D, below), the
+repository's automated test suite, and, for production operations, issue
+#243's disposable-environment rehearsal
+([`evidence/production-operations-rehearsal-2026-09-27.md`](evidence/production-operations-rehearsal-2026-09-27.md)).
 
 This is the authoritative current-state document for whether BBBFFL can run
 a live 2027 season. Where it and any older document disagree, this
@@ -260,7 +263,8 @@ auto-pick automation are v0.2.
 | Capability | Status | Evidence |
 |---|---|---|
 | Paired database-archive + checkpoint backup/restore mechanism itself | Replay-proven repeatedly (every phase boundary), as an operator/CLI procedure | All three provenance manifests |
-| Production deployment backup/restore runbook rehearsal (real hosting environment, not a replay checkpoint) | **Staging/rehearsal-needed** | Named explicitly as a "likely v0.1" item in issue #224; the replay validated the archive/restore mechanism repeatedly but not under a real production deployment's operational conditions |
+| Scheduled (not merely manual) production PostgreSQL backups, with retention and failure visibility | **Automated-test-proven + disposable-environment rehearsal (issue #243); staging/rehearsal-needed on the real production host** | `compose.production.yaml`'s `backup` service (`deploy/production/scripts/backup_entrypoint.sh`/`backup_postgres.sh`) runs `pg_dump -Fc` on a cron schedule (default daily 02:15 UTC), prunes by configurable retention, names files unambiguously (`bbbffl-<db>-<UTC timestamp>.dump`), writes to a host bind mount outside every container's writable layer, and alerts (webhook + `CRITICAL` log) on failure. Rehearsed end-to-end in a disposable sandbox, including the failure path: [`evidence/production-operations-rehearsal-2026-09-27.md`](evidence/production-operations-rehearsal-2026-09-27.md) section D. Not yet run on a real production host against production-scale data. |
+| Production restore procedure, verified beyond "exited zero" | **Automated-test-proven + disposable-environment rehearsal (issue #243); staging/rehearsal-needed on the real production host** | `deploy/production/scripts/restore_postgres.sh` restores into a named target database (refusing the live database name without an explicit override), rehearsed by backing up the production-topology rehearsal database and restoring it into a genuinely separate, disposable PostgreSQL container -- verified by matching `alembic_version` migration head, a representative application-written decision row, and its audit-trail entry, not merely the restore command's exit code. See [`production-operations.md#restore-procedure`](production-operations.md#restore-procedure) and the evidence document's section E. |
 
 ### Production/operations readiness
 
@@ -269,8 +273,8 @@ auto-pick automation are v0.2.
 | CI quality gates (tests, lint/format, incremental type-check, migration integrity on SQLite and PostgreSQL, dependency audit, container build) | Automated-test-proven | `docs/ci-quality-gates.md` |
 | Non-technical Scorer staging/beta rehearsal | **Staging/rehearsal-needed** | Recommended explicitly in `2026-finals-replay/ux-findings.md`, "Pre-2027 rehearsal"; not yet performed |
 | Live `afl-api` deployment validation (the application's sole live data dependency for 2027) | **Outstanding / blocks v0.1** | `docs/afl-api-v1-contract.md`'s own "Live validation status" section records this as **not completed**: outbound network access to the configured `afl-api` deployment was blocked by an egress policy in the environment that produced that report, so the opt-in diagnostic (`scripts/afl_contract_diagnostic.py`) could prove itself sound but not positively validate the live deployment; `/openapi.json` was never compared; the contract fixtures are source-derived, not live-captured; and historical 2026 data presence against the real deployment remains genuinely unverified. The entire 2026 replay used `ReplayAflDataSource` (never the live client), and CI is hermetic, so none of the evidence in this document proves the current production `afl-api` configuration is reachable or contract-compatible for a live 2027 season. Found by Codex review on this PR (P1); this document had omitted it entirely from the matrix despite it already being documented elsewhere in the repository. |
-| Production backup/restore runbook rehearsal | **Staging/rehearsal-needed** | See "Backup/restore/archive" above |
-| Reproducible production deployment topology, TLS/reverse-proxy setup, dependency-readiness probe, structured alerting/logging, scheduled backups with an accepted RPO/RTO, and a rollback runbook | **Outstanding / blocks v0.1** | `GET /health` (`app/routes/health.py`) returns only `{"status": "ok"}` -- a process-liveness check with no database/dependency probe. The repository has a generic `Dockerfile` and the Compose-first local/rehearsal workflow (`docs/round1-rehearsal.md`), but no reproducible production deployment topology, TLS/reverse-proxy configuration, structured alerting, or rollback runbook. **Backups today are manual-only**: every backup taken during the 2026 replay was an ad hoc `pg_dump` run by the operator immediately before a specific boundary, never a scheduled job -- a repo-wide search found no cron/systemd-timer/scheduler configuration anywhere. The "Backup/restore/archive" rehearsal item above proves a manually created archive can be restored; it does not establish that a live production season is protected between backups, since nothing currently takes one on a schedule. The original roadmap's package 39 already marked all of this P0/required for 2027 (roadmap section 2, "Health/observability: ... Missing operationally"); it was never closed and is carried forward here as current-state fact. Found by Codex review on this PR (P1, across two rounds: deployment/observability controls, then specifically scheduled backups); confirmed by inspecting `app/routes/health.py` and searching the repository for the described controls (none exist). |
+| Production backup/restore runbook rehearsal | **Automated-test-proven + disposable-environment rehearsal (issue #243); staging/rehearsal-needed on the real production host** | See "Backup/restore/archive" above |
+| Reproducible production deployment topology, TLS/reverse-proxy setup, dependency-readiness probe, structured alerting/logging, scheduled backups with an accepted RPO/RTO, and a rollback runbook | **Implemented and disposable-environment-rehearsed (issue #243); staging/rehearsal-needed on the real production host, and RPO/RTO await Steve's explicit acceptance** | `compose.production.yaml` defines a reproducible four-service topology (app, PostgreSQL, a Caddy TLS-terminating reverse proxy, and a scheduled-backup service), documented operator-by-operator in [`production-operations.md`](production-operations.md). `GET /health` (`app/routes/health.py`) remains a pure process-liveness check exactly as before; a new, separate `GET /health/ready` checks database connectivity and (only when `afl_mode == "live"`) afl-api connectivity, each bounded by a configurable timeout, never mutating state, never leaking a credential -- see `tests/test_health_api.py` and [`production-operations.md#readiness-vs-liveness`](production-operations.md#readiness-vs-liveness). Structured `CRITICAL`/`WARNING` logging now covers startup/config failure, database/migration failure, a dependency-readiness failure, an otherwise-unhandled application exception, and backup failure; a host-run `readiness_watch.sh` plus an optional alert webhook give a practical, reproducible alerting path (see [`production-operations.md#logging-and-alerting`](production-operations.md#logging-and-alerting)). Scheduled backups, the restore procedure, and both an application-only and a database-affecting rollback procedure are documented and were rehearsed end-to-end in a disposable sandbox environment, including the failure paths -- see [`evidence/production-operations-rehearsal-2026-09-27.md`](evidence/production-operations-rehearsal-2026-09-27.md) and [`production-operations.md#rollback-strategy`](production-operations.md#rollback-strategy) (which explains why a bare "`alembic downgrade` then restart the previous image" recipe is unsafe given this repository's forward-only migration refusal policy). RPO (24h) and RTO (4h) targets are proposed and consistent with the implementation, but not yet accepted by Steve -- see [`production-operations.md#rpo-and-rto`](production-operations.md#rpo-and-rto). None of this was rehearsed against the real production host, real DNS/TLS, or a non-technical operator -- see [`production-operations.md#what-remains-environment-specific`](production-operations.md#what-remains-environment-specific) for exactly what remains. This does not change the separately tracked live-`afl-api` validation gap below, which remains outstanding. |
 | Notification delivery (lockout/missing-team alerts) and a live-season incident/manual-fallback operations runbook | **Deferred / v0.2** | No notification adapter or delivery configuration exists in `app/` (roadmap package 40's own scope); no incident/fallback runbook exists in the repository either. Unlike the deployment-controls row above, this does not block running an individual round end-to-end -- a season can operate without automated reminders, with the Scorer relying on the existing dashboards/attention queue instead -- so it is classified as deferred rather than outstanding, consistent with the original roadmap treating packages 39 (P0, blocking) and 40 (P1, "final launch gate" but reminder-level) differently. Found by Codex review on this PR (P2); confirmed by inspecting `app/` for any notification adapter (none exists). |
 | `Legacy Grand Final admin` link still reachable from ordinary Scorer Round Centre | Resolved | Issue #233: link removed from `/scorer/round-centre/{round_id}`; covered by `tests/test_round_review_api.py` |
 | Post-trigger-round mid-season handoff prominence on the Scorer dashboard | Resolved | Issue #233: once the configured trigger round is final and no mid-season draft has started, the Scorer dashboard's Next safe action is **Open mid-season draft operations**; covered by `tests/test_scorer_dashboard.py` |
@@ -378,17 +382,26 @@ they touch have already passed.
    Codex review on this PR (P1).
 10. **Reproducible production deployment topology, TLS/reverse-proxy
     setup, a dependency-readiness probe, structured alerting, scheduled
-    backups with an accepted RPO/RTO, and a rollback runbook.**
-    `GET /health` is process-liveness only; no deployment topology,
-    TLS/reverse-proxy configuration, or rollback runbook exists in the
-    repository beyond the generic `Dockerfile` and the local/rehearsal
-    Compose workflow. Backups today are entirely manual `pg_dump` runs
-    taken by an operator at a chosen boundary -- nothing schedules one, so
-    a live production season is unprotected between manual runs. The
-    original roadmap's package 39 already marked all of this P0/required
-    and it was never closed -- carried forward here as current fact.
-    Found by Codex review on this PR (P1, across two rounds). Notification
-    delivery and an incident/fallback runbook (roadmap package 40) are a
+    backups with an accepted RPO/RTO, and a rollback runbook -- addressed
+    by issue #243.** `compose.production.yaml` and `deploy/production/`
+    now give a reproducible four-service topology (app, PostgreSQL, a
+    Caddy TLS reverse proxy, a scheduled-backup service), a separate
+    `GET /health/ready` dependency-readiness check alongside the unchanged
+    `GET /health` liveness check, structured `CRITICAL`/`WARNING`
+    operational logging, a webhook-based alerting path, scheduled
+    PostgreSQL backups with documented retention, a rehearsed restore
+    procedure, and a rollback runbook covering both the application-only
+    and database-affecting cases -- see
+    [`production-operations.md`](production-operations.md) and
+    [`evidence/production-operations-rehearsal-2026-09-27.md`](evidence/production-operations-rehearsal-2026-09-27.md).
+    **What remains:** this was rehearsed end-to-end in a disposable sandbox
+    environment, not against Steve's real production host, real DNS/TLS,
+    or a non-technical operator; the proposed RPO (24h)/RTO (4h) targets
+    await his explicit acceptance; and the alert-webhook destination and
+    host cron/systemd-timer entry for the readiness watchdog are still his
+    to configure on the real host -- see `production-operations.md`'s
+    "What remains environment-specific" for the complete list. Notification
+    delivery and an incident/fallback runbook (roadmap package 40) remain a
     separate, related gap classified as deferred/v0.2 in the matrix above,
     since they do not block running an individual round.
 11. **Live `afl-api` deployment validation.** The entire 2026 replay used
@@ -431,4 +444,17 @@ convenience/polish under the stated criterion and does not block
   database acceptance run. (`scripts/bootstrap_2026_first_half.py`'s
   production guard, missing when this document was first written, was
   added by #237 and is covered by an automated test.)
+- It does not claim issue #243's production deployment/readiness/backup/
+  rollback baseline was rehearsed against Steve's real production host,
+  real DNS/TLS, or a non-technical operator -- it was rehearsed end-to-end
+  in a disposable sandbox environment only (see
+  `evidence/production-operations-rehearsal-2026-09-27.md`), and the
+  proposed RPO/RTO targets are not yet his explicitly accepted figures.
+- It does not claim issue #243 validates the real deployed `afl-api`
+  contract. `GET /health/ready`'s afl-api check proves the *mechanism*
+  works (it correctly reported the deliberately unreachable example
+  afl-api endpoint as down during the #243 rehearsal); it does not, and
+  cannot, prove the real production `afl-api` deployment is reachable or
+  contract-compatible. That remains the separate, already-tracked
+  outstanding item below.
 - It does not treat any v0.2/deferred item as blocking `v0.1.0`.

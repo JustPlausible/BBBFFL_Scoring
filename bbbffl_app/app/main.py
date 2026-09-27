@@ -1,4 +1,5 @@
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -18,7 +19,7 @@ from app.auth import (
 from app.auth_rate_limit import LoginRateLimiter
 from app.calculations import MatchupCalculationService
 from app.competition_lifecycle import CompetitionLifecycleRepository, StaleRoundVersionError
-from app.config import get_settings
+from app.config import SettingsError, get_settings
 from app.db import DecisionsRepository, connect
 from app.draft import (
     DraftCorrectionError,
@@ -119,7 +120,7 @@ from app.teams import TeamConfigError, get_teams
 logger = logging.getLogger("bbbffl.startup")
 
 
-def configure_logging(level: str) -> None:
+def configure_logging(level: str = "INFO") -> None:
     logging.basicConfig(
         level=level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -128,14 +129,31 @@ def configure_logging(level: str) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    settings = get_settings()
+    # Configured with a safe default *before* get_settings() can raise, so
+    # an invalid configuration is reported through the same structured
+    # logging (issue #243) every other startup failure below uses, not a
+    # bare traceback -- an operator grepping container logs for "CRITICAL"
+    # finds every startup failure the same way, including this earliest one.
+    configure_logging(os.getenv("BBBFFL_LOG_LEVEL", "INFO"))
+    try:
+        settings = get_settings()
+    except SettingsError as exc:
+        logger.critical("BBBFFL failed to start: invalid configuration -- %s", exc)
+        raise
+    # Re-applies the validated level (usually identical to the default
+    # above, but an operator may configure a non-default BBBFFL_LOG_LEVEL).
     configure_logging(settings.log_level)
 
-    # Migrations are the sole schema authority. Running them at startup is a
-    # deployment convenience and is idempotent; production may run the same
-    # command as a separate release step before starting the application.
-    migrate(settings.database_url)
-    database = connect(settings.database_url)
+    try:
+        # Migrations are the sole schema authority. Running them at startup
+        # is a deployment convenience and is idempotent; production may run
+        # the same command as a separate release step before starting the
+        # application.
+        migrate(settings.database_url)
+        database = connect(settings.database_url)
+    except Exception:
+        logger.critical("BBBFFL failed to start: database migration/connection failed", exc_info=True)
+        raise
 
     afl_transport = (
         ReplayAflDataSource(
@@ -687,3 +705,19 @@ async def unauthorized_context_switch_error_handler(
     request: Request, exc: UnauthorizedContextSwitchError
 ) -> JSONResponse:
     return JSONResponse(status_code=403, content={"detail": str(exc)})
+
+
+# Last-resort net (issue #243): FastAPI/Starlette always dispatch to the
+# most-derived *registered* handler for an exception's actual type, so
+# every specific handler above -- and FastAPI's own defaults for
+# HTTPException/RequestValidationError -- still wins over this one; this
+# only catches what nothing else does. Logs at CRITICAL through the same
+# structured logging every other startup/dependency failure in this module
+# uses, so an application-level bug is identifiable in container logs
+# rather than only as an opaque client-side 500, then returns a generic
+# body -- never the exception's own message, which could echo request
+# data back to the caller.
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    logger.critical("Unhandled exception on %s %s", request.method, request.url.path, exc_info=exc)
+    return JSONResponse(status_code=500, content={"detail": "internal server error"})

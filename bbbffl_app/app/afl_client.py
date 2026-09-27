@@ -310,6 +310,20 @@ class AflApiClient:
     def close(self) -> None:
         self._client.close()
 
+    def check_connectivity(self) -> None:
+        """Cheap, stable liveness probe for the configured afl-api deployment
+        (issue #243's dependency-readiness check). Hits `GET /api/{version}`
+        -- the same unauthenticated discovery endpoint
+        `scripts/afl_contract_diagnostic.py` uses as its own connectivity
+        smoke check -- rather than any endpoint that returns season/round/
+        player data, so a readiness probe never pulls a real dataset or
+        performs fantasy-domain work. Raises `AflApiError` (a subclass
+        naming the failure phase/status, never a secret) on failure; returns
+        `None` on success. Bounded by this client's own configured connect/
+        read timeouts -- never retried, since readiness must reflect the
+        dependency's state right now, not a retried/cached view of it."""
+        self._get(f"/api/{self._contract_version}")
+
     def _get(self, path: str, params: dict | None = None) -> dict | list:
         try:
             response = self._client.get(path, params=params)

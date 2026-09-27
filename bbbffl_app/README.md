@@ -316,7 +316,8 @@ Compose-first and does not require host Python 3.11; follow the complete
 
 - Public scoreboard: http://localhost:8000/
 - Scorer admin: http://localhost:8000/admin
-- Health check: http://localhost:8000/health
+- Health check (process liveness only): http://localhost:8000/health
+- Dependency readiness (database + afl-api, issue #243): http://localhost:8000/health/ready
 - SuperScore (only if `BBBFFL_SUPERSCORE_CONFIG_PATH` is set): public
   leaderboard at http://localhost:8000/superscore, scorer admin at
   http://localhost:8000/admin/superscore

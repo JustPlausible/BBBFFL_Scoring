@@ -114,6 +114,15 @@ issue -- their existing defaults and precedence rules (e.g.
 `BBBFFL_DATABASE_URL` winning over `BBBFFL_DB_PATH`, documented in
 [`database-migrations.md`](database-migrations.md)) still apply.
 
+## Dependency-readiness timeout (issue #243)
+
+`BBBFFL_READINESS_TIMEOUT_SECONDS` (default `5`, must be positive) bounds
+`GET /health/ready`'s database and (only when `BBBFFL_AFL_MODE=live`)
+afl-api connectivity checks -- see
+[`production-operations.md`](production-operations.md#readiness-vs-liveness)
+for the full readiness design and how it differs from `GET /health`'s
+unconditional process-liveness response.
+
 ## Coach session/CSRF secret and lifetime
 
 `BBBFFL_SESSION_SECRET` (roadmap package 19, issue #74) signs the CSRF

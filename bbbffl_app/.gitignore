@@ -6,6 +6,7 @@ __pycache__/
 .env.rehearsal
 .env.first-half-replay
 .env.second-half-replay
+.env.production
 data/*.db
 data/scorer_decisions.db
 data/round1-2026-rehearsal-evidence.json

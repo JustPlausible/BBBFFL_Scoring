@@ -192,6 +192,11 @@ class Settings:
     public_base_url: str | None
     poll_interval_seconds: int
     log_level: str
+    # Bounds the dependency-readiness check (GET /health/ready, issue #243)
+    # -- both the database probe and, when afl_mode == "live", the afl-api
+    # connectivity probe are each run under this timeout, so a stuck
+    # dependency can never hang the readiness request indefinitely.
+    readiness_timeout_seconds: float
     # SuperScore is entirely opt-in: unset (the default), the app behaves
     # exactly as it does today -- no SuperScore state, routes still exist
     # but report disabled. Set BBBFFL_SUPERSCORE_CONFIG_PATH to a checked-in
@@ -316,6 +321,10 @@ def get_settings() -> Settings:
     if session_lifetime_seconds <= 0:
         errors.append("BBBFFL_SESSION_LIFETIME_SECONDS: must be a positive number of seconds")
 
+    readiness_timeout_seconds = float(os.getenv("BBBFFL_READINESS_TIMEOUT_SECONDS", "5"))
+    if readiness_timeout_seconds <= 0:
+        errors.append("BBBFFL_READINESS_TIMEOUT_SECONDS: must be a positive number of seconds")
+
     if errors:
         raise SettingsError(errors)
 
@@ -342,5 +351,6 @@ def get_settings() -> Settings:
         public_base_url=public_base_url,
         poll_interval_seconds=int(os.getenv("BBBFFL_POLL_INTERVAL_SECONDS", "25")),
         log_level=os.getenv("BBBFFL_LOG_LEVEL", "INFO"),
+        readiness_timeout_seconds=readiness_timeout_seconds,
         superscore_config_path=os.getenv("BBBFFL_SUPERSCORE_CONFIG_PATH") or None,
     )

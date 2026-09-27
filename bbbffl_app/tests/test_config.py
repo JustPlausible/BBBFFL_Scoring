@@ -23,6 +23,7 @@ _ALL_SETTINGS_ENV_VARS = (
     "BBBFFL_ADMIN_TOKEN",
     "BBBFFL_SESSION_SECRET",
     "BBBFFL_SESSION_LIFETIME_SECONDS",
+    "BBBFFL_READINESS_TIMEOUT_SECONDS",
     "BBBFFL_AFL_MODE",
     "BBBFFL_AFL_REPLAY_EVIDENCE_PATH",
     "BBBFFL_TEAMS_CONFIG_PATH",
@@ -254,6 +255,26 @@ def test_development_gets_a_usable_session_secret_by_default(clean_env):
     assert settings.environment == "development"
     assert settings.session_secret == "dev-insecure-session-secret-change-in-production"
     assert settings.session_lifetime_seconds > 0
+
+
+def test_readiness_timeout_defaults_to_five_seconds(clean_env):
+    settings = get_settings()
+    assert settings.readiness_timeout_seconds == 5.0
+
+
+def test_readiness_timeout_is_configurable(clean_env):
+    clean_env.setenv("BBBFFL_READINESS_TIMEOUT_SECONDS", "2.5")
+    settings = get_settings()
+    assert settings.readiness_timeout_seconds == 2.5
+
+
+def test_readiness_timeout_must_be_positive(clean_env):
+    clean_env.setenv("BBBFFL_READINESS_TIMEOUT_SECONDS", "0")
+
+    with pytest.raises(SettingsError) as excinfo:
+        get_settings()
+
+    assert any("BBBFFL_READINESS_TIMEOUT_SECONDS" in e for e in excinfo.value.errors)
 
 
 def test_production_refuses_missing_database_url(clean_env):

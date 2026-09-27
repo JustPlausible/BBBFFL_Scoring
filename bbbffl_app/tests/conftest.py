@@ -59,6 +59,7 @@ class FakeAflClient:
         self.get_round_calls = []
         self._season = FakeSeason(season_id=season_id, round_number=current_round_number, year=year)
         self.byes = byes
+        self.connectivity_error = None
 
     def get_current_season(self):
         return self._season
@@ -77,6 +78,13 @@ class FakeAflClient:
     def get_match_player_stats(self, match_id):
         self.stats_fetch_calls.append(match_id)
         return self.stats_by_match.get(match_id, {})
+
+    def check_connectivity(self):
+        """Issue #243's readiness probe surface. `connectivity_error`, if
+        set, is raised to simulate afl-api being unreachable; defaults to a
+        successful probe."""
+        if self.connectivity_error is not None:
+            raise self.connectivity_error
 
 
 @pytest.fixture

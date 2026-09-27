@@ -406,6 +406,7 @@ ROUTES = {
     "app.routes.preseason",
     "app.routes.round_review",
     "app.routes.auth",
+    "app.routes.coach_credentials",
     "app.routes.lineups",
     "app.routes.coach_lineup",
     "app.routes.delegated_operations",

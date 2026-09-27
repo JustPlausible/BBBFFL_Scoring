@@ -196,7 +196,7 @@ remain v0.2 candidates.
 | Capability | Status | Evidence |
 |---|---|---|
 | Login/session/CSRF mechanism, own-team-only writes | Automated-test-proven, and replay-proven for the sessions actually exercised | `docs/coach-authentication.md`; two authenticated Coach accounts retained through the final two Finals/SuperScore replay rounds, with verified Finals eligibility and cross-Coach private-lineup isolation (`2026-finals-replay/workflow-findings.md` finding 12) |
-| Initial coach credential provisioning (onboarding every coach before their first login) | **Outstanding / blocks v0.1** | The only wired operation is `POST /api/admin/coach-credential` (`app/routes/admin.py`), a JSON API gated by `X-Admin-Token` with no browser form calling it; `docs/coach-authentication.md` itself directs the operator to "a short script/`curl` invocation" against it. This is routine onboarding for every coach at the start of a season, not an exceptional recovery task, so it fails the normal-user criterion. Found by Codex review on this PR (P1); confirmed against the current route inventory. Not previously named as a v0.1 item in issue #224's own candidate list. |
+| Initial coach credential provisioning (onboarding every coach before their first login) | Resolved (issue #238) | `GET`/`POST /admin/coach-credentials` (`app/routes/coach_credentials.py`) is now the normal browser workflow: an Administrator selects a coach by name/team (no `coach_id`, `curl`, script or database access), sets or resets a password through a CSRF-protected form, and gets a clear success/error result, calling the same `AuthenticationService.reset_password` the existing JSON API (`POST /api/admin/coach-credential`, kept for scripted/API use) already used. `tests/test_coach_credentials_api.py` covers authorization (Administrator-only, matching the JSON endpoint's existing authority -- the current capability model grants no Scorer credential-management capability), CSRF, provisioning, reset (including session revocation), validation failures and audit attribution to the authenticated operator. |
 | Coach self-service mid-season delisting | Current-code regression-proven | Issue #226, `app/routes/coach_delisting.py`; part of the mid-season draft acceptance pass above |
 | Routine full-season individual Coach self-service for every weekly lineup | Automated-test-proven; **not the primary path replay-exercised** | The second-half/finals replay used delegated (Scorer/Admin proxy) entry for most rounds as "a useful proxy for future coach operation" (`2026-second-half-replay/workflow-findings.md`), reserving direct Coach sessions mainly for Finals. This is a reasonable substitute given delegated entry uses the identical validated pathway, but it means a non-technical Coach's own weekly session has had less direct replay exercise than the Scorer's. |
 
@@ -319,11 +319,10 @@ they touch have already passed.
    rehearsal (item 6) and depends on live afl-api validation (item 11) for
    the player-pool read. Conditional gaps adjacent to it remain separate:
    provisional players (item 9) and exact ladder ties (item 7).
-2. **Initial coach credential provisioning.** `POST /api/admin/coach-
-   credential` is a JSON API with no browser form; onboarding every coach
-   before their first login currently requires a script/`curl` invocation.
-   Found by Codex review on this PR (P1); confirmed against the current
-   route inventory.
+2. **Initial coach credential provisioning -- resolved by issue #238.**
+   `GET`/`POST /admin/coach-credentials` is now the browser workflow every
+   Administrator onboarding a coach uses; see "Coach authentication,
+   ownership and privacy" above.
 3. **Explicit `setup -> active` season-activation gate** (browser action).
    Issue #224 candidate; no implementation issue filed as of this
    document.

@@ -189,27 +189,49 @@ for this deployment's scale (a single home-server-style process); a future
 multi-instance deployment would need to move this state into the database
 or a shared cache.
 
-## Recovery / re-entry
+## Recovery / re-entry and initial provisioning
+
+**`GET`/`POST /admin/coach-credentials`** (issue #238, `app/routes/
+coach_credentials.py`) is the normal operator workflow for both initial
+coach onboarding and password reset: an Administrator picks a coach by
+name/team from a browser page -- no `coach_id`, `curl`, script or database
+access required -- enters and confirms a new password through a CSRF-
+protected form, and gets a clear success/error result. The page reuses
+`app.identity.IdentityRepository.list_coaches`/`list_entries` (the same
+read model `app.season_centre`/`app.admin_dashboard` already use) purely
+for human-readable presentation, and never renders a password hash or
+existing password material. It is gated by the same
+`app.authorization.require_admin_principal` authority the JSON endpoint
+below already requires (so both a real Administrator coach session and the
+legacy shared `X-Admin-Token` work); the current capability model grants no
+Scorer credential-management authority, so this stays Administrator-only.
 
 `POST /api/admin/coach-credential` (gated by the existing `X-Admin-Token`
-`require_admin` dependency in `app/routes/admin.py`) lets an admin set or
-reset a coach's password, identified by either `coach_id` or `email`. This
-is the practical recovery path for a coach who has forgotten their
-password: contact the league admin, who resets it through this endpoint
-(or a short script/`curl` invocation using it) and relays the new password
-out of band. It requires no email infrastructure and reuses an access
-control surface that already exists.
+`require_admin` dependency in `app/routes/admin.py`) remains available for
+scripted/API use and identifies the coach by either `coach_id` or `email`.
+Both surfaces call the exact same underlying service,
+`AuthenticationService.reset_password`, so their behaviour -- including
+audit attribution and session revocation -- never diverges.
 
-The route delegates to `AuthenticationService.reset_password`, which does
-two things atomically from the caller's perspective: sets the new password
-hash, then revokes every currently-valid session for that coach
-(`SessionRepository.revoke_all_for_coach`). This matters for the case the
-reset exists to cover -- a suspected compromised credential or device --
-where leaving old sessions alive would let a stolen cookie keep
-authenticating for up to `BBBFFL_SESSION_LIFETIME_SECONDS` regardless of
-the reset. A `coach_id` that does not name a real coach raises `KeyError`
-(mapped to HTTP 404 by `app/main.py`'s existing handler) before any write
-is attempted, rather than surfacing as an uncaught foreign-key violation.
+`AuthenticationService.reset_password` does two things atomically from the
+caller's perspective: sets the new password hash, then revokes every
+currently-valid session for that coach (`SessionRepository.
+revoke_all_for_coach`). This matters for the case the reset exists to cover
+-- a suspected compromised credential or device -- where leaving old
+sessions alive would let a stolen cookie keep authenticating for up to
+`BBBFFL_SESSION_LIFETIME_SECONDS` regardless of the reset. A `coach_id`
+that does not name a real coach raises `KeyError` (mapped to HTTP 404 by
+`app/main.py`'s existing handler for the JSON endpoint; the browser page
+validates the coach selection itself and renders a form error instead).
+
+Audit attribution for the browser page follows the same pattern already
+established by `app.routes.season_centre`/`app.routes.finals_preflight`
+for every other authenticated-session administrative action: the actor
+type stays `anonymous_operator` (a delegated administrative action is
+never attributed to the `coach` actor type -- see app/audit.py's "Actor
+convention"), but `actor_id` carries the authenticated Administrator's own
+`coach_id` when known, so the audit trail records *which* operator
+performed the reset.
 
 ## Scorer/admin proxy provenance is unchanged
 
@@ -307,6 +329,16 @@ contains a password, password hash, session secret, or session token.
   depend on `app.identity`, but the season model/lockouts/weekly-submission
   sources may never depend back on it, and it must never depend on the
   Grand Final vertical, routes, or the composition root.
+- `tests/test_coach_credentials_api.py` (issue #238) -- the browser
+  provisioning/reset workflow end to end: Administrator access, every
+  other role (Coach/Scorer/Secretary/Spectator) and an unauthenticated
+  request rejected, CSRF enforcement, successful provisioning and reset
+  (including that a reset revokes the coach's existing sessions), a
+  mismatched password confirmation, a weak password, a missing/unknown
+  coach selection, audit attribution to the authenticated operator rather
+  than the affected coach, that no password hash or password material is
+  ever rendered on the page, and human-readable coach/team selection
+  (never a typed `coach_id`).
 
 The existing full API, scoring, replay, audit and architecture suites all
 remain green -- see this file's "Scorer/admin proxy provenance is

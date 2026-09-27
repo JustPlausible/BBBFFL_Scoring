@@ -18,7 +18,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from app.audit import ActorContext, AuditEventRepository
-from app.db import connect
+from app.db import connect, transaction
 from app.finals_seeding import (
     FINALS_SEEDING_SNAPSHOT_CREATED,
     HISTORICAL_FINALS_SEED_TEAM_NAMES,
@@ -90,6 +90,14 @@ def test_preview_reports_a_clean_diagnostic_before_the_owning_migration_has_run(
     path = Path(tempfile.mkstemp(suffix=".db")[1])
     migrate(f"sqlite:///{path}", "0027_midseason_draft")
     database = connect(f"sqlite:///{path}")
+    # `build_2026_replay_season` populates the player pool through the
+    # current `PlayerPoolRepository`, which targets 0036's season_player_pool
+    # shape (issue #248's given_name/family_name) -- irrelevant to what this
+    # test actually checks (finals_seeding_snapshot pre-0028), so the two
+    # columns are added directly rather than migrating past 0028.
+    with transaction(database) as conn:
+        conn.execute("ALTER TABLE season_player_pool ADD COLUMN given_name TEXT")
+        conn.execute("ALTER TABLE season_player_pool ADD COLUMN family_name TEXT")
     ctx = build_2026_replay_season(database=database)
 
     report = _repo(ctx).preview(ctx["season"].season_id, ctx["competition"].competition_id)

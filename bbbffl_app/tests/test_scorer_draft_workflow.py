@@ -216,6 +216,8 @@ def test_full_ten_entry_draft_runs_through_finalisation_via_the_admin_api(synthe
             "owner_season_entry_id": None,
             "owner_team_name": None,
             "diagnostic": "Not selectable: season player identity or eligibility requires investigation",
+            "given_name": None,
+            "family_name": None,
             "stats_label": "Previous season",
             "games_played": None,
             "total_points": None,

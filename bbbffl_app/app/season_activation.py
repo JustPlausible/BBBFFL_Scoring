@@ -20,32 +20,48 @@ function shape as `app.season_completion`'s `preview_complete_season`/
 ## Readiness
 
 Reuses existing authoritative state; this module never invents a second
-"is this season ready" definition. Every check below re-reads persisted
-state fresh:
+"is this season ready" definition. Every check below reads the same
+tables the owning domain module already writes:
 
-- **season entries** -- `app.identity.IdentityRepository.list_entries`,
-  exactly `TEAM_COUNT` (10) required, the same constant and threshold
-  `app.season_setup`/`app.admin_dashboard` already use for a fresh BBBFFL
-  season;
-- **player pool / completed squads** -- the season's player pool is
-  populated (`app.player_pool.PlayerPoolRepository.summary`) and every
-  season entry owns exactly the configured squad limit's worth of active
-  players (`player_ownership_period`/`season_squad_configuration`);
-- **competition state** -- the ordinary competition stream and its
-  Rounds 1..`regular_season_round_count` exist
-  (`app.season.SeasonRepository.list_competitions`/`list_rounds`), the
-  same shape `SeasonRepository.initialize_ordinary_competition` creates;
-- **fixture state** -- the fixture-number draw is accepted and frozen
-  (`app.fixtures.FixtureRepository.get_draw`);
-- **preseason draft state** -- the preseason draft is finalized (the
-  opening-squad freeze), not merely accepted
-  (`app.draft.DraftRepository.status`, `.is_complete`/`.is_finalized`).
+- **season entries** (`season_entry`) -- exactly `TEAM_COUNT` (10)
+  required, the same constant and threshold `app.season_setup`/
+  `app.admin_dashboard` already use for a fresh BBBFFL season;
+- **player pool / completed squads** (`season_player_pool`,
+  `season_squad_configuration`, `player_ownership_period`) -- the
+  season's player pool is populated and every season entry owns exactly
+  the configured squad limit's worth of active players;
+- **competition state** (`competition_stream`, `bbbffl_round`) -- the
+  ordinary competition stream and its Rounds 1..
+  `regular_season_round_count` exist, the same shape
+  `SeasonRepository.initialize_ordinary_competition` creates;
+- **fixture state** (`season_fixture_draw`) -- the fixture-number draw
+  is accepted and frozen;
+- **preseason draft state** (`season_draft`, `draft_pick`,
+  `season_preseason_window`) -- the preseason draft is finalized *and*
+  the preseason trade window is closed. A finalized draft alone is only
+  the prerequisite for *opening* that window
+  (`app.preseason.PreseasonRepository.open_window`) -- `close_window` is
+  the operation that validates every squad and freezes the authoritative
+  opening-squad snapshot (see `app/preseason.py`'s module docstring,
+  "draft finalized -> window OPEN -> [preseason trades] -> window
+  CLOSED (+ opening snapshot frozen)"). Activation requires the window
+  actually closed, not merely a finalized draft, so a season cannot go
+  live with preseason trades still possible (Codex review, PR #254, P1).
 
-`preview_activate_season` never locks a row and never mutates.
-`activate_season` re-verifies every check inside the same season-row-
-locked transaction as the lifecycle transition itself, so the preview is
-advisory only -- exactly like `app.season_setup`'s own commands and
-`app.season_completion.preview_complete_season`/`complete_season`.
+Every read function takes the same connection-like object `conn` the
+caller is already using -- `database` itself for the read-only preview,
+or the transaction's own `conn` for `activate_season` -- and an
+`for_update` flag that appends `SeasonRepository`/`app.season_completion`'s
+existing `_for_update_suffix` on PostgreSQL. `preview_activate_season`
+never locks a row and never mutates; `activate_season` re-verifies every
+check *through the season-row-locked transaction itself*, with each
+check's own prerequisite rows locked too, so a concurrent write to any
+of them (e.g. `DraftRepository.reopen`, a trade, a fixture change)
+either commits first and is observed, or blocks until this transaction
+completes -- never an unlocked read racing the commit (Codex review, PR
+#254, P2). This mirrors `app.season_completion.preview_complete_season`/
+`complete_season`'s own dual-mode `_required_round_ids`/
+`_collect_round_states` pattern exactly.
 
 ## Safety properties
 
@@ -68,11 +84,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.audit import ActorContext
-from app.db import transaction
-from app.draft import DraftRepository
-from app.fixtures import FixtureRepository
-from app.identity import IdentityRepository
-from app.player_pool import PlayerPoolRepository
+from app.db import _for_update_suffix, transaction
 from app.season import Season, SeasonCompletedError, SeasonNotFoundError, SeasonRepository
 
 # BBBFFL is a fixed ten-team league -- the same structural constant
@@ -127,8 +139,16 @@ class ActivationResult:
     previous_lifecycle_state: str
 
 
-def _entries_check(database, season_id: str) -> ActivationCheck:
-    count = len(IdentityRepository(database).list_entries(season_id))
+def _suffix(database, *, for_update: bool) -> str:
+    return _for_update_suffix(database) if for_update else ""
+
+
+def _entries_check(conn, database, season_id: str, *, for_update: bool) -> ActivationCheck:
+    rows = conn.execute(
+        "SELECT season_entry_id FROM season_entry WHERE season_id=?" + _suffix(database, for_update=for_update),
+        (season_id,),
+    ).fetchall()
+    count = len(rows)
     ready = count == TEAM_COUNT
     detail = (
         f"{count} of {TEAM_COUNT} season entries established"
@@ -138,15 +158,19 @@ def _entries_check(database, season_id: str) -> ActivationCheck:
     return ActivationCheck("entries", "Season entries", ready, detail)
 
 
-def _ordinary_competition_check(database, season: Season) -> ActivationCheck:
+def _ordinary_competition_check(conn, database, season: Season, *, for_update: bool) -> ActivationCheck:
     """The same target shape `SeasonRepository.initialize_ordinary_competition`
     creates -- one `ordinary`-typed competition stream with exactly Rounds
-    1..`regular_season_round_count` -- read directly from the season model
-    rather than through `app.season_setup`'s own page-model helper (this
-    module and `app.season_setup` are kept siblings, not a dependency of
-    one another; see `tests/test_architecture.py`)."""
-    seasons = SeasonRepository(database)
-    competitions = [c for c in seasons.list_competitions(season.season_id) if c.stream_type == "ordinary"]
+    1..`regular_season_round_count` -- read directly from the season model's
+    own tables rather than through `app.season_setup`'s page-model helper
+    (this module and `app.season_setup` are kept siblings, not a dependency
+    of one another; see `tests/test_architecture.py`)."""
+    suffix = _suffix(database, for_update=for_update)
+    streams = conn.execute(
+        "SELECT competition_id, label, stream_type FROM competition_stream WHERE season_id=?" + suffix,
+        (season.season_id,),
+    ).fetchall()
+    competitions = [row for row in streams if row["stream_type"] == "ordinary"]
     if len(competitions) > 1:
         return ActivationCheck(
             "competition_state",
@@ -159,9 +183,12 @@ def _ordinary_competition_check(database, season: Season) -> ActivationCheck:
             "competition_state", "Ordinary competition", False, "the ordinary competition has not been initialized yet"
         )
     competition = competitions[0]
-    rounds = seasons.list_rounds(competition.competition_id)
+    rounds = conn.execute(
+        "SELECT sequence, round_key, label FROM bbbffl_round WHERE competition_id=? ORDER BY sequence" + suffix,
+        (competition["competition_id"],),
+    ).fetchall()
     expected = [(n, f"round-{n}", f"Round {n}") for n in range(1, season.regular_season_round_count + 1)]
-    actual = [(r.sequence, r.round_key, r.label) for r in rounds]
+    actual = [(row["sequence"], row["round_key"], row["label"]) for row in rounds]
     if actual != expected:
         return ActivationCheck(
             "competition_state",
@@ -174,63 +201,64 @@ def _ordinary_competition_check(database, season: Season) -> ActivationCheck:
         "competition_state",
         "Ordinary competition",
         True,
-        f"{competition.label}: Rounds 1-{season.regular_season_round_count}",
+        f"{competition['label']}: Rounds 1-{season.regular_season_round_count}",
     )
 
 
-def _fixture_check(database, season_id: str) -> ActivationCheck:
-    draw = FixtureRepository(database).get_draw(season_id)
+def _fixture_check(conn, database, season_id: str, *, for_update: bool) -> ActivationCheck:
+    draw = conn.execute(
+        "SELECT state FROM season_fixture_draw WHERE season_id=?" + _suffix(database, for_update=for_update),
+        (season_id,),
+    ).fetchone()
     if draw is None:
         return ActivationCheck(
             "fixture_state", "Fixture-number draw", False, "the fixture-number draw has not been created yet"
         )
-    if draw.state != "frozen":
+    if draw["state"] != "frozen":
         return ActivationCheck(
-            "fixture_state", "Fixture-number draw", False, f"the fixture-number draw is {draw.state!r}, not frozen"
+            "fixture_state", "Fixture-number draw", False, f"the fixture-number draw is {draw['state']!r}, not frozen"
         )
     return ActivationCheck("fixture_state", "Fixture-number draw", True, "accepted and frozen")
 
 
-def _squad_completion(database, season_id: str) -> tuple[int, int | None, int]:
-    """`(entries_with_a_complete_squad, configured_squad_limit,
-    total_entries)` -- read directly from ownership/squad-configuration,
-    the same tables `app.draft.DraftRepository.finalize`'s own "resulting
-    squads do not match the configured squad size" defence-in-depth check
-    reads (never counting draft picks alone, which say nothing about
-    ownership released out-of-band)."""
-    config = database.execute(
-        "SELECT squad_limit FROM season_squad_configuration WHERE season_id=?", (season_id,)
+def _player_pool_check(conn, database, season_id: str, *, for_update: bool) -> ActivationCheck:
+    """Player pool populated, and every season entry's active ownership
+    count matches the configured squad limit -- `season_entry` and
+    `player_ownership_period` (which carries its own `season_id`, so no
+    join is needed) are read as two plain, unjoined row sets rather than
+    one outer join: PostgreSQL refuses `FOR UPDATE` on an aggregate/
+    `GROUP BY` *and* on the nullable side of an outer join, so the locked
+    path locks each table's own rows directly and the per-entry counts are
+    computed in Python."""
+    suffix = _suffix(database, for_update=for_update)
+    pool_row = conn.execute(
+        "SELECT canonical_player_id FROM season_player_pool WHERE season_id=? LIMIT 1" + suffix, (season_id,)
     ).fetchone()
-    squad_limit = config["squad_limit"] if config else None
-    entries = database.execute("SELECT season_entry_id FROM season_entry WHERE season_id=?", (season_id,)).fetchall()
-    if squad_limit is None or not entries:
-        return 0, squad_limit, len(entries)
-    complete = database.execute(
-        "SELECT COUNT(*) AS n FROM ("
-        "  SELECT se.season_entry_id, COUNT(p.ownership_period_id) AS owned"
-        "  FROM season_entry se"
-        "  LEFT JOIN player_ownership_period p"
-        "    ON p.season_entry_id = se.season_entry_id AND p.released_at IS NULL"
-        "  WHERE se.season_id = ?"
-        "  GROUP BY se.season_entry_id"
-        "  HAVING owned = ?"
-        ") complete_entries",
-        (season_id, squad_limit),
-    ).fetchone()["n"]
-    return complete, squad_limit, len(entries)
-
-
-def _player_pool_check(database, season_id: str) -> ActivationCheck:
-    pool_total = PlayerPoolRepository(database).summary(season_id)["total"]
-    if not pool_total:
+    if pool_row is None:
         return ActivationCheck(
             "player_pool", "Player pool and squads", False, "the player pool has not been populated yet"
         )
-    complete_count, squad_limit, entry_count = _squad_completion(database, season_id)
-    if squad_limit is None:
+    config = conn.execute(
+        "SELECT squad_limit FROM season_squad_configuration WHERE season_id=?" + suffix, (season_id,)
+    ).fetchone()
+    if config is None:
         return ActivationCheck(
             "player_pool", "Player pool and squads", False, "the season squad limit has not been configured yet"
         )
+    squad_limit = config["squad_limit"]
+    entries = conn.execute(
+        "SELECT season_entry_id FROM season_entry WHERE season_id=?" + suffix, (season_id,)
+    ).fetchall()
+    counts: dict[str, int] = {row["season_entry_id"]: 0 for row in entries}
+    ownership = conn.execute(
+        "SELECT season_entry_id FROM player_ownership_period WHERE season_id=? AND released_at IS NULL" + suffix,
+        (season_id,),
+    ).fetchall()
+    for row in ownership:
+        if row["season_entry_id"] in counts:
+            counts[row["season_entry_id"]] += 1
+    entry_count = len(counts)
+    complete_count = sum(1 for n in counts.values() if n == squad_limit)
     if entry_count == 0 or complete_count != entry_count:
         return ActivationCheck(
             "player_pool",
@@ -243,36 +271,68 @@ def _player_pool_check(database, season_id: str) -> ActivationCheck:
     )
 
 
-def _draft_check(database, season_id: str) -> ActivationCheck:
-    status = DraftRepository(database).status(season_id)
-    if status is None:
+def _draft_check(conn, database, season_id: str, *, for_update: bool) -> ActivationCheck:
+    """The preseason draft is finalized *and* its preseason trade window
+    is closed -- a finalized draft alone only permits *opening* that
+    window; `close_window` is what validates squads and freezes the
+    authoritative opening-squad snapshot (Codex review, PR #254, P1;
+    see `app/preseason.py`'s module docstring)."""
+    suffix = _suffix(database, for_update=for_update)
+    draft = conn.execute(
+        "SELECT draft_id, finalized_at FROM season_draft WHERE season_id=? AND draft_kind='preseason'" + suffix,
+        (season_id,),
+    ).fetchone()
+    if draft is None:
         return ActivationCheck(
             "preseason_draft", "Preseason draft", False, "the preseason draft order has not been accepted yet"
         )
-    if not status.is_complete:
-        return ActivationCheck(
-            "preseason_draft",
-            "Preseason draft",
-            False,
-            f"{status.completed_picks} of {status.total_picks} pick(s) completed",
-        )
-    if not status.is_finalized:
+    picks = conn.execute(
+        "SELECT completed_at FROM draft_pick WHERE draft_id=? AND superseded_by_draft_pick_id IS NULL" + suffix,
+        (draft["draft_id"],),
+    ).fetchall()
+    total = len(picks)
+    completed = sum(1 for row in picks if row["completed_at"] is not None)
+    if not total or completed != total:
+        return ActivationCheck("preseason_draft", "Preseason draft", False, f"{completed} of {total} pick(s) completed")
+    if draft["finalized_at"] is None:
         return ActivationCheck(
             "preseason_draft",
             "Preseason draft",
             False,
             "every pick is complete, but the draft has not been finalized (opening-squad freeze) yet",
         )
-    return ActivationCheck("preseason_draft", "Preseason draft", True, "finalized (opening-squad freeze complete)")
+    window = conn.execute(
+        "SELECT closed_at FROM season_preseason_window WHERE season_id=?" + suffix, (season_id,)
+    ).fetchone()
+    if window is None:
+        return ActivationCheck(
+            "preseason_draft",
+            "Preseason draft",
+            False,
+            "the draft is finalized, but the preseason trade window has not been opened yet",
+        )
+    if window["closed_at"] is None:
+        return ActivationCheck(
+            "preseason_draft",
+            "Preseason draft",
+            False,
+            "the preseason trade window is still open; close it to freeze the opening squads before activating",
+        )
+    return ActivationCheck(
+        "preseason_draft",
+        "Preseason draft",
+        True,
+        "finalized, with the preseason trade window closed and opening squads frozen",
+    )
 
 
-def _evaluate_checks(database, season: Season) -> list[ActivationCheck]:
+def _evaluate_checks(conn, database, season: Season, *, for_update: bool) -> list[ActivationCheck]:
     return [
-        _entries_check(database, season.season_id),
-        _player_pool_check(database, season.season_id),
-        _ordinary_competition_check(database, season),
-        _fixture_check(database, season.season_id),
-        _draft_check(database, season.season_id),
+        _entries_check(conn, database, season.season_id, for_update=for_update),
+        _player_pool_check(conn, database, season.season_id, for_update=for_update),
+        _ordinary_competition_check(conn, database, season, for_update=for_update),
+        _fixture_check(conn, database, season.season_id, for_update=for_update),
+        _draft_check(conn, database, season.season_id, for_update=for_update),
     ]
 
 
@@ -291,7 +351,7 @@ def preview_activate_season(database, season_id: str) -> ActivationReadiness:
             else f"this season is {season.lifecycle_state!r}; only a season in 'setup' can be activated"
         )
         return ActivationReadiness(season_id, season.lifecycle_state, False, [], diagnostic)
-    checks = _evaluate_checks(database, season)
+    checks = _evaluate_checks(database, database, season, for_update=False)
     blockers = [check for check in checks if not check.ready]
     ready = not blockers
     diagnostic = None if ready else "; ".join(check.detail for check in blockers)
@@ -304,11 +364,13 @@ def activate_season(database, season_id: str, *, actor: ActorContext, reason: st
     global lock order every other result-changing write in this
     application uses), refuses outright -- never a silent no-op -- if the
     season is not currently `setup`, re-verifies every readiness check
-    under that lock, then transitions the lifecycle state via
-    `SeasonRepository._transition_lifecycle_in_transaction` (which appends
-    the existing `season.lifecycle.changed` audit event with the actor,
-    reason and before/after lifecycle state) -- all in the caller's one
-    transaction. Raises `SeasonActivationError` if `reason` is empty,
+    *through that same transaction* (each check's own prerequisite rows
+    locked too, on PostgreSQL -- see the module docstring), then
+    transitions the lifecycle state via `SeasonRepository.
+    _transition_lifecycle_in_transaction` (which appends the existing
+    `season.lifecycle.changed` audit event with the actor, reason and
+    before/after lifecycle state) -- all in the caller's one transaction.
+    Raises `SeasonActivationError` if `reason` is empty,
     `SeasonActivationStateError` if the season is already `active` or is
     `completed`, `SeasonNotReadyToActivateError` if any prerequisite is
     missing or contradictory, and `app.season.SeasonNotFoundError` for an
@@ -328,7 +390,7 @@ def activate_season(database, season_id: str, *, actor: ActorContext, reason: st
             raise SeasonActivationStateError(
                 f"season {season_id} cannot be activated from its current lifecycle state ({season.lifecycle_state!r})"
             )
-        checks = _evaluate_checks(database, season)
+        checks = _evaluate_checks(conn, database, season, for_update=True)
         blockers = [check for check in checks if not check.ready]
         if blockers:
             raise SeasonNotReadyToActivateError("activation refused: " + "; ".join(check.detail for check in blockers))

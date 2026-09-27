@@ -95,6 +95,51 @@ def test_preview_names_unfinalized_draft_once_every_pick_is_complete():
     assert pool_check.ready is True
 
 
+def test_preview_names_unopened_preseason_window_once_draft_is_finalized():
+    """Codex review, PR #254 (P1): a finalized draft alone only permits
+    *opening* the preseason trade window -- it is not itself the freeze."""
+    built = build_activation_ready_season(year=6020, open_preseason=False, freeze_fixture=False)
+    database, season_id = built["database"], built["season"].season_id
+
+    readiness = preview_activate_season(database, season_id)
+
+    assert readiness.ready is False
+    draft_check = next(check for check in readiness.checks if check.key == "preseason_draft")
+    assert draft_check.ready is False
+    assert "has not been opened yet" in draft_check.detail
+
+
+def test_preview_names_still_open_preseason_window_as_a_specific_blocker():
+    """Codex review, PR #254 (P1): trades remain possible until the window
+    is closed, so an open window must block activation even with a
+    finalized draft -- `close_window` is what validates squads and freezes
+    the authoritative opening-squad snapshot."""
+    built = build_activation_ready_season(year=6021, close_preseason=False, freeze_fixture=False)
+    database, season_id = built["database"], built["season"].season_id
+
+    readiness = preview_activate_season(database, season_id)
+
+    assert readiness.ready is False
+    draft_check = next(check for check in readiness.checks if check.key == "preseason_draft")
+    assert draft_check.ready is False
+    assert "still open" in draft_check.detail
+
+
+def test_activate_season_refuses_while_the_preseason_window_is_still_open():
+    built = build_activation_ready_season(year=6022, close_preseason=False)
+    database, season_id = built["database"], built["season"].season_id
+    before_events = _audit_event_count(database, season_id)
+
+    try:
+        activate_season(database, season_id, actor=ACTOR, reason=REASON)
+        raise AssertionError("expected SeasonNotReadyToActivateError")
+    except SeasonNotReadyToActivateError as exc:
+        assert "still open" in str(exc)
+
+    assert SeasonRepository(database).get_season(season_id).lifecycle_state == "setup"
+    assert _audit_event_count(database, season_id) == before_events
+
+
 def test_preview_names_unfrozen_fixture_draw_as_a_specific_blocker():
     built = build_activation_ready_season(year=6005, freeze_fixture=False)
     database, season_id = built["database"], built["season"].season_id

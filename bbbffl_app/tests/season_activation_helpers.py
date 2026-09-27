@@ -13,6 +13,7 @@ from app.draft import DraftRepository
 from app.fixtures import FixtureRepository
 from app.identity import IdentityRepository
 from app.player_pool import OwnershipRepository, PlayerPoolRepository
+from app.preseason import PreseasonRepository
 from app.season import SeasonRepository
 from tests.db_helpers import migrated_connection
 
@@ -34,16 +35,26 @@ def build_activation_ready_season(
     accept_order: bool = True,
     complete_picks: bool = True,
     finalize_draft: bool = True,
+    open_preseason: bool = True,
+    close_preseason: bool = True,
     freeze_fixture: bool = True,
 ):
     """Build a season with each activation-readiness prerequisite
-    individually switchable. Later stages imply their prerequisites (a
-    caller asking for `finalize_draft` need not also spell out
-    `complete_picks`/`accept_order`; `freeze_fixture` needs `create_entries`
-    only) -- callers pass exactly the flags for the readiness state under
-    test."""
+    individually switchable. Every flag only narrows downward -- a caller
+    asking for `finalize_draft` need not also spell out
+    `complete_picks`/`accept_order`, and `close_preseason`/`open_preseason`
+    are silently forced off when their own prerequisite is off (an explicit
+    `open_preseason=False` therefore also disables `close_preseason`,
+    regardless of that parameter's own default) -- `freeze_fixture` needs
+    `create_entries` only. Callers pass exactly the flags for the readiness
+    state under test. A fully-ready season needs the preseason trade window
+    closed, not merely a finalized draft: `close_window` is the operation
+    that validates every squad and freezes the authoritative opening-squad
+    snapshot (see `app/preseason.py`'s module docstring)."""
     complete_picks = complete_picks and accept_order and create_entries
     finalize_draft = finalize_draft and complete_picks
+    open_preseason = open_preseason and finalize_draft
+    close_preseason = close_preseason and open_preseason
     freeze_fixture = freeze_fixture and create_entries
 
     db = db or migrated_connection()
@@ -86,6 +97,12 @@ def build_activation_ready_season(
     if finalize_draft:
         draft.finalize(season.season_id)
 
+    preseason = PreseasonRepository(db)
+    if open_preseason:
+        preseason.open_window(season.season_id)
+    if close_preseason:
+        preseason.close_window(season.season_id)
+
     fixtures = FixtureRepository(db)
     if freeze_fixture:
         fixtures.save_draft(season.season_id, [entry.season_entry_id for entry in entries])
@@ -99,6 +116,7 @@ def build_activation_ready_season(
         "seasons": seasons,
         "identities": identities,
         "draft": draft,
+        "preseason": preseason,
         "fixtures": fixtures,
         "ownership": ownership,
         "player_pool": pool,

@@ -38,7 +38,7 @@ every other page already uses:
 | **Player pool and completed squads** | `PlayerPoolRepository.summary`, `player_ownership_period`/`season_squad_configuration` | The player pool has been populated, and every season entry owns exactly the configured squad limit's worth of active players. |
 | **Ordinary competition** | `SeasonRepository.list_competitions`/`list_rounds` | Exactly one `ordinary` competition stream exists, with exactly Rounds 1 to `regular_season_round_count`. |
 | **Fixture-number draw** | `FixtureRepository.get_draw` | A fixture draw exists and is `frozen`. |
-| **Preseason draft** | `DraftRepository.status` | The preseason draft is finalized (every pick complete, and the opening-squad freeze has happened) -- not merely accepted. |
+| **Preseason draft** | `season_draft`/`draft_pick`/`season_preseason_window` | Every pick is complete, the draft is finalized, **and** its preseason trade window is closed. |
 
 Every check is independent, and a blocked one names exactly what is
 missing (for example "8 of 10 season entries are established" or "the
@@ -47,10 +47,35 @@ A contradictory state -- for example two `ordinary` competition streams --
 is refused with its own explicit diagnosis, the same way
 `app.season_setup` refuses an ambiguous structure.
 
+**A finalized draft alone is not the opening-squad freeze.** Finalizing
+the draft only permits *opening* the preseason trade window
+(`app.preseason.PreseasonRepository.open_window`); trades can still move
+players between squads until that window is explicitly *closed*.
+`close_window` is the operation that validates every squad against the
+configured limit and freezes the authoritative opening-squad snapshot
+(see `app/preseason.py`'s module docstring, "draft finalized -> window
+OPEN -> [preseason trades] -> window CLOSED (+ opening snapshot
+frozen)"). Activation therefore requires the window closed, not merely a
+finalized draft -- otherwise a season could go live while trades were
+still possible (Codex review, PR #254, P1).
+
 None of this is a second readiness engine competing with `app.season_setup`'s
 own read model: it reads the same underlying tables that model's steps
 already read, just resolved to the stricter facts activation itself needs
-(a *finalized* draft, not merely an *accepted* order).
+(a *closed preseason window*, not merely an *accepted* draft order).
+
+## Atomicity
+
+`preview_activate_season` never locks a row. `activate_season` re-verifies
+every check *through the same transaction* as the lifecycle transition,
+with each check's own prerequisite rows locked too (`SELECT ... FOR
+UPDATE` on PostgreSQL, via the same `_for_update_suffix` helper
+`app.season_completion` already uses) -- so a concurrent write to any of
+them (a draft reopened, a trade, a fixture change) either commits first
+and is observed, or blocks until this transaction completes. A readiness
+check is never satisfied by a snapshot that a concurrent write then
+invalidates before the lifecycle transition commits (Codex review, PR
+#254, P2; see `tests/test_season_activation_postgresql.py`).
 
 ## Activation is always explicit
 
@@ -132,13 +157,20 @@ audit trail (`tests/test_season_activation_api.py`).
   sessions -- authorization (including Secretary and Replay Operator
   refusal, a season-scoped grant that does not reach a different season,
   and CSRF), 409/400 refusal shapes, and the 404 unknown-season case.
+- `tests/test_season_activation_postgresql.py`: proves the readiness
+  locking itself -- a concurrently held lock on the exact row a check
+  reads blocks `activate_season` until it is released, and activation
+  then correctly observes the change made while it waited. Skipped
+  unless `BBBFFL_DATABASE_URL` points at PostgreSQL (the CI postgres
+  job), matching `tests/test_season_setup_concurrency.py`'s convention.
 - `tests/test_architecture.py`'s `SEASON_ACTIVATION` group.
 
-This is automated-test-proven. It has not been rehearsed in a real
-production deployment or against the 2026 replay season (which was, and
-remains, activated only through the historical CLI/domain call this issue
-adds a browser alternative to -- see
-`2026-finals-replay/workflow-findings.md` finding 10).
+This is automated-test-proven, including against a real PostgreSQL
+instance for the concurrency-sensitive locking behaviour above. It has
+not been rehearsed in a real production deployment or against the 2026
+replay season (which was, and remains, activated only through the
+historical CLI/domain call this issue adds a browser alternative to --
+see `2026-finals-replay/workflow-findings.md` finding 10).
 
 ## Not in scope
 

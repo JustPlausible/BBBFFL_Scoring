@@ -431,6 +431,64 @@ A fifth Codex pass found two more P2s:
   `math.isfinite()` check alongside the positivity check, and parametrized
   regression tests for `inf`, `-inf` and `nan`.
 
+## L. Sixth review pass: a public placeholder secret and an unbounded connect
+
+A sixth Codex pass found one more P1 and one more P2:
+
+- **The checked-in `.env.production.example` placeholder could satisfy
+  production's admin-token/session-secret requirements** (P1): both
+  fields previously held `CHANGE-ME-...` values so an operator who copied
+  the file without editing them would still pass `get_settings()`'s
+  "is it set" check -- silently running production with a secret that is
+  public in the repository's history. Fixed on both sides: `app/config.py`
+  now rejects the literal value `CHANGE-ME` outright for both
+  `BBBFFL_ADMIN_TOKEN` and `BBBFFL_SESSION_SECRET` (a new
+  `_EXAMPLE_PLACEHOLDER_SECRET` constant, checked the same way the
+  existing `_DEV_SESSION_SECRET` placeholder already is), and
+  `.env.production.example` now leaves both fields empty so a forgotten
+  value fails closed on the "required, but missing" branch even before
+  the placeholder check would apply. Verified with two new regression
+  tests (`test_production_refuses_the_checked_in_example_admin_token_placeholder`,
+  `test_production_refuses_the_checked_in_example_session_secret_placeholder`)
+  confirming `get_settings()` raises `SettingsError` for `CHANGE-ME` in
+  either field.
+- **A blocking PostgreSQL `connect()` had no timeout of its own** (P2):
+  `GET /health/ready`'s database probe (`app/routes/health.py`) bounds
+  its own *awaiting* coroutine with `asyncio.wait_for`, but that cannot
+  stop an underlying blocking `engine.connect()` call that is still
+  establishing a fresh TCP connection -- under a network partition to
+  PostgreSQL, the readiness request would return its timeout response,
+  but the worker thread (and the pooled connection slot it was trying to
+  fill) would stay blocked until the OS-level TCP timeout eventually
+  gave up, on the order of minutes. Fixed by passing
+  `connect_args={"connect_timeout": 10}` (psycopg/libpq's own
+  connect-phase timeout, in seconds) for every non-SQLite `connect()`
+  call in `app/db.py` -- this bounds only the connect phase, never a
+  query already in flight, and 10s is far below
+  `BBBFFL_READINESS_TIMEOUT_SECONDS`'s own default.
+
+  Rehearsed against a disposable `postgres:16-alpine` container
+  (`docker run --name bbbffl_rehearsal_pg -e POSTGRES_DB=bbbffl -e
+  POSTGRES_USER=bbbffl -e POSTGRES_PASSWORD=rehearsalpass -p
+  15432:5432 postgres:16-alpine`):
+
+  ```
+  >>> db = connect("postgresql+psycopg://bbbffl:rehearsalpass@localhost:15432/bbbffl")
+  >>> db.execute("SELECT 1").fetchone()
+  normal connect+query result: {'?column?': 1}
+
+  >>> start = time.monotonic()
+  >>> connect("postgresql+psycopg://bbbffl:rehearsalpass@10.255.255.1:5432/bbbffl").execute("SELECT 1")
+  unreachable-host connect failed after 10.0s: OperationalError: (psycopg.errors.ConnectionTimeout) connection timeout expired
+  ```
+
+  A normal connection still succeeds unchanged with `connect_timeout=10`
+  set, and a connection attempt to an unreachable (black-hole, non-
+  responding) address now fails at exactly the configured 10s bound
+  instead of hanging -- confirming the fix closes the gap without
+  affecting ordinary connections. Container removed immediately after
+  (`docker rm -f bbbffl_rehearsal_pg`).
+
 ## What this rehearsal does not prove
 
 - It does not prove the real production afl-api deployment is reachable or

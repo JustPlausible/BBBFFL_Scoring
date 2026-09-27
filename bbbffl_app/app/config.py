@@ -82,6 +82,14 @@ SUPPORTED_AFL_API_CONTRACT_VERSIONS = ("v1",)
 # when BBBFFL_ENVIRONMENT=production, in case a deployment ever copies
 # .env.example without changing it.
 _DEV_SESSION_SECRET = "dev-insecure-session-secret-change-in-production"
+# bbbffl_app/.env.production.example's own placeholder for every secret an
+# operator must fill in (issue #243 review): that file's fields are left
+# empty precisely so a forgotten one fails closed on its own, but this is
+# rejected outright as belt-and-suspenders -- a public repository's example
+# file is not a secret, so anyone who left this exact literal value in
+# production would have handed out their admin token/session secret to
+# everyone who has ever read this file.
+_EXAMPLE_PLACEHOLDER_SECRET = "CHANGE-ME"
 DEFAULT_SESSION_LIFETIME_SECONDS = 12 * 60 * 60
 
 
@@ -291,10 +299,15 @@ def get_settings() -> Settings:
             )
 
     admin_token = os.getenv("BBBFFL_ADMIN_TOKEN") or None
-    if is_production and not admin_token:
-        errors.append(
-            "BBBFFL_ADMIN_TOKEN: required in production (refusing to start with the admin interface open to any caller)"
-        )
+    if is_production:
+        if not admin_token:
+            errors.append(
+                "BBBFFL_ADMIN_TOKEN: required in production "
+                "(refusing to start with the admin interface open to any caller)"
+            )
+        elif admin_token == _EXAMPLE_PLACEHOLDER_SECRET:
+            errors.append("BBBFFL_ADMIN_TOKEN: must not be the checked-in .env.production.example placeholder value")
+            admin_token = None
 
     # Coach session/CSRF secret (roadmap package 19, issue #74): unlike
     # BBBFFL_ADMIN_TOKEN (which simply disables its check when unset),
@@ -312,6 +325,9 @@ def get_settings() -> Settings:
             session_secret = None
         elif raw_session_secret == _DEV_SESSION_SECRET:
             errors.append("BBBFFL_SESSION_SECRET: must not be the development placeholder value in production")
+            session_secret = None
+        elif raw_session_secret == _EXAMPLE_PLACEHOLDER_SECRET:
+            errors.append("BBBFFL_SESSION_SECRET: must not be the checked-in .env.production.example placeholder value")
             session_secret = None
         else:
             session_secret = raw_session_secret

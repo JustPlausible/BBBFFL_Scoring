@@ -169,11 +169,21 @@ def connect(database_url: str) -> DatabaseConnection:
 
     if "://" not in database_url:
         database_url = f"sqlite:///{database_url}"
-    return DatabaseConnection(
-        create_engine(
-            database_url, connect_args={"check_same_thread": False} if database_url.startswith("sqlite") else {}
-        )
-    )
+    if database_url.startswith("sqlite"):
+        connect_args: dict = {"check_same_thread": False}
+    else:
+        # Bounds the TCP-connect phase only (psycopg/libpq's own
+        # connect_timeout, seconds) -- never the query itself. Without this,
+        # a network partition to PostgreSQL lets a new connection attempt
+        # block its worker thread indefinitely; GET /health/ready's
+        # database probe (app/routes/health.py) times out its own awaiting
+        # coroutine via asyncio.wait_for, but that alone cannot stop an
+        # underlying blocking connect() call or free the pooled slot it
+        # would otherwise occupy until it eventually resolves on its own
+        # (issue #243 review). 10s is generous for any real network, never
+        # the readiness endpoint's own bound (BBBFFL_READINESS_TIMEOUT_SECONDS).
+        connect_args = {"connect_timeout": 10}
+    return DatabaseConnection(create_engine(database_url, connect_args=connect_args))
 
 
 def init_db(conn) -> None:

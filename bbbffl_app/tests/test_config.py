@@ -208,6 +208,21 @@ def test_development_admin_token_default_does_not_satisfy_production(clean_env):
     assert any("BBBFFL_ADMIN_TOKEN" in e for e in excinfo.value.errors)
 
 
+def test_production_refuses_the_checked_in_example_admin_token_placeholder(clean_env):
+    """bbbffl_app/.env.production.example's own placeholder must never
+    accidentally satisfy production's requirement -- it is a public,
+    checked-in value, so an operator who forgets to change it would be
+    handing out admin authority to anyone who has read the repository
+    (issue #243 review)."""
+    _set_valid_production_env(clean_env)
+    clean_env.setenv("BBBFFL_ADMIN_TOKEN", "CHANGE-ME")
+
+    with pytest.raises(SettingsError) as excinfo:
+        get_settings()
+
+    assert any("BBBFFL_ADMIN_TOKEN" in e for e in excinfo.value.errors)
+
+
 def test_production_refuses_missing_session_secret(clean_env):
     """Roadmap package 19 (issue #74): production startup refuses a
     missing coach session/CSRF secret, the same as it does for
@@ -229,6 +244,19 @@ def test_production_refuses_the_development_session_secret_placeholder(clean_env
     design constraint."""
     _set_valid_production_env(clean_env)
     clean_env.setenv("BBBFFL_SESSION_SECRET", "dev-insecure-session-secret-change-in-production")
+
+    with pytest.raises(SettingsError) as excinfo:
+        get_settings()
+
+    assert any("BBBFFL_SESSION_SECRET" in e for e in excinfo.value.errors)
+
+
+def test_production_refuses_the_checked_in_example_session_secret_placeholder(clean_env):
+    """Same reasoning as the admin-token placeholder check above (issue
+    #243 review): bbbffl_app/.env.production.example's own placeholder
+    must never accidentally satisfy production's requirement."""
+    _set_valid_production_env(clean_env)
+    clean_env.setenv("BBBFFL_SESSION_SECRET", "CHANGE-ME")
 
     with pytest.raises(SettingsError) as excinfo:
         get_settings()

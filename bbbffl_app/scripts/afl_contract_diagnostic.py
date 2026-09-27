@@ -35,6 +35,7 @@ from typing import Any, Callable
 
 import httpx
 
+from app.afl_client import SEASON_PLAYERS_PAGE_LIMIT
 from app.config import get_settings
 
 REQUIRED_STAT_FIELDS = {"goals", "behinds", "disposals", "marks", "tackles", "hitouts"}
@@ -193,42 +194,76 @@ def check_historical_season(ctx: DiagnosticContext) -> None:
     ctx.record("GET /api/v1/seasons/{historical_id}/rounds (2026 replay prerequisite)", ok, detail)
 
 
+# ~5,000 players -- far beyond any real season pool; guards against a non-terminating page.
+SEASON_PLAYERS_MAX_PAGES = 20
+
+
 def check_season_players(ctx: DiagnosticContext) -> None:
     """GET /api/v1/seasons/{season_id}/players -- the live season-scoped
     canonical player pool (issue #237's `AflApiClient.get_season_players`),
     classified **required now** in docs/afl-api-v1-contract.md but
-    previously never exercised by this diagnostic at all."""
+    previously never exercised by this diagnostic at all.
+
+    Follows pagination to exhaustion at the exact page size
+    `AflApiClient.get_season_players` actually requests in production
+    (`SEASON_PLAYERS_PAGE_LIMIT`, 250) -- a single small page (as an earlier
+    version of this check used) would report a deployment compatible even
+    if it rejected or clamped the production page size, or returned
+    malformed/duplicate rows past the first page, while Season Setup would
+    still fail against it."""
     if ctx.season_id is None:
         ctx.skip("GET /api/v1/seasons/{id}/players", "no season resolved")
         return
-    resp = _get(ctx, f"/api/v1/seasons/{ctx.season_id}/players", params={"limit": 50, "offset": 0})
-    if resp.status_code != 200:
-        ctx.record("GET /api/v1/seasons/{id}/players", False, f"status={resp.status_code}")
-        return
-    body = resp.json()
-    players = body.get("players", [])
-    # The client follows pagination to exhaustion by trusting the echoed
-    # limit/offset match what it requested -- a server-side clamp would
-    # otherwise look identical to a genuine short final page.
-    ok = bool(players) and body.get("limit") == 50 and body.get("offset") == 0
-    ctx.record(
-        "GET /api/v1/seasons/{id}/players",
-        ok,
-        f"{len(players)} players, limit={body.get('limit')!r} offset={body.get('offset')!r}",
-    )
-    if not players:
+    limit = SEASON_PLAYERS_PAGE_LIMIT
+    offset = 0
+    seen: dict[int, dict[str, Any]] = {}
+    duplicates: list[int] = []
+    problems: list[str] = []
+    pages = 0
+    while True:
+        resp = _get(ctx, f"/api/v1/seasons/{ctx.season_id}/players", params={"limit": limit, "offset": offset})
+        if resp.status_code != 200:
+            ctx.record("GET /api/v1/seasons/{id}/players", False, f"status={resp.status_code} at offset={offset}")
+            return
+        body = resp.json()
+        pages += 1
+        # A server-side clamp of the requested page size would otherwise
+        # look identical to a genuine short final page -- the echoed
+        # limit/offset must match exactly what was requested, on every page.
+        if body.get("limit") != limit or body.get("offset") != offset:
+            problems.append(f"offset={offset}: echoed limit={body.get('limit')!r} offset={body.get('offset')!r}")
+            break
+        rows = body.get("players", [])
+        for row in rows:
+            player_id = row.get("canonical_player_id")
+            if player_id in seen:
+                duplicates.append(player_id)
+            else:
+                seen[player_id] = row
+        if len(rows) < limit:
+            break
+        if pages >= SEASON_PLAYERS_MAX_PAGES:
+            problems.append(f"did not terminate with a short page after {pages} pages")
+            break
+        offset += limit
+    ok = not problems and not duplicates and bool(seen)
+    detail = f"{len(seen)} players across {pages} page(s) (limit={limit})"
+    if not ok:
+        detail += f"; duplicates={duplicates[:5]} problems={problems}"
+    ctx.record("GET /api/v1/seasons/{id}/players", ok, detail)
+    if not seen:
         return
     required_fields = {"canonical_player_id", "display_name", "team", "identifiers"}
-    missing_by_row = [(i, sorted(required_fields - set(row.keys()))) for i, row in enumerate(players)]
-    missing_by_row = [(i, fields) for i, fields in missing_by_row if fields]
+    missing_by_row = [(pid, sorted(required_fields - set(row.keys()))) for pid, row in seen.items()]
+    missing_by_row = [(pid, fields) for pid, fields in missing_by_row if fields]
     ctx.record(
         "season players: rows expose canonical_player_id/display_name/team/identifiers",
         not missing_by_row,
-        "all rows complete" if not missing_by_row else f"missing (row_index, fields)={missing_by_row[:5]}",
+        "all rows complete" if not missing_by_row else f"missing (canonical_player_id, fields)={missing_by_row[:5]}",
     )
     ctx.record(
         "season players: given_name/family_name present-or-null (issue #248)",
-        all("given_name" in p and "family_name" in p for p in players),
+        all("given_name" in row and "family_name" in row for row in seen.values()),
         required=False,
     )
 

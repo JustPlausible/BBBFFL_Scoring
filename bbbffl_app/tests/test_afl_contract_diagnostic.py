@@ -14,7 +14,7 @@ import copy
 
 import httpx
 
-from scripts.afl_contract_diagnostic import run
+from scripts.afl_contract_diagnostic import SEASON_PLAYERS_PAGE_LIMIT, run
 
 VALID_KEY = "test-diagnostic-key"
 
@@ -136,7 +136,7 @@ SEASON_PLAYERS_85 = {
             "identifiers": {"afl_player_id": 101, "champion_data_player_id": "CD_I2"},
         },
     ],
-    "limit": 50,
+    "limit": SEASON_PLAYERS_PAGE_LIMIT,
     "offset": 0,
 }
 PLAYERS_SEARCH = {"players": [PLAYER_1["player"]]}
@@ -506,5 +506,134 @@ def test_diagnostic_flags_a_season_player_row_missing_a_required_field():
         r for r in results if r.name == "season players: rows expose canonical_player_id/display_name/team/identifiers"
     )
     assert field_check.status == "FAIL"
-    assert "1" in field_check.detail  # row_index of the broken second row
+    assert "2" in field_check.detail  # canonical_player_id of the broken second row
     assert "team" in field_check.detail
+
+
+def test_diagnostic_follows_season_player_pagination_to_exhaustion():
+    """The production client (`AflApiClient.get_season_players`) requests
+    SEASON_PLAYERS_PAGE_LIMIT-sized pages and follows them to the
+    terminating short page. This check must exercise the identical
+    contract, not just a single small page (Codex review on PR #251) --
+    otherwise a deployment that clamps the page size or malforms a later
+    page would be reported compatible even though Season Setup would fail
+    against it."""
+    limit = SEASON_PLAYERS_PAGE_LIMIT
+    page0_players = [
+        {
+            "canonical_player_id": i,
+            "display_name": f"Player {i}",
+            "given_name": f"Given{i}",
+            "family_name": f"Family{i}",
+            "team": {"team_id": 1, "name": "Home"},
+            "identifiers": {"afl_player_id": 1000 + i, "champion_data_player_id": f"CD_I{i}"},
+        }
+        for i in range(limit)
+    ]
+    page1_players = [
+        {
+            "canonical_player_id": limit,
+            "display_name": "Last Player",
+            "given_name": "Last",
+            "family_name": "Player",
+            "team": {"team_id": 2, "name": "Away"},
+            "identifiers": {"afl_player_id": 2000, "champion_data_player_id": "CD_ILAST"},
+        }
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("x-api-key") != VALID_KEY:
+            return httpx.Response(401, json=ERROR_401)
+        path = request.url.path
+        if path == "/api/v1/seasons/85/players":
+            offset = int(request.url.params.get("offset", "0"))
+            if offset == 0:
+                return httpx.Response(200, json={"players": page0_players, "limit": limit, "offset": 0})
+            if offset == limit:
+                return httpx.Response(200, json={"players": page1_players, "limit": limit, "offset": limit})
+            return httpx.Response(200, json={"players": [], "limit": limit, "offset": offset})
+        routes = {
+            "/api/v1": DISCOVERY,
+            "/api/v1/seasons": SEASONS,
+            "/api/v1/seasons/85/rounds": ROUNDS_85,
+            "/api/v1/seasons/84/rounds": ROUNDS_84,
+        }
+        if path in routes:
+            return httpx.Response(200, json=routes[path])
+        return httpx.Response(404, json={"error": {"code": "not_found", "message": "no mock route"}})
+
+    results = run("http://afl-api.test", VALID_KEY, transport=httpx.MockTransport(handler))
+    season_players_check = next(r for r in results if r.name == "GET /api/v1/seasons/{id}/players")
+    assert season_players_check.status == "PASS", season_players_check.detail
+    assert f"{limit + 1} players across 2 page(s)" in season_players_check.detail
+
+
+def test_diagnostic_flags_a_repeated_canonical_player_id_across_season_player_pages():
+    limit = SEASON_PLAYERS_PAGE_LIMIT
+    page0_players = [
+        {
+            "canonical_player_id": i,
+            "display_name": f"Player {i}",
+            "given_name": None,
+            "family_name": None,
+            "team": {"team_id": 1, "name": "Home"},
+            "identifiers": {},
+        }
+        for i in range(limit)
+    ]
+    # The first row of the "second page" repeats a canonical_player_id
+    # already seen on the first page instead of the real deployment's next
+    # player -- a genuine, deployment-side pagination defect that a
+    # last-page-only check would never see.
+    page1_players = [dict(page0_players[0])]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("x-api-key") != VALID_KEY:
+            return httpx.Response(401, json=ERROR_401)
+        path = request.url.path
+        if path == "/api/v1/seasons/85/players":
+            offset = int(request.url.params.get("offset", "0"))
+            if offset == 0:
+                return httpx.Response(200, json={"players": page0_players, "limit": limit, "offset": 0})
+            return httpx.Response(200, json={"players": page1_players, "limit": limit, "offset": limit})
+        routes = {
+            "/api/v1": DISCOVERY,
+            "/api/v1/seasons": SEASONS,
+            "/api/v1/seasons/85/rounds": ROUNDS_85,
+            "/api/v1/seasons/84/rounds": ROUNDS_84,
+        }
+        if path in routes:
+            return httpx.Response(200, json=routes[path])
+        return httpx.Response(404, json={"error": {"code": "not_found", "message": "no mock route"}})
+
+    results = run("http://afl-api.test", VALID_KEY, transport=httpx.MockTransport(handler))
+    season_players_check = next(r for r in results if r.name == "GET /api/v1/seasons/{id}/players")
+    assert season_players_check.status == "FAIL"
+    assert "duplicates=" in season_players_check.detail
+
+
+def test_diagnostic_flags_a_deployment_that_clamps_the_requested_page_size():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("x-api-key") != VALID_KEY:
+            return httpx.Response(401, json=ERROR_401)
+        path = request.url.path
+        if path == "/api/v1/seasons/85/players":
+            # Ignores the requested limit (SEASON_PLAYERS_PAGE_LIMIT) and
+            # always serves a smaller page -- AflApiClient.get_season_players
+            # would treat this identically to a genuine short final page and
+            # stop paginating early, silently under-populating the pool.
+            return httpx.Response(200, json={"players": SEASON_PLAYERS_85["players"], "limit": 50, "offset": 0})
+        routes = {
+            "/api/v1": DISCOVERY,
+            "/api/v1/seasons": SEASONS,
+            "/api/v1/seasons/85/rounds": ROUNDS_85,
+            "/api/v1/seasons/84/rounds": ROUNDS_84,
+        }
+        if path in routes:
+            return httpx.Response(200, json=routes[path])
+        return httpx.Response(404, json={"error": {"code": "not_found", "message": "no mock route"}})
+
+    results = run("http://afl-api.test", VALID_KEY, transport=httpx.MockTransport(handler))
+    season_players_check = next(r for r in results if r.name == "GET /api/v1/seasons/{id}/players")
+    assert season_players_check.status == "FAIL"
+    assert "echoed limit" in season_players_check.detail

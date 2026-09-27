@@ -329,12 +329,17 @@ the shell it runs in -- restoring over that name is refused outright
 which exists only for the deliberate database-affecting rollback path (see
 ["Rollback strategy"](#rollback-strategy) below). Day-to-day restore
 rehearsal always targets a differently named clean/staging database and
-never needs that flag. The script always drops the target database if it
-already exists and creates it fresh before restoring into it -- deliberately
-stronger than `pg_restore --clean` (which only drops objects present in the
-archive being restored, so a schema object a later migration introduced
-would otherwise survive a restore to an older backup and collide with that
-migration being re-attempted afterward).
+never needs that flag. Before touching any database, the script first validates the archive with
+`pg_restore --list` (which parses the custom-format archive's table of
+contents without connecting to a database) and refuses outright if that
+fails, so a truncated, corrupted, or wrong-format dump file is caught
+before anything is dropped, not after. Only once that passes does it drop
+the target database if it already exists and create it fresh before
+restoring into it -- deliberately stronger than `pg_restore --clean` (which
+only drops objects present in the archive being restored, so a schema
+object a later migration introduced would otherwise survive a restore to
+an older backup and collide with that migration being re-attempted
+afterward).
 
 **This was rehearsed, not just written down**, during this issue's work:
 backup taken from a real running production-topology database (with

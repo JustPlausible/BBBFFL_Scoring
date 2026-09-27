@@ -489,6 +489,75 @@ A sixth Codex pass found one more P1 and one more P2:
   affecting ordinary connections. Container removed immediately after
   (`docker rm -f bbbffl_rehearsal_pg`).
 
+## M. Seventh review pass: a destructive restore of a bad dump, and dead peers on established connections
+
+A seventh Codex pass, re-reviewing the section L fixes, found one more P1
+and one more P2:
+
+- **A corrupted/truncated dump would destroy the live target before
+  failing** (P1): section I's fix made `restore_postgres.sh` drop and
+  recreate the target database before calling `pg_restore`, to guarantee
+  no schema-drift leftovers survived a restore. That fix did not account
+  for the archive itself being bad: a truncated, corrupted, or wrong-
+  format dump file would only be discovered by `pg_restore` *after* the
+  target had already been dropped and recreated empty, turning a bad
+  backup file into a second, self-inflicted outage. Fixed by validating
+  the archive with `pg_restore --list` (which parses the custom-format
+  archive's table of contents without connecting to any database) before
+  the drop, refusing outright if that fails.
+
+  Rehearsed against a real database, reproducing the exact failure mode
+  first: created a target database with its own pre-existing data
+  (`existing_target_data`), then ran the restore script against a
+  deliberately truncated dump (`head -c 200` of a real backup):
+
+  ```
+  2026-09-27T05:19:34Z [ERROR] dump file '/backups/corrupt-test.dump' failed pg_restore --list validation (truncated, corrupted, or not a pg_dump custom-format archive) -- refusing to touch 'bbbffl_restore_target'
+  exit code: 1
+  ```
+
+  The target database's pre-existing data survived untouched
+  (`SELECT * FROM existing_target_data` still returned its one row
+  afterwards). Then confirmed a legitimate restore is unaffected by the
+  new check: the same script, given the real (untruncated) dump, still
+  dropped, recreated, and restored the target successfully (`exit=0`,
+  correct data present afterwards).
+
+- **`connect_timeout` does nothing for a connection already established
+  and pooled** (P2): the section L fix only bounds the TCP-connect phase.
+  A query issued on a connection whose peer has since become unreachable
+  (not merely refused -- a genuine network partition, with no RST or FIN)
+  has no libpq-level timeout of its own, and without TCP keepalive
+  enabled, Linux's default `tcp_keepalive_time` of two hours means that
+  worker thread and pooled slot could stay blocked for hours, not
+  seconds. Fixed by enabling TCP keepalive on every pooled PostgreSQL
+  connection (`keepalives=1, keepalives_idle=10, keepalives_interval=5,
+  keepalives_count=4` in `app/db.py`'s `connect_args`), bounding
+  dead-peer detection to roughly 30 seconds instead of hours. This is a
+  socket-level dead-peer detector, not a query deadline: it never
+  interrupts a query that is genuinely still running against a server
+  that is still there, however long that legitimately takes, so it
+  cannot cut off a slow migration or report query.
+
+  A true network-partition rehearsal (dropping packets between an
+  established client and server with no RST/FIN) needs host-level
+  firewall rules broad enough to risk this sandbox's own networking, so
+  instead verified the fix is actually applied where it matters: opened a
+  connection through `app.db.connect()` against a disposable
+  `postgres:16-alpine` container, extracted the raw OS socket the pooled
+  connection was using, and read its actual `SO_KEEPALIVE`/`TCP_KEEPIDLE`/
+  `TCP_KEEPINTVL`/`TCP_KEEPCNT` socket options directly:
+
+  ```
+  SO_KEEPALIVE=1 TCP_KEEPIDLE=10 TCP_KEEPINTVL=5 TCP_KEEPCNT=4
+  query still works normally: {'?column?': 1}
+  ```
+
+  This confirms libpq actually applied the configured values to the
+  kernel socket (rather than silently ignoring an unrecognized
+  connection-string parameter) and that an ordinary query still succeeds
+  unchanged with keepalive enabled.
+
 ## What this rehearsal does not prove
 
 - It does not prove the real production afl-api deployment is reachable or

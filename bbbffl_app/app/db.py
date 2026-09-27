@@ -172,17 +172,38 @@ def connect(database_url: str) -> DatabaseConnection:
     if database_url.startswith("sqlite"):
         connect_args: dict = {"check_same_thread": False}
     else:
-        # Bounds the TCP-connect phase only (psycopg/libpq's own
-        # connect_timeout, seconds) -- never the query itself. Without this,
-        # a network partition to PostgreSQL lets a new connection attempt
-        # block its worker thread indefinitely; GET /health/ready's
-        # database probe (app/routes/health.py) times out its own awaiting
-        # coroutine via asyncio.wait_for, but that alone cannot stop an
-        # underlying blocking connect() call or free the pooled slot it
-        # would otherwise occupy until it eventually resolves on its own
-        # (issue #243 review). 10s is generous for any real network, never
-        # the readiness endpoint's own bound (BBBFFL_READINESS_TIMEOUT_SECONDS).
-        connect_args = {"connect_timeout": 10}
+        # connect_timeout (psycopg/libpq, seconds) bounds only the TCP-
+        # connect phase. Without it, a network partition to PostgreSQL lets
+        # a *new* connection attempt block its worker thread indefinitely;
+        # GET /health/ready's database probe (app/routes/health.py) times
+        # out its own awaiting coroutine via asyncio.wait_for, but that
+        # alone cannot stop an underlying blocking connect() call or free
+        # the pooled slot it would otherwise occupy (issue #243 review).
+        # 10s is generous for any real network, never the readiness
+        # endpoint's own bound (BBBFFL_READINESS_TIMEOUT_SECONDS).
+        #
+        # connect_timeout does nothing once a connection is already
+        # established and pooled, though: a query issued on a connection
+        # whose peer has since gone unreachable (cable pulled, route
+        # dropped) has no libpq-level timeout of its own and can block that
+        # worker/slot for as long as the OS takes to notice -- on Linux,
+        # tcp_keepalive_time defaults to two hours if TCP keepalive is off
+        # (issue #243 review, follow-up). The keepalives_* settings below
+        # turn keepalive on for every pooled connection and shorten that to
+        # a bounded ~30s: after 10s of the socket being idle, probe every
+        # 5s, and give up (killing the connection, which surfaces to the
+        # blocked query as a normal connection error) after 4 unanswered
+        # probes. This is a socket-level dead-peer detector, not a query
+        # deadline -- it never interrupts a query that is genuinely still
+        # running against a server that is still there, however long that
+        # takes, so it cannot cut off a legitimate slow migration or report.
+        connect_args = {
+            "connect_timeout": 10,
+            "keepalives": 1,
+            "keepalives_idle": 10,
+            "keepalives_interval": 5,
+            "keepalives_count": 4,
+        }
     return DatabaseConnection(create_engine(database_url, connect_args=connect_args))
 
 

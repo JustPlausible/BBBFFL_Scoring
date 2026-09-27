@@ -61,6 +61,19 @@ fi
 
 bbbffl_log "INFO" "restoring ${DUMP_FILE} into database '${TARGET_DB}' on host '${PGHOST:-database}'"
 
+# Validate the archive *before* touching the target database at all
+# (issue #243 review): pg_restore --list parses the custom-format
+# archive's table of contents without connecting to any database, so a
+# truncated, corrupted, or wrong-format dump file is rejected right here.
+# Without this check, a bad dump would only be discovered after the drop
+# below had already destroyed the target -- turning a bad backup file
+# into a second, self-inflicted outage on top of whatever this restore
+# was meant to recover from.
+if ! pg_restore --list "$DUMP_FILE" >/dev/null 2>&1; then
+    bbbffl_log "ERROR" "dump file '${DUMP_FILE}' failed pg_restore --list validation (truncated, corrupted, or not a pg_dump custom-format archive) -- refusing to touch '${TARGET_DB}'"
+    exit 1
+fi
+
 # Drop and recreate the target rather than restoring into it with
 # pg_restore --clean: --clean only drops objects present in the archive
 # being restored, so a table/sequence/type/function a later migration

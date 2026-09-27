@@ -610,14 +610,21 @@ session — only the pass/fail outcome above.
   and by the diagnostic's `VALID_MATCH_STATES` check.
 - **A concrete, live confirmation that `POSTGAME`/`CONCLUDED` and
   player-stat finality are genuinely independent signals, not aliases:**
-  the 2026 Grand Final match reports `matches.status="CONCLUDED"` (with a
-  final score), while its own `player-stats` resource independently
-  reports `lifecycle.finality="not_available"` and zero player rows (stats
-  not yet loaded for that specific match at validation time). This is
-  exactly the distinction [§1.3](#13-match-lifecycle) and
+  at the first validation pass (~11:47 UTC), the 2026 Grand Final match
+  reported `matches.status="CONCLUDED"` (with a final score) while its own
+  `player-stats` resource independently reported
+  `lifecycle.finality="not_available"` with zero player rows (stats not
+  yet loaded for that specific match at that time) — the match-lifecycle
+  and player-stat-finality fields disagreed on "done-ness" while both
+  stayed internally consistent with their own semantics. This is exactly
+  the distinction [§1.3](#13-match-lifecycle) and
   [§1.4](#14-player-stat-finality-and-corrections) already document as two
   separately-sourced facts — BBBFFL must never collapse them — now backed
-  by a real, non-hypothetical example.
+  by a real, non-hypothetical example. (The upstream provider has since
+  backfilled this match's stats — see "Historical season data presence"
+  in [§3](#3-known-upstream-gaps-and-unresolved-semantics) — so it no
+  longer reports `not_available`; the independent-signals finding itself
+  remains valid regardless of that match's current state.)
 
 ### Known, non-blocking gap: no season is currently flagged `is_current`
 

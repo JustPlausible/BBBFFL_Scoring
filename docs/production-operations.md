@@ -321,10 +321,12 @@ the shell it runs in -- restoring over that name is refused outright
 which exists only for the deliberate database-affecting rollback path (see
 ["Rollback strategy"](#rollback-strategy) below). Day-to-day restore
 rehearsal always targets a differently named clean/staging database and
-never needs that flag. If the target database does not already exist, the
-script creates it; it then runs `pg_restore --clean --if-exists --no-owner`
-so a retried restore into an already-partially-restored database is
-idempotent (the same convention the existing 2026 replay playbooks use).
+never needs that flag. The script always drops the target database if it
+already exists and creates it fresh before restoring into it -- deliberately
+stronger than `pg_restore --clean` (which only drops objects present in the
+archive being restored, so a schema object a later migration introduced
+would otherwise survive a restore to an older backup and collide with that
+migration being re-attempted afterward).
 
 **This was rehearsed, not just written down**, during this issue's work:
 backup taken from a real running production-topology database (with

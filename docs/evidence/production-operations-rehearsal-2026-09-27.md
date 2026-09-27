@@ -322,6 +322,53 @@ reproducible in isolation):
   in `starting` well past its first expected backup), then
   `Up ... (healthy)` immediately after one succeeds.
 
+## I. Third review pass: a genuine schema-drift bug, reproduced and fixed
+
+The third Codex pass found a real correctness bug in `restore_postgres.sh`
+that section E's rehearsal had not exercised (it only added a data row, no
+schema change): `pg_restore --clean --if-exists` only drops objects present
+in the *archive being restored*, so a table/sequence a later migration
+introduced would survive a restore to an older backup even as
+`alembic_version` goes back to that older revision -- exactly the
+condition a database-affecting rollback creates on purpose. Reproduced the
+bug directly before fixing it:
+
+```
+$ psql -d bbbffl -c "CREATE TABLE pre_release_table (id int primary key, note text); INSERT INTO pre_release_table VALUES (1, 'pre-release data');"
+$ backup_postgres.sh                                    # pre-release backup
+$ psql -d bbbffl -c "CREATE TABLE post_release_table (id int primary key); CREATE SEQUENCE post_release_seq;"   # simulated bad release
+
+$ pg_restore --clean --if-exists --no-owner --dbname=bbbffl <pre-release-backup>   # the OLD approach
+$ psql -d bbbffl -c "\dt"
+ public | post_release_table | table   <- BUG: survives the restore
+ public | pre_release_table  | table
+```
+
+Fixed `restore_postgres.sh` to drop and recreate the target database
+before restoring into it, rather than relying on `pg_restore --clean`.
+Re-ran the identical scenario against the fixed script:
+
+```
+$ BBBFFL_ALLOW_RESTORE_OVER_LIVE_DATABASE=yes restore_postgres.sh <pre-release-backup> bbbffl
+...dropping existing target database 'bbbffl' for a clean restore
+...creating target database 'bbbffl'
+...restore into 'bbbffl' completed
+$ psql -d bbbffl -c "\dt"
+ public | pre_release_table  | table   <- post_release_table and its sequence are gone; fix confirmed
+$ psql -d bbbffl -c "SELECT * FROM pre_release_table;"
+ 1 | pre-release data                  <- pre-release data intact
+```
+
+The same pass also found that `lib_alert.sh` always used `wget`, but
+`readiness_watch.sh` (host-run) documents `curl` as its prerequisite --
+a host with `curl` and no `wget` would silently fail to deliver every
+alert. Fixed `lib_alert.sh` to try `curl` first, falling back to `wget`,
+and confirmed both paths select correctly: inside the Alpine backup
+container (`curl` absent, `wget` present) it used `wget`; on this host
+(`curl` present) it used `curl`. Both attempts against a deliberately
+unreachable port failed with a normal connection-refused error, not a
+missing-tool error.
+
 ## What this rehearsal does not prove
 
 - It does not prove the real production afl-api deployment is reachable or

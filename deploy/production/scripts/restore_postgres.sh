@@ -61,18 +61,29 @@ fi
 
 bbbffl_log "INFO" "restoring ${DUMP_FILE} into database '${TARGET_DB}' on host '${PGHOST:-database}'"
 
-if ! psql -lqtA | cut -d '|' -f1 | grep -qxF "$TARGET_DB"; then
-    bbbffl_log "INFO" "target database '${TARGET_DB}' does not exist yet -- creating it"
-    createdb "$TARGET_DB"
+# Drop and recreate the target rather than restoring into it with
+# pg_restore --clean: --clean only drops objects present in the archive
+# being restored, so a table/sequence/type/function a later migration
+# introduced -- absent from an older pre-release archive -- would
+# otherwise survive the restore even as alembic_version goes back to that
+# older revision, and a subsequent re-attempt at that same migration would
+# then fail because its object already exists (issue #243 review). A
+# fresh, empty target database has no such leftover to worry about.
+# dropdb/createdb connect to PostgreSQL's own "postgres" maintenance
+# database to issue these commands, never to the target itself (dropping a
+# database you are connected to is impossible), so this is safe even when
+# TARGET_DB is the live database this script's own env is otherwise
+# configured to talk to.
+if psql -lqtA | cut -d '|' -f1 | grep -qxF "$TARGET_DB"; then
+    bbbffl_log "INFO" "dropping existing target database '${TARGET_DB}' for a clean restore"
+    dropdb "$TARGET_DB"
 fi
+bbbffl_log "INFO" "creating target database '${TARGET_DB}'"
+createdb "$TARGET_DB"
 
-# --clean --if-exists: drops conflicting objects first, so a retried
-# restore into an already-partially-restored database is idempotent --
-# same convention the existing replay playbooks use (e.g.
-# docs/2026-second-half-replay-playbook.md). --no-owner: tolerates a
-# target cluster whose roles do not exactly match the dump's origin
-# cluster (e.g. a differently-provisioned staging host).
-if pg_restore --clean --if-exists --no-owner --dbname="$TARGET_DB" "$DUMP_FILE"; then
+# --no-owner: tolerates a target cluster whose roles do not exactly match
+# the dump's origin cluster (e.g. a differently-provisioned staging host).
+if pg_restore --no-owner --dbname="$TARGET_DB" "$DUMP_FILE"; then
     bbbffl_log "INFO" "restore into '${TARGET_DB}' completed"
 else
     bbbffl_alert "PostgreSQL restore of ${DUMP_FILE} into '${TARGET_DB}' FAILED"

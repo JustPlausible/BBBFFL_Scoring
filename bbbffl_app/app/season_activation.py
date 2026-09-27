@@ -54,14 +54,25 @@ or the transaction's own `conn` for `activate_season` -- and an
 `for_update` flag that appends `SeasonRepository`/`app.season_completion`'s
 existing `_for_update_suffix` on PostgreSQL. `preview_activate_season`
 never locks a row and never mutates; `activate_season` re-verifies every
-check *through the season-row-locked transaction itself*, with each
-check's own prerequisite rows locked too, so a concurrent write to any
-of them (e.g. `DraftRepository.reopen`, a trade, a fixture change)
-either commits first and is observed, or blocks until this transaction
-completes -- never an unlocked read racing the commit (Codex review, PR
-#254, P2). This mirrors `app.season_completion.preview_complete_season`/
+check *through the season-row-locked transaction itself*, so a concurrent
+write to a locked prerequisite (e.g. `DraftRepository.reopen`, a
+preseason-window closure/correction, a squad-limit change) either commits
+first and is observed, or blocks until this transaction completes --
+never an unlocked read racing the commit (Codex review, PR #254, P2).
+This mirrors `app.season_completion.preview_complete_season`/
 `complete_season`'s own dual-mode `_required_round_ids`/
 `_collect_round_states` pattern exactly.
+
+Not every prerequisite row is locked, though: `season_entry` and
+`season_player_pool` are deliberately read unlocked always (see
+`_entries_check`'s docstring) -- `app.identity`/`app.player_pool`/
+`app.preseason`/`app.shortlist` each lock `season_entry` in mutually
+different orders with no documented global convention, and a real
+PostgreSQL deadlock against an ordinary `OwnershipRepository.acquire`/
+`release` was reproduced and fixed by *not* locking these two tables here
+(Codex review, PR #254, a fourth P2 round) -- see "Atomicity" in
+`docs/season-activation.md` for what this module's locking does and does
+not claim.
 
 ## Safety properties
 
@@ -144,10 +155,17 @@ def _suffix(database, *, for_update: bool) -> str:
 
 
 def _entries_check(conn, database, season_id: str, *, for_update: bool) -> ActivationCheck:
-    rows = conn.execute(
-        "SELECT season_entry_id FROM season_entry WHERE season_id=?" + _suffix(database, for_update=for_update),
-        (season_id,),
-    ).fetchall()
+    """Deliberately never locked (regardless of `for_update`): `app.identity`/
+    `app.player_pool`/`app.preseason`/`app.shortlist` each lock `season_entry`
+    rows in their own, mutually different orders relative to other tables
+    (no documented global order exists for this table today), and a season's
+    ten entries are established once, before drafting begins -- effectively
+    stable by the time a season can be activation-ready. A stress run
+    confirmed a real PostgreSQL deadlock between `activate_season` and an
+    ordinary `OwnershipRepository.acquire` when this row was locked here
+    (Codex review, PR #254, a fourth P2 round); an unlocked read removes
+    that contention entirely rather than chasing one more pairwise order."""
+    rows = conn.execute("SELECT season_entry_id FROM season_entry WHERE season_id=?", (season_id,)).fetchall()
     count = len(rows)
     ready = count == TEAM_COUNT
     detail = (
@@ -229,10 +247,24 @@ def _player_pool_check(conn, database, season_id: str, *, for_update: bool) -> A
     one outer join: PostgreSQL refuses `FOR UPDATE` on an aggregate/
     `GROUP BY` *and* on the nullable side of an outer join, so the locked
     path locks each table's own rows directly and the per-entry counts are
-    computed in Python."""
+    computed in Python.
+
+    The pool-population existence check is deliberately never locked
+    (regardless of `for_update`): `OwnershipRepository.acquire_in_
+    transaction`/`release_in_transaction` lock a `season_player_pool` row
+    *before* they request `season_preseason_window` (via
+    `_assert_ownership_mutation_allowed`), the opposite of the window-
+    before-everything-else order this check's siblings use below --
+    locking an arbitrary pool row here could deadlock against an ordinary
+    ownership mutation on PostgreSQL (Codex review, PR #254, a fourth P2
+    round). Whether the pool has ever been populated is effectively
+    monotonic (no caller un-populates it), so an unlocked read is safe:
+    the worst case is observing "not yet populated" for a population that
+    committed a moment later, which correctly refuses activation rather
+    than risking anything unsafe."""
     suffix = _suffix(database, for_update=for_update)
     pool_row = conn.execute(
-        "SELECT canonical_player_id FROM season_player_pool WHERE season_id=? LIMIT 1" + suffix, (season_id,)
+        "SELECT canonical_player_id FROM season_player_pool WHERE season_id=? LIMIT 1", (season_id,)
     ).fetchone()
     if pool_row is None:
         return ActivationCheck(
@@ -246,9 +278,9 @@ def _player_pool_check(conn, database, season_id: str, *, for_update: bool) -> A
             "player_pool", "Player pool and squads", False, "the season squad limit has not been configured yet"
         )
     squad_limit = config["squad_limit"]
-    entries = conn.execute(
-        "SELECT season_entry_id FROM season_entry WHERE season_id=?" + suffix, (season_id,)
-    ).fetchall()
+    # `season_entry` is deliberately never locked here either -- see
+    # `_entries_check`'s docstring.
+    entries = conn.execute("SELECT season_entry_id FROM season_entry WHERE season_id=?", (season_id,)).fetchall()
     counts: dict[str, int] = {row["season_entry_id"]: 0 for row in entries}
     ownership = conn.execute(
         "SELECT season_entry_id FROM player_ownership_period WHERE season_id=? AND released_at IS NULL" + suffix,

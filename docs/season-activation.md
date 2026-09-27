@@ -79,31 +79,50 @@ invalidates before the lifecycle transition commits (Codex review, PR
 
 The checks lock in a fixed order -- `season_squad_configuration`, then
 `season_preseason_window`, then `season_draft`/`draft_pick`, then
-`season_entry`/`player_ownership_period`, then the remaining tables --
-matching the order `app.preseason.PreseasonRepository.close_window`/
+`player_ownership_period`, then the remaining tables -- matching the
+order `app.preseason.PreseasonRepository.close_window`/
 `correct_opening_snapshot` and `app.player_pool.OwnershipRepository.
 configure_squad_limit` already lock in (window before draft, window
-before ownership, squad configuration before draft). Two review rounds
+before ownership, squad configuration before draft). Three review rounds
 each found one pair locked in the opposite order from an existing
 caller, which could deadlock against a concurrent `close_window`/
 `correct_opening_snapshot`/`configure_squad_limit` on PostgreSQL rather
 than cleanly serializing; `tests/test_season_activation_postgresql.py`'s
-three lock-order tests prove the corrected order, and a 40-iteration
-real-concurrency stress run (`activate_season` racing
-`configure_squad_limit` via a `threading.Barrier`, not merely a held
-lock) produced no deadlock or hang.
+lock-order tests prove the corrected order, and repeated real-concurrency
+stress runs (`activate_season` racing `configure_squad_limit`/
+`OwnershipRepository.acquire` via a `threading.Barrier`, not merely a
+held lock) confirmed no deadlock or hang.
+
+**`season_entry` and `season_player_pool` are deliberately never
+locked**, in either mode. A fourth review round's stress run reproduced a
+real PostgreSQL deadlock between `activate_season` (which had locked
+`season_entry`) and an ordinary `OwnershipRepository.acquire`/`release`
+(which locks `season_player_pool` then, on refusal, `season_preseason_
+window` -- the opposite of this module's window-first order for that
+pair). `app.identity`/`app.player_pool`/`app.preseason`/`app.shortlist`
+each already lock `season_entry` in mutually different orders relative
+to other tables, with no documented global convention to conform to in
+the first place; a season's ten entries and its player pool are also
+effectively stable by the time a season is activation-ready (established
+well before the draft that activation itself requires finalized).
+Reading them unlocked removes the contention entirely rather than
+chasing another pairwise fix -- the same trade-off as the deliberately
+unlocked pool-existence check from the previous round.
 
 **What this does not claim.** `app.preseason`/`app.draft`/
-`app.player_pool` do not themselves follow one documented global lock
-order today -- for example `DraftRepository.execute_pick`'s ordinary
-ownership-acquisition path locks `season_draft` before
-`season_preseason_window`, the opposite of `close_window`'s own order,
-a pre-existing inconsistency this issue did not introduce and does not
-fix. This module locks in the order needed to avoid a deadlock against
-every caller identified during review that could plausibly run
-concurrently with activation; a comprehensive lock-order audit across
-the whole season/preseason/draft/ownership domain is a separate,
-valuable follow-up, not part of issue #239's scope.
+`app.player_pool`/`app.identity`/`app.shortlist` do not themselves follow
+one documented global lock order today -- for example `DraftRepository.
+execute_pick`'s ordinary ownership-acquisition path locks `season_draft`
+before `season_preseason_window`, the opposite of `close_window`'s own
+order, and `season_entry` itself is locked in several different relative
+orders across `app.identity`/`app.player_pool`/`app.preseason`/
+`app.shortlist`. These are pre-existing inconsistencies this issue did
+not introduce and does not fix. This module locks (or deliberately does
+not lock) exactly what was needed to avoid a deadlock against every
+caller identified and stress-tested during review; a comprehensive
+lock-order audit across the whole season/preseason/draft/ownership
+domain is a separate, valuable follow-up, not part of issue #239's
+scope.
 
 ## Activation is always explicit
 

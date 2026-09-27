@@ -52,6 +52,7 @@ from pydantic import BaseModel
 from app.audit import ActorContext
 from app.authorization import (
     Principal,
+    Role,
     principal_has_capability,
     require_role_covers_season,
     require_secretary_or_admin,
@@ -91,6 +92,14 @@ def _season_view(state, season_id: str, principal: Principal):
     # #131 PR review finding), mirroring the `draft` filtering above.
     if not principal_has_capability(principal, "opening_round.nominate"):
         view["links"]["opening_round"] = None
+    # Issue #239's season-activation gate is Scorer/Administrator only --
+    # narrower than any single existing capability (Replay Operator also
+    # holds `scoring.manage`, but is not authorised to activate). Hide the
+    # link for anyone else (a Secretary included) rather than send them to
+    # a page whose readiness request would 403 (Codex review, PR #254),
+    # mirroring the `draft`/`opening_round` filtering above.
+    if principal.role not in (Role.SCORER, Role.ADMIN):
+        view["links"]["season_activation"] = None
     return view
 
 

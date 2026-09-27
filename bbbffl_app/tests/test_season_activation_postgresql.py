@@ -151,3 +151,33 @@ def test_activation_locks_squad_configuration_before_the_draft_avoiding_deadlock
     assert not thread.is_alive()
     assert outcome["result"] == "activated", outcome["result"]
     assert SeasonRepository(database).get_season(season_id).lifecycle_state == "active"
+
+
+def test_activation_never_contends_for_season_entry_or_player_pool_locks(postgres_url):  # noqa: F811
+    """Codex review, PR #254 (a fourth P2 round): a stress run reproduced a
+    real PostgreSQL deadlock between `activate_season` (which locked
+    `season_entry`) and an ordinary `OwnershipRepository.acquire`/`release`
+    (which locks `season_player_pool` then, on refusal, `season_preseason_
+    window` -- the opposite of this module's window-first order for that
+    pair). The fix is to never lock `season_entry`/`season_player_pool`
+    here at all (see `_entries_check`'s docstring) -- proven here by
+    holding both rows from a separate connection and confirming
+    `activate_season` does not even wait for them."""
+    database = connect(postgres_url)
+    built = build_activation_ready_season(database, year=9242)
+    season_id = built["season"].season_id
+    entry_id = built["entries"][0].season_entry_id
+
+    lock_conn = connect(postgres_url).engine.connect()
+    lock_txn = lock_conn.begin()
+    lock_conn.execute(text("SELECT * FROM season_entry WHERE season_entry_id=:eid FOR UPDATE"), {"eid": entry_id})
+    lock_conn.execute(
+        text("SELECT * FROM season_player_pool WHERE season_id=:sid LIMIT 1 FOR UPDATE"), {"sid": season_id}
+    )
+
+    try:
+        result = activate_season(database, season_id, actor=ACTOR, reason=REASON)
+        assert result.season.lifecycle_state == "active"
+    finally:
+        lock_txn.rollback()
+        lock_conn.close()

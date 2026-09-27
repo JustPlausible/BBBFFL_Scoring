@@ -335,24 +335,34 @@ not this contract-validation issue, per its explicit non-goals.
    pages. This endpoint supersedes the earlier gap recorded below and
    prevents injured, suspended, or pre-debut eligible players being omitted
    merely because they have no first-half stat row.
-2. **Historical season data presence — partially confirmed (issue #244,
-   2026-09-27); full season-wide stats completeness remains open.** The
-   contract structurally supports historical access (any persisted
-   season/round/match/player-stats resource is reachable by ID with no
-   time-window restriction), and the deployed instance has confirmed
-   persisted the round/match structure: season 85 (2026) carries all 30
+2. **Historical season data presence — now fully confirmed (issue #244,
+   2026-09-27).** The contract structurally supports historical access
+   (any persisted season/round/match/player-stats resource is reachable by
+   ID with no time-window restriction), and the deployed instance has
+   confirmed persisted this completely: season 85 (2026) carries all 30
    rounds and all 218 matches, every one reporting `CONCLUDED` — see
-   [Live validation status](#live-validation-status). Player-stats rows
-   were confirmed complete and contract-compliant for the specific match
-   sampled (Round 1's Carlton v Richmond, `match_id` 8045), **not** for
-   every match in the season: the same validation run found the 2026
-   Grand Final (`match_id` 9028) reports `lifecycle.finality="not_available"`
-   with zero player rows, i.e. season 85's own player-stats are not
-   uniformly complete end-to-end. **This still blocks packages 08/32**
-   until a season-wide (not single-match) stats-completeness check
-   confirms every match a replay or export would actually read has usable
-   player-stats, or the specific matches still missing them are
-   identified and accounted for.
+   [Live validation status](#live-validation-status). Player-stats
+   completeness was checked twice, ~75 minutes apart, and genuinely
+   changed state between the two checks:
+   - **First pass (~11:47 UTC):** complete and contract-compliant for the
+     specific match sampled (Round 1's Carlton v Richmond, `match_id`
+     8045), but **not** for every match — three matches (the two
+     Preliminary Finals, `match_id` 9026/9027, and the Grand Final,
+     `match_id` 9028) reported `lifecycle.finality="not_available"` with
+     zero player rows. This correctly blocked packages 08/32 at the time.
+   - **Second pass (~12:51 UTC), after the operator reported the upstream
+     provider had backfilled those three matches:** all three now report
+     `lifecycle.finality="final"` with 46 player rows each. A full
+     season-wide sweep of all 218 matches in season 85 (every
+     `GET /api/v1/matches/{id}/player-stats`, not a single sample) found
+     **zero** incomplete matches — every match reports `finality="final"`
+     with at least one player row.
+
+   **This no longer blocks packages 08/32.** The upstream data gap was
+   real, genuinely time-bound, and is now closed by the provider's own
+   backfill, not by BBBFFL relaxing what "complete" means — see
+   [Live validation status](#live-validation-status) for the season-wide
+   sweep methodology.
 3. **No standalone team-list/team-detail resource.** Not currently a
    BBBFFL requirement, but worth tracking if a future package needs a full
    AFL club list independent of a match/player projection.
@@ -501,23 +511,32 @@ against real data and returned a contract-compatible shape:
 | `GET /api/v1/seasons/{season_id}/players` | Season 85: complete pool followed to exhaustion at the production page size (812 players across 4 pages of `SEASON_PLAYERS_PAGE_LIMIT`=250, `limit`/`offset` echoed exactly on every page, no repeated `canonical_player_id` across pages), every row's *values* -- not just key presence -- validated against `AflApiClient.get_season_players`'s own rules (positive `canonical_player_id`, non-blank `display_name`, optional non-blank `given_name`/`family_name`, a resolved season-scoped `team`) |
 | `GET /api/v1/rounds/{round_id}/matches` | Every one of season 85's 218 matches, across all 30 rounds, reports `status="CONCLUDED"` (the 2026 season has fully finished) |
 | `GET /api/v1/matches/{match_id}` | Round 1 and Grand Final match detail, correct `home_team`/`away_team`/`score_home`/`score_away` shape |
-| `GET /api/v1/matches/{match_id}/player-stats` | Round 1 match (Carlton v Richmond): `lifecycle.finality="final"`, 46 player rows, every BBBFFL-scored field (`goals, behinds, disposals, marks, tackles, hitouts`) present on every row |
+| `GET /api/v1/matches/{match_id}/player-stats` | Round 1 match (Carlton v Richmond): `lifecycle.finality="final"`, 46 player rows, every BBBFFL-scored field (`goals, behinds, disposals, marks, tackles, hitouts`) present on every row. **Season-wide sweep** (second validation pass, ~12:51 UTC): all 218 matches in season 85 checked individually, all report `lifecycle.finality="final"` with player rows present -- zero incomplete matches |
 | `GET /api/v1/players/{canonical_player_id}` | Resolved a real `canonical_player_id` from the match player-stats above and confirmed `display_name`/`current_team`/`identifiers` |
 | `GET /api/v1/players?search=` | Non-empty result for a real surname |
 | `GET /api/v1/injuries` | 245 current records, correct shape |
 | `GET /api/v1/matches/{match_id}/rosters` | Correct `home_team`/`away_team` shape |
 | 404/422 structured error shapes | Confirmed: `player_not_found` / `search_required`, exactly as documented in [§1.7](#17-authentication-and-configuration) |
 
-This partially closes gap #2 in
+This closes gap #2 in
 [§3](#3-known-upstream-gaps-and-unresolved-semantics) (historical 2026 data
 presence was genuinely unverified before this session): season 85 (2026)'s
 round/match structure is confirmed fully present (30 rounds, 218 matches,
-all `CONCLUDED`), and player-stats were confirmed complete and
-contract-compliant for the one match sampled. **It is not fully populated
-end-to-end** — the same run found the 2026 Grand Final (`match_id` 9028)
-reports `lifecycle.finality="not_available"` with zero player rows, so
-whether every match in the season has usable player-stats remains
-unconfirmed and continues to block packages 08/32 (see §3 item 2).
+all `CONCLUDED`), and player-stats are now confirmed complete and
+contract-compliant **season-wide, not just for one sampled match**.
+
+This was not true on the first validation pass (~11:47 UTC): the 2026
+Grand Final (`match_id` 9028) and both Preliminary Finals (`match_id`
+9026/9027) reported `lifecycle.finality="not_available"` with zero player
+rows, and this document correctly recorded season 85 as not fully
+populated end-to-end and continuing to block packages 08/32. The operator
+reported the upstream provider had since backfilled those three matches
+from the authoritative CFS source; a second validation pass (~12:51 UTC)
+confirmed all three now report `lifecycle.finality="final"` with 46
+player rows each, and a full sweep of all 218 matches in season 85 (every
+`GET /api/v1/matches/{id}/player-stats`, not a sample) found zero
+remaining incomplete matches. **Packages 08/32 are no longer blocked by
+this gap** — see §3 item 2.
 
 ### OpenAPI comparison — completed, no incompatible difference found
 

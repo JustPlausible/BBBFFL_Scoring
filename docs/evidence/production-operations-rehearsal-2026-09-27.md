@@ -677,6 +677,52 @@ placeholder fix, found the same gap still open for a third secret:
   and manually confirmed `urlsplit` extracts the password correctly from
   the documented `postgresql+psycopg://user:pass@host/db` URL shape.
 
+## P. Tenth review pass: the scheduled cron job never actually saw its credentials
+
+A tenth Codex pass found a P1 that every prior backup rehearsal in this
+document had genuinely missed, and explained exactly why:
+
+- **The captured environment file was sourced but never exported, so the
+  scheduled backup job could never see it** (P1): `backup_entrypoint.sh`
+  captures `POSTGRES_*`/`PG*`/`BBBFFL_*` into `/etc/bbbffl-backup.env` as
+  plain `NAME='value'` lines because busybox `crond` does not inherit the
+  container's own environment for a scheduled run -- that part was
+  already known and is why the file exists at all. What was missed:
+  the crontab line sources that file (`. /etc/bbbffl-backup.env`) and
+  then runs `backup_postgres.sh` as a *separate* process on the same
+  line -- and `.` alone only sets plain shell variables in the sourcing
+  shell, never exports them, so a subsequently exec'd child process
+  inherits none of them. Only `PGHOST`, set inline on the crontab line
+  itself (`PGHOST=database /scripts/backup_postgres.sh`), ever actually
+  reached the scheduled job; every actual scheduled backup would have
+  failed at `backup_postgres.sh`'s own `PGDATABASE (or POSTGRES_DB) must
+  be set` check. Every rehearsal in sections A-O ran the script directly
+  via `docker compose exec ... backup /scripts/backup_postgres.sh` (or
+  sourced the env file in an already-fully-exported interactive shell),
+  which inherits the container's real environment regardless of what
+  sourcing does or doesn't export -- so none of them could have caught
+  this; only a truly scheduled `crond` run, or an equivalent clean-
+  environment reproduction, exposes it. Fixed by writing
+  `export NAME='value'` lines instead of bare `NAME='value'`.
+
+  Reproduced the exact failure with a clean-environment simulation of
+  crond's own invocation style (`env -i sh -c '. <envfile>; <command>'`,
+  which starts with no inherited environment at all, matching how
+  busybox crond actually starts a scheduled job): with the old,
+  non-exported file format, this failed exactly as predicted:
+
+  ```
+  /scripts/backup_postgres.sh: line 37: PGDATABASE: PGDATABASE (or POSTGRES_DB) must be set
+  ```
+
+  Then confirmed the fix by extracting the real crontab line the fixed
+  entrypoint generates and running it verbatim in the same clean
+  environment: the backup now succeeds end-to-end, producing a real
+  dump file, with none of `POSTGRES_DB`/`POSTGRES_USER`/
+  `POSTGRES_PASSWORD` present in the invoking shell beforehand -- proving
+  the exported env file, not an inherited container environment, is what
+  supplied them.
+
 ## What this rehearsal does not prove
 
 - It does not prove the real production afl-api deployment is reachable or

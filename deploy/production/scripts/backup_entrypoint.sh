@@ -26,10 +26,23 @@ umask 077
 # ("15 2 * * *") contains spaces, and an unquoted `env`-format line breaks
 # when later sourced with `.` (the shell would try to run "2", "*", "*",
 # "*" as separate commands after the first space).
+#
+# Written as `export NAME='value'`, not bare `NAME='value'` (issue #243
+# review): the crontab line below sources this file with `.` and then runs
+# backup_postgres.sh as a *separate* process on the same line -- `.`
+# alone only sets plain shell variables in the sourcing shell, which are
+# never inherited by a subsequently exec'd child process, only genuinely
+# exported ones are. Without `export`, that child would see none of these
+# (its own PGDATABASE/PGUSER/PGPASSWORD defaulting would then all resolve
+# empty), and only PGHOST -- set inline on the crontab line itself -- would
+# actually reach it. A rehearsal that instead sources this file in an
+# interactive shell before invoking the script directly (as this issue's
+# own rehearsal did) would not catch this: that shell's env is already the
+# container's full env regardless of what sourcing exports.
 env | grep -E '^(POSTGRES_|PG|BBBFFL_)' | cut -d= -f1 | while IFS= read -r name; do
     value=$(eval "printf '%s' \"\$$name\"")
     escaped=$(printf '%s' "$value" | sed "s/'/'\\\\''/g")
-    printf "%s='%s'\n" "$name" "$escaped" >>"$ENV_FILE"
+    printf "export %s='%s'\n" "$name" "$escaped" >>"$ENV_FILE"
 done
 chmod 600 "$ENV_FILE"
 

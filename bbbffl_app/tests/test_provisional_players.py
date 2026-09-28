@@ -700,6 +700,40 @@ def test_reconciliation_preserves_ineligibility_of_a_target_never_detected_as_a_
     assert reconciled.eligible is False
 
 
+def test_reconciliation_does_not_reapply_a_rejected_winning_candidates_stale_eligibility():
+    """Codex review on PR #258 (P2, sixth round): the winning-candidate
+    eligibility lookup added for pre-quarantine preservation must also only
+    consider a still-*pending* candidate -- a rejected one's recorded value
+    can be stale by the time of a later, unrelated eligibility change and a
+    manual reconciliation to that same target."""
+    db, season, _entries = setup_domain()
+    player = _create(db, season.season_id, given="Jordan", family="Newrecruit")
+    pool = PlayerPoolRepository(db)
+    target = pool.refresh_player(
+        season.season_id, 9704, "Jordan Newrecruit", given_name="Jordan", family_name="Newrecruit"
+    )
+    detect_candidates(db, season.season_id, actor=ActorContext.system())
+
+    provisional = ProvisionalPlayerRepository(db)
+    provisional.reject_candidate(season.season_id, player.season_player_id, 9704, actor=SCORER, reason="Not them")
+    assert pool.get_by_id(target.season_player_id).eligible is True
+
+    # Made ineligible for an unrelated reason after the rejection.
+    pool.refresh_player(
+        season.season_id,
+        9704,
+        "Jordan Newrecruit",
+        given_name="Jordan",
+        family_name="Newrecruit",
+        eligible=False,
+    )
+
+    reconciled = provisional.reconcile(
+        season.season_id, player.season_player_id, target.season_player_id, actor=SCORER, reason="Confirmed after all"
+    )
+    assert reconciled.eligible is False
+
+
 def test_deferring_an_already_rejected_candidate_is_refused():
     """Codex review on PR #258 (P2, fifth round): a rejected candidate is
     terminal -- deferring it would record a `candidate_deferred` audit

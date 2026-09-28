@@ -107,6 +107,16 @@ ENTITY_TYPE_MATCH_CANDIDATE = "player_pool.match_candidate"
 
 MATCH_BASIS_GIVEN_FAMILY_NAME = "given_name+family_name"
 
+# `season_player_pool.source_provider` for a provisional row -- never a live
+# afl-api provider string (`app.season_setup.live_source_provider`'s
+# `"afl-api-v1/season-<id>"` shape), so a caller can always tell the two
+# apart. Codex review on PR #258 (P1, sixth round): `app.season_setup.
+# _live_pool_afl_season_id` must exclude this provider when deciding whether
+# the pool was populated from exactly one live afl-api season -- a
+# provisional player created before the preseason draft order is accepted
+# must not make that check see two providers and refuse to start the draft.
+PROVISIONAL_SOURCE_PROVIDER = "bbbffl-provisional"
+
 
 class NominationStateError(ValueError):
     pass
@@ -373,12 +383,13 @@ class ProvisionalPlayerRepository:
                 "(season_player_id, season_id, canonical_player_id, display_name, afl_team_id, afl_team_name, "
                 "eligible, source_provider, source_fetched_at, source_updated_at, created_at, updated_at, "
                 "given_name, family_name, was_provisional, provisional_note, provisional_reconciled_at) "
-                "VALUES (?, ?, NULL, ?, NULL, ?, TRUE, 'bbbffl-provisional', ?, NULL, ?, ?, ?, ?, TRUE, ?, NULL)",
+                "VALUES (?, ?, NULL, ?, NULL, ?, TRUE, ?, ?, NULL, ?, ?, ?, ?, TRUE, ?, NULL)",
                 (
                     season_player_id,
                     season_id,
                     display_name.strip(),
                     club,
+                    PROVISIONAL_SOURCE_PROVIDER,
                     created,
                     created,
                     created,
@@ -574,9 +585,14 @@ class ProvisionalPlayerRepository:
             # row's own current `eligible` when reconciling to a target that
             # was never a detected candidate for this provisional player, so
             # nothing has quarantined it and its live value is authoritative.
+            # Codex review on PR #258 (P2, sixth round): restrict this to a
+            # still-*pending* winning candidate -- a rejected one is no
+            # longer an active quarantine, so its recorded value can be
+            # stale by the time of a later, unrelated eligibility change and
+            # a manual reconciliation to the same target.
             winning_candidate = conn.execute(
                 "SELECT restore_eligible_on_release FROM provisional_match_candidate "
-                "WHERE season_player_id=? AND canonical_player_id=?",
+                "WHERE season_player_id=? AND canonical_player_id=? AND status='pending'",
                 (season_player_id, target["canonical_player_id"]),
             ).fetchone()
             merged_eligible = (

@@ -74,7 +74,7 @@ from app.fixtures import FixtureRepository
 from app.identity import IdentityRepository
 from app.opening_round import OpeningRoundRuleRepository
 from app.player_pool import OwnershipRepository, PlayerPoolRepository
-from app.provisional_players import detect_candidates_in_transaction
+from app.provisional_players import PROVISIONAL_SOURCE_PROVIDER, detect_candidates_in_transaction
 from app.season import SeasonRepository
 from app.superscore_round import ROUND_LABELS, get_stream, initialize_structure
 
@@ -607,8 +607,20 @@ def _draft_blockers(database, season, entries, squad_limit, pool) -> list[str]:
 def _live_pool_afl_season_id(database, season_id: str) -> int:
     """The AFL season this season's pool was populated from, read back from
     its `source_provider` (`live_source_provider`) -- the AFL season whose
-    fixture the draft's Opening Round gate must check."""
-    providers = PlayerPoolRepository(database).summary(season_id)["source_providers"]
+    fixture the draft's Opening Round gate must check.
+
+    Codex review on PR #258 (P1, sixth round): a provisional player (issue
+    #242) is cached with `source_provider=PROVISIONAL_SOURCE_PROVIDER`, never
+    a live afl-api provider string -- excluded from the "exactly one
+    provider" check below, or a provisional player created before the
+    preseason draft order is accepted (the primary workflow that feature
+    supports) would make this refuse to start the draft even though the
+    canonical pool was populated correctly."""
+    providers = [
+        p
+        for p in PlayerPoolRepository(database).summary(season_id)["source_providers"]
+        if p != PROVISIONAL_SOURCE_PROVIDER
+    ]
     prefix = f"{LIVE_SOURCE_PROVIDER}/season-"
     live = [p for p in providers if p.startswith(prefix) and p[len(prefix) :].isdigit()]
     if len(providers) != 1 or len(live) != 1:

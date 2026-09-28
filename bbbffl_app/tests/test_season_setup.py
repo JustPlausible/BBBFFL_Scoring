@@ -385,6 +385,33 @@ def test_squad_limit_repeat_is_a_no_op_and_change_after_draft_is_refused():
     assert table_counts(database, *STRUCTURE_TABLES) == before
 
 
+def test_accepting_draft_order_ignores_a_provisional_player_when_checking_the_live_pool_provider():
+    """Codex review on PR #258 (P1, sixth round): a provisional player
+    (issue #242) created before the preseason draft order is accepted --
+    the primary workflow that feature supports -- is cached under
+    `source_provider=PROVISIONAL_SOURCE_PROVIDER`, never a live afl-api
+    provider. `_live_pool_afl_season_id`'s "exactly one provider" check
+    must exclude it, or the draft could never start while any provisional
+    player exists."""
+    from app.provisional_players import ProvisionalPlayerRepository
+
+    database = migrated_connection()
+    season, entries = fresh_season(database)
+    ProvisionalPlayerRepository(database).create(
+        season.season_id,
+        display_name="Jordan Newrecruit",
+        given_name="Jordan",
+        family_name="Newrecruit",
+        note="verified via club website squad list",
+        actor=SCORER,
+    )
+    _ready_for_draft(database, season, SetupAfl())
+    result = accept_draft_order(
+        database, NO_OPENING, season.season_id, [e.season_entry_id for e in entries], actor=SCORER, reason=REASON
+    )
+    assert result["created"] is True
+
+
 def test_draft_order_refuses_each_missing_prerequisite_without_writing():
     database = migrated_connection()
     season, entries = fresh_season(database)

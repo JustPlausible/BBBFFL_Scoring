@@ -89,7 +89,7 @@
     </div>
     {% endfor %}
     {% endif %}
-    {% if preseason_selection %}
+    {% if nomination_context %}
     <details class="nominate">
       <summary>Missing a player from the draft pool? Report it</summary>
       <p class="muted">If a legitimate AFL player you want to draft is not yet in the player pool, report them here. A Scorer/Administrator will verify and add them as a provisional player before you can draft them -- you cannot create the player identity yourself.</p>
@@ -106,8 +106,8 @@
         var form = document.getElementById('nominate-form');
         if (!form) return;
         var status = document.getElementById('nominate-status');
-        var seasonId = {{ preseason_selection.season_id|tojson }};
-        var seasonEntryId = {{ preseason_selection.season_entry_id|tojson }};
+        var seasonId = {{ nomination_context.season_id|tojson }};
+        var seasonEntryId = {{ nomination_context.season_entry_id|tojson }};
         var csrfToken = {{ csrf_token|tojson }};
         form.addEventListener('submit', function (event) {
           event.preventDefault();

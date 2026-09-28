@@ -214,6 +214,7 @@ def test_coach_dashboard_notice_disappears_after_reconciliation(provisional_clie
         season.season_id, 12345, "Jordan Newrecruit"
     )
     provisional.reconcile(
+        season.season_id,
         player.season_player_id,
         canonical.season_player_id,
         actor=ActorContext.anonymous_operator("scorer"),
@@ -322,6 +323,7 @@ def test_repeated_reconciliation_is_a_409(provisional_client):
     canonical = pool.refresh_player(season.season_id, 5003, "Jordan Newrecruit")
     other = pool.refresh_player(season.season_id, 5004, "Someone Else")
     provisional.reconcile(
+        season.season_id,
         player.season_player_id,
         canonical.season_player_id,
         actor=ActorContext.anonymous_operator("scorer"),
@@ -405,3 +407,49 @@ def test_outstanding_provisional_player_appears_in_scorer_dashboard_attention(pr
     assert response.status_code == 200, response.text
     codes = {item["code"] for item in response.json()["dashboard"]["attention"]}
     assert "provisional_players:outstanding" in codes
+
+
+def test_nomination_form_is_offered_during_the_midseason_draft_too(provisional_client):
+    """Codex review on PR #258 (P2): the report-a-missing-player form was
+    previously gated on `preseason_selection` alone, so it vanished once
+    the preseason draft was finalized -- exactly the state a mid-season
+    draft is in. It must also appear from `midseason_selection`."""
+    client = provisional_client
+    from app.season import SeasonRepository
+    from tests.midseason_draft_helpers import build_season
+
+    database = client.app.state.database
+    ctx = build_season(database, year=8114, trigger_round=10, squad_limit=4, regular_season_round_count=12)
+    season, entries = ctx["season"], ctx["entries"]
+    SeasonRepository(database).set_midseason_draft_trigger_round(season.season_id, 10)
+    api = f"/api/admin/midseason-draft/{season.season_id}"
+    assert (
+        client.post(f"{api}/confirm-ladder", json={"competition_id": ctx["competition"].competition_id}).status_code
+        == 200
+    )
+    assert client.post(f"{api}/open-delisting-window", json={}).status_code == 200
+    worst = entries[9]
+    worst_squad = ctx["ownership"].current_squad(worst.season_entry_id)
+    for player in worst_squad[:2]:
+        response = client.post(
+            f"{api}/delisting",
+            json={"season_entry_id": worst.season_entry_id, "season_player_id": player.season_player_id},
+        )
+        assert response.status_code == 200
+    assert client.post(f"{api}/lock-delistings", json={}).status_code == 200
+    generated = client.post(f"{api}/generate-selections", json={})
+    assert generated.status_code == 200, generated.text
+    assert generated.json()["draft"]["state"] == "draft_open"
+
+    coach = database.execute(
+        "SELECT coach_id FROM season_entry_coach_history WHERE season_entry_id=? AND ended_at IS NULL",
+        (worst.season_entry_id,),
+    ).fetchone()
+    from types import SimpleNamespace
+
+    _coach_session(client, SimpleNamespace(coach_id=coach["coach_id"]), email="coach-8114@example.com")
+
+    account_page = client.get("/account")
+    assert account_page.status_code == 200
+    assert "Report missing player" in account_page.text
+    assert "Missing a player from the draft pool" in account_page.text

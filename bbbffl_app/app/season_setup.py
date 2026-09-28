@@ -74,7 +74,7 @@ from app.fixtures import FixtureRepository
 from app.identity import IdentityRepository
 from app.opening_round import OpeningRoundRuleRepository
 from app.player_pool import OwnershipRepository, PlayerPoolRepository
-from app.provisional_players import detect_candidates
+from app.provisional_players import detect_candidates_in_transaction
 from app.season import SeasonRepository
 from app.superscore_round import ROUND_LABELS, get_stream, initialize_structure
 
@@ -256,31 +256,36 @@ def refresh_player_pool(database, afl_client, season_id: str, afl_season_id: int
         _afl_season(afl_client, afl_season_id, season)
         players = afl_client.get_season_players(afl_season_id)
         _require_fresh(evidence)
+    # Issue #242: the refresh and the candidate-detection quarantine it may
+    # trigger for a provisional player share one transaction (Codex review
+    # on PR #258, P1) -- otherwise a newly-imported canonical duplicate is
+    # briefly eligible/draftable between the refresh committing and
+    # detection's own separate transaction quarantining it, and a pick
+    # placed in that window would leave `detect_candidates` unable to
+    # quarantine it (already owned) and `reconcile` refusing to merge it
+    # later (existing ownership history). `refresh_season_pool_in_
+    # transaction`/`detect_candidates_in_transaction` are the `_in_
+    # transaction`-suffixed variants this codebase already uses for a
+    # compound command spanning two repositories -- never mutations the
+    # season model performs on its own; see `app.provisional_players`'s
+    # module docstring on why the season model itself never calls the
+    # latter.
     try:
-        summary = PlayerPoolRepository(database).refresh_season_pool(
-            season_id,
-            [
-                (p.canonical_player_id, p.display_name, p.given_name, p.family_name, p.team.team_id, p.team.name)
-                for p in players
-            ],
-            source_provider=live_source_provider(afl_season_id),
-            actor=actor,
-            reason=reason,
-        )
+        with transaction(database) as conn:
+            summary = PlayerPoolRepository(database).refresh_season_pool_in_transaction(
+                conn,
+                season_id,
+                [
+                    (p.canonical_player_id, p.display_name, p.given_name, p.family_name, p.team.team_id, p.team.name)
+                    for p in players
+                ],
+                source_provider=live_source_provider(afl_season_id),
+                actor=actor,
+                reason=reason,
+            )
+            detect_candidates_in_transaction(conn, season_id, actor=actor)
     except ValueError as exc:
         raise SeasonSetupError(str(exc)) from exc
-    # Issue #242: once this refresh has committed, check whether any
-    # currently-provisional player in this season now plausibly matches a
-    # canonical afl-api player it just imported -- a recommendation only,
-    # never automatic reconciliation (see `app.provisional_players`'s
-    # module docstring). Deliberately a separate call/transaction from the
-    # refresh above, not folded into `PlayerPoolRepository.
-    # refresh_season_pool` itself -- see `tests/test_architecture.py`'s
-    # PROVISIONAL_PLAYERS comment for why. Best-effort: a failure here
-    # would not un-refresh the pool, so it is allowed to propagate rather
-    # than being swallowed -- the refresh itself already succeeded and is
-    # safe to retry.
-    detect_candidates(database, season_id, actor=actor)
     return {**summary, "afl_season_id": afl_season_id}
 
 

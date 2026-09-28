@@ -94,13 +94,16 @@ def test_dismissing_a_nomination_requires_a_reason_and_is_terminal():
     nominations = PlayerNominationRepository(db)
     nomination = nominations.submit(season.season_id, entries[0].season_entry_id, "Jordan Newrecruit", actor=COACH)
     with pytest.raises(ValueError):
-        nominations.dismiss(nomination.nomination_id, actor=SCORER, reason="")
+        nominations.dismiss(season.season_id, nomination.nomination_id, actor=SCORER, reason="")
     dismissed = nominations.dismiss(
-        nomination.nomination_id, actor=SCORER, reason="Already in afl-api under a different spelling"
+        season.season_id,
+        nomination.nomination_id,
+        actor=SCORER,
+        reason="Already in afl-api under a different spelling",
     )
     assert dismissed.status == "dismissed"
     with pytest.raises(NominationStateError):
-        nominations.dismiss(nomination.nomination_id, actor=SCORER, reason="again")
+        nominations.dismiss(season.season_id, nomination.nomination_id, actor=SCORER, reason="again")
 
 
 # -- Provisional creation -------------------------------------------------------
@@ -246,7 +249,7 @@ def test_rejected_candidate_restores_eligibility_and_is_never_resuggested():
 
     provisional = ProvisionalPlayerRepository(db)
     provisional.reject_candidate(
-        player.season_player_id, 9003, actor=SCORER, reason="Different person, confirmed by club"
+        season.season_id, player.season_player_id, 9003, actor=SCORER, reason="Different person, confirmed by club"
     )
 
     assert pool.get_by_id(pool.get(season.season_id, 9003).season_player_id).eligible is True
@@ -265,7 +268,144 @@ def test_rejecting_an_unknown_candidate_pair_fails():
     db, season, _entries = setup_domain()
     player = _create(db, season.season_id)
     with pytest.raises(KeyError):
-        ProvisionalPlayerRepository(db).reject_candidate(player.season_player_id, 999999, actor=SCORER, reason="no")
+        ProvisionalPlayerRepository(db).reject_candidate(
+            season.season_id, player.season_player_id, 999999, actor=SCORER, reason="no"
+        )
+
+
+def test_rejecting_one_candidate_does_not_release_a_canonical_row_still_pending_for_another_provisional_player():
+    """Codex review on PR #258 (P1): two provisional players can plausibly
+    share a name and both match the same canonical row. Rejecting the pair
+    for one must not make the canonical row draftable while it is still an
+    unresolved suggestion for the other."""
+    db, season, _entries = setup_domain()
+    player_a = _create(db, season.season_id, given="Jordan", family="Newrecruit")
+    player_b = _create(db, season.season_id, given="Jordan2", family="Newrecruit2")
+    with transaction(db) as conn:
+        conn.execute(
+            "UPDATE season_player_pool SET given_name='Jordan', family_name='Newrecruit' WHERE season_player_id=?",
+            (player_b.season_player_id,),
+        )
+    pool = PlayerPoolRepository(db)
+    canonical = pool.refresh_player(
+        season.season_id, 9005, "Jordan Newrecruit", given_name="Jordan", family_name="Newrecruit"
+    )
+    detect_candidates(db, season.season_id, actor=ActorContext.system())
+    assert pool.get_by_id(canonical.season_player_id).eligible is False
+
+    provisional = ProvisionalPlayerRepository(db)
+    provisional.reject_candidate(
+        season.season_id, player_a.season_player_id, 9005, actor=SCORER, reason="Not the same person as A"
+    )
+
+    # Still quarantined -- player_b's candidate suggestion for the same
+    # canonical row is still pending.
+    assert pool.get_by_id(canonical.season_player_id).eligible is False
+
+    provisional.reject_candidate(
+        season.season_id, player_b.season_player_id, 9005, actor=SCORER, reason="Not the same person as B either"
+    )
+    # Now that neither provisional player has a pending claim on it, it is
+    # released.
+    assert pool.get_by_id(canonical.season_player_id).eligible is True
+
+
+def test_reconciliation_does_not_release_a_losing_candidate_still_pending_for_another_provisional_player():
+    """As above, but for `reconcile`'s own losing-candidate cleanup loop."""
+    db, season, _entries = setup_domain()
+    player_a = _create(db, season.season_id, given="Jordan", family="Newrecruit")
+    player_b = _create(db, season.season_id, given="Jordan2", family="Newrecruit2")
+    with transaction(db) as conn:
+        conn.execute(
+            "UPDATE season_player_pool SET given_name='Jordan', family_name='Newrecruit' WHERE season_player_id=?",
+            (player_b.season_player_id,),
+        )
+    pool = PlayerPoolRepository(db)
+    winner = pool.refresh_player(
+        season.season_id, 9006, "Jordan Newrecruit One", given_name="Jordan", family_name="Newrecruit"
+    )
+    shared = pool.refresh_player(
+        season.season_id, 9007, "Jordan Newrecruit Two", given_name="Jordan", family_name="Newrecruit"
+    )
+    detect_candidates(db, season.season_id, actor=ActorContext.system())
+
+    provisional = ProvisionalPlayerRepository(db)
+    provisional.reconcile(
+        season.season_id, player_a.season_player_id, winner.season_player_id, actor=SCORER, reason="Confirmed A"
+    )
+
+    # `shared` (candidate 9007) is still a live pending suggestion for
+    # player_b -- reconciling A must not release it.
+    assert pool.get_by_id(shared.season_player_id).eligible is False
+
+
+def test_rejecting_a_candidate_is_refused_once_season_is_completed():
+    db, season, _entries = setup_domain()
+    player = _create(db, season.season_id, given="Jordan", family="Newrecruit")
+    pool = PlayerPoolRepository(db)
+    pool.refresh_player(season.season_id, 9008, "Jordan Newrecruit", given_name="Jordan", family_name="Newrecruit")
+    detect_candidates(db, season.season_id, actor=ActorContext.system())
+    with transaction(db) as conn:
+        conn.execute("UPDATE bbbffl_season SET lifecycle_state='completed' WHERE season_id=?", (season.season_id,))
+    with pytest.raises(SeasonCompletedError):
+        ProvisionalPlayerRepository(db).reject_candidate(
+            season.season_id, player.season_player_id, 9008, actor=SCORER, reason="too late"
+        )
+
+
+def test_deferring_a_candidate_is_refused_once_season_is_completed():
+    db, season, _entries = setup_domain()
+    player = _create(db, season.season_id, given="Jordan", family="Newrecruit")
+    pool = PlayerPoolRepository(db)
+    pool.refresh_player(season.season_id, 9009, "Jordan Newrecruit", given_name="Jordan", family_name="Newrecruit")
+    detect_candidates(db, season.season_id, actor=ActorContext.system())
+    with transaction(db) as conn:
+        conn.execute("UPDATE bbbffl_season SET lifecycle_state='completed' WHERE season_id=?", (season.season_id,))
+    with pytest.raises(SeasonCompletedError):
+        ProvisionalPlayerRepository(db).defer_candidate(season.season_id, player.season_player_id, 9009, actor=SCORER)
+
+
+def test_dismissing_a_nomination_is_refused_once_season_is_completed():
+    db, season, entries = setup_domain()
+    nominations = PlayerNominationRepository(db)
+    nomination = nominations.submit(season.season_id, entries[0].season_entry_id, "Jordan Newrecruit", actor=COACH)
+    with transaction(db) as conn:
+        conn.execute("UPDATE bbbffl_season SET lifecycle_state='completed' WHERE season_id=?", (season.season_id,))
+    with pytest.raises(SeasonCompletedError):
+        nominations.dismiss(season.season_id, nomination.nomination_id, actor=SCORER, reason="too late")
+
+
+def test_reconcile_and_dismiss_reject_a_mismatched_season_id():
+    """Codex review on PR #258 (P1): every mutation must bind to the caller-
+    supplied `season_id`, not trust the resource id alone -- otherwise a
+    Scorer authorized for season A could act on season B's resources by
+    passing A's season_id in the URL alongside B's resource ids."""
+    db, season_a, _entries_a = setup_domain()
+    identities = IdentityRepository(db)
+    season_b = SeasonRepository(db).create_season(2090, "2090 cross-season isolation check")
+    coach_b = identities.create_coach("Coach B")
+    entry_b = identities.create_entry(season_b.season_id, "licence-b", coach_b.coach_id, "Team B")
+    player_b = _create(db, season_b.season_id, given="Jordan", family="Newrecruit")
+    pool = PlayerPoolRepository(db)
+    canonical_b = pool.refresh_player(
+        season_b.season_id, 9010, "Jordan Newrecruit", given_name="Jordan", family_name="Newrecruit"
+    )
+    detect_candidates(db, season_b.season_id, actor=ActorContext.system())
+    nomination_b = PlayerNominationRepository(db).submit(
+        season_b.season_id, entry_b.season_entry_id, "Someone", actor=COACH
+    )
+
+    provisional = ProvisionalPlayerRepository(db)
+    with pytest.raises(KeyError):
+        provisional.reconcile(
+            season_a.season_id, player_b.season_player_id, canonical_b.season_player_id, actor=SCORER, reason="x"
+        )
+    with pytest.raises(KeyError):
+        provisional.reject_candidate(season_a.season_id, player_b.season_player_id, 9010, actor=SCORER, reason="x")
+    with pytest.raises(KeyError):
+        provisional.defer_candidate(season_a.season_id, player_b.season_player_id, 9010, actor=SCORER)
+    with pytest.raises(KeyError):
+        PlayerNominationRepository(db).dismiss(season_a.season_id, nomination_b.nomination_id, actor=SCORER, reason="x")
 
 
 def test_deferring_a_candidate_records_an_audit_event_without_changing_state():
@@ -276,7 +416,9 @@ def test_deferring_a_candidate_records_an_audit_event_without_changing_state():
     detect_candidates(db, season.season_id, actor=ActorContext.system())
 
     provisional = ProvisionalPlayerRepository(db)
-    provisional.defer_candidate(player.season_player_id, 9004, actor=SCORER, reason="Need more evidence")
+    provisional.defer_candidate(
+        season.season_id, player.season_player_id, 9004, actor=SCORER, reason="Need more evidence"
+    )
 
     outstanding = provisional.list_outstanding(season.season_id)
     [row] = [o for o in outstanding if o.player.season_player_id == player.season_player_id]
@@ -310,7 +452,11 @@ def test_reconciliation_attaches_canonical_identity_and_preserves_history():
 
     provisional = ProvisionalPlayerRepository(db)
     reconciled = provisional.reconcile(
-        player.season_player_id, canonical.season_player_id, actor=SCORER, reason="Confirmed same player"
+        season.season_id,
+        player.season_player_id,
+        canonical.season_player_id,
+        actor=SCORER,
+        reason="Confirmed same player",
     )
 
     assert reconciled.season_player_id == player.season_player_id  # identity preserved
@@ -351,7 +497,7 @@ def test_reconciliation_restores_losing_candidates_when_ambiguous_set_is_resolve
     detect_candidates(db, season.season_id, actor=ActorContext.system())
 
     ProvisionalPlayerRepository(db).reconcile(
-        player.season_player_id, winner.season_player_id, actor=SCORER, reason="Confirmed via club"
+        season.season_id, player.season_player_id, winner.season_player_id, actor=SCORER, reason="Confirmed via club"
     )
 
     assert pool.get_by_id(loser.season_player_id).eligible is True
@@ -367,10 +513,14 @@ def test_repeated_reconciliation_fails_safely():
     pool = PlayerPoolRepository(db)
     canonical = pool.refresh_player(season.season_id, 9401, "Someone Else")
     provisional = ProvisionalPlayerRepository(db)
-    provisional.reconcile(player.season_player_id, canonical.season_player_id, actor=SCORER, reason="confirmed")
+    provisional.reconcile(
+        season.season_id, player.season_player_id, canonical.season_player_id, actor=SCORER, reason="confirmed"
+    )
     other = pool.refresh_player(season.season_id, 9402, "Another Player")
     with pytest.raises(NotProvisionalError):
-        provisional.reconcile(player.season_player_id, other.season_player_id, actor=SCORER, reason="again")
+        provisional.reconcile(
+            season.season_id, player.season_player_id, other.season_player_id, actor=SCORER, reason="again"
+        )
 
 
 def test_reconciliation_refuses_a_target_that_is_itself_provisional():
@@ -379,7 +529,11 @@ def test_reconciliation_refuses_a_target_that_is_itself_provisional():
     other_provisional = _create(db, season.season_id, given="B", family="Two")
     with pytest.raises(InvalidReconciliationTargetError):
         ProvisionalPlayerRepository(db).reconcile(
-            player.season_player_id, other_provisional.season_player_id, actor=SCORER, reason="bad target"
+            season.season_id,
+            player.season_player_id,
+            other_provisional.season_player_id,
+            actor=SCORER,
+            reason="bad target",
         )
 
 
@@ -390,7 +544,7 @@ def test_reconciliation_refuses_a_target_from_a_different_season():
     foreign = PlayerPoolRepository(db).refresh_player(other_season.season_id, 9500, "Foreign Player")
     with pytest.raises(InvalidReconciliationTargetError):
         ProvisionalPlayerRepository(db).reconcile(
-            player.season_player_id, foreign.season_player_id, actor=SCORER, reason="wrong season"
+            season.season_id, player.season_player_id, foreign.season_player_id, actor=SCORER, reason="wrong season"
         )
 
 
@@ -401,7 +555,11 @@ def test_reconciliation_refuses_a_source_that_is_not_provisional():
     other = pool.refresh_player(season.season_id, 9601, "Other Player")
     with pytest.raises(NotProvisionalError):
         ProvisionalPlayerRepository(db).reconcile(
-            already_canonical.season_player_id, other.season_player_id, actor=SCORER, reason="not provisional"
+            season.season_id,
+            already_canonical.season_player_id,
+            other.season_player_id,
+            actor=SCORER,
+            reason="not provisional",
         )
 
 
@@ -413,7 +571,7 @@ def test_reconciliation_refuses_a_target_with_existing_ownership_history():
     OwnershipRepository(db).acquire(owned.season_player_id, entries[0].season_entry_id, effective_at="2027-01-01")
     with pytest.raises(ReconciliationConflictError):
         ProvisionalPlayerRepository(db).reconcile(
-            player.season_player_id, owned.season_player_id, actor=SCORER, reason="already owned"
+            season.season_id, player.season_player_id, owned.season_player_id, actor=SCORER, reason="already owned"
         )
 
 
@@ -423,7 +581,7 @@ def test_reconciliation_requires_a_reason():
     canonical = PlayerPoolRepository(db).refresh_player(season.season_id, 9800, "Canonical Player")
     with pytest.raises(ValueError):
         ProvisionalPlayerRepository(db).reconcile(
-            player.season_player_id, canonical.season_player_id, actor=SCORER, reason=""
+            season.season_id, player.season_player_id, canonical.season_player_id, actor=SCORER, reason=""
         )
 
 
@@ -435,5 +593,5 @@ def test_reconciliation_refused_once_season_is_completed():
         conn.execute("UPDATE bbbffl_season SET lifecycle_state='completed' WHERE season_id=?", (season.season_id,))
     with pytest.raises(SeasonCompletedError):
         ProvisionalPlayerRepository(db).reconcile(
-            player.season_player_id, canonical.season_player_id, actor=SCORER, reason="too late"
+            season.season_id, player.season_player_id, canonical.season_player_id, actor=SCORER, reason="too late"
         )

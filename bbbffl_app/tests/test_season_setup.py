@@ -156,6 +156,41 @@ def test_player_pool_refresh_persists_and_updates_structured_names():
     assert pool.get(season.season_id, 9001).given_name == "Nicholas"
 
 
+def test_player_pool_refresh_atomically_quarantines_a_provisional_players_candidate():
+    """Issue #242 (Codex review on PR #258, P1): `refresh_player_pool`
+    quarantines a freshly-imported canonical duplicate of a provisional
+    player in the *same* transaction as the refresh that imported it --
+    never a separate, later call -- so the row is never observably
+    eligible/draftable even momentarily. A single call to
+    `refresh_player_pool` is enough to prove this: if detection had run
+    separately (and had not yet been called), the new row would still be
+    eligible right after this call returns."""
+    from app.provisional_players import ProvisionalPlayerRepository
+
+    database = migrated_connection()
+    season, _entries = fresh_season(database)
+    ProvisionalPlayerRepository(database).create(
+        season.season_id,
+        display_name="Jordan Newrecruit",
+        given_name="Jordan",
+        family_name="Newrecruit",
+        note="verified via club website squad list",
+        actor=SCORER,
+    )
+    afl = SetupAfl(
+        players=[
+            SeasonPlayerRecord(
+                9099, "Jordan Newrecruit", Team(1, "Adelaide"), given_name="Jordan", family_name="Newrecruit"
+            )
+        ]
+    )
+    refresh_player_pool(database, afl, season.season_id, 77, actor=SCORER, reason=REASON)
+
+    pool = PlayerPoolRepository(database)
+    imported = pool.get(season.season_id, 9099)
+    assert imported.eligible is False
+
+
 def test_player_pool_refresh_never_deletes_or_changes_eligibility_or_ownership():
     database = migrated_connection()
     season, entries = fresh_season(database)

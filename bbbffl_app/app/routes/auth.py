@@ -203,6 +203,14 @@ def account_page(request: Request):
     provisional_notices = ProvisionalPlayerRepository(request.app.state.database).coach_dashboard_notices(
         coach.coach_id
     )
+    # Issue #242 (Codex review on PR #258, P2): the "report a missing
+    # player" form needs a (season_id, season_entry_id) pair to submit
+    # against, and a Coach may be in exactly this situation during the
+    # mid-season draft too, once the preseason draft is finalized and
+    # `preseason_selection` has gone back to `None` -- so this falls back
+    # to `midseason_selection`, which carries the same shape
+    # (`season_id`/`season_entry_id`/`team_name`).
+    nomination_context = preseason_selection or midseason_selection
     response = templates.TemplateResponse(
         request,
         "account.html",
@@ -218,6 +226,7 @@ def account_page(request: Request):
             "midseason_selection": midseason_selection,
             "preseason_selection": preseason_selection,
             "provisional_notices": provisional_notices,
+            "nomination_context": nomination_context,
         },
     )
     _attach_csrf_cookie(request, response, token)

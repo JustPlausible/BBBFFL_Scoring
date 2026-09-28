@@ -246,7 +246,7 @@ def dismiss_nomination(
     require_role_covers_season(request, principal, season_id)
     _require_session_csrf(request, principal)
     PlayerNominationRepository(request.app.state.database).dismiss(
-        nomination_id, actor=_actor(principal), reason=payload.reason
+        season_id, nomination_id, actor=_actor(principal), reason=payload.reason
     )
     return _management_payload(request, season_id)
 
@@ -263,7 +263,7 @@ def reconcile(
     require_role_covers_season(request, principal, season_id)
     _require_session_csrf(request, principal)
     ProvisionalPlayerRepository(request.app.state.database).reconcile(
-        season_player_id, payload.target_season_player_id, actor=_actor(principal), reason=payload.reason
+        season_id, season_player_id, payload.target_season_player_id, actor=_actor(principal), reason=payload.reason
     )
     return _management_payload(request, season_id)
 
@@ -282,7 +282,7 @@ def reject_candidate(
     if not payload.reason or not payload.reason.strip():
         raise HTTPException(status_code=400, detail="rejecting a candidate match requires a reason")
     ProvisionalPlayerRepository(request.app.state.database).reject_candidate(
-        season_player_id, payload.canonical_player_id, actor=_actor(principal), reason=payload.reason
+        season_id, season_player_id, payload.canonical_player_id, actor=_actor(principal), reason=payload.reason
     )
     return _management_payload(request, season_id)
 
@@ -299,7 +299,7 @@ def defer_candidate(
     require_role_covers_season(request, principal, season_id)
     _require_session_csrf(request, principal)
     ProvisionalPlayerRepository(request.app.state.database).defer_candidate(
-        season_player_id, payload.canonical_player_id, actor=_actor(principal), reason=payload.reason
+        season_id, season_player_id, payload.canonical_player_id, actor=_actor(principal), reason=payload.reason
     )
     return _management_payload(request, season_id)
 

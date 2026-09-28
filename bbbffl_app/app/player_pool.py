@@ -318,6 +318,28 @@ class PlayerPoolRepository:
         string records which AFL season the pool was read from, so this is
         what stops one BBBFFL season's pool being silently mixed with
         another AFL season's players."""
+        with transaction(self.database) as conn:
+            return self.refresh_season_pool_in_transaction(
+                conn,
+                season_id,
+                players,
+                source_provider=source_provider,
+                source_fetched_at=source_fetched_at,
+                actor=actor,
+                reason=reason,
+            )
+
+    def refresh_season_pool_in_transaction(
+        self, conn, season_id, players, *, source_provider, source_fetched_at=None, actor, reason=None
+    ):
+        """As `refresh_season_pool`, but on the caller's own transaction-
+        scoped `conn` -- for a compound command that must refresh the pool
+        and perform a following step atomically, in one transaction (issue
+        #242: `app.season_setup.refresh_player_pool` also quarantines any
+        newly-arrived canonical match for a provisional player in the same
+        transaction, via `app.provisional_players.detect_candidates_in_
+        transaction`, so a concurrent draft pick can never observe a
+        freshly-imported duplicate identity as eligible even momentarily)."""
         rows = [
             (int(pid), name, given_name, family_name, team_id, team_name)
             for pid, name, given_name, family_name, team_id, team_name in players
@@ -327,115 +349,114 @@ class PlayerPoolRepository:
         if len({row[0] for row in rows}) != len(rows):
             raise ValueError("a season pool refresh must not repeat a canonical player")
         fetched = source_fetched_at or _now()
-        with transaction(self.database) as conn:
-            if self.database.engine.dialect.name == "sqlite":
-                conn.execute("UPDATE bbbffl_season SET updated_at=updated_at WHERE season_id=?", (season_id,))
-            season = conn.execute(
-                "SELECT season_id, lifecycle_state FROM bbbffl_season WHERE season_id=?"
-                + _for_update_suffix(self.database),
-                (season_id,),
-            ).fetchone()
-            if season is None:
-                raise KeyError(season_id)
-            if season["lifecycle_state"] == "completed":
-                raise ValueError("a completed season's player pool is historical and cannot be refreshed")
-            # Issue #242: a provisional player has no canonical_player_id
-            # (NULL) and is never part of the afl-api-sourced pool this
-            # method refreshes -- excluded here so several provisional rows
-            # never collide on the `None` dict key, and so their
-            # `source_provider` ('bbbffl-provisional') never trips the
-            # foreign-provider mixing check below.
-            existing = {
-                row["canonical_player_id"]: row
-                for row in conn.execute("SELECT * FROM season_player_pool WHERE season_id=?", (season_id,)).fetchall()
-                if row["canonical_player_id"] is not None
-            }
-            foreign = sorted({row["source_provider"] for row in existing.values()} - {source_provider})
-            if foreign:
-                raise ValueError(
-                    f"this season's player pool was populated from {', '.join(foreign)}, not {source_provider}; "
-                    "refusing to mix player pools from different sources"
-                )
-            inserted = updated = unchanged = 0
-            for canonical_player_id, display_name, given_name, family_name, afl_team_id, afl_team_name in rows:
-                row = existing.get(canonical_player_id)
-                if row is None:
-                    conn.execute(
-                        "INSERT INTO season_player_pool "
-                        "(season_player_id, season_id, canonical_player_id, display_name, afl_team_id, "
-                        "afl_team_name, eligible, source_provider, source_fetched_at, source_updated_at, "
-                        "created_at, updated_at, given_name, family_name) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (
-                            _id(),
-                            season_id,
-                            canonical_player_id,
-                            display_name,
-                            afl_team_id,
-                            afl_team_name,
-                            True,
-                            source_provider,
-                            fetched,
-                            None,
-                            fetched,
-                            fetched,
-                            given_name,
-                            family_name,
-                        ),
-                    )
-                    inserted += 1
-                    continue
-                if (
-                    row["display_name"],
-                    row["given_name"],
-                    row["family_name"],
-                    row["afl_team_id"],
-                    row["afl_team_name"],
-                ) == (display_name, given_name, family_name, afl_team_id, afl_team_name):
-                    conn.execute(
-                        "UPDATE season_player_pool SET source_fetched_at=? WHERE season_player_id=?",
-                        (fetched, row["season_player_id"]),
-                    )
-                    unchanged += 1
-                    continue
+        if self.database.engine.dialect.name == "sqlite":
+            conn.execute("UPDATE bbbffl_season SET updated_at=updated_at WHERE season_id=?", (season_id,))
+        season = conn.execute(
+            "SELECT season_id, lifecycle_state FROM bbbffl_season WHERE season_id=?"
+            + _for_update_suffix(self.database),
+            (season_id,),
+        ).fetchone()
+        if season is None:
+            raise KeyError(season_id)
+        if season["lifecycle_state"] == "completed":
+            raise ValueError("a completed season's player pool is historical and cannot be refreshed")
+        # Issue #242: a provisional player has no canonical_player_id
+        # (NULL) and is never part of the afl-api-sourced pool this
+        # method refreshes -- excluded here so several provisional rows
+        # never collide on the `None` dict key, and so their
+        # `source_provider` ('bbbffl-provisional') never trips the
+        # foreign-provider mixing check below.
+        existing = {
+            row["canonical_player_id"]: row
+            for row in conn.execute("SELECT * FROM season_player_pool WHERE season_id=?", (season_id,)).fetchall()
+            if row["canonical_player_id"] is not None
+        }
+        foreign = sorted({row["source_provider"] for row in existing.values()} - {source_provider})
+        if foreign:
+            raise ValueError(
+                f"this season's player pool was populated from {', '.join(foreign)}, not {source_provider}; "
+                "refusing to mix player pools from different sources"
+            )
+        inserted = updated = unchanged = 0
+        for canonical_player_id, display_name, given_name, family_name, afl_team_id, afl_team_name in rows:
+            row = existing.get(canonical_player_id)
+            if row is None:
                 conn.execute(
-                    "UPDATE season_player_pool SET display_name=?, given_name=?, family_name=?, afl_team_id=?, "
-                    "afl_team_name=?, source_fetched_at=?, updated_at=? WHERE season_player_id=?",
+                    "INSERT INTO season_player_pool "
+                    "(season_player_id, season_id, canonical_player_id, display_name, afl_team_id, "
+                    "afl_team_name, eligible, source_provider, source_fetched_at, source_updated_at, "
+                    "created_at, updated_at, given_name, family_name) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
+                        _id(),
+                        season_id,
+                        canonical_player_id,
                         display_name,
-                        given_name,
-                        family_name,
                         afl_team_id,
                         afl_team_name,
+                        True,
+                        source_provider,
+                        fetched,
+                        None,
                         fetched,
                         fetched,
-                        row["season_player_id"],
+                        given_name,
+                        family_name,
                     ),
                 )
-                updated += 1
-            source_ids = {row[0] for row in rows}
-            missing = sorted(pid for pid in existing if pid not in source_ids)
-            summary = {
-                "source_provider": source_provider,
-                "source_player_count": len(rows),
-                "inserted": inserted,
-                "updated": updated,
-                "unchanged": unchanged,
-                "missing_from_source": missing,
-                "pool_size": len(existing) + inserted,
-                "source_fetched_at": fetched,
-            }
-            append_event(
-                conn,
-                actor=actor,
-                action="player_pool.season.refreshed",
-                entity_type="season.player_pool",
-                entity_id=season_id,
-                reason=reason,
-                before_state={"pool_size": len(existing)},
-                after_state={key: value for key, value in summary.items() if key != "missing_from_source"},
-                payload={"missing_from_source_count": len(missing)},
+                inserted += 1
+                continue
+            if (
+                row["display_name"],
+                row["given_name"],
+                row["family_name"],
+                row["afl_team_id"],
+                row["afl_team_name"],
+            ) == (display_name, given_name, family_name, afl_team_id, afl_team_name):
+                conn.execute(
+                    "UPDATE season_player_pool SET source_fetched_at=? WHERE season_player_id=?",
+                    (fetched, row["season_player_id"]),
+                )
+                unchanged += 1
+                continue
+            conn.execute(
+                "UPDATE season_player_pool SET display_name=?, given_name=?, family_name=?, afl_team_id=?, "
+                "afl_team_name=?, source_fetched_at=?, updated_at=? WHERE season_player_id=?",
+                (
+                    display_name,
+                    given_name,
+                    family_name,
+                    afl_team_id,
+                    afl_team_name,
+                    fetched,
+                    fetched,
+                    row["season_player_id"],
+                ),
             )
+            updated += 1
+        source_ids = {row[0] for row in rows}
+        missing = sorted(pid for pid in existing if pid not in source_ids)
+        summary = {
+            "source_provider": source_provider,
+            "source_player_count": len(rows),
+            "inserted": inserted,
+            "updated": updated,
+            "unchanged": unchanged,
+            "missing_from_source": missing,
+            "pool_size": len(existing) + inserted,
+            "source_fetched_at": fetched,
+        }
+        append_event(
+            conn,
+            actor=actor,
+            action="player_pool.season.refreshed",
+            entity_type="season.player_pool",
+            entity_id=season_id,
+            reason=reason,
+            before_state={"pool_size": len(existing)},
+            after_state={key: value for key, value in summary.items() if key != "missing_from_source"},
+            payload={"missing_from_source_count": len(missing)},
+        )
         return summary
 
     def summary(self, season_id):

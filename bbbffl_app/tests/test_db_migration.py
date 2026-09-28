@@ -1675,6 +1675,7 @@ def test_provisional_player_lifecycle_works_after_the_0038_upgrade(tmp_path):
 
     canonical = PlayerPoolRepository(connection).refresh_player(season.season_id, 492, "Jordan Newrecruit")
     reconciled = ProvisionalPlayerRepository(connection).reconcile(
+        season.season_id,
         provisional.season_player_id,
         canonical.season_player_id,
         actor=ActorContext.anonymous_operator("scorer"),

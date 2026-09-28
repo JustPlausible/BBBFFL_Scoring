@@ -316,6 +316,47 @@ def test_prior_eligibility_is_preserved_across_separate_detection_runs():
     assert pool.get_by_id(canonical.season_player_id).eligible is True
 
 
+def test_detect_candidates_derives_eligibility_from_the_live_row_once_no_pending_candidate_remains():
+    """Codex review on PR #258 (P2, fourth round): once every earlier
+    candidate naming a canonical id has been rejected (so none is pending
+    any more), a newly detected candidate for that same id must derive
+    `restore_eligible_on_release` from the pool row's *current* eligibility
+    -- not a rejected candidate's recorded value, which can be stale by the
+    time of the new detection run."""
+    db, season, _entries = setup_domain()
+    player_a = _create(db, season.season_id, given="Jordan", family="Newrecruit")
+    pool = PlayerPoolRepository(db)
+    canonical = pool.refresh_player(
+        season.season_id, 9601, "Jordan Newrecruit", given_name="Jordan", family_name="Newrecruit"
+    )
+    detect_candidates(db, season.season_id, actor=ActorContext.system())  # candidate A: records True (row eligible)
+
+    provisional = ProvisionalPlayerRepository(db)
+    provisional.reject_candidate(season.season_id, player_a.season_player_id, 9601, actor=SCORER, reason="Not A")
+    # Released -- no pending candidate remains for 9601.
+    assert pool.get_by_id(canonical.season_player_id).eligible is True
+
+    # Made ineligible for an unrelated reason (a fresh afl-api refresh),
+    # independent of the now-rejected candidate suggestion.
+    pool.refresh_player(
+        season.season_id,
+        9601,
+        "Jordan Newrecruit",
+        given_name="Jordan",
+        family_name="Newrecruit",
+        eligible=False,
+    )
+
+    player_b = _create(db, season.season_id, given="Jordan", family="Newrecruit")
+    detect_candidates(
+        db, season.season_id, actor=ActorContext.system()
+    )  # candidate B: must derive False, not A's stale True
+
+    provisional.reject_candidate(season.season_id, player_b.season_player_id, 9601, actor=SCORER, reason="Not B")
+    # Must remain ineligible -- A's stale recorded True must not be reapplied.
+    assert pool.get_by_id(canonical.season_player_id).eligible is False
+
+
 def test_detect_candidates_is_refused_once_season_is_completed():
     db, season, _entries = setup_domain()
     _create(db, season.season_id, given="Jordan", family="Newrecruit")
@@ -401,6 +442,49 @@ def test_reconciliation_does_not_release_a_losing_candidate_still_pending_for_an
     # `shared` (candidate 9007) is still a live pending suggestion for
     # player_b -- reconciling A must not release it.
     assert pool.get_by_id(shared.season_player_id).eligible is False
+
+
+def test_reconciliation_does_not_reapply_a_rejected_candidates_stale_eligibility():
+    """Codex review on PR #258 (P2, fourth round): `reconcile`'s
+    losing-candidate cleanup loop must only release a still-*pending*
+    losing candidate. A candidate already rejected (and released at
+    rejection time) may have since had its canonical row's eligibility
+    changed for an unrelated reason; reapplying its recorded
+    `restore_eligible_on_release` at reconciliation time would silently
+    undo that unrelated change."""
+    db, season, _entries = setup_domain()
+    player = _create(db, season.season_id, given="Jordan", family="Newrecruit")
+    pool = PlayerPoolRepository(db)
+    winner = pool.refresh_player(
+        season.season_id, 9501, "Jordan Newrecruit One", given_name="Jordan", family_name="Newrecruit"
+    )
+    loser = pool.refresh_player(
+        season.season_id, 9502, "Jordan Newrecruit Two", given_name="Jordan", family_name="Newrecruit"
+    )
+    detect_candidates(db, season.season_id, actor=ActorContext.system())
+
+    provisional = ProvisionalPlayerRepository(db)
+    provisional.reject_candidate(season.season_id, player.season_player_id, 9502, actor=SCORER, reason="Not this one")
+    # Released back to eligible -- rejection recorded restore_eligible_on_release=True.
+    assert pool.get_by_id(loser.season_player_id).eligible is True
+
+    # Made ineligible for an unrelated reason (a fresh afl-api refresh),
+    # independent of the now-rejected candidate suggestion.
+    pool.refresh_player(
+        season.season_id,
+        9502,
+        "Jordan Newrecruit Two",
+        given_name="Jordan",
+        family_name="Newrecruit",
+        eligible=False,
+    )
+
+    provisional.reconcile(
+        season.season_id, player.season_player_id, winner.season_player_id, actor=SCORER, reason="Confirmed"
+    )
+
+    # The rejected candidate's stale recorded value must not be reapplied.
+    assert pool.get_by_id(loser.season_player_id).eligible is False
 
 
 def test_rejecting_a_candidate_is_refused_once_season_is_completed():

@@ -569,8 +569,16 @@ class ProvisionalPlayerRepository:
             # pending candidate naming that same canonical id (Codex review
             # on PR #258, P1) -- releasing it here would prematurely make
             # it draftable out from under that still-unresolved suggestion.
+            # Codex review on PR #258 (P2, fourth round): only a still-pending
+            # losing candidate should have its quarantine released here -- a
+            # candidate already rejected by `reject_candidate` was released
+            # (or refused release, per `_other_pending_candidates_exist`) at
+            # rejection time, and its `restore_eligible_on_release` may since
+            # be stale relative to a later, unrelated eligibility change on
+            # that canonical row.
             other_candidates = conn.execute(
-                "SELECT * FROM provisional_match_candidate WHERE season_player_id=? AND canonical_player_id<>?",
+                "SELECT * FROM provisional_match_candidate WHERE season_player_id=? AND canonical_player_id<>? "
+                "AND status='pending'",
                 (season_player_id, target["canonical_player_id"]),
             ).fetchall()
             for candidate in other_candidates:
@@ -809,10 +817,18 @@ def detect_candidates_in_transaction(conn, database, season_id: str, *, actor: A
             # the pool row's *current* `eligible` is no longer the original
             # value, so only the first-ever candidate for a canonical id
             # may derive it from the live row; every later one must copy
-            # the value that first candidate already recorded.
+            # the value that first candidate already recorded. Codex review
+            # on PR #258 (P2, fourth round): restrict this to a still-*pending*
+            # prior candidate. A rejected candidate's recorded value can be
+            # stale by the time a new candidate is detected for the same
+            # canonical id -- the row may have since been made ineligible for
+            # an unrelated reason (a fresh `refresh_season_pool` call) -- so
+            # once no pending candidate remains, the next one must re-derive
+            # from the pool row's current `eligible` value, not a rejected
+            # candidate's old one.
             prior_candidate = conn.execute(
                 "SELECT restore_eligible_on_release FROM provisional_match_candidate "
-                "WHERE season_id=? AND canonical_player_id=? LIMIT 1",
+                "WHERE season_id=? AND canonical_player_id=? AND status='pending' LIMIT 1",
                 (season_id, canonical_player_id),
             ).fetchone()
             restore_eligible_on_release = (

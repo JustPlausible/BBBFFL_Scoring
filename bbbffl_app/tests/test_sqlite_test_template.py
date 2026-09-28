@@ -26,9 +26,18 @@ from tests.db_helpers import migrated_connection
 
 
 @pytest.fixture
-def template():
+def template(monkeypatch):
+    """The session's template, enabled for this test.
+
+    These tests exercise the template mechanism itself, so they must keep
+    working when the whole session runs with the documented
+    ``BBBFFL_TEST_DB_TEMPLATE=0`` opt-out (the template is then built on
+    demand here, and still removed at session end).
+    """
     active = sqlite_test_template.TEMPLATE
     assert active is not None, "tests/conftest.py must install the migrated SQLite template"
+    monkeypatch.setattr(active, "enabled", True)
+    active.ensure_built()
     return active
 
 
@@ -188,7 +197,10 @@ def test_app_startup_on_an_empty_database_still_runs_migrate_and_serves_the_curr
 
 def test_test_sqlite_connections_skip_fsync_but_keep_foreign_keys_journal_and_rollback():
     connection = migrated_connection()
-    assert connection.execute("PRAGMA synchronous").fetchone()["synchronous"] == 0  # OFF
+    # OFF by default; the documented BBBFFL_TEST_SQLITE_SYNCHRONOUS opt-out
+    # must be honoured exactly as configured.
+    expected = {"OFF": 0, "NORMAL": 1, "FULL": 2, "EXTRA": 3}[sqlite_test_template.synchronous_setting()]
+    assert connection.execute("PRAGMA synchronous").fetchone()["synchronous"] == expected
     assert connection.execute("PRAGMA foreign_keys").fetchone()["foreign_keys"] == 1
     assert connection.execute("PRAGMA journal_mode").fetchone()["journal_mode"] == "delete"
 

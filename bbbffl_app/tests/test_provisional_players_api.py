@@ -102,6 +102,12 @@ def _management_csrf(client, season_id):
     return {"X-CSRF-Token": json.loads(_extract(r"const csrf=(\"[^\"]+\")", page.text))}
 
 
+def _account_csrf(client):
+    account = client.get("/account")
+    assert account.status_code == 200
+    return {"X-CSRF-Token": _extract(r'name="csrf_token" value="([^"]+)"', account.text)}
+
+
 # -- Coach nomination ----------------------------------------------------------
 
 
@@ -109,10 +115,12 @@ def test_coach_can_nominate_a_missing_player_for_their_own_entry(provisional_cli
     client = provisional_client
     season, coaches, entries = _seed(client, 8101)
     _coach_session(client, coaches[0], email="coach-8101@example.com")
+    headers = _account_csrf(client)
 
     response = client.post(
         f"/api/account/player-nominations/{entries[0].season_entry_id}",
         json={"season_id": season.season_id, "player_name": "Jordan Newrecruit", "note": "Saw him on club site"},
+        headers=headers,
     )
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "pending"
@@ -120,6 +128,30 @@ def test_coach_can_nominate_a_missing_player_for_their_own_entry(provisional_cli
     mine = client.get(f"/api/account/player-nominations/{entries[0].season_entry_id}")
     assert mine.status_code == 200
     assert len(mine.json()["nominations"]) == 1
+
+
+def test_coach_session_requires_csrf_to_nominate(provisional_client):
+    """Codex review on PR #258 (P2, eighth round): the account nomination
+    form already supplies `X-CSRF-Token` (see `account.html`), but the
+    route never validated it -- a forged cross-site request could create
+    nomination and audit records under the victim Coach's identity."""
+    client = provisional_client
+    season, coaches, entries = _seed(client, 8115)
+    _coach_session(client, coaches[0], email="coach-8115@example.com")
+
+    without_csrf = client.post(
+        f"/api/account/player-nominations/{entries[0].season_entry_id}",
+        json={"season_id": season.season_id, "player_name": "Jordan Newrecruit", "note": "Saw him on club site"},
+    )
+    assert without_csrf.status_code == 403, without_csrf.text
+
+    headers = _account_csrf(client)
+    with_csrf = client.post(
+        f"/api/account/player-nominations/{entries[0].season_entry_id}",
+        json={"season_id": season.season_id, "player_name": "Jordan Newrecruit", "note": "Saw him on club site"},
+        headers=headers,
+    )
+    assert with_csrf.status_code == 200, with_csrf.text
 
 
 def test_coach_cannot_nominate_for_another_coachs_entry(provisional_client):
@@ -344,6 +376,7 @@ def test_nomination_can_be_used_to_create_a_provisional_player(provisional_clien
     nomination = client.post(
         f"/api/account/player-nominations/{entries[0].season_entry_id}",
         json={"season_id": season.season_id, "player_name": "Jordan Newrecruit"},
+        headers=_account_csrf(client),
     ).json()
     client.cookies.clear()  # back to the ambient operator default for the Scorer/Admin action below
 

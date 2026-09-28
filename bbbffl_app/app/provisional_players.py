@@ -439,7 +439,7 @@ class ProvisionalPlayerRepository:
             # this new row would get on that next refresh, immediately, in
             # this same transaction.
             _detect_candidates_for_provisional(
-                conn, season_id, season_player_id, given_name.strip(), family_name.strip(), actor=actor
+                conn, self.database, season_id, season_player_id, given_name.strip(), family_name.strip(), actor=actor
             )
         return self.pool.get_by_id(season_player_id)
 
@@ -572,6 +572,20 @@ class ProvisionalPlayerRepository:
             if target["canonical_player_id"] is None:
                 raise InvalidReconciliationTargetError(
                     "target must itself be a canonical afl-api player, not another provisional player"
+                )
+            # Codex review on PR #258 (P2, eighth round): a target that was
+            # itself created provisional and already reconciled carries its
+            # own permanent, stable season_player_id and history (ownership
+            # aside -- a nomination, an earlier candidate decision, its own
+            # audit trail). Retiring it here as though it were a disposable
+            # freshly-imported canonical duplicate would destroy that
+            # identity and silently reverse the earlier reconciliation
+            # decision that established it, the same history-preservation
+            # guarantee this method exists to give the *source* row.
+            if target["was_provisional"]:
+                raise InvalidReconciliationTargetError(
+                    "target was itself created as a provisional player and already reconciled -- its own "
+                    "season_player_id carries permanent history and cannot be retired as a duplicate"
                 )
             owned = conn.execute(
                 "SELECT 1 FROM player_ownership_period WHERE season_player_id=?" + _for_update_suffix(self.database),
@@ -884,6 +898,7 @@ def detect_candidates_in_transaction(conn, database, season_id: str, *, actor: A
     for provisional in provisional_rows:
         detected += _detect_candidates_for_provisional(
             conn,
+            database,
             season_id,
             provisional["season_player_id"],
             provisional["given_name"],
@@ -894,7 +909,7 @@ def detect_candidates_in_transaction(conn, database, season_id: str, *, actor: A
 
 
 def _detect_candidates_for_provisional(
-    conn, season_id: str, season_player_id: str, given_name: str, family_name: str, *, actor: ActorContext
+    conn, database, season_id: str, season_player_id: str, given_name: str, family_name: str, *, actor: ActorContext
 ) -> int:
     """Suggest plausible canonical matches for exactly one already-inserted
     provisional player row -- the per-player body `detect_candidates_in_
@@ -906,12 +921,23 @@ def _detect_candidates_for_provisional(
     `refresh_player_pool`, rather than being quarantined the moment the
     provisional identity that duplicates it is created. Caller must already
     hold the season write lock (`guard_writable`). Returns the number of
-    newly recorded candidate rows."""
+    newly recorded candidate rows.
+
+    Locks every matched pool row (Codex review on PR #258, P1, eighth
+    round): on PostgreSQL, an unlocked read here could observe
+    `eligible=TRUE` while a concurrent draft pick's `OwnershipRepository.
+    acquire_in_transaction` locks and acquires the very same row first --
+    this call would then quarantine (and record a pre-quarantine
+    `eligible`) an already-owned row, leaving the new provisional identity
+    eligible while `reconcile` later refuses the target for having
+    ownership history. Locking each matched row here forces the concurrent
+    acquire to wait (or this call to wait for it), so quarantine and
+    acquisition can never interleave."""
     detected = 0
     matches = conn.execute(
         "SELECT canonical_player_id, eligible FROM season_player_pool "
         "WHERE season_id=? AND canonical_player_id IS NOT NULL "
-        "AND lower(given_name)=lower(?) AND lower(family_name)=lower(?)",
+        "AND lower(given_name)=lower(?) AND lower(family_name)=lower(?)" + _for_update_suffix(database),
         (season_id, given_name, family_name),
     ).fetchall()
     for match in matches:

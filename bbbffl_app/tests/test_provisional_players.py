@@ -860,6 +860,34 @@ def test_reconciliation_refuses_a_target_that_is_itself_provisional():
         )
 
 
+def test_reconciliation_refuses_a_target_that_was_itself_a_reconciled_provisional_player():
+    """Codex review on PR #258 (P2, eighth round): a target that was itself
+    created provisional and already reconciled (`was_provisional=True`,
+    `canonical_player_id` now set) carries its own permanent, stable
+    `season_player_id` and history. Accepting it as a *target* here would
+    retire and delete it as though it were a disposable freshly-imported
+    canonical duplicate -- reversing the earlier reconciliation decision
+    that established it -- so it must be refused exactly like a target that
+    is still plainly provisional."""
+    db, season, _entries = setup_domain()
+    player_a = _create(db, season.season_id, given="A", family="One")
+    canonical = PlayerPoolRepository(db).refresh_player(season.season_id, 9906, "Someone Else")
+    reconciled_a = ProvisionalPlayerRepository(db).reconcile(
+        season.season_id, player_a.season_player_id, canonical.season_player_id, actor=SCORER, reason="Confirmed A"
+    )
+    assert reconciled_a.was_provisional is True
+
+    player_b = _create(db, season.season_id, given="B", family="Two")
+    with pytest.raises(InvalidReconciliationTargetError):
+        ProvisionalPlayerRepository(db).reconcile(
+            season.season_id,
+            player_b.season_player_id,
+            reconciled_a.season_player_id,
+            actor=SCORER,
+            reason="bad target -- already-reconciled provisional",
+        )
+
+
 def test_reconciliation_refuses_a_target_from_a_different_season():
     db, season, _entries = setup_domain()
     player = _create(db, season.season_id)

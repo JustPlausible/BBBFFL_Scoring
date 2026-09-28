@@ -161,6 +161,7 @@ def submit_nomination(
     season_entry_id: str, payload: NominateRequest, request: Request, principal: Principal = Depends(nominate)
 ):
     require_entry_context(request, principal, season_entry_id)
+    _require_session_csrf(request, principal)
     nomination = PlayerNominationRepository(request.app.state.database).submit(
         payload.season_id,
         season_entry_id,

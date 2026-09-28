@@ -66,6 +66,7 @@ from app.scorer_dashboard import (
 )
 from app.season_activation import preview_activate_season
 from app.season_centre import build_season_centre
+from app.season_completion import preview_complete_season
 
 # BBBFFL is a fixed ten-team league (see `app.replay_bootstrap.TEAM_COUNT`
 # and `app.draft_board`'s own `len(entries) == 10` convention) -- the
@@ -117,6 +118,7 @@ OPENING_ROUND_URL = "/operations/seasons/{season_id}/opening-round"
 PREFLIGHT_URL = "/admin/round-preflight/{round_id}"
 MIDSEASON_DRAFT_URL = "/admin/midseason-draft/{season_id}"
 SEASON_ACTIVATION_URL = "/scorer/season-activation/{season_id}"
+SEASON_COMPLETION_URL = "/scorer/season-completion/{season_id}"
 
 
 def scorer_dashboard_link(season_id: str, round_id: str | None = None) -> str:
@@ -924,6 +926,24 @@ def build_admin_dashboard(
         else None
     )
 
+    # Issue #240: the same additive-only, top-level-key convention as
+    # `activation_card`/`midseason_card` above -- never folded into
+    # `_attention_queue`'s categorised list. `preview_complete_season` is
+    # read-only and re-derives readiness fresh from the finals/SuperScore
+    # round lifecycle every call; this dashboard never computes its own
+    # second "is this season ready to complete" answer. Shown only while
+    # the season is `active` and every required finals week and SuperScore
+    # round (SS1-SS4) is final -- once `completed`, there is nothing
+    # further for this card to prompt.
+    completion_card = (
+        {
+            "title": "Finals and SuperScore results are final — complete the season",
+            "url": SEASON_COMPLETION_URL.format(season_id=season_id),
+        }
+        if season.lifecycle_state == "active" and preview_complete_season(database, season_id)["ready"]
+        else None
+    )
+
     attention = _attention_queue(
         season=season,
         entries=entries,
@@ -980,6 +1000,7 @@ def build_admin_dashboard(
         "scorer_summary": scorer_summary,
         "midseason_draft": midseason_card,
         "season_activation": activation_card,
+        "season_completion": completion_card,
         "attention": attention,
         "workflow_map": workflow_map,
         "role_overview": role_overview,

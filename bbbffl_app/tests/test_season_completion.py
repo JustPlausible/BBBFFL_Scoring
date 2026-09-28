@@ -407,3 +407,106 @@ def test_completed_2026_and_active_2027_coexist_without_implicit_current_season(
         raise AssertionError("expected SeasonCompletedError")
     except SeasonCompletedError:
         pass
+
+
+# -- Issue #240: production browser-workflow acceptance coverage -------------
+
+
+def test_completion_refuses_when_no_finals_bracket_exists_yet():
+    """`FinalsBracketRepository.create_bracket`'s ladder-seed path only ever
+    succeeds once every regular-season round is final -- so "the ordinary
+    season is incomplete" and "no finals bracket exists yet" are the same
+    observable fact from `complete_season`'s point of view. This is the
+    concrete shape issue #240's acceptance criteria means by "refusal when
+    ordinary-season requirements are incomplete": a season cannot reach
+    Finals (a completion prerequisite) before the ordinary season is done."""
+    built = build_2026_replay_season(year=5200)
+    database, season_id = built["database"], built["season"].season_id
+    SeasonRepository(database).transition_lifecycle(season_id, "active", actor=ACTOR, reason="activate")
+
+    preview = preview_complete_season(database, season_id)
+    assert preview["ready"] is False
+    assert "no finals bracket" in preview["diagnostic"]
+
+    try:
+        complete_season(database, season_id, actor=ACTOR, reason="attempt with no finals bracket")
+        raise AssertionError("expected SeasonNotReadyError")
+    except SeasonNotReadyError:
+        pass
+
+    season = SeasonRepository(database).get_season(season_id)
+    assert season.lifecycle_state == "active"
+    assert SeasonAwardRepository(database).get_active(season_id, PREMIERSHIP) is None
+
+
+def test_completion_atomically_refuses_an_internal_consistency_tie_introduced_after_bracket_freeze():
+    """`FinalsBracketRepository.create_bracket`'s ladder-seed path refuses
+    outright if *any* row anywhere on the ladder is tied
+    (`docs/2027-live-season-readiness.md` remaining item 7), so by the time
+    a finals bracket exists the ladder was provably untied -- including at
+    the bottom. But finals seeding is frozen once, at bracket creation
+    (never re-read); the *live* ladder `app.season_awards` reads for the
+    wooden spoon is not. Correcting entries[8]/entries[9]'s ordinary results
+    *after* the bracket (and the rest of the season) is already built
+    reproduces a genuine internal-consistency finding at completion time:
+    the finals bracket's own frozen seeding stays valid, but the now-tied
+    live ladder can no longer support a deterministic wooden spoon.
+
+    Every match either of them played (against each other or a third
+    opponent) is corrected to a fixed, deterministic score -- `40` for
+    whichever of the pair played it, `45`/`40` for the other side (`40`
+    for both sides of their own head-to-head matches) -- so their final
+    points-for/points-against are exactly equal regardless of the
+    fixture's actual home/away/opponent distribution, while both stay
+    clearly below every other entry's genuine competition points. This is
+    deliberately a *result correction*, not a fixture/seed manipulation,
+    matching how a live season could genuinely reach this state.
+
+    `reconcile_premiership_in_transaction` runs before `reconcile_wooden_
+    spoon_in_transaction` in `complete_season`'s step 3, so this also proves
+    atomicity one level deeper than `test_completion_is_atomic_no_partial_
+    writes_on_readiness_failure` (which fails at the earlier readiness gate,
+    before any award write is attempted): a failure *after* the premiership
+    has already been inserted still rolls back the whole transaction, with
+    no partial premiership row left behind."""
+    built = build_completable_season(year=5201)
+    database, season_id = built["database"], built["season"].season_id
+    last_place_entry = built["entries"][9].season_entry_id
+    second_last_entry = built["entries"][8].season_entry_id
+    pair = {last_place_entry, second_last_entry}
+
+    matches = database.execute(
+        "SELECT m.matchup_id, m.home_season_entry_id, m.away_season_entry_id FROM bbbffl_matchup m "
+        "JOIN bbbffl_round_lifecycle l ON l.bbbffl_round_id = m.bbbffl_round_id "
+        "WHERE l.competition_id=? AND l.fixture_round_number<=20 "
+        "AND (m.home_season_entry_id IN (?,?) OR m.away_season_entry_id IN (?,?))",
+        (
+            built["ordinary_competition_id"],
+            last_place_entry,
+            second_last_entry,
+            last_place_entry,
+            second_last_entry,
+        ),
+    ).fetchall()
+    assert matches  # every entry plays every round; both entries appear here
+    for match in matches:
+        home, away = match["home_season_entry_id"], match["away_season_entry_id"]
+        if home in pair and away in pair:
+            correct_official_result(database, match["matchup_id"], 40, 40, reason="forced tie: head-to-head")
+        elif home in pair:
+            correct_official_result(database, match["matchup_id"], 40, 45, reason="forced tie: external opponent")
+        else:
+            correct_official_result(database, match["matchup_id"], 45, 40, reason="forced tie: external opponent")
+
+    before_events = len(AuditEventRepository(database).list_events(entity_type="season", entity_id=season_id))
+    try:
+        complete_season(database, season_id, actor=ACTOR, reason="attempt despite a bottom-of-ladder tie")
+        raise AssertionError("expected UnresolvedWoodenSpoonTieError")
+    except UnresolvedWoodenSpoonTieError:
+        pass
+
+    after_events = len(AuditEventRepository(database).list_events(entity_type="season", entity_id=season_id))
+    assert after_events == before_events
+    assert SeasonAwardRepository(database).get_active(season_id, PREMIERSHIP) is None
+    assert SeasonAwardRepository(database).get_active(season_id, WOODEN_SPOON) is None
+    assert SeasonRepository(database).get_season(season_id).lifecycle_state == "active"

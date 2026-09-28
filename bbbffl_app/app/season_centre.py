@@ -268,6 +268,10 @@ def _links(season_id: str, draft_started: bool, ordinary_rounds_created: bool, o
         # itself shows readiness/blockers and refuses cleanly once the
         # season is not currently `setup` (already active, or completed).
         "season_activation": f"/scorer/season-activation/{season_id}",
+        # Issue #240: the production-safe `active -> completed` gate --
+        # always reachable, the same "the page shows readiness/blockers
+        # itself" reasoning as `season_activation` above.
+        "season_completion": f"/scorer/season-completion/{season_id}",
         "draft": f"/admin/draft/{season_id}" if draft_started else None,
         "preseason": f"/admin/preseason/{season_id}" if draft_started else None,
         "round_centre": "/scorer/round-centre" if ordinary_rounds_created else None,

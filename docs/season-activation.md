@@ -221,10 +221,8 @@ see `2026-finals-replay/workflow-findings.md` finding 10).
 
 ## Not in scope
 
-- Season completion (`active → completed`) has its own domain command
-  (`app.season_completion.complete_season`) but, per
-  [`2027-live-season-readiness.md`](2027-live-season-readiness.md), still
-  has no browser or production entry point -- a separate remaining item.
+- Season completion (`active → completed`) now has its own browser gate,
+  resolved by issue #240 -- see [`season-completion.md`](season-completion.md).
 - A policy for exact ladder ties.
 - Provisional (not-yet-afl-api) players.
 

@@ -97,6 +97,7 @@ from app.routes import round_review as round_review_routes
 from app.routes import scorer_dashboard as scorer_dashboard_routes
 from app.routes import season_activation as season_activation_routes
 from app.routes import season_centre as season_centre_routes
+from app.routes import season_completion as season_completion_routes
 from app.routes import season_setup as season_setup_routes
 from app.routes import shortlist as shortlist_routes
 from app.routes import superscore as superscore_routes
@@ -110,8 +111,11 @@ from app.scorer_decisions import (
     StaleAflEvidenceError,
     UnknownTeamError,
 )
-from app.season import SeasonRepository
+from app.season import SeasonCompletedError, SeasonRepository
 from app.season_activation import SeasonActivationStateError, SeasonNotReadyToActivateError
+from app.season_archival import CompletionEventMismatchError, SeasonNotCompletedError, UnknownSeasonError
+from app.season_awards import SeasonAwardError
+from app.season_completion import SeasonCompletionError
 from app.season_setup import SeasonSetupAflError, SeasonSetupError
 from app.service import PlayerIdentityCache
 from app.shortlist import ShortlistRepository
@@ -344,6 +348,8 @@ app.include_router(season_setup_routes.router)
 app.include_router(season_setup_routes.page_router)
 app.include_router(season_activation_routes.router)
 app.include_router(season_activation_routes.page_router)
+app.include_router(season_completion_routes.router)
+app.include_router(season_completion_routes.page_router)
 app.include_router(fixture_setup_routes.router)
 app.include_router(fixture_setup_routes.page_router)
 app.include_router(context_routes.router)
@@ -397,6 +403,67 @@ async def season_activation_state_error_handler(request: Request, exc: SeasonAct
 @app.exception_handler(SeasonNotReadyToActivateError)
 async def season_not_ready_to_activate_error_handler(
     request: Request, exc: SeasonNotReadyToActivateError
+) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+# Issue #240's production-safe season-completion gate. `SeasonCompletionError`
+# (raised by `app.season_completion.complete_season` for a missing reason, a
+# non-active season, or its own `SeasonNotReadyError` readiness-gate
+# subclass) is always a resolvable conflict for an operator to act on, never
+# a 500 -- matching `SeasonActivationStateError`'s convention above.
+# `SeasonCompletedError` is the shared completed-season write fence
+# (`app.season.SeasonRepository.guard_writable`): `complete_season` raises it
+# unwrapped when asked to complete an already-`completed` season (issue
+# #195's explicit "no reopen pathway, not idempotently re-callable" scope),
+# so this route surface needs its own mapping rather than relying on a
+# domain module elsewhere having already wrapped it.
+@app.exception_handler(SeasonCompletionError)
+async def season_completion_error_handler(request: Request, exc: SeasonCompletionError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(SeasonCompletedError)
+async def season_completed_error_handler(request: Request, exc: SeasonCompletedError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+# `app.season_awards.SeasonAwardError` (`AwardNotReadyError`/
+# `UnresolvedWoodenSpoonTieError`): `complete_season`'s step 3 calls
+# `reconcile_premiership_in_transaction`/`reconcile_wooden_spoon_in_
+# transaction` directly, so either can propagate a `SeasonAwardError`
+# unwrapped past `app.season_completion`'s own exception hierarchy. Both are
+# resolvable operator-facing conflicts (an internal-consistency finding, not
+# an unexpected server error), so this route surface maps them to 409 too --
+# never a 500 -- and, being raised mid-transaction, the whole completion
+# transaction still rolls back with no partial award, event or lifecycle
+# change.
+@app.exception_handler(SeasonAwardError)
+async def season_award_error_handler(request: Request, exc: SeasonAwardError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+# `app.season_archival.verify_season_completed_for_archival`'s read-only
+# refusals: an unknown season is a 404 (matching every other unknown-entity
+# lookup in this file); a season not yet `completed`, or a supplied
+# `expected_completion_event_id` that does not match the currently observed
+# completion event, are both resolvable 409s. `MissingCompletionEventError`/
+# `AmbiguousCompletionEventError` are deliberately left unregistered here --
+# both are documented as "should be unreachable" invariant violations that
+# must surface as a loud 500 for investigation, never a quiet 409.
+@app.exception_handler(UnknownSeasonError)
+async def season_archival_unknown_season_error_handler(request: Request, exc: UnknownSeasonError) -> JSONResponse:
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+
+@app.exception_handler(SeasonNotCompletedError)
+async def season_archival_not_completed_error_handler(request: Request, exc: SeasonNotCompletedError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(CompletionEventMismatchError)
+async def season_archival_event_mismatch_error_handler(
+    request: Request, exc: CompletionEventMismatchError
 ) -> JSONResponse:
     return JSONResponse(status_code=409, content={"detail": str(exc)})
 

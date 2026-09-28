@@ -143,12 +143,27 @@ def _require_all_final(states: dict) -> None:
 def preview_complete_season(database, season_id: str) -> dict:
     """Read-only report of whether `complete_season` would currently
     succeed -- never locks a row, never mutates. Mirrors `app.finals.
-    FinalsBracketRepository.preview_create_bracket`'s shape."""
-    report: dict = {"season_id": season_id, "ready": False, "diagnostic": None, "round_states": {}}
+    FinalsBracketRepository.preview_create_bracket`'s shape.
+
+    `lifecycle_state` (issue #240) is additive: the browser completion
+    surface (`app.routes.season_completion`) needs to tell "not yet active",
+    "active, not ready", "active, ready" and "already completed" apart
+    without parsing `diagnostic`'s free text, the same way `app.season_
+    activation.ActivationReadiness.lifecycle_state` already does for the
+    sibling `setup -> active` gate. It reports a fact this function already
+    computes; it changes no readiness rule."""
+    report: dict = {
+        "season_id": season_id,
+        "lifecycle_state": None,
+        "ready": False,
+        "diagnostic": None,
+        "round_states": {},
+    }
     season = SeasonRepository(database).get_season(season_id)
     if season is None:
         report["diagnostic"] = f"unknown season {season_id}"
         return report
+    report["lifecycle_state"] = season.lifecycle_state
     if season.lifecycle_state != "active":
         report["diagnostic"] = f"season must be active to complete (currently {season.lifecycle_state!r})"
         return report

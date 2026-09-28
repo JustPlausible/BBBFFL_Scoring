@@ -201,8 +201,13 @@ SUPERSCORE = {"app.superscore_round", "app.superscore_review", "app.superscore_r
 # `completed`, with its exact `season.completed` audit event, before the
 # final archival/checkpoint evidence step 7 may bind to it -- it takes no
 # lock, starts no transaction, and materialises nothing, unlike the three
-# modules below it. None of these four modules is HTTP-routed, and no lower
-# layer (SEASON_MODEL, FINALS, SUPERSCORE) may depend back on any of them.
+# modules below it. No lower layer (SEASON_MODEL, FINALS, SUPERSCORE) may
+# depend back on any of them. `app.season_completion` and `app.season_
+# archival` (but never `app.season_awards`, which stays composed only
+# through `app.season_completion`'s own step 3) are now HTTP-routed by
+# `app.routes.season_completion` (issue #240) -- the production-safe
+# browser gate that was missing before that issue; see that route module's
+# own docstring.
 SEASON_COMPLETION = {"app.season_awards", "app.season_completion", "app.season_archival"}
 
 # Anonymous ordinary-season presentation/read service (issue #78).  It is an
@@ -436,6 +441,7 @@ ROUTES = {
     "app.routes.superscore_review",
     "app.routes.season_setup",
     "app.routes.season_activation",
+    "app.routes.season_completion",
 }
 
 COMPOSITION_ROOT = {"app.main"}

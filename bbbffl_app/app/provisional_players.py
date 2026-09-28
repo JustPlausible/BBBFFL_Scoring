@@ -157,6 +157,10 @@ class MatchCandidate:
     status: str
     detected_at: str
     decided_at: str | None
+    # Codex review on PR #258 (P1, second round): the canonical row's
+    # `eligible` value right before detection quarantined it, so releasing
+    # quarantine restores this recorded value instead of assuming `True`.
+    restore_eligible_on_release: bool = True
 
 
 @dataclass(frozen=True)
@@ -186,7 +190,9 @@ def _nomination(row) -> PlayerNomination:
 
 
 def _candidate(row) -> MatchCandidate:
-    return MatchCandidate(**dict(row))
+    values = dict(row)
+    values["restore_eligible_on_release"] = bool(values["restore_eligible_on_release"])
+    return MatchCandidate(**values)
 
 
 class PlayerNominationRepository:
@@ -561,8 +567,12 @@ class ProvisionalPlayerRepository:
                 ):
                     continue
                 conn.execute(
-                    "UPDATE season_player_pool SET eligible=TRUE WHERE season_id=? AND canonical_player_id=?",
-                    (source["season_id"], candidate["canonical_player_id"]),
+                    "UPDATE season_player_pool SET eligible=? WHERE season_id=? AND canonical_player_id=?",
+                    (
+                        bool(candidate["restore_eligible_on_release"]),
+                        source["season_id"],
+                        candidate["canonical_player_id"],
+                    ),
                 )
             conn.execute("DELETE FROM provisional_match_candidate WHERE season_player_id=?", (season_player_id,))
             # Retire the now-redundant duplicate pool entry *before*
@@ -654,8 +664,8 @@ class ProvisionalPlayerRepository:
                 conn, season_id, canonical_player_id, excluding_season_player_id=season_player_id
             ):
                 conn.execute(
-                    "UPDATE season_player_pool SET eligible=TRUE WHERE season_id=? AND canonical_player_id=?",
-                    (season_id, canonical_player_id),
+                    "UPDATE season_player_pool SET eligible=? WHERE season_id=? AND canonical_player_id=?",
+                    (bool(candidate["restore_eligible_on_release"]), season_id, canonical_player_id),
                 )
             append_event(
                 conn,
@@ -734,6 +744,14 @@ def detect_candidates_in_transaction(conn, season_id: str, *, actor: ActorContex
     (`reject_candidate`) is never re-suggested. Returns the number of newly
     recorded candidate rows."""
     detected = 0
+    # Two different provisional players can share a name and match the same
+    # canonical row within one detection run -- quarantining it for the
+    # first would make a later `SELECT ... eligible` for the second read
+    # back the *already-quarantined* `FALSE`, corrupting the recorded
+    # "restore to" value (Codex review on PR #258, P1, second round). Cache
+    # each canonical row's original eligibility the first time it is seen
+    # this run so every candidate on it records the same, true prior value.
+    original_eligible_by_canonical: dict[int, bool] = {}
     provisional_rows = conn.execute(
         "SELECT season_player_id, given_name, family_name FROM season_player_pool "
         "WHERE season_id=? AND canonical_player_id IS NULL "
@@ -742,7 +760,7 @@ def detect_candidates_in_transaction(conn, season_id: str, *, actor: ActorContex
     ).fetchall()
     for provisional in provisional_rows:
         matches = conn.execute(
-            "SELECT canonical_player_id FROM season_player_pool "
+            "SELECT canonical_player_id, eligible FROM season_player_pool "
             "WHERE season_id=? AND canonical_player_id IS NOT NULL "
             "AND lower(given_name)=lower(?) AND lower(family_name)=lower(?)",
             (season_id, provisional["given_name"], provisional["family_name"]),
@@ -758,11 +776,20 @@ def detect_candidates_in_transaction(conn, season_id: str, *, actor: ActorContex
                 # record) or explicitly rejected (never resurrected
                 # automatically).
                 continue
+            # Codex review on PR #258 (P1, second round): record whether
+            # this row was actually eligible right before quarantine, so
+            # releasing quarantine later restores *that* value rather than
+            # unconditionally `TRUE` -- a row already ineligible for an
+            # unrelated reason must not become draftable just because an
+            # unrelated candidate suggestion was rejected.
+            if canonical_player_id not in original_eligible_by_canonical:
+                original_eligible_by_canonical[canonical_player_id] = bool(match["eligible"])
+            restore_eligible_on_release = original_eligible_by_canonical[canonical_player_id]
             candidate_id, detected_at = _id(), _now()
             conn.execute(
                 "INSERT INTO provisional_match_candidate "
                 "(candidate_id, season_id, season_player_id, canonical_player_id, match_basis, status, "
-                "detected_at, decided_at) VALUES (?, ?, ?, ?, ?, 'pending', ?, NULL)",
+                "detected_at, decided_at, restore_eligible_on_release) VALUES (?, ?, ?, ?, ?, 'pending', ?, NULL, ?)",
                 (
                     candidate_id,
                     season_id,
@@ -770,6 +797,7 @@ def detect_candidates_in_transaction(conn, season_id: str, *, actor: ActorContex
                     canonical_player_id,
                     MATCH_BASIS_GIVEN_FAMILY_NAME,
                     detected_at,
+                    restore_eligible_on_release,
                 ),
             )
             # Quarantine the candidate's own pool row: it must not be

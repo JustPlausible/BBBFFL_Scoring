@@ -264,6 +264,30 @@ def test_rejected_candidate_restores_eligibility_and_is_never_resuggested():
     assert row.has_candidate is False
 
 
+def test_rejecting_a_candidate_never_makes_an_already_ineligible_row_draftable():
+    """Codex review on PR #258 (P1, second round): a canonical row that was
+    already `eligible=False` for a reason unrelated to detection must stay
+    `False` after its candidate suggestion is rejected -- releasing
+    quarantine restores the row's *recorded prior* eligibility, never an
+    unconditional `True`."""
+    db, season, _entries = setup_domain()
+    player = _create(db, season.season_id, given="Jordan", family="Newrecruit")
+    pool = PlayerPoolRepository(db)
+    canonical = pool.refresh_player(
+        season.season_id, 9011, "Jordan Newrecruit", given_name="Jordan", family_name="Newrecruit", eligible=False
+    )
+    detect_candidates(db, season.season_id, actor=ActorContext.system())
+    # Quarantine is a no-op here -- it was already ineligible.
+    assert pool.get_by_id(canonical.season_player_id).eligible is False
+
+    provisional = ProvisionalPlayerRepository(db)
+    provisional.reject_candidate(
+        season.season_id, player.season_player_id, 9011, actor=SCORER, reason="Different person"
+    )
+
+    assert pool.get_by_id(canonical.season_player_id).eligible is False
+
+
 def test_rejecting_an_unknown_candidate_pair_fails():
     db, season, _entries = setup_domain()
     player = _create(db, season.season_id)

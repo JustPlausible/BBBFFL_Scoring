@@ -129,6 +129,14 @@ def upgrade():
         sa.Column("status", sa.Text(), nullable=False, server_default="pending"),
         sa.Column("detected_at", sa.Text(), nullable=False),
         sa.Column("decided_at", sa.Text()),
+        # Codex review on PR #258 (P1, second round): the candidate's own
+        # canonical pool row's `eligible` value *before* detection
+        # quarantined it -- releasing quarantine (reject/reconcile) restores
+        # this recorded value rather than unconditionally `TRUE`, so a row
+        # that was already ineligible for an unrelated reason before
+        # detection is never made draftable by releasing an unrelated
+        # candidate suggestion.
+        sa.Column("restore_eligible_on_release", sa.Boolean(), nullable=False, server_default=sa.true()),
         sa.ForeignKeyConstraint(
             ["season_player_id", "season_id"],
             ["season_player_pool.season_player_id", "season_player_pool.season_id"],

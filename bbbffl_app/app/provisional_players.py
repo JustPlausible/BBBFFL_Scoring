@@ -560,6 +560,30 @@ class ProvisionalPlayerRepository:
                 raise ReconciliationConflictError(
                     "target canonical player already has BBBFFL ownership history and cannot be merged automatically"
                 )
+            # Codex review on PR #258 (P2, fifth round): if the target
+            # canonical player was already ineligible for an unrelated
+            # policy reason before candidate detection quarantined it, that
+            # ineligibility must survive the merge into the surviving
+            # (provisional) row -- a provisional row is created eligible, so
+            # leaving `eligible` untouched on the UPDATE below would
+            # silently make a policy-restricted player draftable. Prefer the
+            # winning candidate's own recorded pre-quarantine value when one
+            # exists (the target may currently read `eligible=FALSE` purely
+            # because detection quarantined it for *this* match, which must
+            # not itself count as "ineligible"); fall back to the target
+            # row's own current `eligible` when reconciling to a target that
+            # was never a detected candidate for this provisional player, so
+            # nothing has quarantined it and its live value is authoritative.
+            winning_candidate = conn.execute(
+                "SELECT restore_eligible_on_release FROM provisional_match_candidate "
+                "WHERE season_player_id=? AND canonical_player_id=?",
+                (season_player_id, target["canonical_player_id"]),
+            ).fetchone()
+            merged_eligible = (
+                bool(winning_candidate["restore_eligible_on_release"])
+                if winning_candidate is not None
+                else bool(target["eligible"])
+            )
             at = _now()
             # Any other candidate suggested for this provisional player but
             # not chosen is, by this decision, a distinct real person -- it
@@ -622,7 +646,7 @@ class ProvisionalPlayerRepository:
             conn.execute(
                 "UPDATE season_player_pool SET canonical_player_id=?, display_name=?, given_name=?, family_name=?, "
                 "afl_team_id=?, afl_team_name=?, source_provider=?, source_fetched_at=?, source_updated_at=?, "
-                "provisional_reconciled_at=?, updated_at=? WHERE season_player_id=?",
+                "eligible=?, provisional_reconciled_at=?, updated_at=? WHERE season_player_id=?",
                 (
                     target["canonical_player_id"],
                     target["display_name"],
@@ -633,6 +657,7 @@ class ProvisionalPlayerRepository:
                     target["source_provider"],
                     target["source_fetched_at"],
                     target["source_updated_at"],
+                    merged_eligible,
                     at,
                     at,
                     season_player_id,
@@ -728,6 +753,12 @@ class ProvisionalPlayerRepository:
             ).fetchone()
             if not candidate:
                 raise KeyError((season_player_id, canonical_player_id))
+            # Codex review on PR #258 (P2, fifth round): a candidate already
+            # rejected is terminal -- deferring it would record a
+            # `candidate_deferred` audit event for an action that left
+            # nothing actionable, and contradicts the earlier rejection.
+            if candidate["status"] != "pending":
+                raise ProvisionalPlayerError("candidate match is no longer pending and cannot be deferred")
             append_event(
                 conn,
                 actor=actor,

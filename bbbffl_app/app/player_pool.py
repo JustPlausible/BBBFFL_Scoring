@@ -436,6 +436,16 @@ class PlayerPoolRepository:
             updated += 1
         source_ids = {row[0] for row in rows}
         missing = sorted(pid for pid in existing if pid not in source_ids)
+        # Codex review on PR #258 (P3, fifth round): `existing` deliberately
+        # excludes provisional rows (see above), so `len(existing) +
+        # inserted` under-reports the season's actual pool size whenever any
+        # provisional player exists -- add them back in for the reported
+        # total, which callers (Season Setup UI, this audit event) expect to
+        # match `summary()`'s total.
+        provisional_count = conn.execute(
+            "SELECT COUNT(*) AS n FROM season_player_pool WHERE season_id=? AND canonical_player_id IS NULL",
+            (season_id,),
+        ).fetchone()["n"]
         summary = {
             "source_provider": source_provider,
             "source_player_count": len(rows),
@@ -443,7 +453,7 @@ class PlayerPoolRepository:
             "updated": updated,
             "unchanged": unchanged,
             "missing_from_source": missing,
-            "pool_size": len(existing) + inserted,
+            "pool_size": len(existing) + inserted + provisional_count,
             "source_fetched_at": fetched,
         }
         append_event(

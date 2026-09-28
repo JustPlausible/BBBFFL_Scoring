@@ -191,6 +191,32 @@ def test_player_pool_refresh_atomically_quarantines_a_provisional_players_candid
     assert imported.eligible is False
 
 
+def test_player_pool_refresh_reports_provisional_rows_in_the_pool_size():
+    """Codex review on PR #258 (P3, fifth round): `existing` deliberately
+    excludes provisional rows so they never collide on the `None` dict key
+    (see `refresh_season_pool_in_transaction`), but the reported
+    `pool_size` must still count them -- it is expected to match
+    `PlayerPoolRepository.summary()`'s total, which does."""
+    from app.provisional_players import ProvisionalPlayerRepository
+
+    database = migrated_connection()
+    season, _entries = fresh_season(database)
+    ProvisionalPlayerRepository(database).create(
+        season.season_id,
+        display_name="Jordan Newrecruit",
+        given_name="Jordan",
+        family_name="Newrecruit",
+        note="verified via club website squad list",
+        actor=SCORER,
+    )
+    result = refresh_player_pool(
+        database, SetupAfl(players=season_players(5)), season.season_id, 77, actor=SCORER, reason=REASON
+    )
+    assert result["pool_size"] == 6
+    pool = PlayerPoolRepository(database)
+    assert pool.summary(season.season_id)["total"] == 6
+
+
 def test_player_pool_refresh_never_deletes_or_changes_eligibility_or_ownership():
     database = migrated_connection()
     season, entries = fresh_season(database)

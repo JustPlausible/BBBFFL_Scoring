@@ -14,6 +14,7 @@ from app.provisional_players import (
     NominationStateError,
     NotProvisionalError,
     PlayerNominationRepository,
+    ProvisionalPlayerError,
     ProvisionalPlayerRepository,
     ReconciliationConflictError,
     detect_candidates,
@@ -653,6 +654,67 @@ def test_reconciliation_restores_losing_candidates_when_ambiguous_set_is_resolve
         "SELECT COUNT(*) AS n FROM provisional_match_candidate WHERE season_player_id=?", (player.season_player_id,)
     ).fetchone()["n"]
     assert remaining_candidates == 0
+
+
+def test_reconciliation_preserves_the_targets_pre_quarantine_ineligibility():
+    """Codex review on PR #258 (P2, fifth round): if the target canonical
+    player was already ineligible for an unrelated policy reason before
+    candidate detection quarantined it, reconciling to it must not silently
+    make the merged (provisional) row draftable -- a provisional row is
+    created eligible, so the merge must carry over the winning candidate's
+    recorded pre-quarantine ineligibility rather than leaving the source
+    row's own (eligible) value untouched."""
+    db, season, _entries = setup_domain()
+    player = _create(db, season.season_id, given="Jordan", family="Newrecruit")
+    pool = PlayerPoolRepository(db)
+    target = pool.refresh_player(
+        season.season_id,
+        9701,
+        "Jordan Newrecruit",
+        given_name="Jordan",
+        family_name="Newrecruit",
+        eligible=False,
+    )
+    detect_candidates(db, season.season_id, actor=ActorContext.system())
+
+    reconciled = ProvisionalPlayerRepository(db).reconcile(
+        season.season_id, player.season_player_id, target.season_player_id, actor=SCORER, reason="Confirmed"
+    )
+    assert reconciled.eligible is False
+
+
+def test_reconciliation_preserves_ineligibility_of_a_target_never_detected_as_a_candidate():
+    """As above, but for a target the caller names directly without it ever
+    having been suggested by `detect_candidates` -- there is no candidate
+    row to consult, so the target's own live `eligible` value (not a
+    recorded pre-quarantine one) is authoritative and must still survive
+    the merge."""
+    db, season, _entries = setup_domain()
+    player = _create(db, season.season_id, given="A", family="One")
+    pool = PlayerPoolRepository(db)
+    target = pool.refresh_player(season.season_id, 9702, "Someone Else", eligible=False)
+
+    reconciled = ProvisionalPlayerRepository(db).reconcile(
+        season.season_id, player.season_player_id, target.season_player_id, actor=SCORER, reason="Confirmed"
+    )
+    assert reconciled.eligible is False
+
+
+def test_deferring_an_already_rejected_candidate_is_refused():
+    """Codex review on PR #258 (P2, fifth round): a rejected candidate is
+    terminal -- deferring it would record a `candidate_deferred` audit
+    event for an action that left nothing actionable."""
+    db, season, _entries = setup_domain()
+    player = _create(db, season.season_id, given="Jordan", family="Newrecruit")
+    pool = PlayerPoolRepository(db)
+    pool.refresh_player(season.season_id, 9703, "Jordan Newrecruit", given_name="Jordan", family_name="Newrecruit")
+    detect_candidates(db, season.season_id, actor=ActorContext.system())
+
+    provisional = ProvisionalPlayerRepository(db)
+    provisional.reject_candidate(season.season_id, player.season_player_id, 9703, actor=SCORER, reason="Not them")
+
+    with pytest.raises(ProvisionalPlayerError):
+        provisional.defer_candidate(season.season_id, player.season_player_id, 9703, actor=SCORER)
 
 
 def test_repeated_reconciliation_fails_safely():

@@ -211,6 +211,39 @@ def test_creation_immediately_detects_an_already_existing_canonical_duplicate():
     assert pool.get_by_id(player.season_player_id).eligible is True
 
 
+def test_creation_quarantines_the_provisional_row_when_the_matching_canonical_is_already_owned():
+    """Codex review on PR #258 (P1, ninth round): quarantining an
+    already-owned canonical match protects nothing -- `list_available`
+    already excludes any row with an open ownership period regardless of
+    `eligible`. The actual duplicate-ownership risk is the *provisional*
+    row itself staying eligible and independently draftable as the same
+    real person; detection (run here via `create`) must quarantine that
+    row instead of the pointless canonical one."""
+    db, season, entries = setup_domain()
+    pool = PlayerPoolRepository(db)
+    canonical = pool.refresh_player(
+        season.season_id, 9910, "Jordan Newrecruit", given_name="Jordan", family_name="Newrecruit"
+    )
+    OwnershipRepository(db).acquire(canonical.season_player_id, entries[0].season_entry_id)
+
+    player = _create(db, season.season_id, given="Jordan", family="Newrecruit")
+
+    assert pool.get_by_id(player.season_player_id).eligible is False
+    candidate = db.execute(
+        "SELECT status FROM provisional_match_candidate WHERE season_player_id=? AND canonical_player_id=?",
+        (player.season_player_id, 9910),
+    ).fetchone()
+    assert candidate is not None
+    assert candidate["status"] == "pending"
+
+    # Once a Scorer rules out the pairing, the provisional row is freed --
+    # no other pending owned-match candidate remains for it.
+    ProvisionalPlayerRepository(db).reject_candidate(
+        season.season_id, player.season_player_id, 9910, actor=SCORER, reason="Different person"
+    )
+    assert pool.get_by_id(player.season_player_id).eligible is True
+
+
 def test_no_match_leaves_player_plainly_provisional():
     db, season, _entries = setup_domain()
     player = _create(db, season.season_id)
@@ -811,6 +844,52 @@ def test_reconciliation_recreates_another_provisional_players_still_pending_clai
         season.season_id, player_b.season_player_id, 9705, actor=SCORER, reason="Not the same person as B"
     )
     assert pool.get_by_id(player_a.season_player_id).eligible is True
+
+
+def test_reconciliation_preserves_a_rejected_pairs_tombstone_across_the_canonical_identity_move():
+    """Codex review on PR #258 (P2, ninth round): an already-rejected pair
+    for a *different* provisional player naming the same target canonical
+    id must also survive `fk_candidate_target_same_season`'s cascade, not
+    just a still-pending one -- or the next detection run resurrects a
+    suggestion a Scorer explicitly rejected, since the "already known"
+    check only consults a live row."""
+    db, season, _entries = setup_domain()
+    player_a = _create(db, season.season_id, given="Jordan", family="Newrecruit")
+    player_b = _create(db, season.season_id, given="Jordan2", family="Newrecruit2")
+    with transaction(db) as conn:
+        conn.execute(
+            "UPDATE season_player_pool SET given_name='Jordan', family_name='Newrecruit' WHERE season_player_id=?",
+            (player_b.season_player_id,),
+        )
+    pool = PlayerPoolRepository(db)
+    target = pool.refresh_player(
+        season.season_id, 9911, "Jordan Newrecruit", given_name="Jordan", family_name="Newrecruit"
+    )
+    detect_candidates(db, season.season_id, actor=ActorContext.system())
+
+    provisional = ProvisionalPlayerRepository(db)
+    provisional.reject_candidate(season.season_id, player_b.season_player_id, 9911, actor=SCORER, reason="Not B")
+
+    provisional.reconcile(
+        season.season_id, player_a.season_player_id, target.season_player_id, actor=SCORER, reason="Confirmed A"
+    )
+
+    # B's rejected tombstone survives the merge -- still rejected, not lost.
+    tombstone = db.execute(
+        "SELECT status FROM provisional_match_candidate WHERE season_player_id=? AND canonical_player_id=?",
+        (player_b.season_player_id, 9911),
+    ).fetchone()
+    assert tombstone is not None
+    assert tombstone["status"] == "rejected"
+
+    # The next detection run must not resurrect it as a fresh suggestion.
+    detected = detect_candidates(db, season.season_id, actor=ActorContext.system())
+    assert detected == 0
+    still_rejected = db.execute(
+        "SELECT status FROM provisional_match_candidate WHERE season_player_id=? AND canonical_player_id=?",
+        (player_b.season_player_id, 9911),
+    ).fetchone()
+    assert still_rejected["status"] == "rejected"
 
 
 def test_deferring_an_already_rejected_candidate_is_refused():

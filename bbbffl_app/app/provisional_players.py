@@ -636,12 +636,22 @@ class ProvisionalPlayerRepository:
             # while any such claim remains open, and recreate each one
             # afterwards against the same canonical id, which the merged row
             # now carries -- exactly the same suggestion, still pending.
-            other_provisionals_pending = conn.execute(
-                "SELECT season_player_id, match_basis, restore_eligible_on_release FROM provisional_match_candidate "
-                "WHERE season_id=? AND canonical_player_id=? AND season_player_id<>? AND status='pending'",
+            # Codex review on PR #258 (P2, ninth round): also capture an
+            # *already-rejected* pair for a different provisional player --
+            # the same cascade would destroy that tombstone too, and
+            # `_detect_candidates_for_provisional`'s "already known" check
+            # only consults a live `provisional_match_candidate` row, so
+            # losing the tombstone would let the next detection run
+            # resurrect a pairing a Scorer explicitly rejected. Recreated
+            # rows below preserve each one's own `status`/`decided_at`
+            # rather than resetting every row to pending.
+            other_provisionals_candidates = conn.execute(
+                "SELECT season_player_id, match_basis, restore_eligible_on_release, status, decided_at "
+                "FROM provisional_match_candidate WHERE season_id=? AND canonical_player_id=? "
+                "AND season_player_id<>?",
                 (source["season_id"], target["canonical_player_id"], season_player_id),
             ).fetchall()
-            if other_provisionals_pending:
+            if any(candidate["status"] == "pending" for candidate in other_provisionals_candidates):
                 merged_eligible = False
             at = _now()
             # Any other candidate suggested for this provisional player but
@@ -722,23 +732,28 @@ class ProvisionalPlayerRepository:
                     season_player_id,
                 ),
             )
-            # Recreate each other provisional player's still-pending claim on
-            # this canonical id, captured above before the cascade delete --
-            # the merged row now carries `target["canonical_player_id"]`, so
-            # the same suggestion (unchanged `match_basis`/
-            # `restore_eligible_on_release`) is exactly as valid against it.
-            for other in other_provisionals_pending:
+            # Recreate each other provisional player's claim (pending or
+            # already-rejected) on this canonical id, captured above before
+            # the cascade delete -- the merged row now carries `target[
+            # "canonical_player_id"]`, so the same suggestion (unchanged
+            # `match_basis`/`restore_eligible_on_release`, and its own
+            # `status`/`decided_at`) is exactly as valid against it. A
+            # rejected tombstone is recreated rejected -- never resurrected
+            # as a fresh pending suggestion.
+            for other in other_provisionals_candidates:
                 conn.execute(
                     "INSERT INTO provisional_match_candidate "
                     "(candidate_id, season_id, season_player_id, canonical_player_id, match_basis, status, "
-                    "detected_at, decided_at, restore_eligible_on_release) VALUES (?, ?, ?, ?, ?, 'pending', ?, NULL, ?)",
+                    "detected_at, decided_at, restore_eligible_on_release) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         _id(),
                         source["season_id"],
                         other["season_player_id"],
                         target["canonical_player_id"],
                         other["match_basis"],
+                        other["status"],
                         at,
+                        other["decided_at"],
                         other["restore_eligible_on_release"],
                     ),
                 )
@@ -794,6 +809,18 @@ class ProvisionalPlayerRepository:
                 conn.execute(
                     "UPDATE season_player_pool SET eligible=? WHERE season_id=? AND canonical_player_id=?",
                     (bool(candidate["restore_eligible_on_release"]), season_id, canonical_player_id),
+                )
+            # Codex review on PR #258 (P1, ninth round): this rejected
+            # candidate may have been the one whose already-owned target
+            # made `_detect_candidates_for_provisional` quarantine the
+            # *provisional* row itself, not the (pointless-to-quarantine)
+            # canonical one. Restore it once no other pending owned-match
+            # candidate remains for this provisional player -- a no-op
+            # unless this player was ever actually quarantined that way.
+            if not _provisional_has_pending_owned_match_candidate(conn, season_id, season_player_id):
+                conn.execute(
+                    "UPDATE season_player_pool SET eligible=TRUE WHERE season_player_id=? AND canonical_player_id IS NULL",
+                    (season_player_id,),
                 )
             append_event(
                 conn,
@@ -932,16 +959,33 @@ def _detect_candidates_for_provisional(
     eligible while `reconcile` later refuses the target for having
     ownership history. Locking each matched row here forces the concurrent
     acquire to wait (or this call to wait for it), so quarantine and
-    acquisition can never interleave."""
+    acquisition can never interleave.
+
+    Re-checks ownership *after* that lock is acquired (Codex review on PR
+    #258, P1, ninth round): the row lock alone only serializes against a
+    concurrent acquisition, it does not detect one that already committed
+    (an acquisition never touches `season_player_pool.eligible`, so an
+    owned row can still read `eligible=TRUE` here). Quarantining an
+    already-owned canonical row is a no-op protection -- `list_available`
+    already excludes any row with an open ownership period regardless of
+    `eligible` -- so the actual duplicate-ownership risk is the
+    *provisional* row itself staying eligible and independently draftable
+    as the same real person. When a match is already owned, this also
+    quarantines the provisional player's own row; `reject_candidate`
+    restores it once no other pending owned-match candidate remains."""
     detected = 0
     matches = conn.execute(
-        "SELECT canonical_player_id, eligible FROM season_player_pool "
+        "SELECT season_player_id, canonical_player_id, eligible FROM season_player_pool "
         "WHERE season_id=? AND canonical_player_id IS NOT NULL "
         "AND lower(given_name)=lower(?) AND lower(family_name)=lower(?)" + _for_update_suffix(database),
         (season_id, given_name, family_name),
     ).fetchall()
     for match in matches:
         canonical_player_id = match["canonical_player_id"]
+        owned = conn.execute(
+            "SELECT 1 FROM player_ownership_period WHERE season_player_id=? AND released_at IS NULL",
+            (match["season_player_id"],),
+        ).fetchone()
         existing = conn.execute(
             "SELECT status FROM provisional_match_candidate WHERE season_player_id=? AND canonical_player_id=?",
             (season_player_id, canonical_player_id),
@@ -1002,11 +1046,39 @@ def _detect_candidates_for_provisional(
         # Quarantine the candidate's own pool row: it must not be
         # draftable while a plausible duplicate-identity question is
         # unresolved (issue #242's "resistant to accidental
-        # duplicate ... player identities").
+        # duplicate ... player identities"). Harmless (if pointless) even
+        # when `owned` below is true: `eligible` no longer controls whether
+        # an already-owned row can be drafted again (`list_available`
+        # excludes it by its open ownership period regardless), and
+        # `reject_candidate` still restores this value symmetrically.
         conn.execute(
             "UPDATE season_player_pool SET eligible=FALSE WHERE season_id=? AND canonical_player_id=?",
             (season_id, canonical_player_id),
         )
+        if owned:
+            # Codex review on PR #258 (P1, ninth round): the matched
+            # canonical row is already owned, so quarantining *it* protects
+            # nothing -- it was never independently draftable in the first
+            # place. The real risk is this *provisional* row: if it is the
+            # same real person as the already-owned canonical player,
+            # leaving it eligible would let a second entry draft that same
+            # person under the provisional identity. `reject_candidate`
+            # re-checks whether any other pending owned-match candidate
+            # remains before restoring this back to eligible.
+            #
+            # Residual limitation: if this provisional player is later
+            # `reconcile`d to a *different*, unowned target while this
+            # owned-match candidate is still pending, that merge computes
+            # the surviving row's `eligible` from the winning target alone
+            # and does not currently re-check this candidate -- so the
+            # owned-duplicate suspicion this quarantine records does not
+            # survive being merged into an unrelated identity. Narrower
+            # than what this fix closes (the row stays quarantined for as
+            # long as it remains provisional, which is the common case).
+            conn.execute(
+                "UPDATE season_player_pool SET eligible=FALSE WHERE season_player_id=?",
+                (season_player_id,),
+            )
         append_event(
             conn,
             actor=actor,
@@ -1017,6 +1089,7 @@ def _detect_candidates_for_provisional(
                 "season_player_id": season_player_id,
                 "canonical_player_id": canonical_player_id,
                 "match_basis": MATCH_BASIS_GIVEN_FAMILY_NAME,
+                "target_already_owned": bool(owned),
             },
         )
         detected += 1
@@ -1038,5 +1111,24 @@ def _other_pending_candidates_exist(
         "SELECT 1 FROM provisional_match_candidate WHERE season_id=? AND canonical_player_id=? "
         "AND status='pending' AND season_player_id<>?",
         (season_id, canonical_player_id, excluding_season_player_id),
+    ).fetchone()
+    return row is not None
+
+
+def _provisional_has_pending_owned_match_candidate(conn, season_id: str, season_player_id: str) -> bool:
+    """Whether this provisional player still has a pending candidate whose
+    target canonical row currently has an open BBBFFL ownership period
+    (issue #242, Codex review on PR #258, P1, ninth round). `reconcile`
+    unconditionally refuses an owned target, so `reject_candidate` is the
+    only way such a pair is ever resolved -- this row must stay quarantined
+    until it is, even if some *other* pending (unowned) candidate for the
+    same provisional player was just released."""
+    row = conn.execute(
+        "SELECT 1 FROM provisional_match_candidate c "
+        "JOIN season_player_pool p ON p.season_id=c.season_id AND p.canonical_player_id=c.canonical_player_id "
+        "WHERE c.season_id=? AND c.season_player_id=? AND c.status='pending' "
+        "AND EXISTS (SELECT 1 FROM player_ownership_period o "
+        "WHERE o.season_player_id=p.season_player_id AND o.released_at IS NULL)",
+        (season_id, season_player_id),
     ).fetchone()
     return row is not None

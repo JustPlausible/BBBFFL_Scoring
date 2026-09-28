@@ -35,13 +35,15 @@ from tests.finals_helpers import correct_official_result
 from tests.finals_seeding_helpers import build_2026_replay_season
 
 
-def build_tied_season(database=None, *, year=2200, tied_ranks=(9, 10), round_count=20, win_rounds=None, **kwargs):
-    """Build a season shaped exactly like `build_2026_replay_season`, then
-    force the two entries at `tied_ranks` (1-indexed, adjacent, e.g. `(9,
-    10)` for last place or `(5, 6)` for the Finals cutoff) into an exact
-    mathematical tie: identical competition points, percentage and points
-    for, while every other entry's own match results (and therefore its
-    ranking relative to every *other* entry) are untouched.
+def force_tie(database, entries, competition_id, *, tied_ranks=(9, 10), round_count=20, win_rounds=None):
+    """Correct the two entries at `tied_ranks` (1-indexed, adjacent, e.g.
+    `(9, 10)` for last place or `(5, 6)` for the Finals cutoff) into an
+    exact mathematical tie: identical competition points, percentage and
+    points for, while every other entry's own match results (and therefore
+    its ranking relative to every *other* entry) are untouched. Can be
+    called on an already-built, already-finalised season -- e.g. after a
+    Finals bracket has already been created from an untied ladder, to
+    reproduce a mid-ladder tie introduced only afterwards.
 
     `win_rounds` controls roughly where the pair lands: the pair wins every
     non-head-to-head match in rounds `1..win_rounds` and loses every one in
@@ -49,17 +51,9 @@ def build_tied_season(database=None, *, year=2200, tied_ranks=(9, 10), round_cou
     ladder and a low one near the bottom. Defaults to a value derived from
     `tied_ranks` itself (higher ranks near the top get a higher default).
 
-    Returns the same `built` dict `build_2026_replay_season` does, plus
-    `ordinary_competition_id` and `tied_pair` (the two tied entries'
-    `season_entry_id`, sorted -- ready to pass as `decided_order`'s member
-    set, or in either order, to `app.ladder_tie_ruling.record_ruling`)."""
-    kwargs.setdefault("regular_season_round_count", round_count)
-    kwargs.setdefault("trigger_round", round_count)
-    built = build_2026_replay_season(database=database, year=year, **kwargs)
-    database = built["database"]
-    entries = built["entries"]
-    competition_id = built["competition"].competition_id
-
+    Returns the two tied entries' `season_entry_id`, sorted -- ready to pass
+    as `decided_order`'s member set, or in either order, to `app.ladder_tie_
+    ruling.record_ruling`."""
     lower_index, higher_index = sorted(rank - 1 for rank in tied_ranks)
     if higher_index != lower_index + 1:
         raise ValueError("tied_ranks must name two adjacent ladder ranks")
@@ -86,8 +80,29 @@ def build_tied_season(database=None, *, year=2200, tied_ranks=(9, 10), round_cou
         scores = (pair_score, opponent_score) if home_in_pair else (opponent_score, pair_score)
         correct_official_result(database, match["matchup_id"], *scores, reason="fixture: forced tie vs external")
 
+    return sorted(pair_ids)
+
+
+def build_tied_season(database=None, *, year=2200, tied_ranks=(9, 10), round_count=20, win_rounds=None, **kwargs):
+    """Build a season shaped exactly like `build_2026_replay_season`, then
+    `force_tie` the two entries at `tied_ranks` into an exact mathematical
+    tie. Returns the same `built` dict `build_2026_replay_season` does,
+    plus `ordinary_competition_id` and `tied_pair` (see `force_tie`)."""
+    kwargs.setdefault("regular_season_round_count", round_count)
+    kwargs.setdefault("trigger_round", round_count)
+    built = build_2026_replay_season(database=database, year=year, **kwargs)
+    database = built["database"]
+    competition_id = built["competition"].competition_id
+
     built["ordinary_competition_id"] = competition_id
-    built["tied_pair"] = sorted(pair_ids)
+    built["tied_pair"] = force_tie(
+        database,
+        built["entries"],
+        competition_id,
+        tied_ranks=tied_ranks,
+        round_count=round_count,
+        win_rounds=win_rounds,
+    )
     return built
 
 

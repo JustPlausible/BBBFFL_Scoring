@@ -76,7 +76,7 @@ from app.competition_lifecycle import CompetitionLifecycleRepository
 from app.db import _for_update_suffix, transaction
 from app.finals_seeding import FinalsSeedingRepository, UnresolvedLadderTieError
 from app.ladder import LadderRepository
-from app.ladder_tie_ruling import UnresolvedTieError, resolve_full_ladder_order
+from app.ladder_tie_ruling import UnresolvedTieError, resolve_full_ladder_order_with_rulings
 from app.season import SeasonRepository
 
 __all__ = [
@@ -453,7 +453,7 @@ class FinalsBracketRepository:
                 f"not the requested season {season_id!r}"
             )
         try:
-            seed_order = resolve_full_ladder_order(self.database, ladder)
+            seed_order, tie_ruling_ids = resolve_full_ladder_order_with_rulings(self.database, ladder)
         except UnresolvedTieError as exc:
             raise UnresolvedLadderTieError(
                 f"cannot derive a deterministic finals seed order: the mathematical ladder has an unresolved tie "
@@ -468,6 +468,7 @@ class FinalsBracketRepository:
                 "through_round": round_count,
                 "latest_included_round": ladder.latest_included_round,
                 "result_references": ladder.result_references,
+                "tie_ruling_ids": tie_ruling_ids,
             },
         )
 
@@ -626,6 +627,30 @@ class FinalsBracketRepository:
                             raise StaleSeedOrderError(
                                 f"matchup {reference.matchup_id}'s official result changed since the ladder was "
                                 "read for finals seeding; retry bracket creation from a fresh read"
+                            )
+                    # Codex review, PR #257: superseding a ladder tie ruling
+                    # (`app.ladder_tie_ruling.LadderTieRulingRepository.
+                    # record_ruling`) need not change any official result --
+                    # a Scorer could simply record a different decided_order
+                    # for the identical tie group -- so the result-reference
+                    # recheck above cannot detect that race on its own. Every
+                    # ruling `_resolve_ladder_seed`'s unlocked read actually
+                    # consumed is re-verified here, under the same season
+                    # lock acquired above (which `record_ruling`'s own
+                    # `guard_writable` call also takes first), for exactly
+                    # the same reason: either this transaction's lock wins
+                    # and a concurrent supersede blocks behind it (safe --
+                    # the bracket freezes the still-current ruling), or the
+                    # supersede commits first and this read observes it and
+                    # aborts for a fresh retry.
+                    for ruling_id in sorted(provenance.get("tie_ruling_ids", ())):
+                        ruling_row = conn.execute(
+                            "SELECT status FROM ladder_tie_ruling WHERE ruling_id=?", (ruling_id,)
+                        ).fetchone()
+                        if ruling_row is None or ruling_row["status"] != "active":
+                            raise StaleSeedOrderError(
+                                f"tie ruling {ruling_id} was superseded concurrently while the mathematical ladder "
+                                "seed order was being resolved; retry bracket creation from a fresh read"
                             )
 
                 bracket_id = _id()

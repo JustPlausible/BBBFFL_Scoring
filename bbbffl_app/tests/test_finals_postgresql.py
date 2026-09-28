@@ -130,6 +130,76 @@ def test_concurrent_correction_between_ladder_read_and_bracket_commit_is_detecte
     assert repo.get_bracket(built["season"].season_id, built["finals_competition"].competition_id) is None
 
 
+def test_concurrent_tie_ruling_supersede_between_ladder_read_and_bracket_commit_is_detected(
+    postgres_database, monkeypatch
+):
+    """Issue #241, Codex review (PR #257, P1): superseding a ladder tie
+    ruling need not change any official result -- an operator can simply
+    record a different `decided_order` for the identical tie group -- so
+    the result-reference recheck above cannot, on its own, detect a ruling
+    superseded in the gap between bracket creation's ladder read and its
+    own transaction's locked re-check. Every `ruling_id` that read actually
+    consumed must be independently re-verified still `active`."""
+    from app.ladder_tie_ruling import LadderTieRulingRepository
+    from tests.ladder_tie_ruling_helpers import build_tied_finals_ready_season
+
+    built = build_tied_finals_ready_season(database=postgres_database, year=2950, tied_ranks=(9, 10))
+    SeasonRepository(postgres_database).transition_lifecycle(
+        built["season"].season_id, "active", actor=ACTOR, reason="activate for tie-ruling race test"
+    )
+    ruling_repo = LadderTieRulingRepository(postgres_database)
+    ruling_repo.record_ruling(
+        built["season"].season_id,
+        built["ordinary_competition_id"],
+        20,
+        built["tied_pair"],
+        actor=ACTOR,
+        reason="initial ruling, to be superseded mid-race",
+    )
+    repo = FinalsBracketRepository(postgres_database)
+
+    real_resolve_seed = FinalsBracketRepository._resolve_seed
+    read_done = threading.Event()
+    allow_transaction_to_proceed = threading.Event()
+
+    def paused_resolve_seed(self, *args, **kwargs):
+        result = real_resolve_seed(self, *args, **kwargs)
+        read_done.set()
+        assert allow_transaction_to_proceed.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(FinalsBracketRepository, "_resolve_seed", paused_resolve_seed)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        creation = executor.submit(
+            repo.create_bracket,
+            built["season"].season_id,
+            built["finals_competition"].competition_id,
+            built["ordinary_competition_id"],
+            actor=ACTOR,
+            reason="race: ladder read then stale ruling supersede",
+        )
+        assert read_done.wait(timeout=5)
+
+        # A fully independent, uncontested re-recording supersedes the
+        # already-consumed ruling with the reversed decided_order --
+        # touching no official result at all.
+        ruling_repo.record_ruling(
+            built["season"].season_id,
+            built["ordinary_competition_id"],
+            20,
+            list(reversed(built["tied_pair"])),
+            actor=ACTOR,
+            reason="concurrent re-recording races bracket creation",
+        )
+
+        allow_transaction_to_proceed.set()
+        with pytest.raises(StaleSeedOrderError):
+            creation.result(timeout=5)
+
+    assert repo.get_bracket(built["season"].season_id, built["finals_competition"].competition_id) is None
+
+
 def test_bracket_creation_transaction_genuinely_blocks_on_the_same_row_a_correction_holds(
     postgres_database, monkeypatch
 ):

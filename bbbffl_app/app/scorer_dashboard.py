@@ -939,6 +939,12 @@ def _ladder_tie_ruling_attention(database, season_id: str) -> list[dict]:
             blocked.append("Finals seeding")
         if tie.affects_wooden_spoon:
             blocked.append("the Wooden Spoon / season awards")
+        if not blocked:
+            # Neither downstream consumer needs this exact tie right now
+            # (Finals seeding already froze from a snapshot/bracket, and
+            # this isn't the last-place group) -- nothing is actionable, so
+            # don't ask the Scorer to rule on it.
+            continue
         stale_note = (
             " A prior ruling for this exact tie is now stale and no longer applies." if tie.status == "stale" else ""
         )
@@ -949,12 +955,12 @@ def _ladder_tie_ruling_attention(database, season_id: str) -> list[dict]:
                 "title": "Ladder tie needs a competition ruling",
                 "detail": (
                     f"Rank {tie.rank} is exactly tied on the mathematical ladder and blocks "
-                    f"{' and '.join(blocked) or 'a downstream deterministic order'}.{stale_note} An authorised "
-                    "Scorer/Administrator must record the decided order -- see Ladder tie ruling."
+                    f"{' and '.join(blocked)}.{stale_note} An authorised Scorer/Administrator must record the "
+                    "decided order -- see Ladder tie ruling."
                 ),
                 "state": None,
                 "timestamp": None,
-                "capability": None,
+                "capability": "ladder_tie_ruling.manage",
                 "url": LADDER_TIE_RULING_URL.format(season_id=season_id),
                 "diagnostics": None,
             }

@@ -335,15 +335,21 @@ def record_ruling_for_season(
     )
 
 
-def resolve_tie(database, ladder: LadderSnapshot, tie_group) -> tuple[str, ...]:
+def resolve_tie(database, ladder: LadderSnapshot, tie_group) -> LadderTieRuling:
     """The one integration seam `app.finals`/`app.finals_seeding` and
     `app.season_awards` should call once they have found a tied
     `LadderRow.tie_group` on an already-computed `ladder` (a plain
     `app.ladder.LadderRepository.snapshot(...)` read -- never re-derived
-    here). Returns the decided best-to-worst order for `tie_group`'s members
-    if an active ruling exists for `(ladder.season_id, ladder.competition_id,
-    ladder.through_round, tie_group)` and its frozen `result_references`
-    still match `ladder.result_references` exactly; raises
+    here). Returns the active `LadderTieRuling` for `(ladder.season_id,
+    ladder.competition_id, ladder.through_round, tie_group)` if one exists
+    and its frozen `result_references` still match `ladder.result_references`
+    exactly (`.decided_order` is the decided best-to-worst order for
+    `tie_group`'s members; `.ruling_id` lets a caller with its own unlocked-
+    then-locked resolution, like `app.finals.FinalsBracketRepository.
+    create_bracket`'s ladder path, re-verify under its own write lock that
+    this exact ruling has not been superseded by a concurrent `record_ruling`
+    call since -- superseding a ruling need not change any official result,
+    so `result_references` staleness alone cannot catch that race). Raises
     `UnresolvedTieError` otherwise (see that class's docstring for the
     `stale` distinction it carries for a caller that wants to report it)."""
     tie_group = tuple(tie_group)
@@ -369,7 +375,7 @@ def resolve_tie(database, ladder: LadderSnapshot, tie_group) -> tuple[str, ...]:
             stale=True,
             ruling=ruling,
         )
-    return ruling.decided_order
+    return ruling
 
 
 def resolve_ordinary_context(database, season_id: str) -> tuple[str, int]:
@@ -410,17 +416,43 @@ class OpenTie:
     ruling: LadderTieRuling | None
 
 
+def _finals_seeding_frozen(database, season_id: str, competition_id: str) -> bool:
+    """Whether Finals seeding for this season's ordinary competition no
+    longer depends on the live ladder at all: either a 2026-style historical
+    `finals_seeding_snapshot` already exists for it (`app.finals_seeding`
+    always consumes that instead of the ladder), or a `finals_bracket` has
+    already frozen its seed order once (`app.finals`'s own module docstring:
+    "Seed consumption -- single read, frozen once", never re-read). Read
+    directly by table name rather than importing `app.finals_seeding`/
+    `app.finals` -- both depend on this module already, so importing either
+    back would cycle; this mirrors the established pattern `app.lineups`
+    already uses to reach into `app.round_review`'s tables by raw SQL."""
+    snapshot = database.execute(
+        "SELECT competition_id FROM finals_seeding_snapshot WHERE season_id=?", (season_id,)
+    ).fetchone()
+    if snapshot is not None and snapshot["competition_id"] == competition_id:
+        return True
+    bracket = database.execute(
+        "SELECT bracket_id FROM finals_bracket WHERE season_id=? AND ordinary_competition_id=?",
+        (season_id, competition_id),
+    ).fetchone()
+    return bracket is not None
+
+
 def preview(database, season_id: str) -> dict:
     """Read-only Scorer Operations report: never mutates, never takes a row
     lock. Every exact tie group on this season's live ordinary-competition
     ladder, whether it blocks Finals seeding (any tie, since a full
-    deterministic order needs every rank resolved) and/or the Wooden Spoon
+    deterministic order needs every rank resolved -- unless Finals seeding
+    has already been frozen from a snapshot or an existing bracket, in which
+    case the live ladder no longer feeds it at all) and/or the Wooden Spoon
     (only the last-place group), and whether a ruling already resolves it
     (and if so, whether that ruling is fresh or stale)."""
     competition_id, through_round = resolve_ordinary_context(database, season_id)
     ladder = LadderRepository(database).snapshot(competition_id, through_round)
     repository = LadderTieRulingRepository(database)
     last_place_group = ladder.rows[-1].tie_group if ladder.rows and ladder.rows[-1].tied else None
+    finals_seeding_still_live = not _finals_seeding_frozen(database, season_id, competition_id)
     open_ties: list[OpenTie] = []
     handled: set[tuple[str, ...]] = set()
     for row in ladder.rows:
@@ -441,7 +473,7 @@ def preview(database, season_id: str) -> dict:
                 competition_points=row.competition_points,
                 percentage=str(row.percentage),
                 points_for=str(row.points_for),
-                affects_finals_seeding=True,
+                affects_finals_seeding=finals_seeding_still_live,
                 affects_wooden_spoon=row.tie_group == last_place_group,
                 status=status,
                 ruling=ruling,
@@ -455,15 +487,21 @@ def preview(database, season_id: str) -> dict:
     }
 
 
-def resolve_full_ladder_order(database, ladder: LadderSnapshot) -> tuple[str, ...]:
+def resolve_full_ladder_order_with_rulings(database, ladder: LadderSnapshot) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Apply every resolvable tie ruling to `ladder.rows`' own best-to-worst
-    order, returning a fully deterministic `season_entry_id` order across
-    every row -- `app.finals._resolve_ladder_seed`'s use case, which needs a
-    total order over all ten entries, not just one tie group. Raises
+    order, returning `(order, ruling_ids)`: a fully deterministic
+    `season_entry_id` order across every row, and the sorted `ruling_id`s of
+    every active ruling actually consumed to produce it. `app.finals.
+    FinalsBracketRepository._resolve_ladder_seed` needs `ruling_ids` to
+    re-verify, under its own later write lock, that none of them has since
+    been superseded by a concurrent `record_ruling` call -- a race
+    `result_references`-based staleness checks alone cannot catch, since
+    superseding a ruling need not change any official result. Raises
     `UnresolvedTieError` (from `resolve_tie`) on the first tie group with no
     fresh ruling, in ladder rank order, so the reported group is always the
     highest-ranked one still blocking a deterministic order."""
     order: list[str] = []
+    ruling_ids: list[str] = []
     handled: set[tuple[str, ...]] = set()
     for row in ladder.rows:
         if not row.tied:
@@ -472,5 +510,14 @@ def resolve_full_ladder_order(database, ladder: LadderSnapshot) -> tuple[str, ..
         if row.tie_group in handled:
             continue
         handled.add(row.tie_group)
-        order.extend(resolve_tie(database, ladder, row.tie_group))
-    return tuple(order)
+        ruling = resolve_tie(database, ladder, row.tie_group)
+        order.extend(ruling.decided_order)
+        ruling_ids.append(ruling.ruling_id)
+    return tuple(order), tuple(sorted(ruling_ids))
+
+
+def resolve_full_ladder_order(database, ladder: LadderSnapshot) -> tuple[str, ...]:
+    """`resolve_full_ladder_order_with_rulings`, for callers (`app.finals_
+    seeding.resolve_finals_seed_order`) that only need the order itself."""
+    order, _ruling_ids = resolve_full_ladder_order_with_rulings(database, ladder)
+    return order

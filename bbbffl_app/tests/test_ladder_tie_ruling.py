@@ -245,8 +245,8 @@ def test_resolution_never_falls_back_to_team_name_id_or_database_order():
     )
     ladder = LadderRepository(database).snapshot(built["ordinary_competition_id"], 20)
     tie_group = next(row.tie_group for row in ladder.rows if row.tied)
-    assert resolve_tie(database, ladder, tie_group) == tuple(decided_order)
-    assert resolve_tie(database, ladder, tie_group) != tuple(incidental_order)
+    assert resolve_tie(database, ladder, tie_group).decided_order == tuple(decided_order)
+    assert resolve_tie(database, ladder, tie_group).decided_order != tuple(incidental_order)
 
 
 # -- Staleness ----------------------------------------------------------------
@@ -322,7 +322,7 @@ def test_a_fresh_ruling_supersedes_a_stale_one_and_preserves_history():
 
     ladder = LadderRepository(database).snapshot(built["ordinary_competition_id"], 20)
     tie_group = next(row.tie_group for row in ladder.rows if row.tied)
-    assert resolve_tie(database, ladder, tie_group) == tuple(decided_order)
+    assert resolve_tie(database, ladder, tie_group).decided_order == tuple(decided_order)
 
 
 # -- Scorer Operations preview report ----------------------------------------
@@ -349,6 +349,74 @@ def test_preview_reports_a_mid_ladder_tie_as_affecting_finals_only():
     assert len(report["open_ties"]) == 1
     tie = report["open_ties"][0]
     assert tie.affects_finals_seeding is True
+    assert tie.affects_wooden_spoon is False
+
+
+def test_preview_reports_finals_seeding_unaffected_once_a_bracket_already_exists():
+    """Codex review (PR #257, P2): once Finals seeding has already been
+    frozen (a bracket exists, or a 2026-style snapshot does), the live
+    ladder no longer feeds it at all -- a mid-ladder tie away from last
+    place then blocks nothing, and must not be reported as a mandatory
+    decision the Scorer still owes an operation that no longer consumes it.
+    Recording the ruling first (required for `create_bracket` itself to
+    succeed past this tie) and then re-checking `preview` proves this: the
+    ladder still reports the identical tie (nothing here ever rewrites
+    results), but it no longer *blocks* anything."""
+    from app.finals import FinalsBracketRepository
+    from tests.ladder_tie_ruling_helpers import build_tied_finals_ready_season
+
+    built = build_tied_finals_ready_season(year=6118, tied_ranks=(3, 4))
+    database, season_id = built["database"], built["season"].season_id
+    _activate(database, season_id)
+    _repo(built).record_ruling(
+        season_id,
+        built["ordinary_competition_id"],
+        20,
+        built["tied_pair"],
+        actor=ACTOR,
+        reason="resolve before bracket",
+    )
+    FinalsBracketRepository(database).create_bracket(
+        season_id,
+        built["finals_competition"].competition_id,
+        built["ordinary_competition_id"],
+        actor=ACTOR,
+        reason="freeze finals seeding",
+    )
+
+    report = preview(database, season_id)
+    assert len(report["open_ties"]) == 1
+    tie = report["open_ties"][0]
+    assert tie.affects_finals_seeding is False
+    assert tie.affects_wooden_spoon is False
+
+
+def test_preview_reports_an_unresolved_mid_ladder_tie_as_blocking_nothing_once_bracket_exists():
+    """The realistic shape of the P2 finding above: a tie introduced by a
+    correction *after* the bracket already exists never needed a ruling to
+    unblock anything, and `preview` must say so (`status='unresolved'`,
+    both `affects_*` flags `False`) rather than presenting it as a pending
+    decision."""
+    from app.finals import FinalsBracketRepository
+    from tests.finals_helpers import build_finals_ready_season
+    from tests.ladder_tie_ruling_helpers import force_tie
+
+    built = build_finals_ready_season(year=6119)
+    database, season_id = built["database"], built["season"].season_id
+    FinalsBracketRepository(database).create_bracket(
+        season_id,
+        built["finals_competition"].competition_id,
+        built["ordinary_competition_id"],
+        actor=ACTOR,
+        reason="freeze finals seeding while the ladder is still untied",
+    )
+    force_tie(database, built["entries"], built["ordinary_competition_id"], tied_ranks=(3, 4))
+
+    report = preview(database, season_id)
+    assert len(report["open_ties"]) == 1
+    tie = report["open_ties"][0]
+    assert tie.status == "unresolved"
+    assert tie.affects_finals_seeding is False
     assert tie.affects_wooden_spoon is False
 
 

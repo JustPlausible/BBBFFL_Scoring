@@ -672,6 +672,42 @@ def test_ladder_tie_attention_present_once_the_regular_season_ladder_is_complete
     assert item["category"] == "decision_required"
     assert item["url"] == f"/scorer/ladder-tie-ruling/{built['season'].season_id}"
     assert "Wooden Spoon" in item["detail"]
+    # Codex review (PR #257, P2): the linked action needs Scorer/Admin
+    # authority (`app.routes.ladder_tie_ruling.require_scorer_or_admin`) --
+    # narrower than `roundsetup.manage`, which a Replay Operator also
+    # holds -- so it must carry its own capability, not `None` (which
+    # `_annotate_actionability` would treat as actionable by anyone who can
+    # view this dashboard at all, including a Replay Operator who would
+    # 403 on the actual route).
+    assert item["capability"] == "ladder_tie_ruling.manage"
+
+
+def test_ladder_tie_attention_absent_once_finals_seeding_is_already_frozen_and_not_last_place():
+    """A mid-ladder tie that blocks neither Finals seeding (already frozen
+    by an existing bracket, created while the ladder was still untied) nor
+    the Wooden Spoon (not the last-place group) is not actionable by
+    anyone -- it must not appear in the attention queue at all, even though
+    it is genuinely unresolved (no ruling was ever needed for it)."""
+    from app.finals import FinalsBracketRepository
+    from tests.finals_helpers import build_finals_ready_season
+    from tests.ladder_tie_ruling_helpers import force_tie
+
+    built = build_finals_ready_season(year=9311)
+    database, season_id = built["database"], built["season"].season_id
+    FinalsBracketRepository(database).create_bracket(
+        season_id,
+        built["finals_competition"].competition_id,
+        built["ordinary_competition_id"],
+        actor=ActorContext.anonymous_operator("test"),
+        reason="freeze finals seeding while the ladder is still untied",
+    )
+    # Only after the bracket exists (and its own seed order is already
+    # frozen) does a mid-ladder correction introduce this tie -- it never
+    # needed a ruling to unblock anything.
+    force_tie(database, built["entries"], built["ordinary_competition_id"], tied_ranks=(3, 4))
+
+    view = _dashboard(database, Facts({}), season_id)
+    assert [item for item in view["attention"] if item["code"].startswith("ladder_tie:")] == []
 
 
 def test_ladder_tie_attention_withdraws_once_a_ruling_resolves_it():

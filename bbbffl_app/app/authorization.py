@@ -217,6 +217,13 @@ CAPABILITIES: dict[Role, frozenset[str]] = {
             "preseason.manage",
             "midseason_draft.manage",
             "midseason_draft.participate",
+            # Issue #241: recording/superseding a ladder tie ruling is
+            # deliberately narrower than `roundsetup.manage` above -- it is
+            # Scorer/Administrator only (`app.routes.ladder_tie_ruling.
+            # require_scorer_or_admin`), excluding both Secretary and
+            # Replay Operator, so it needs its own capability rather than
+            # reusing one already granted to either.
+            "ladder_tie_ruling.manage",
             # Issue #181: legitimate proxy/support access to a coach's
             # private shortlist requires the same explicit represented-entry
             # acting context as any other proxy action -- see

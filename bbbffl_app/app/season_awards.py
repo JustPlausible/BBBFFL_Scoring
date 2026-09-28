@@ -349,7 +349,7 @@ def _resolve_effective_wooden_spoon(conn, database, season_id: str):
     last_place = ladder.rows[-1]
     if last_place.tied:
         try:
-            decided_order = resolve_tie(database, ladder, last_place.tie_group)
+            ruling = resolve_tie(database, ladder, last_place.tie_group)
         except UnresolvedTieError as exc:
             raise UnresolvedWoodenSpoonTieError(
                 f"cannot derive a deterministic wooden spoon for season {season_id}: the mathematical ladder has "
@@ -357,6 +357,7 @@ def _resolve_effective_wooden_spoon(conn, database, season_id: str):
                 "explicit, audited competition-governance determination "
                 f"({'a prior ruling is stale' if exc.stale else 'no ruling has been recorded'})"
             ) from exc
+        decided_order = ruling.decided_order
         last_place_entry_id = decided_order[-1]
     else:
         last_place_entry_id = last_place.season_entry_id

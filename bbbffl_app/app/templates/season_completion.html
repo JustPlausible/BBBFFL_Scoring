@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BBBFFL Season Completion</title>
+<style>
+:root{color-scheme:dark}body{font:15px system-ui;margin:auto;max-width:900px;padding:20px;background:#0f1115;color:#e7e9ee}a{color:#79c0ff}.card{background:#171a21;border:1px solid #303744;border-radius:10px;padding:16px;margin:14px 0}.error{background:#4a1f1f}.success{background:#1f3a24}#message:empty{display:none}input,button{font:inherit;padding:6px;border-radius:6px;background:#222733;color:inherit;border:1px solid #454d5c}input.reason{width:60%}button{cursor:pointer}button.primary{background:#2869a8}button:disabled{opacity:.5;cursor:not-allowed}.muted{color:#aab2c0;font-size:.88rem}.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.8rem;margin-left:8px}.b-ready{background:#1f3a24}.b-not_ready{background:#4a1f1f}.b-completed{background:#1f3a24}table{border-collapse:collapse;width:100%;margin:10px 0}td,th{padding:4px 8px;text-align:left;font-size:.88rem;border-bottom:1px solid #303744}tr.final td{color:#8ee08e}tr.blocked td{color:#e08e8e}.actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}code{background:#222733;padding:1px 4px;border-radius:4px}
+</style>
+</head><body>
+<a href="/admin/season-centre/{{ season_id }}">← Season Centre</a> · <a href="/scorer/season-activation/{{ season_id }}">Season activation</a> · <a href="/scorer/dashboard">Scorer dashboard</a>
+<h1>Season completion</h1>
+<p class="muted">The production-safe <code>active → completed</code> gate (issue #240), reusing <code>app.season_completion.preview_complete_season</code>/<code>complete_season</code> unchanged. Completion is available only to a Scorer or an Administrator, requires an explicit reason, an explicit confirmation, and never happens automatically or from a plain page load.</p>
+<div id="message" class="card"></div>
+<main id="app"><p>Loading season completion readiness…</p></main>
+<section class="card">
+  <h2>Archival verification</h2>
+  <p class="muted">Read-only. Never mutates, never migrates the schema, never locks a row -- production-safe by construction and independent of the 2026-replay-only <code>scripts/season_archival_checkpoint_2026.py</code>, which remains refused in production. Confirms the season has actually observed <code>completed</code> and reports the exact <code>completion_event_id</code>/<code>completed_season_version</code> that archival evidence must be labelled with.</p>
+  <label class="muted">Expected completion event id (optional) <input id="expected-event-id" placeholder="leave blank to just report the current one"></label>
+  <div class="actions"><button id="verify-archival">Verify archival checkpoint</button></div>
+  <div id="archival-result"></div>
+</section>
+<script>
+const seasonId={{ season_id|tojson }}; const csrf={{ csrf_token|tojson }};
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function headers(){const h={'Content-Type':'application/json','X-CSRF-Token':csrf};const t=localStorage.getItem('bbbffl_admin_token');if(t)h['X-Admin-Token']=t;return h}
+async function api(path,body){const r=await fetch(path,{method:body?'POST':'GET',headers:headers(),body:body?JSON.stringify(body):undefined});const d=await r.json().catch(()=>({detail:r.statusText}));if(!r.ok)throw Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail)||r.statusText);return d}
+function say(text,kind='error'){const e=document.querySelector('#message');e.textContent=text;e.className=`card ${kind}`;e.scrollIntoView({block:'nearest'})}
+function roundStatesTable(states){
+  const rows=Object.entries(states||{}).map(([id,state])=>`<tr class="${state==='final'?'final':'blocked'}"><td><code>${esc(id)}</code></td><td>${esc(state)}</td></tr>`).join('');
+  if(!rows)return '';
+  return `<table><thead><tr><th>Required round</th><th>Lifecycle state</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+function successCardHtml(data){
+  const p=data.premiership, w=data.wooden_spoon;
+  return `<div class="card success"><h2>Season completed <span class="badge b-completed">completed</span></h2>
+    <p>Completed-season version <code>${esc(data.completed_season_version)}</code>, completion event <code>${esc(data.completion_event_id)}</code>.</p>
+    <p><strong>Premiership:</strong> ${esc(p.team_name||p.season_entry_id)} ${p.created?'(newly recorded)':'(already recorded, unchanged)'}</p>
+    <p><strong>Wooden spoon:</strong> ${esc(w.team_name||w.season_entry_id)} ${w.created?'(newly recorded)':'(already recorded, unchanged)'}</p>
+    <p class="muted">The season is now permanently fenced against result-changing writes. Run archival verification below before taking the paired backup.</p></div>`;
+}
+function render(data){
+  if(data.lifecycle_state==='completed'){
+    document.querySelector('#app').innerHTML=`<div class="card"><h2>Lifecycle state: <code>completed</code> <span class="badge b-completed">completed</span></h2>
+      <p>This season has already been completed. Use archival verification below to confirm the exact completion event and completed-season version.</p></div>`;
+    verifyArchival(true);
+    return;
+  }
+  const badge=data.ready?'<span class="badge b-ready">Ready</span>':'<span class="badge b-not_ready">Not ready</span>';
+  let action='';
+  if(data.lifecycle_state!=='active'){
+    action=`<p>${esc(data.diagnostic||`this season is ${data.lifecycle_state}; only an active season can be completed`)}</p>`;
+  }else if(data.ready){
+    action=`<p>Every required Finals week (1-4) and every SuperScore round (SS1-SS4) is <code>final</code>. Completing is an explicit, one-way step: the season moves from <code>active</code> to <code>completed</code>, the Premiership and Wooden Spoon are recorded, and the season is permanently fenced against further result-changing writes.</p>
+      <label class="muted">Reason <input class="reason" id="reason" value="Ordinary season, Finals and SuperScore results are final; completing the season"></label>
+      <div class="actions"><button class="primary" id="do-complete">Complete this season</button></div>`;
+  }else{
+    action=`<p>${esc(data.diagnostic||'This season is not ready to complete yet.')}</p>`;
+  }
+  document.querySelector('#app').innerHTML=`<div class="card"><h2>Lifecycle state: <code>${esc(data.lifecycle_state)}</code> ${badge}</h2>
+    ${roundStatesTable(data.round_states)}
+    ${action}</div>`;
+  const b=document.querySelector('#do-complete');
+  if(b)b.onclick=complete;
+}
+async function complete(){
+  const reason=document.querySelector('#reason').value;
+  if(!confirm('Complete this season now? This is irreversible: it records the Premiership and Wooden Spoon, moves the season from active to completed, and permanently fences it against further result-changing writes.'))return;
+  try{
+    const result=await api(`/api/scorer/season-completion/${seasonId}/complete`,{reason});
+    document.querySelector('#app').innerHTML=successCardHtml(result);
+    say('Season completed successfully.','success');
+    verifyArchival(true);
+  }catch(e){say(e.message)}
+}
+async function verifyArchival(quiet){
+  const expected=document.querySelector('#expected-event-id').value.trim();
+  const qs=expected?`?expected_completion_event_id=${encodeURIComponent(expected)}`:'';
+  const out=document.querySelector('#archival-result');
+  try{
+    const result=await api(`/api/scorer/season-completion/${seasonId}/archival-verification${qs}`);
+    out.innerHTML=`<div class="card success"><p>Verified: season <code>${esc(result.season_id)}</code> is completed.</p>
+      <p>Completed-season version <code>${esc(result.completed_season_version)}</code>, completion event <code>${esc(result.completion_event_id)}</code> (recorded ${esc(result.completion_event_occurred_at)}), verified at ${esc(result.verified_at)}.</p></div>`;
+  }catch(e){
+    if(!quiet)out.innerHTML=`<div class="card error">${esc(e.message)}</div>`;
+    else out.innerHTML=`<p class="muted">${esc(e.message)}</p>`;
+  }
+}
+document.querySelector('#verify-archival').onclick=()=>verifyArchival(false);
+async function load(){try{render(await api(`/api/scorer/season-completion/${seasonId}`))}catch(e){say(e.message)}}
+load();
+</script></body></html>

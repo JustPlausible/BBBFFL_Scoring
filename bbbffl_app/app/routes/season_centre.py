@@ -100,6 +100,10 @@ def _season_view(state, season_id: str, principal: Principal):
     # mirroring the `draft`/`opening_round` filtering above.
     if principal.role not in (Role.SCORER, Role.ADMIN):
         view["links"]["season_activation"] = None
+    # Issue #240's season-completion gate is the same Scorer/Administrator-
+    # only authority as season activation above, for the same reason.
+    if principal.role not in (Role.SCORER, Role.ADMIN):
+        view["links"]["season_completion"] = None
     return view
 
 

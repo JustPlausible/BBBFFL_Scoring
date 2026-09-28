@@ -12,7 +12,7 @@ from sqlalchemy import text
 
 from app.audit import ActorContext
 from app.db import connect
-from app.player_pool import PlayerPoolRepository
+from app.player_pool import OwnershipRepository, PlayerPoolRepository
 from app.provisional_players import ProvisionalPlayerRepository, detect_candidates
 from tests.season_setup_helpers import fresh_season
 from tests.test_replay_bootstrap_concurrency import postgres_url  # noqa: F401 -- fixture
@@ -73,3 +73,57 @@ def test_candidate_detection_blocks_behind_a_concurrently_locked_matching_row(po
     assert not thread.is_alive()
     assert outcome["detected"] == 1
     assert pool.get_by_id(canonical.season_player_id).eligible is False
+
+
+def test_candidate_detection_blocks_behind_a_concurrently_locked_provisional_row(postgres_url):  # noqa: F811
+    """Codex review on PR #258 (P1, tenth round): detection must also lock
+    the *provisional* player's own row before deciding whether to
+    quarantine it for an already-owned match -- otherwise a concurrent
+    `OwnershipRepository.acquire_in_transaction` on that exact row could
+    lock it, see it still eligible/unowned, and commit an acquisition
+    before detection's own quarantine `UPDATE` ever runs, leaving both the
+    canonical player and the provisional identity independently owned."""
+    database = connect(postgres_url)
+    season, entries = fresh_season(database)
+    provisional = ProvisionalPlayerRepository(database).create(
+        season.season_id,
+        display_name="Jordan Newrecruit",
+        given_name="Jordan",
+        family_name="Newrecruit",
+        note="verified via club website squad list",
+        actor=SCORER,
+        reason=REASON,
+    )
+    pool = PlayerPoolRepository(database)
+    canonical = pool.refresh_player(
+        season.season_id, 9902, "Jordan Newrecruit", given_name="Jordan", family_name="Newrecruit"
+    )
+    OwnershipRepository(database).acquire(canonical.season_player_id, entries[0].season_entry_id)
+    assert pool.get_by_id(provisional.season_player_id).eligible is True
+
+    lock_conn = connect(postgres_url).engine.connect()
+    lock_txn = lock_conn.begin()
+    lock_conn.execute(
+        text("SELECT * FROM season_player_pool WHERE season_player_id=:id FOR UPDATE"),
+        {"id": provisional.season_player_id},
+    )
+
+    outcome = {}
+
+    def run_detection():
+        db = connect(postgres_url)
+        try:
+            outcome["detected"] = detect_candidates(db, season.season_id, actor=SCORER)
+        finally:
+            db.close()
+
+    thread = Thread(target=run_detection)
+    thread.start()
+    thread.join(timeout=1)
+    assert thread.is_alive(), "candidate detection did not wait for the concurrently held provisional row's lock"
+    lock_txn.commit()
+    lock_conn.close()
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+    assert outcome["detected"] == 1
+    assert pool.get_by_id(provisional.season_player_id).eligible is False

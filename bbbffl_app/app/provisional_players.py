@@ -595,6 +595,22 @@ class ProvisionalPlayerRepository:
                 raise ReconciliationConflictError(
                     "target canonical player already has BBBFFL ownership history and cannot be merged automatically"
                 )
+            # Codex review on PR #258 (P2, tenth round): refuse outright
+            # while some *other* provisional player still has a pending
+            # candidate naming this exact target -- reconciling this one
+            # first would make the target `was_provisional=True`, and the
+            # `was_provisional` refusal above (eighth round) then makes the
+            # other provisional player's candidate permanently unapprovable
+            # (it can only ever be rejected, even if it is genuinely the
+            # same real person). The Scorer must resolve every competing
+            # claim on a target before any one of them can win it.
+            if _other_pending_candidates_exist(
+                conn, source["season_id"], target["canonical_player_id"], excluding_season_player_id=season_player_id
+            ):
+                raise ReconciliationConflictError(
+                    "another provisional player still has a pending candidate naming this same target -- resolve "
+                    "that candidate (reject or reconcile it) before reconciling this one"
+                )
             # Codex review on PR #258 (P2, fifth round): if the target
             # canonical player was already ineligible for an unrelated
             # policy reason before candidate detection quarantined it, that
@@ -972,7 +988,26 @@ def _detect_candidates_for_provisional(
     *provisional* row itself staying eligible and independently draftable
     as the same real person. When a match is already owned, this also
     quarantines the provisional player's own row; `reject_candidate`
-    restores it once no other pending owned-match candidate remains."""
+    restores it once no other pending owned-match candidate remains.
+
+    Locks the provisional player's own row first (Codex review on PR #258,
+    P1, tenth round): without it, a concurrent `acquire_in_transaction` on
+    this exact row (also taken by `season_player_id`, so the two calls
+    contend for the identical lock) could lock, validate (`eligible=TRUE`,
+    unowned) and commit an acquisition on it before this function's later
+    owned-match quarantine `UPDATE` ever touches the row -- at that point
+    the quarantine is just as much a no-op protection as an already-owned
+    *canonical* row's is, and the double-draft has already happened. Taking
+    this lock up front instead makes the two calls serialize on this row:
+    whichever commits first is the one the other observes and correctly
+    refuses against (a concurrent acquire sees this quarantine's
+    `eligible=FALSE`; a concurrent quarantine finds the row already owned,
+    which is itself a harmless no-op, the same as the canonical-row case
+    above)."""
+    conn.execute(
+        "SELECT 1 FROM season_player_pool WHERE season_player_id=?" + _for_update_suffix(database),
+        (season_player_id,),
+    )
     detected = 0
     matches = conn.execute(
         "SELECT season_player_id, canonical_player_id, eligible FROM season_player_pool "

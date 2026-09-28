@@ -477,21 +477,24 @@ def test_rejecting_one_candidate_does_not_release_a_canonical_row_still_pending_
 
 
 def test_reconciliation_does_not_release_a_losing_candidate_still_pending_for_another_provisional_player():
-    """As above, but for `reconcile`'s own losing-candidate cleanup loop."""
+    """As above, but for `reconcile`'s own losing-candidate cleanup loop.
+
+    `winner` deliberately carries no structured name detection could ever
+    match -- reconciling A to it is a manual (undetected) Scorer decision,
+    not the resolution of a suggested candidate. This is required under
+    exact given/family-name matching: A's own losing candidate on `shared`
+    and player_b's candidate on that same `shared` can only coexist if A
+    and B have the identical structured name (both must equal `shared`'s),
+    which would make B match *any* other canonical row sharing that name
+    too -- including `winner`, were it name-matched, which would trip the
+    tenth-round refusal below before this cleanup loop is ever reached."""
     db, season, _entries = setup_domain()
     player_a = _create(db, season.season_id, given="Jordan", family="Newrecruit")
-    player_b = _create(db, season.season_id, given="Jordan2", family="Newrecruit2")
-    with transaction(db) as conn:
-        conn.execute(
-            "UPDATE season_player_pool SET given_name='Jordan', family_name='Newrecruit' WHERE season_player_id=?",
-            (player_b.season_player_id,),
-        )
+    _player_b = _create(db, season.season_id, given="Jordan", family="Newrecruit")
     pool = PlayerPoolRepository(db)
-    winner = pool.refresh_player(
-        season.season_id, 9006, "Jordan Newrecruit One", given_name="Jordan", family_name="Newrecruit"
-    )
+    winner = pool.refresh_player(season.season_id, 9006, "Someone Unrelated")
     shared = pool.refresh_player(
-        season.season_id, 9007, "Jordan Newrecruit Two", given_name="Jordan", family_name="Newrecruit"
+        season.season_id, 9007, "Jordan Newrecruit", given_name="Jordan", family_name="Newrecruit"
     )
     detect_candidates(db, season.season_id, actor=ActorContext.system())
 
@@ -794,18 +797,16 @@ def test_reconciliation_does_not_reapply_a_rejected_winning_candidates_stale_eli
     assert reconciled.eligible is False
 
 
-def test_reconciliation_recreates_another_provisional_players_still_pending_claim_on_the_same_target():
-    """Codex review on PR #258 (P2, seventh round): if some *other*
-    provisional player still has a pending candidate naming the exact
-    canonical id being reconciled here, `fk_candidate_target_same_season`'s
-    `ON DELETE CASCADE` (triggered when the target's own pool row is
-    deleted to make way for the merge) would otherwise silently destroy
-    that unresolved suggestion and let both the merged row and the other
-    provisional player become independently draftable -- this decision
-    only establishes that *this* provisional player is the target, not
-    that the other one is not. Reconciling A must recreate B's claim
-    against the same canonical id (now held by the merged row) and keep
-    that row quarantined until B's claim is itself decided."""
+def test_reconciliation_refuses_a_target_another_provisional_player_still_has_a_pending_claim_on():
+    """Codex review on PR #258 (P2, tenth round): reconciling A to a target
+    while B still has a *pending* candidate naming that exact same target
+    must be refused outright, not allowed through with B's claim silently
+    recreated against the merged row. Once A wins the target, the merged
+    row is `was_provisional=True`, and `reconcile`'s own refusal of such a
+    target (eighth round) would make B's claim permanently unapprovable --
+    rejectable only, even if B genuinely is the same real person. The
+    Scorer must resolve every competing claim on a target before any one
+    of them can win it."""
     db, season, _entries = setup_domain()
     player_a = _create(db, season.season_id, given="Jordan", family="Newrecruit")
     player_b = _create(db, season.season_id, given="Jordan2", family="Newrecruit2")
@@ -821,29 +822,21 @@ def test_reconciliation_recreates_another_provisional_players_still_pending_clai
     detect_candidates(db, season.season_id, actor=ActorContext.system())
 
     provisional = ProvisionalPlayerRepository(db)
-    reconciled = provisional.reconcile(
-        season.season_id, player_a.season_player_id, target.season_player_id, actor=SCORER, reason="Confirmed A"
-    )
+    with pytest.raises(ReconciliationConflictError):
+        provisional.reconcile(
+            season.season_id, player_a.season_player_id, target.season_player_id, actor=SCORER, reason="Confirmed A"
+        )
+    # Refused before writing anything -- A is still plainly provisional.
+    assert pool.get_by_id(player_a.season_player_id).canonical_player_id is None
 
-    # The merged row stays quarantined -- B's claim on the same canonical
-    # id is still open.
-    assert reconciled.eligible is False
-
-    # B's claim survives the cascade, now naming the merged row's canonical
-    # id.
-    remaining = db.execute(
-        "SELECT status FROM provisional_match_candidate WHERE season_player_id=? AND canonical_player_id=?",
-        (player_b.season_player_id, 9705),
-    ).fetchone()
-    assert remaining is not None
-    assert remaining["status"] == "pending"
-
-    # Deciding B's claim now correctly resolves the merged row's
-    # eligibility.
+    # Once B's competing claim is resolved, reconciling A succeeds.
     provisional.reject_candidate(
         season.season_id, player_b.season_player_id, 9705, actor=SCORER, reason="Not the same person as B"
     )
-    assert pool.get_by_id(player_a.season_player_id).eligible is True
+    reconciled = provisional.reconcile(
+        season.season_id, player_a.season_player_id, target.season_player_id, actor=SCORER, reason="Confirmed A"
+    )
+    assert reconciled.canonical_player_id == 9705
 
 
 def test_reconciliation_preserves_a_rejected_pairs_tombstone_across_the_canonical_identity_move():

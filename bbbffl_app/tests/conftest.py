@@ -3,10 +3,58 @@ import pytest
 from app.afl_client import Match, Player, PlayerStatLine, Team
 from app.db import DecisionsRepository
 from app.teams import TeamConfig
+from tests import sqlite_test_template
 from tests.db_helpers import migrated_connection
 
 CATS = Team(team_id=1001, name="Cats")
 PIES = Team(team_id=1002, name="Pies")
+
+
+# Test-only SQLite setup (issue #218): fresh to-head SQLite databases are
+# cloned from one real, session-built migrated template, and test SQLite
+# connections skip fsync. See tests/sqlite_test_template.py for exactly what
+# still runs real Alembic (anything marked real_migrations included).
+def pytest_configure(config):
+    sqlite_test_template.configure(config)
+
+
+def pytest_unconfigure(config):
+    sqlite_test_template.unconfigure()
+
+
+def pytest_sessionstart(session):
+    # Built before any test runs, so its content can never depend on test
+    # order or on whatever a particular test has monkeypatched.
+    template = sqlite_test_template.TEMPLATE
+    if template is not None and template.enabled:
+        template.ensure_built()
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    # Set before any fixture (whatever its scope) can create a database.
+    template = sqlite_test_template.TEMPLATE
+    if template is not None:
+        template.real_migrations_requested = item.get_closest_marker(sqlite_test_template.MARKER) is not None
+    try:
+        yield
+    finally:
+        if template is not None:
+            template.real_migrations_requested = False
+
+
+def pytest_sessionfinish(session, exitstatus):
+    template = sqlite_test_template.TEMPLATE
+    if template is not None and not template.unchanged():
+        # A test wrote to the shared template: isolation would be broken.
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+        print("\n[db-setup] ERROR: the shared migrated SQLite template was modified during the session")
+
+
+def pytest_terminal_summary(terminalreporter):
+    line = sqlite_test_template.summary_line()
+    if line:
+        terminalreporter.write_line(line)
 
 
 @pytest.fixture(autouse=True)

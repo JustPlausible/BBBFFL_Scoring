@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BBBFFL Provisional Players</title>
+<style>
+:root{color-scheme:dark}body{font:15px system-ui;margin:auto;max-width:1000px;padding:20px;background:#0f1115;color:#e7e9ee}a{color:#79c0ff}.card{background:#171a21;border:1px solid #303744;border-radius:10px;padding:16px;margin:14px 0}.error{background:#4a1f1f}.success{background:#1f3a24}#message:empty{display:none}input,button,textarea,select{font:inherit;padding:6px;border-radius:6px;background:#222733;color:inherit;border:1px solid #454d5c}textarea{width:100%;min-height:2.6em}button{cursor:pointer}button.primary{background:#2869a8}button.danger{background:#a53a3a}button.small{padding:2px 8px;font-size:.85rem}button:disabled{opacity:.5;cursor:not-allowed}.muted{color:#aab2c0;font-size:.88rem}.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.8rem;margin-left:8px}.b-ambiguous{background:#4a1f1f}.b-candidate{background:#4a3a1f}.b-plain{background:#2a2f3a}.field{display:flex;flex-direction:column;gap:3px;margin:8px 0}.candidate{background:#222733;border-radius:6px;padding:8px;margin:6px 0}.actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px}dl.facts{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;margin:6px 0;font-size:.85rem}dl.facts dt{color:#aab2c0}
+</style>
+</head><body>
+<a href="/scorer">← Scorer dashboard</a>
+<h1>Provisional players</h1>
+<p class="muted">Issue #242: verify and create a provisional BBBFFL player identity when a legitimate AFL player is not yet represented by afl-api, review any canonical match a later player-pool refresh detects, and explicitly reconcile it. Creation and reconciliation never invent, guess or reuse a fake afl-api id; reconciliation preserves every ownership/draft/lineup/audit record already attached to the provisional player under its existing identity.</p>
+<div id="message" class="card"></div>
+
+<div class="card">
+  <h2>Coach-reported missing players</h2>
+  <div id="nominations"><p class="muted">Loading…</p></div>
+</div>
+
+<div class="card">
+  <h2>Create a provisional player</h2>
+  <p class="muted">Requires a reason/source note -- how you verified this is a real, legitimate AFL player -- and their name as afl-api would report it, so a later canonical match can be detected reliably. No afl-api id is required or accepted here.</p>
+  <form id="create-form">
+    <div class="field"><label>Display name <input id="create-display-name" required></label></div>
+    <div class="field"><label>Given name <input id="create-given-name" required></label></div>
+    <div class="field"><label>Family name <input id="create-family-name" required></label></div>
+    <div class="field"><label>AFL club (if known) <input id="create-afl-club"></label></div>
+    <div class="field"><label>Reason / source (required) <textarea id="create-note" required placeholder="e.g. confirmed via club website squad list, not yet listed in afl-api"></textarea></label></div>
+    <input type="hidden" id="create-nomination-id">
+    <div class="actions"><button type="submit" class="primary">Create provisional player</button></div>
+  </form>
+</div>
+
+<h2>Outstanding provisional players</h2>
+<main id="app"><p>Loading…</p></main>
+
+<script>
+const seasonId={{ season_id|tojson }}; const csrf={{ csrf_token|tojson }};
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function headers(){const h={'Content-Type':'application/json','X-CSRF-Token':csrf};const t=localStorage.getItem('bbbffl_admin_token');if(t)h['X-Admin-Token']=t;return h}
+async function api(path,body){const r=await fetch(path,{method:body?'POST':'GET',headers:headers(),body:body?JSON.stringify(body):undefined});const d=await r.json().catch(()=>({detail:r.statusText}));if(!r.ok)throw Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail)||r.statusText);return d}
+function say(text,kind='error'){const e=document.querySelector('#message');e.textContent=text;e.className=`card ${kind}`;e.scrollIntoView({block:'nearest'})}
+
+function nominationCard(n){
+  return `<div class="candidate" data-nomination="${esc(n.nomination_id)}">
+    <strong>${esc(n.player_name)}</strong>${n.afl_club_note?` (${esc(n.afl_club_note)})`:''}
+    ${n.note?`<div class="muted">${esc(n.note)}</div>`:''}
+    <div class="actions">
+      <button class="small primary" data-act="use-nomination" data-nomination="${esc(n.nomination_id)}" data-name="${esc(n.player_name)}">Use to create provisional player</button>
+      <button class="small danger" data-act="dismiss-nomination" data-nomination="${esc(n.nomination_id)}">Dismiss</button>
+    </div>
+  </div>`;
+}
+
+function candidateCard(seasonPlayerId,c){
+  return `<div class="candidate">
+    <strong>${esc(c.target_display_name||('afl-api #'+c.canonical_player_id))}</strong>${c.target_afl_team_name?` (${esc(c.target_afl_team_name)})`:''}
+    <div class="muted">Match basis: ${esc(c.match_basis)} · detected ${esc(c.detected_at)}</div>
+    <div class="actions">
+      <button class="small primary" data-act="approve" data-player="${esc(seasonPlayerId)}" data-target="${esc(c.target_season_player_id)}">Approve this match</button>
+      <button class="small danger" data-act="reject" data-player="${esc(seasonPlayerId)}" data-canonical="${esc(c.canonical_player_id)}">Reject -- different person</button>
+      <button class="small" data-act="defer" data-player="${esc(seasonPlayerId)}" data-canonical="${esc(c.canonical_player_id)}">Defer</button>
+    </div>
+  </div>`;
+}
+
+function playerCard(row){
+  const badge=row.is_ambiguous?'<span class="badge b-ambiguous">Ambiguous -- needs manual resolution</span>':(row.has_candidate?'<span class="badge b-candidate">Candidate detected</span>':'<span class="badge b-plain">No candidate yet</span>');
+  return `<div class="card" data-player="${esc(row.season_player_id)}">
+    <h3>${esc(row.display_name)} ${badge}</h3>
+    <dl class="facts">
+      <dt>AFL club claimed</dt><dd>${esc(row.afl_team_name||'unknown')}</dd>
+      <dt>Reason/source at creation</dt><dd>${esc(row.provisional_note||'')}</dd>
+      <dt>Created</dt><dd>${esc(row.created_at)}</dd>
+      <dt>Current owner</dt><dd>${row.owner_team_name?esc(row.owner_team_name):'undrafted'}</dd>
+    </dl>
+    ${row.candidates.length?`<h4>Detected candidate${row.candidates.length>1?'s':''}</h4>${row.candidates.map(c=>candidateCard(row.season_player_id,c)).join('')}`:'<p class="muted">No plausible canonical match detected yet. This will be checked again on the next player-pool refresh.</p>'}
+    <details><summary class="muted">Reconcile with a different canonical player</summary>
+      <div class="field"><label>Target season_player_id <input class="manual-target" placeholder="paste the canonical player's season_player_id"></label></div>
+      <div class="actions"><button class="small primary" data-act="approve-manual" data-player="${esc(row.season_player_id)}">Reconcile</button></div>
+    </details>
+  </div>`;
+}
+
+let currentState=null;
+function render(data){
+  currentState=data;
+  document.querySelector('#nominations').innerHTML=data.pending_nominations.length
+    ? data.pending_nominations.map(nominationCard).join('')
+    : '<p class="muted">No pending nominations.</p>';
+  document.querySelector('#app').innerHTML=data.outstanding.length
+    ? data.outstanding.map(playerCard).join('')
+    : '<div class="card success"><p>No provisional players are currently outstanding for this season.</p></div>';
+}
+
+function reasonFor(promptText){const r=prompt(promptText);if(r===null)return null;if(!r.trim()){alert('A reason is required.');return null}return r.trim()}
+
+document.querySelector('#nominations').addEventListener('click', async e => {
+  const btn=e.target.closest('button[data-act]'); if(!btn) return;
+  const nominationId=btn.dataset.nomination;
+  try{
+    if(btn.dataset.act==='use-nomination'){
+      document.getElementById('create-nomination-id').value=nominationId;
+      document.getElementById('create-display-name').value=btn.dataset.name;
+      document.getElementById('create-form').scrollIntoView({block:'center'});
+      say(`Pre-filled the form below from this nomination -- confirm the given/family name and reason, then create.`, 'success');
+    } else if(btn.dataset.act==='dismiss-nomination'){
+      const reason=reasonFor('Why dismiss this nomination?'); if(reason===null) return;
+      render(await api(`/api/scorer/provisional-players/${seasonId}/nominations/${nominationId}/dismiss`,{reason}));
+      say('Nomination dismissed.','success');
+    }
+  }catch(err){say(err.message)}
+});
+
+document.getElementById('create-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  try{
+    const nominationId=document.getElementById('create-nomination-id').value||null;
+    render(await api(`/api/scorer/provisional-players/${seasonId}/create`,{
+      display_name:document.getElementById('create-display-name').value,
+      given_name:document.getElementById('create-given-name').value,
+      family_name:document.getElementById('create-family-name').value,
+      afl_team_name:document.getElementById('create-afl-club').value||null,
+      note:document.getElementById('create-note').value,
+      nomination_id:nominationId
+    }));
+    say('Provisional player created -- they are now in the season pool and can be drafted normally.','success');
+    e.target.reset();
+    document.getElementById('create-nomination-id').value='';
+  }catch(err){say(err.message)}
+});
+
+document.querySelector('#app').addEventListener('click', async e => {
+  const btn=e.target.closest('button[data-act]'); if(!btn) return;
+  try{
+    if(btn.dataset.act==='approve'){
+      if(!confirm('Reconcile this provisional player with the detected canonical match? This preserves all existing history under the same BBBFFL identity.'))return;
+      const reason=reasonFor('Reason for approving this match?'); if(reason===null) return;
+      render(await api(`/api/scorer/provisional-players/${seasonId}/${btn.dataset.player}/reconcile`,{target_season_player_id:btn.dataset.target,reason}));
+      say('Reconciled.','success');
+    } else if(btn.dataset.act==='approve-manual'){
+      const card=btn.closest('.card');
+      const target=card.querySelector('.manual-target').value.trim();
+      if(!target){alert('Enter the target season_player_id.');return}
+      if(!confirm('Reconcile this provisional player with the given target? This preserves all existing history under the same BBBFFL identity.'))return;
+      const reason=reasonFor('Reason for this reconciliation?'); if(reason===null) return;
+      render(await api(`/api/scorer/provisional-players/${seasonId}/${btn.dataset.player}/reconcile`,{target_season_player_id:target,reason}));
+      say('Reconciled.','success');
+    } else if(btn.dataset.act==='reject'){
+      const reason=reasonFor('Why is this not the same player?'); if(reason===null) return;
+      render(await api(`/api/scorer/provisional-players/${seasonId}/${btn.dataset.player}/candidates/reject`,{canonical_player_id:Number(btn.dataset.canonical),reason}));
+      say('Candidate rejected; it is selectable again.','success');
+    } else if(btn.dataset.act==='defer'){
+      render(await api(`/api/scorer/provisional-players/${seasonId}/${btn.dataset.player}/candidates/defer`,{canonical_player_id:Number(btn.dataset.canonical)}));
+      say('Deferred -- no change made.','success');
+    }
+  }catch(err){say(err.message)}
+});
+
+async function load(){try{render(await api(`/api/scorer/provisional-players/${seasonId}`))}catch(e){say(e.message)}}
+load();
+</script></body></html>

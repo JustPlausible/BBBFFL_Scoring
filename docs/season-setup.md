@@ -53,6 +53,12 @@ The page pre-fills a sensible default reason.
      - afl-api returns an incomplete or malformed list (for example bad
        paging, a repeated player, or a player with no resolved club);
      - the app runs in replay mode.
+   - Once the refresh commits, it also checks every currently provisional
+     player in this season (issue #242 -- see
+     [`player-pool-ownership.md`](player-pool-ownership.md#provisional-players-issue-242))
+     for a plausible newly-arrived canonical match, purely as a suggestion for
+     Scorer/Administrator review at `/scorer/provisional-players/{season_id}`
+     -- never automatic reconciliation.
 3. **Ordinary competition.** One click creates the `ordinary` rules version (or
    reuses a single existing one), the ordinary competition stream, and Rounds
    1 to N, where N is the season's `regular_season_round_count`. This is one
@@ -210,7 +216,11 @@ It has not been rehearsed in a real production deployment.
 
 ## Not in scope
 
-- Provisional (not-yet-afl-api) players.
+- Provisional (not-yet-afl-api) player creation and reconciliation -- a
+  separate browser workflow at `/scorer/provisional-players/{season_id}`
+  (issue #242); this page's own player-pool refresh only *detects* a
+  plausible candidate match for Scorer/Administrator review there, per
+  the note above.
 - Coach credential provisioning.
 - The `setup → active` gate -- see [`season-activation.md`](season-activation.md)
   (issue #239), a separate browser workflow with its own, narrower

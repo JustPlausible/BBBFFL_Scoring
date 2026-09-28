@@ -29,6 +29,17 @@
   form { margin-top: 18px; }
   button { font-size: 0.9rem; padding: 8px 14px; border-radius: 6px; border: 1px solid #a53a3a; background: #a53a3a; color: white; cursor: pointer; }
   button:hover { background: #8f3232; }
+  .notice { background: #2a2412; border: 1px solid #6b5a1f; border-radius: 7px; padding: 10px 12px; margin: 10px 0; font-size: 0.85rem; }
+  .notice h3 { margin: 0 0 4px; font-size: 0.92rem; }
+  .notice .squad { color: #ffcf7a; }
+  .nominate summary { cursor: pointer; color: #9aa3b2; font-size: 0.85rem; margin-top: 14px; }
+  .nominate .field { display: flex; flex-direction: column; gap: 3px; margin: 8px 0; }
+  .nominate input, .nominate textarea { font: inherit; padding: 6px; border-radius: 6px; background: #202838; color: inherit; border: 1px solid #3a4152; }
+  .nominate button[type="submit"] { background: #2869a8; border-color: #2869a8; }
+  .nominate button[type="submit"]:hover { background: #1f5286; }
+  .nominate .status { font-size: 0.82rem; min-height: 1.2em; margin-top: 6px; }
+  .nominate .status.ok { color: #7ee787; }
+  .nominate .status.err { color: #ff7b72; }
 </style>
 </head>
 <body>
@@ -68,6 +79,66 @@
         });
       }
     </script>
+    {% if provisional_notices %}
+    {% for notice in provisional_notices %}
+    <div class="notice">
+      <h3>Provisional player{{ 's' if notice.outstanding_count != 1 else '' }} awaiting reconciliation -- {{ notice.season_label }}</h3>
+      <div>{{ notice.outstanding_count }} player{{ 's' if notice.outstanding_count != 1 else '' }} in this season {{ 'are' if notice.outstanding_count != 1 else 'is' }} still waiting for a Scorer/Administrator to confirm their canonical afl-api identity.
+        {% if notice.on_my_squad %}<span class="squad"> On your squad: {{ notice.on_my_squad|join(', ') }}.</span>{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+    {% endif %}
+    {% if nomination_context %}
+    <details class="nominate">
+      <summary>Missing a player from the draft pool? Report it</summary>
+      <p class="muted">If a legitimate AFL player you want to draft is not yet in the player pool, report them here. A Scorer/Administrator will verify and add them as a provisional player before you can draft them -- you cannot create the player identity yourself.</p>
+      <form id="nominate-form">
+        <div class="field"><label for="nominate-name">Player name</label><input id="nominate-name" required></div>
+        <div class="field"><label for="nominate-club">AFL club (if known)</label><input id="nominate-club"></div>
+        <div class="field"><label for="nominate-note">Why do you think they're missing?</label><textarea id="nominate-note" rows="2"></textarea></div>
+        <button type="submit">Report missing player</button>
+        <div class="status" id="nominate-status"></div>
+      </form>
+    </details>
+    <script>
+      (function () {
+        var form = document.getElementById('nominate-form');
+        if (!form) return;
+        var status = document.getElementById('nominate-status');
+        var seasonId = {{ nomination_context.season_id|tojson }};
+        var seasonEntryId = {{ nomination_context.season_entry_id|tojson }};
+        var csrfToken = {{ csrf_token|tojson }};
+        form.addEventListener('submit', function (event) {
+          event.preventDefault();
+          status.textContent = '';
+          status.className = 'status';
+          fetch('/api/account/player-nominations/' + seasonEntryId, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({
+              season_id: seasonId,
+              player_name: document.getElementById('nominate-name').value,
+              afl_club_note: document.getElementById('nominate-club').value || null,
+              note: document.getElementById('nominate-note').value || null
+            })
+          }).then(function (response) {
+            return response.json().catch(function () { return {}; }).then(function (data) {
+              if (!response.ok) throw new Error(data.detail || response.statusText);
+              return data;
+            });
+          }).then(function () {
+            status.textContent = 'Reported to the Scorer/Administrator for review.';
+            status.className = 'status ok';
+            form.reset();
+          }).catch(function (err) {
+            status.textContent = err.message;
+            status.className = 'status err';
+          });
+        });
+      })();
+    </script>
+    {% endif %}
     {% if has_admin_dashboard_access %}<div class="rounds">
       <button type="button" class="link-button" id="open-admin-dashboard">
         <span class="round-label">Administrator Dashboard →</span>

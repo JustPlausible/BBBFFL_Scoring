@@ -98,6 +98,7 @@ PUBLIC_ROUND_CENTRE_URL = "/seasons/{season_id}/rounds/{round_id}"
 SCORER_DASHBOARD_URL = "/scorer?season_id={season_id}&round_id={round_id}"
 MIDSEASON_DRAFT_URL = "/admin/midseason-draft/{season_id}"
 LADDER_TIE_RULING_URL = "/scorer/ladder-tie-ruling/{season_id}"
+PROVISIONAL_PLAYERS_URL = "/scorer/provisional-players/{season_id}"
 
 
 @dataclass(frozen=True)
@@ -968,6 +969,62 @@ def _ladder_tie_ruling_attention(database, season_id: str) -> list[dict]:
     return items
 
 
+def _provisional_players_attention(database, season_id: str) -> list[dict]:
+    """Issue #242: surface every currently outstanding provisional player
+    (`canonical_player_id IS NULL`) through the Scorer Operations attention
+    queue, persistently -- unlike a dismiss-once notification, this reflects
+    `app.provisional_players`'s own read model fresh on every dashboard
+    load, so it remains present for as long as the underlying player is
+    provisional and disappears automatically the moment a Scorer/
+    Administrator reconciles it (see `app.provisional_players.
+    ProvisionalPlayerRepository.list_outstanding`). Also surfaces any
+    pending Coach nomination not yet acted on."""
+    from app.provisional_players import PlayerNominationRepository, ProvisionalPlayerRepository
+
+    outstanding = ProvisionalPlayerRepository(database).list_outstanding(season_id)
+    pending_nominations = PlayerNominationRepository(database).list_for_season(season_id, status="pending")
+    items: list[dict] = []
+    if outstanding:
+        ambiguous = sum(1 for row in outstanding if row.is_ambiguous)
+        with_candidate = sum(1 for row in outstanding if row.has_candidate and not row.is_ambiguous)
+        detail_parts = [f"{len(outstanding)} provisional player(s) awaiting a canonical afl-api identity"]
+        if with_candidate:
+            detail_parts.append(f"{with_candidate} with a detected candidate match to review")
+        if ambiguous:
+            detail_parts.append(f"{ambiguous} with multiple ambiguous candidates requiring manual resolution")
+        items.append(
+            {
+                "category": CATEGORY_DECISION_REQUIRED if (with_candidate or ambiguous) else CATEGORY_WAITING,
+                "code": "provisional_players:outstanding",
+                "title": "Provisional players awaiting reconciliation",
+                "detail": ", ".join(detail_parts) + ". See Provisional players.",
+                "state": None,
+                "timestamp": None,
+                "capability": "provisional_player.manage",
+                "url": PROVISIONAL_PLAYERS_URL.format(season_id=season_id),
+                "diagnostics": None,
+            }
+        )
+    if pending_nominations:
+        items.append(
+            {
+                "category": CATEGORY_DECISION_REQUIRED,
+                "code": "provisional_players:pending_nominations",
+                "title": "Coach player nominations awaiting review",
+                "detail": (
+                    f"{len(pending_nominations)} Coach-reported missing player(s) await verification -- see "
+                    "Provisional players."
+                ),
+                "state": None,
+                "timestamp": None,
+                "capability": "provisional_player.manage",
+                "url": PROVISIONAL_PLAYERS_URL.format(season_id=season_id),
+                "diagnostics": None,
+            }
+        )
+    return items
+
+
 def _determine_next_action(
     *,
     database,
@@ -1595,6 +1652,7 @@ def _build_round_dashboard(
             }
         )
     attention += _ladder_tie_ruling_attention(database, season.season_id)
+    attention += _provisional_players_attention(database, season.season_id)
     attention.sort(key=_sort_key)
 
     next_round = next(

@@ -854,7 +854,10 @@ def bootstrap_first_half(database, config: ReplayConfig) -> dict:
         if not existing_players:
             for player in config.players:
                 conn.execute(
-                    "INSERT INTO season_player_pool VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO season_player_pool "
+                    "(season_player_id, season_id, canonical_player_id, display_name, afl_team_id, afl_team_name, "
+                    "eligible, source_provider, source_fetched_at, source_updated_at, created_at, updated_at, "
+                    "given_name, family_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         _id(),
                         season_id,

@@ -200,6 +200,12 @@ CAPABILITIES: dict[Role, frozenset[str]] = {
             "player_pool.read",
             "midseason_draft.participate",
             "shortlist.manage",
+            # Issue #242: a Coach may report/nominate a missing player, but
+            # never create the provisional identity itself -- see
+            # `app.routes.provisional_players`'s module docstring and the
+            # "provisional_player.manage" capability below (Scorer/
+            # Administrator only), which is deliberately *not* granted here.
+            "provisional_player.nominate",
         }
     ),
     Role.SCORER: frozenset(
@@ -229,6 +235,15 @@ CAPABILITIES: dict[Role, frozenset[str]] = {
             # acting context as any other proxy action -- see
             # `app.routes.shortlist`'s module docstring.
             "shortlist.manage",
+            # Issue #242: verifying/creating a provisional player and
+            # deciding a detected canonical-match candidate (approve/
+            # reject/defer) or reconciling one is Scorer/Administrator
+            # only -- deliberately narrower than `player_pool.manage`
+            # above (Secretary's ordinary pool-refresh authority), and
+            # deliberately not granted to Replay Operator: this workflow
+            # governs a live/current-season identity question, not
+            # historical replay data. See `app.routes.provisional_players`.
+            "provisional_player.manage",
         }
     ),
     Role.SECRETARY: frozenset(

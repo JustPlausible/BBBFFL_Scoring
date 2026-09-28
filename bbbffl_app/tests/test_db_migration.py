@@ -117,6 +117,8 @@ EXPECTED_TABLES = {
     "season_award",
     "coach_draft_shortlist",
     "ladder_tie_ruling",
+    "player_nomination",
+    "provisional_match_candidate",
 }
 
 
@@ -1564,6 +1566,171 @@ def test_ladder_tie_ruling_downgrade_succeeds_with_no_recorded_ruling(tmp_path):
     downgrade(url, "0036_player_structured_names")
     engine = create_engine(url)
     assert "ladder_tie_ruling" not in set(inspect(engine).get_table_names())
+    engine.dispose()
+    migrate(url)  # re-upgrading afterward remains harmless
+
+
+# -- 0038: provisional players (issue #242) -----------------------------------
+
+
+def _insert_pre_0038_season_player(
+    connection, *, season_id, canonical_player_id, display_name, given_name=None, family_name=None
+):
+    """Raw insert matching the pre-0038 14-column `season_player_pool` shape
+    (0006's 12 columns plus 0036's `given_name`/`family_name`, but before
+    `was_provisional`/`provisional_note`/`provisional_reconciled_at` and the
+    nullable `canonical_player_id` this revision adds)."""
+    season_player_id = str(uuid4())
+    now = "2026-01-01T00:00:00+00:00"
+    with transaction(connection) as conn:
+        conn.execute(
+            "INSERT INTO season_player_pool VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                season_player_id,
+                season_id,
+                canonical_player_id,
+                display_name,
+                None,
+                None,
+                True,
+                "afl-api-v1",
+                now,
+                None,
+                now,
+                now,
+                given_name,
+                family_name,
+            ),
+        )
+    return season_player_id
+
+
+def test_existing_canonical_player_data_survives_the_0038_upgrade(tmp_path):
+    """Every pre-0038 database has only canonical (positive, non-null
+    `canonical_player_id`) rows -- the migration must not disturb them, and
+    they must remain fully usable through the ordinary repository once
+    `canonical_player_id` becomes nullable and the new provisional columns
+    exist."""
+    url = _url(tmp_path / "provisional-players-upgrade.db")
+    migrate(url, "0037_ladder_tie_ruling")
+    connection = connect(url)
+    season = SeasonRepository(connection).create_season(2074, "2074 provisional-players migration check")
+    canonical_id = 481
+    _insert_pre_0038_season_player(
+        connection, season_id=season.season_id, canonical_player_id=canonical_id, display_name="Existing Canonical"
+    )
+    connection.close()
+
+    migrate(url)
+    engine = create_engine(url)
+    columns = {c["name"]: c["nullable"] for c in inspect(engine).get_columns("season_player_pool")}
+    assert columns["canonical_player_id"] is True
+    assert columns["was_provisional"] is False
+    assert columns["provisional_note"] is True
+    assert columns["provisional_reconciled_at"] is True
+    engine.dispose()
+
+    connection = connect(url)
+    pool = PlayerPoolRepository(connection)
+    existing = pool.get(season.season_id, canonical_id)
+    assert existing.canonical_player_id == canonical_id
+    assert existing.was_provisional is False
+    assert existing.provisional_note is None
+
+    # A fresh canonical refresh (the ordinary live player-pool import path)
+    # still works unchanged.
+    refreshed = pool.refresh_player(season.season_id, 482, "Fresh Canonical Player")
+    assert refreshed.canonical_player_id == 482
+    connection.close()
+
+
+def test_provisional_player_lifecycle_works_after_the_0038_upgrade(tmp_path):
+    """The new provisional -> canonical lifecycle (issue #242) is usable
+    immediately on a freshly migrated database, alongside pre-existing
+    canonical data."""
+    url = _url(tmp_path / "provisional-players-lifecycle.db")
+    migrate(url, "0037_ladder_tie_ruling")
+    connection = connect(url)
+    season = SeasonRepository(connection).create_season(2075, "2075 provisional-players lifecycle")
+    _insert_pre_0038_season_player(
+        connection, season_id=season.season_id, canonical_player_id=491, display_name="Pre-migration Canonical"
+    )
+    connection.close()
+    migrate(url)
+
+    from app.audit import ActorContext
+    from app.provisional_players import ProvisionalPlayerRepository
+
+    connection = connect(url)
+    provisional = ProvisionalPlayerRepository(connection).create(
+        season.season_id,
+        display_name="Jordan Newrecruit",
+        given_name="Jordan",
+        family_name="Newrecruit",
+        note="verified via club website squad list",
+        actor=ActorContext.anonymous_operator("scorer"),
+    )
+    assert provisional.canonical_player_id is None
+    assert provisional.was_provisional is True
+
+    canonical = PlayerPoolRepository(connection).refresh_player(season.season_id, 492, "Jordan Newrecruit")
+    reconciled = ProvisionalPlayerRepository(connection).reconcile(
+        season.season_id,
+        provisional.season_player_id,
+        canonical.season_player_id,
+        actor=ActorContext.anonymous_operator("scorer"),
+        reason="confirmed same player",
+    )
+    assert reconciled.season_player_id == provisional.season_player_id
+    assert reconciled.canonical_player_id == 492
+    connection.close()
+
+
+def test_provisional_players_downgrade_refuses_loss_of_provisional_data(tmp_path):
+    """A provisional player (`canonical_player_id IS NULL`, or a reconciled
+    one still carrying `was_provisional`) cannot be represented by the
+    pre-0038 schema's `NOT NULL`/positive `canonical_player_id` constraint
+    -- the downgrade must refuse rather than silently drop or corrupt it."""
+    url = _url(tmp_path / "provisional-players-downgrade-refused.db")
+    migrate(url)
+    connection = connect(url)
+    season = SeasonRepository(connection).create_season(2076, "2076 provisional-players downgrade refusal")
+
+    from app.audit import ActorContext
+    from app.provisional_players import ProvisionalPlayerRepository
+
+    ProvisionalPlayerRepository(connection).create(
+        season.season_id,
+        display_name="Jordan Newrecruit",
+        given_name="Jordan",
+        family_name="Newrecruit",
+        note="verified",
+        actor=ActorContext.anonymous_operator("scorer"),
+    )
+    connection.close()
+
+    with pytest.raises(RuntimeError, match="0038 downgrade refused"):
+        downgrade(url, "0037_ladder_tie_ruling")
+
+
+def test_provisional_players_downgrade_succeeds_with_only_canonical_data(tmp_path):
+    """The downgrade round-trips cleanly for the canonical-only data every
+    pre-0038 database actually has."""
+    url = _url(tmp_path / "provisional-players-downgrade-ok.db")
+    migrate(url)
+    connection = connect(url)
+    season = SeasonRepository(connection).create_season(2077, "2077 provisional-players downgrade success")
+    PlayerPoolRepository(connection).refresh_player(season.season_id, 501, "Canonical Only Player")
+    connection.close()
+
+    downgrade(url, "0037_ladder_tie_ruling")
+    engine = create_engine(url)
+    columns = {c["name"] for c in inspect(engine).get_columns("season_player_pool")}
+    assert "was_provisional" not in columns
+    assert "provisional_note" not in columns
+    assert "provisional_reconciled_at" not in columns
+    assert "player_nomination" not in set(inspect(engine).get_table_names())
+    assert "provisional_match_candidate" not in set(inspect(engine).get_table_names())
     engine.dispose()
     migrate(url)  # re-upgrading afterward remains harmless
 

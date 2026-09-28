@@ -228,6 +228,21 @@ SEASON_COMPLETION = {"app.season_awards", "app.season_completion", "app.season_a
 # finals_preflight` (see this file's ROUND_REVIEW comment).
 LADDER_GOVERNANCE = {"app.ladder_tie_ruling"}
 
+# Provisional player creation, Coach nomination and canonical afl-api
+# reconciliation (issue #242). Sits directly on `app.player_pool` (season
+# player pool / ownership) and `app.season` (the completed-season write
+# fence) -- but, like `app.ladder_tie_ruling`, must stay a sibling of the
+# season model: the season model must never depend back on it. `app.
+# season_setup` (an application-service layer above the season model, not
+# part of it) is its one sanctioned in-process caller, invoking
+# `detect_candidates` once a live player-pool refresh commits -- kept a
+# separate call/transaction rather than folded into `app.player_pool.
+# PlayerPoolRepository.refresh_season_pool` itself, for exactly this
+# layering reason. It is also imported directly by its own thin route
+# (`app.routes.provisional_players`), the same shape as `app.routes.
+# ladder_tie_ruling`.
+PROVISIONAL_PLAYERS = {"app.provisional_players"}
+
 # Anonymous ordinary-season presentation/read service (issue #78).  It is an
 # allow-listed DTO layer above the persisted review and ladder boundaries;
 # routes may import it, while it never depends on HTTP or the composition root.
@@ -461,6 +476,7 @@ ROUTES = {
     "app.routes.season_activation",
     "app.routes.season_completion",
     "app.routes.ladder_tie_ruling",
+    "app.routes.provisional_players",
 }
 
 COMPOSITION_ROOT = {"app.main"}
@@ -479,6 +495,7 @@ ALL_GROUPS = (
     | SUPERSCORE
     | SEASON_COMPLETION
     | LADDER_GOVERNANCE
+    | PROVISIONAL_PLAYERS
     | PUBLIC_READ_MODEL
     | PUBLIC_FINALS_READ_MODEL
     | OPENING_ROUND
@@ -796,6 +813,26 @@ def test_ladder_governance_is_an_application_service(graph):
 
     for module in sorted(SEASON_MODEL | LOCKOUTS | WEEKLY_SUBMISSION_SOURCES):
         offending = graph[module] & LADDER_GOVERNANCE
+        assert not offending, f"{module} must not depend on {sorted(offending)}"
+
+
+def test_provisional_players_is_an_application_service(graph):
+    """`app.provisional_players` (issue #242) sits directly on `app.
+    player_pool` and `app.season` -- but must stay a sibling of the Grand
+    Final vertical and must never depend on lockouts, routes, or the
+    composition root, exactly like `app.ladder_tie_ruling`. The reverse
+    direction also holds for the season model/lockouts/weekly-submission-
+    sources: they may not depend back on it -- `app.player_pool` in
+    particular never calls its `detect_candidates`; that happens one layer
+    up, in `app.season_setup`, immediately after a live player-pool refresh
+    commits -- see this file's PROVISIONAL_PLAYERS comment."""
+    forbidden = GRAND_FINAL_VERTICAL | LOCKOUTS | ROUTES | COMPOSITION_ROOT
+    for module in sorted(PROVISIONAL_PLAYERS):
+        offending = graph[module] & forbidden
+        assert not offending, f"{module} must not depend on {sorted(offending)}"
+
+    for module in sorted(SEASON_MODEL | LOCKOUTS | WEEKLY_SUBMISSION_SOURCES):
+        offending = graph[module] & PROVISIONAL_PLAYERS
         assert not offending, f"{module} must not depend on {sorted(offending)}"
 
 

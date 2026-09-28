@@ -156,6 +156,94 @@ def test_player_pool_refresh_persists_and_updates_structured_names():
     assert pool.get(season.season_id, 9001).given_name == "Nicholas"
 
 
+def test_player_pool_refresh_atomically_quarantines_a_provisional_players_candidate():
+    """Issue #242 (Codex review on PR #258, P1): `refresh_player_pool`
+    quarantines a freshly-imported canonical duplicate of a provisional
+    player in the *same* transaction as the refresh that imported it --
+    never a separate, later call -- so the row is never observably
+    eligible/draftable even momentarily. A single call to
+    `refresh_player_pool` is enough to prove this: if detection had run
+    separately (and had not yet been called), the new row would still be
+    eligible right after this call returns."""
+    from app.provisional_players import ProvisionalPlayerRepository
+
+    database = migrated_connection()
+    season, _entries = fresh_season(database)
+    ProvisionalPlayerRepository(database).create(
+        season.season_id,
+        display_name="Jordan Newrecruit",
+        given_name="Jordan",
+        family_name="Newrecruit",
+        note="verified via club website squad list",
+        actor=SCORER,
+    )
+    afl = SetupAfl(
+        players=[
+            SeasonPlayerRecord(
+                9099, "Jordan Newrecruit", Team(1, "Adelaide"), given_name="Jordan", family_name="Newrecruit"
+            )
+        ]
+    )
+    refresh_player_pool(database, afl, season.season_id, 77, actor=SCORER, reason=REASON)
+
+    pool = PlayerPoolRepository(database)
+    imported = pool.get(season.season_id, 9099)
+    assert imported.eligible is False
+
+
+def test_player_pool_refresh_reports_provisional_rows_in_the_pool_size():
+    """Codex review on PR #258 (P3, fifth round): `existing` deliberately
+    excludes provisional rows so they never collide on the `None` dict key
+    (see `refresh_season_pool_in_transaction`), but the reported
+    `pool_size` must still count them -- it is expected to match
+    `PlayerPoolRepository.summary()`'s total, which does."""
+    from app.provisional_players import ProvisionalPlayerRepository
+
+    database = migrated_connection()
+    season, _entries = fresh_season(database)
+    ProvisionalPlayerRepository(database).create(
+        season.season_id,
+        display_name="Jordan Newrecruit",
+        given_name="Jordan",
+        family_name="Newrecruit",
+        note="verified via club website squad list",
+        actor=SCORER,
+    )
+    result = refresh_player_pool(
+        database, SetupAfl(players=season_players(5)), season.season_id, 77, actor=SCORER, reason=REASON
+    )
+    assert result["pool_size"] == 6
+    pool = PlayerPoolRepository(database)
+    assert pool.summary(season.season_id)["total"] == 6
+
+
+def test_player_pool_refresh_audit_event_reports_an_unchanged_pool_size_with_provisional_players():
+    """Codex review on PR #258 (P3, eleventh round): `before_state` must
+    also count provisional rows, the same as `after_state`'s `pool_size`
+    -- otherwise refreshing an *unchanged* pool that includes a
+    provisional player falsely reports the pool growing by that many
+    players in the refresh audit event."""
+    from app.provisional_players import ProvisionalPlayerRepository
+
+    database = migrated_connection()
+    season, _entries = fresh_season(database)
+    ProvisionalPlayerRepository(database).create(
+        season.season_id,
+        display_name="Jordan Newrecruit",
+        given_name="Jordan",
+        family_name="Newrecruit",
+        note="verified via club website squad list",
+        actor=SCORER,
+    )
+    players = season_players(5)
+    refresh_player_pool(database, SetupAfl(players=players), season.season_id, 77, actor=SCORER, reason=REASON)
+    refresh_player_pool(database, SetupAfl(players=players), season.season_id, 77, actor=SCORER, reason=REASON)
+
+    events = AuditEventRepository(database).list_events(action="player_pool.season.refreshed")
+    second = events[-1]
+    assert second.before_state["pool_size"] == second.after_state["pool_size"] == 6
+
+
 def test_player_pool_refresh_never_deletes_or_changes_eligibility_or_ownership():
     database = migrated_connection()
     season, entries = fresh_season(database)
@@ -322,6 +410,33 @@ def test_squad_limit_repeat_is_a_no_op_and_change_after_draft_is_refused():
     with pytest.raises(SeasonSetupError, match="cannot change after the season draft is accepted"):
         configure_squad_limit(database, season.season_id, 5, actor=SCORER, reason=REASON)
     assert table_counts(database, *STRUCTURE_TABLES) == before
+
+
+def test_accepting_draft_order_ignores_a_provisional_player_when_checking_the_live_pool_provider():
+    """Codex review on PR #258 (P1, sixth round): a provisional player
+    (issue #242) created before the preseason draft order is accepted --
+    the primary workflow that feature supports -- is cached under
+    `source_provider=PROVISIONAL_SOURCE_PROVIDER`, never a live afl-api
+    provider. `_live_pool_afl_season_id`'s "exactly one provider" check
+    must exclude it, or the draft could never start while any provisional
+    player exists."""
+    from app.provisional_players import ProvisionalPlayerRepository
+
+    database = migrated_connection()
+    season, entries = fresh_season(database)
+    ProvisionalPlayerRepository(database).create(
+        season.season_id,
+        display_name="Jordan Newrecruit",
+        given_name="Jordan",
+        family_name="Newrecruit",
+        note="verified via club website squad list",
+        actor=SCORER,
+    )
+    _ready_for_draft(database, season, SetupAfl())
+    result = accept_draft_order(
+        database, NO_OPENING, season.season_id, [e.season_entry_id for e in entries], actor=SCORER, reason=REASON
+    )
+    assert result["created"] is True
 
 
 def test_draft_order_refuses_each_missing_prerequisite_without_writing():

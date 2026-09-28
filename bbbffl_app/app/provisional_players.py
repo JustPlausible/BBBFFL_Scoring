@@ -78,7 +78,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from app.audit import ActorContext, append_event
+from app.audit import ActorContext, append_event, new_correlation_id
 from app.db import _for_update_suffix, transaction
 from app.player_pool import PlayerPoolRepository, SeasonPlayer
 from app.season import SeasonRepository
@@ -100,6 +100,7 @@ CANDIDATE_DETECTED = "player_pool.provisional.candidate_detected"
 CANDIDATE_REJECTED = "player_pool.provisional.candidate_rejected"
 CANDIDATE_DEFERRED = "player_pool.provisional.candidate_deferred"
 PROVISIONAL_RECONCILED = "player_pool.provisional.reconciled"
+PROVISIONAL_ELIGIBILITY_RESYNCED = "player_pool.provisional.eligibility_resynced"
 
 ENTITY_TYPE_NOMINATION = "player_pool.nomination"
 ENTITY_TYPE_PROVISIONAL_PLAYER = "player_pool.provisional_player"
@@ -398,12 +399,21 @@ class ProvisionalPlayerRepository:
                     note.strip(),
                 ),
             )
+            # Codex review on PR #258 (P2, twelfth round): when this create
+            # resolves a nomination, the PROVISIONAL_CREATED and
+            # NOMINATION_RESOLVED events below describe one atomic command
+            # and must share a correlation_id -- otherwise `append_event`
+            # assigns each its own random one, breaking correlation-based
+            # audit queries that are meant to find both sides of this
+            # command together.
+            creation_correlation_id = new_correlation_id()
             append_event(
                 conn,
                 actor=actor,
                 action=PROVISIONAL_CREATED,
                 entity_type=ENTITY_TYPE_PROVISIONAL_PLAYER,
                 entity_id=season_player_id,
+                correlation_id=creation_correlation_id,
                 reason=reason or note.strip(),
                 after_state={
                     "season_id": season_id,
@@ -427,6 +437,7 @@ class ProvisionalPlayerRepository:
                     action=NOMINATION_RESOLVED,
                     entity_type=ENTITY_TYPE_NOMINATION,
                     entity_id=nomination_id,
+                    correlation_id=creation_correlation_id,
                     reason=reason,
                     before_state={"status": "pending"},
                     after_state={"status": "created", "resulting_season_player_id": season_player_id},
@@ -929,7 +940,22 @@ def detect_candidates_in_transaction(conn, database, season_id: str, *, actor: A
     without them) is simply skipped -- there is nothing reliable to match
     on. A pair already explicitly rejected by a Scorer/Administrator
     (`reject_candidate`) is never re-suggested. Returns the number of newly
-    recorded candidate rows."""
+    recorded candidate rows.
+
+    Also resyncs owned-match quarantines (issue #242, Codex review on PR
+    #258, P2, twelfth round): `_detect_candidates_for_provisional` can
+    quarantine a provisional row itself when its matched canonical player
+    is already owned (ninth/tenth/eleventh rounds), but
+    `OwnershipRepository.release_in_transaction` -- in `app.player_pool`,
+    the season model this module must stay a sibling of, never depended
+    back on by it -- only closes the ownership period and never touches
+    `eligible`. Nothing else notices when that release happens, so a
+    provisional row quarantined this way would otherwise stay incorrectly
+    ineligible forever once the conflict it was quarantined for is gone.
+    Every live pool refresh (`app.season_setup.refresh_player_pool`) and
+    every standalone `detect_candidates` call now re-checks and restores
+    such rows, the same periodic-reconciliation shape this function
+    already gives quarantine itself."""
     SeasonRepository(database).guard_writable(conn, season_id)
     detected = 0
     provisional_rows = conn.execute(
@@ -948,6 +974,7 @@ def detect_candidates_in_transaction(conn, database, season_id: str, *, actor: A
             provisional["family_name"],
             actor=actor,
         )
+    _resync_owned_match_quarantines(conn, season_id, actor=actor)
     return detected
 
 
@@ -1188,3 +1215,39 @@ def _provisional_has_pending_owned_match_candidate(conn, season_id: str, season_
         (season_id, season_player_id),
     ).fetchone()
     return row is not None
+
+
+def _resync_owned_match_quarantines(conn, season_id: str, *, actor: ActorContext) -> int:
+    """Restore any currently-ineligible provisional row that no longer has
+    a pending owned-match candidate (issue #242, Codex review on PR #258,
+    P2, twelfth round) -- see `detect_candidates_in_transaction`'s
+    docstring for why this exists. Nothing else in this codebase ever sets
+    a provisional row's own `eligible` to `FALSE`, so it is always safe to
+    restore one here once `_provisional_has_pending_owned_match_candidate`
+    says no conflict remains. Returns the number of rows restored."""
+    ineligible_provisional_rows = conn.execute(
+        "SELECT season_player_id FROM season_player_pool "
+        "WHERE season_id=? AND canonical_player_id IS NULL AND eligible=FALSE",
+        (season_id,),
+    ).fetchall()
+    restored = 0
+    for row in ineligible_provisional_rows:
+        season_player_id = row["season_player_id"]
+        if _provisional_has_pending_owned_match_candidate(conn, season_id, season_player_id):
+            continue
+        conn.execute(
+            "UPDATE season_player_pool SET eligible=TRUE WHERE season_player_id=?",
+            (season_player_id,),
+        )
+        append_event(
+            conn,
+            actor=actor,
+            action=PROVISIONAL_ELIGIBILITY_RESYNCED,
+            entity_type=ENTITY_TYPE_PROVISIONAL_PLAYER,
+            entity_id=season_player_id,
+            reason="no pending candidate whose target is still owned remains",
+            before_state={"eligible": False},
+            after_state={"eligible": True},
+        )
+        restored += 1
+    return restored

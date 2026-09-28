@@ -148,6 +148,14 @@ def test_creation_from_a_nomination_resolves_it():
     assert resolved.status == "created"
     assert resolved.resulting_season_player_id == player.season_player_id
 
+    # Codex review on PR #258 (P2, twelfth round): the creation and the
+    # nomination resolution it triggers describe one atomic command and
+    # must share a correlation_id, so an audit query correlating one finds
+    # the other.
+    [created_event] = AuditEventRepository(db).list_events(action="player_pool.provisional.created")
+    [resolved_event] = AuditEventRepository(db).list_events(action="player_pool.nomination.resolved")
+    assert created_event.correlation_id == resolved_event.correlation_id
+
 
 def test_creation_refused_once_season_is_completed():
     db, season, _entries = setup_domain()
@@ -268,6 +276,61 @@ def test_detection_skips_the_quarantine_write_when_the_provisional_row_is_alread
     assert detected == 1
     # Not forced ineligible -- the row was already genuinely owned, so the
     # quarantine write was correctly skipped rather than run as a no-op.
+    assert pool.get_by_id(player.season_player_id).eligible is True
+
+
+def test_detection_restores_a_provisional_row_once_its_owned_match_is_released():
+    """Codex review on PR #258 (P2, twelfth round): `OwnershipRepository.
+    release_in_transaction` never touches `eligible`, so a provisional row
+    quarantined because its matched canonical player was already owned
+    would otherwise stay incorrectly ineligible forever after that
+    ownership is released (e.g. a delisting) -- the conflict that caused
+    the quarantine is gone, but nothing notices. Every detection run must
+    resync it."""
+    db, season, entries = setup_domain()
+    canonical = PlayerPoolRepository(db).refresh_player(
+        season.season_id, 9913, "Jordan Newrecruit", given_name="Jordan", family_name="Newrecruit"
+    )
+    ownership = OwnershipRepository(db)
+    ownership.acquire(canonical.season_player_id, entries[0].season_entry_id)
+
+    player = _create(db, season.season_id, given="Jordan", family="Newrecruit")
+    pool = PlayerPoolRepository(db)
+    assert pool.get_by_id(player.season_player_id).eligible is False
+
+    ownership.release(canonical.season_player_id)
+    detect_candidates(db, season.season_id, actor=ActorContext.system())
+    assert pool.get_by_id(player.season_player_id).eligible is True
+
+
+def test_detection_does_not_restore_while_a_second_owned_match_remains_unreleased():
+    """As above, but a provisional player ambiguously matching *two*
+    already-owned canonical players must stay quarantined until *both*
+    ownerships are released -- releasing only one must not prematurely
+    make it draftable while the other owned-duplicate suspicion is still
+    live."""
+    db, season, entries = setup_domain()
+    pool = PlayerPoolRepository(db)
+    first = pool.refresh_player(
+        season.season_id, 9914, "Jordan Newrecruit One", given_name="Jordan", family_name="Newrecruit"
+    )
+    second = pool.refresh_player(
+        season.season_id, 9915, "Jordan Newrecruit Two", given_name="Jordan", family_name="Newrecruit"
+    )
+    ownership = OwnershipRepository(db)
+    ownership.acquire(first.season_player_id, entries[0].season_entry_id)
+    ownership.acquire(second.season_player_id, entries[1].season_entry_id)
+
+    player = _create(db, season.season_id, given="Jordan", family="Newrecruit")
+    assert pool.get_by_id(player.season_player_id).eligible is False
+
+    ownership.release(first.season_player_id)
+    detect_candidates(db, season.season_id, actor=ActorContext.system())
+    # Still quarantined -- the second owned match is unresolved.
+    assert pool.get_by_id(player.season_player_id).eligible is False
+
+    ownership.release(second.season_player_id)
+    detect_candidates(db, season.season_id, actor=ActorContext.system())
     assert pool.get_by_id(player.season_player_id).eligible is True
 
 

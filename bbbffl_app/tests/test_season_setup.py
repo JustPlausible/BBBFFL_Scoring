@@ -217,6 +217,33 @@ def test_player_pool_refresh_reports_provisional_rows_in_the_pool_size():
     assert pool.summary(season.season_id)["total"] == 6
 
 
+def test_player_pool_refresh_audit_event_reports_an_unchanged_pool_size_with_provisional_players():
+    """Codex review on PR #258 (P3, eleventh round): `before_state` must
+    also count provisional rows, the same as `after_state`'s `pool_size`
+    -- otherwise refreshing an *unchanged* pool that includes a
+    provisional player falsely reports the pool growing by that many
+    players in the refresh audit event."""
+    from app.provisional_players import ProvisionalPlayerRepository
+
+    database = migrated_connection()
+    season, _entries = fresh_season(database)
+    ProvisionalPlayerRepository(database).create(
+        season.season_id,
+        display_name="Jordan Newrecruit",
+        given_name="Jordan",
+        family_name="Newrecruit",
+        note="verified via club website squad list",
+        actor=SCORER,
+    )
+    players = season_players(5)
+    refresh_player_pool(database, SetupAfl(players=players), season.season_id, 77, actor=SCORER, reason=REASON)
+    refresh_player_pool(database, SetupAfl(players=players), season.season_id, 77, actor=SCORER, reason=REASON)
+
+    events = AuditEventRepository(database).list_events(action="player_pool.season.refreshed")
+    second = events[-1]
+    assert second.before_state["pool_size"] == second.after_state["pool_size"] == 6
+
+
 def test_player_pool_refresh_never_deletes_or_changes_eligibility_or_ownership():
     database = migrated_connection()
     season, entries = fresh_season(database)

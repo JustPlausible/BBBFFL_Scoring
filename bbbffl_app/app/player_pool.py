@@ -463,7 +463,13 @@ class PlayerPoolRepository:
             entity_type="season.player_pool",
             entity_id=season_id,
             reason=reason,
-            before_state={"pool_size": len(existing)},
+            # Codex review on PR #258 (P3, eleventh round): `before_state`
+            # must count provisional rows too, the same as `after_state`'s
+            # `pool_size` above -- this refresh never creates or removes a
+            # provisional row itself, so the same `provisional_count` is
+            # valid before and after it, and omitting it here made an
+            # unchanged pool look like it grew by that many players.
+            before_state={"pool_size": len(existing) + provisional_count},
             after_state={key: value for key, value in summary.items() if key != "missing_from_source"},
             payload={"missing_from_source_count": len(missing)},
         )

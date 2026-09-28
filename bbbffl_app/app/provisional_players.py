@@ -1003,11 +1003,23 @@ def _detect_candidates_for_provisional(
     refuses against (a concurrent acquire sees this quarantine's
     `eligible=FALSE`; a concurrent quarantine finds the row already owned,
     which is itself a harmless no-op, the same as the canonical-row case
-    above)."""
+    above).
+
+    Re-checks the provisional row's own ownership once this lock is held
+    (Codex review on PR #258, P1, eleventh round): if a concurrent acquire
+    won the race for this exact lock and already committed, this row is
+    now genuinely owned -- the quarantine `UPDATE` below is then not just
+    unnecessary but must not run at all, the same "no-op quarantine of an
+    owned row" the canonical-row case already treats as harmless, made
+    explicit here rather than left implicit in an unconditional write."""
     conn.execute(
         "SELECT 1 FROM season_player_pool WHERE season_player_id=?" + _for_update_suffix(database),
         (season_player_id,),
     )
+    provisional_already_owned = conn.execute(
+        "SELECT 1 FROM player_ownership_period WHERE season_player_id=? AND released_at IS NULL",
+        (season_player_id,),
+    ).fetchone()
     detected = 0
     matches = conn.execute(
         "SELECT season_player_id, canonical_player_id, eligible FROM season_player_pool "
@@ -1110,10 +1122,19 @@ def _detect_candidates_for_provisional(
             # survive being merged into an unrelated identity. Narrower
             # than what this fix closes (the row stays quarantined for as
             # long as it remains provisional, which is the common case).
-            conn.execute(
-                "UPDATE season_player_pool SET eligible=FALSE WHERE season_player_id=?",
-                (season_player_id,),
-            )
+            #
+            # Codex review on PR #258 (P1, eleventh round): skip the write
+            # entirely when `provisional_already_owned` (rechecked right
+            # after this row's own lock was acquired, above) -- a
+            # concurrent acquire won the race for this exact row before
+            # detection resumed, so it is now genuinely owned and this
+            # quarantine would be the same no-op the matched canonical
+            # row's own quarantine already is once owned.
+            if not provisional_already_owned:
+                conn.execute(
+                    "UPDATE season_player_pool SET eligible=FALSE WHERE season_player_id=?",
+                    (season_player_id,),
+                )
         append_event(
             conn,
             actor=actor,

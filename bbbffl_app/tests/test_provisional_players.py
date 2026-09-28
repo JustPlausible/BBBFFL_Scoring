@@ -244,6 +244,33 @@ def test_creation_quarantines_the_provisional_row_when_the_matching_canonical_is
     assert pool.get_by_id(player.season_player_id).eligible is True
 
 
+def test_detection_skips_the_quarantine_write_when_the_provisional_row_is_already_owned():
+    """Codex review on PR #258 (P1, eleventh round): the provisional row's
+    own lock (tenth round) only serializes the two calls -- it doesn't by
+    itself prove the row is still unowned once acquired. If a concurrent
+    acquire won the race and already committed by the time detection's
+    lock request succeeds, this row is genuinely owned; the owned-match
+    quarantine write must then be skipped, not fired as a redundant write
+    on an already-owned row."""
+    db, season, entries = setup_domain()
+    player = _create(db, season.season_id, given="Jordan", family="Newrecruit")
+    pool = PlayerPoolRepository(db)
+    canonical = pool.refresh_player(
+        season.season_id, 9912, "Jordan Newrecruit", given_name="Jordan", family_name="Newrecruit"
+    )
+    ownership = OwnershipRepository(db)
+    ownership.acquire(canonical.season_player_id, entries[0].season_entry_id)
+    # Simulates the race already having been lost by the time detection's
+    # lock request on the provisional row succeeds.
+    ownership.acquire(player.season_player_id, entries[1].season_entry_id)
+
+    detected = detect_candidates(db, season.season_id, actor=ActorContext.system())
+    assert detected == 1
+    # Not forced ineligible -- the row was already genuinely owned, so the
+    # quarantine write was correctly skipped rather than run as a no-op.
+    assert pool.get_by_id(player.season_player_id).eligible is True
+
+
 def test_no_match_leaves_player_plainly_provisional():
     db, season, _entries = setup_domain()
     player = _create(db, season.season_id)

@@ -24,6 +24,7 @@ from app.auth_rate_limit import RateLimitedError
 from app.coach_lineup import CoachLineupService
 from app.config import BASE_DIR
 from app.csrf import issue_token, verify_token
+from app.provisional_players import ProvisionalPlayerRepository
 from app.routes import admin_dashboard as admin_dashboard_routes
 from app.routes import scorer_dashboard as scorer_dashboard_routes
 
@@ -192,6 +193,16 @@ def account_page(request: Request):
     # whenever an accepted, unfinalized pre-season draft exists for their
     # team, with no season id or route required.
     preseason_selection = request.app.state.draft.coach_selection_context(request.app.state.identities, coach.coach_id)
+    # Issue #242: a persistent, informational-only reminder of any
+    # provisional player still awaiting Scorer/Administrator reconciliation
+    # in a season this Coach currently participates in -- never a control
+    # to create, approve or reconcile anything (see
+    # `app.provisional_players`'s module docstring). Disappears on its own,
+    # with no dismiss action, once every provisional player in that season
+    # is reconciled or there simply are none.
+    provisional_notices = ProvisionalPlayerRepository(request.app.state.database).coach_dashboard_notices(
+        coach.coach_id
+    )
     response = templates.TemplateResponse(
         request,
         "account.html",
@@ -206,6 +217,7 @@ def account_page(request: Request):
             "midseason_delisting": midseason_delisting,
             "midseason_selection": midseason_selection,
             "preseason_selection": preseason_selection,
+            "provisional_notices": provisional_notices,
         },
     )
     _attach_csrf_cookie(request, response, token)

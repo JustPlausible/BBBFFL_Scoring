@@ -99,7 +99,11 @@ def _assert_ownership_mutation_allowed(conn, database, season_id, *, allow_close
 class SeasonPlayer:
     season_player_id: str
     season_id: str
-    canonical_player_id: int
+    # Issue #242: nullable while the player is provisional -- the single
+    # authoritative fact `app.provisional_players` and every consumer of
+    # this dataclass reads to decide whether a player currently has a
+    # canonical afl-api association. See that module's docstring.
+    canonical_player_id: int | None
     display_name: str
     afl_team_id: int | None
     afl_team_name: str | None
@@ -111,6 +115,16 @@ class SeasonPlayer:
     updated_at: str
     given_name: str | None = None
     family_name: str | None = None
+    # Issue #242: `was_provisional` is set once at provisional creation and
+    # never reset -- it survives reconciliation so a player's provisional
+    # origin remains visible even once `canonical_player_id` is populated.
+    # `provisional_note` is the reason/source recorded at creation, kept
+    # permanently for the same reason. Neither field decides whether a
+    # player is *currently* provisional -- `canonical_player_id IS NULL`
+    # alone does that.
+    was_provisional: bool = False
+    provisional_note: str | None = None
+    provisional_reconciled_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -158,7 +172,7 @@ class SeasonPlayerPoolItem:
 
     season_player_id: str
     season_id: str
-    canonical_player_id: int
+    canonical_player_id: int | None
     display_name: str
     afl_team_id: int | None
     afl_team_name: str | None
@@ -169,11 +183,16 @@ class SeasonPlayerPoolItem:
     diagnostic: str | None
     given_name: str | None = None
     family_name: str | None = None
+    # Issue #242: `canonical_player_id IS NULL` is the sole authority this
+    # mirrors, computed once here so browse/draft-board consumers never
+    # need to know the underlying column is nullable.
+    is_provisional: bool = False
 
 
 def _player(row):
     values = dict(row)
     values["eligible"] = bool(values["eligible"])
+    values["was_provisional"] = bool(values["was_provisional"])
     return SeasonPlayer(**values)
 
 
@@ -235,7 +254,10 @@ class PlayerPoolRepository:
                 player_id = _id()
                 created = fetched
                 conn.execute(
-                    "INSERT INTO season_player_pool VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO season_player_pool "
+                    "(season_player_id, season_id, canonical_player_id, display_name, afl_team_id, afl_team_name, "
+                    "eligible, source_provider, source_fetched_at, source_updated_at, created_at, updated_at, "
+                    "given_name, family_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         player_id,
                         season_id,
@@ -317,9 +339,16 @@ class PlayerPoolRepository:
                 raise KeyError(season_id)
             if season["lifecycle_state"] == "completed":
                 raise ValueError("a completed season's player pool is historical and cannot be refreshed")
+            # Issue #242: a provisional player has no canonical_player_id
+            # (NULL) and is never part of the afl-api-sourced pool this
+            # method refreshes -- excluded here so several provisional rows
+            # never collide on the `None` dict key, and so their
+            # `source_provider` ('bbbffl-provisional') never trips the
+            # foreign-provider mixing check below.
             existing = {
                 row["canonical_player_id"]: row
                 for row in conn.execute("SELECT * FROM season_player_pool WHERE season_id=?", (season_id,)).fetchall()
+                if row["canonical_player_id"] is not None
             }
             foreign = sorted({row["source_provider"] for row in existing.values()} - {source_provider})
             if foreign:
@@ -332,7 +361,11 @@ class PlayerPoolRepository:
                 row = existing.get(canonical_player_id)
                 if row is None:
                     conn.execute(
-                        "INSERT INTO season_player_pool VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "INSERT INTO season_player_pool "
+                        "(season_player_id, season_id, canonical_player_id, display_name, afl_team_id, "
+                        "afl_team_name, eligible, source_provider, source_fetched_at, source_updated_at, "
+                        "created_at, updated_at, given_name, family_name) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             _id(),
                             season_id,
@@ -536,12 +569,13 @@ class PlayerPoolRepository:
             ).casefold()
             if needles and not all(needle in searchable for needle in needles):
                 continue
+            is_provisional = row["canonical_player_id"] is None
             diagnostic = None
             if not row["eligible"]:
                 diagnostic = "Not selectable: season player identity or eligibility requires investigation"
             elif not row["display_name"].strip():
                 diagnostic = "Missing AFL player display name"
-            elif row["afl_team_id"] is None or not row["afl_team_name"]:
+            elif not is_provisional and (row["afl_team_id"] is None or not row["afl_team_name"]):
                 diagnostic = "AFL club data unavailable"
             items.append(
                 SeasonPlayerPoolItem(
@@ -558,6 +592,7 @@ class PlayerPoolRepository:
                     diagnostic=diagnostic,
                     given_name=row["given_name"],
                     family_name=row["family_name"],
+                    is_provisional=is_provisional,
                 )
             )
         return items[: max(limit, 0)]

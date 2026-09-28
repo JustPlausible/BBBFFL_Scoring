@@ -64,6 +64,7 @@ from app.preseason import (
     PreseasonWindowClosedError,
     PreseasonWindowExistsError,
 )
+from app.provisional_players import NominationStateError, ProvisionalPlayerError
 from app.replay import ReplayAflDataSource
 from app.round_review import InvalidOverridePositionError as RoundReviewInvalidPositionError
 from app.round_review import InvalidSlotError as RoundReviewInvalidSlotError
@@ -93,6 +94,7 @@ from app.routes import lineup_correction as lineup_correction_routes
 from app.routes import lineups as lineup_routes
 from app.routes import midseason_draft as midseason_draft_routes
 from app.routes import preseason as preseason_routes
+from app.routes import provisional_players as provisional_players_routes
 from app.routes import public_rounds as public_round_routes
 from app.routes import round_preflight as round_preflight_routes
 from app.routes import round_review as round_review_routes
@@ -354,6 +356,8 @@ app.include_router(season_completion_routes.router)
 app.include_router(season_completion_routes.page_router)
 app.include_router(ladder_tie_ruling_routes.router)
 app.include_router(ladder_tie_ruling_routes.page_router)
+app.include_router(provisional_players_routes.router)
+app.include_router(provisional_players_routes.page_router)
 app.include_router(fixture_setup_routes.router)
 app.include_router(fixture_setup_routes.page_router)
 app.include_router(context_routes.router)
@@ -456,6 +460,26 @@ async def season_award_error_handler(request: Request, exc: SeasonAwardError) ->
 # `FinalsBracketError`/`FinalsSeedingError`'s identical convention.
 @app.exception_handler(LadderTieRulingConflictError)
 async def ladder_tie_ruling_conflict_error_handler(request: Request, exc: LadderTieRulingConflictError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+# Issue #242: every `app.provisional_players.ProvisionalPlayerError` subclass
+# (`NotProvisionalError`, `InvalidReconciliationTargetError`,
+# `ReconciliationConflictError`) is a resolvable operator-facing conflict --
+# the requested nomination/candidate/reconciliation no longer matches the
+# state the caller assumed (already reconciled, an invalid or already-owned
+# target, a stale candidate) -- never a 500. `NominationStateError` gets the
+# same treatment for the identical "already X" reason `DraftPickCompletedError`
+# does above. A bare precondition failure (a missing required field/reason)
+# is deliberately left unregistered here and falls through to the generic
+# `ValueError` handler below (400).
+@app.exception_handler(ProvisionalPlayerError)
+async def provisional_player_error_handler(request: Request, exc: ProvisionalPlayerError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(NominationStateError)
+async def nomination_state_error_handler(request: Request, exc: NominationStateError) -> JSONResponse:
     return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 

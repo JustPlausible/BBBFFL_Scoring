@@ -74,6 +74,7 @@ from app.fixtures import FixtureRepository
 from app.identity import IdentityRepository
 from app.opening_round import OpeningRoundRuleRepository
 from app.player_pool import OwnershipRepository, PlayerPoolRepository
+from app.provisional_players import detect_candidates
 from app.season import SeasonRepository
 from app.superscore_round import ROUND_LABELS, get_stream, initialize_structure
 
@@ -268,6 +269,18 @@ def refresh_player_pool(database, afl_client, season_id: str, afl_season_id: int
         )
     except ValueError as exc:
         raise SeasonSetupError(str(exc)) from exc
+    # Issue #242: once this refresh has committed, check whether any
+    # currently-provisional player in this season now plausibly matches a
+    # canonical afl-api player it just imported -- a recommendation only,
+    # never automatic reconciliation (see `app.provisional_players`'s
+    # module docstring). Deliberately a separate call/transaction from the
+    # refresh above, not folded into `PlayerPoolRepository.
+    # refresh_season_pool` itself -- see `tests/test_architecture.py`'s
+    # PROVISIONAL_PLAYERS comment for why. Best-effort: a failure here
+    # would not un-refresh the pool, so it is allowed to propagate rather
+    # than being swallowed -- the refresh itself already succeeded and is
+    # safe to retry.
+    detect_candidates(database, season_id, actor=actor)
     return {**summary, "afl_season_id": afl_season_id}
 
 

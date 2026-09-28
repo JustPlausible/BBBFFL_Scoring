@@ -25,7 +25,7 @@ All paths below are under `bbbffl_app/app/`. Routes live in `routes/` and templa
 |---|---|
 | Scoring formulas (pure leaf, no internal imports) | `scoring.py` |
 | AFL API integration | `afl_client.py` (the only adapter for response shapes), `afl_resilience.py` (retry/cache/freshness), `afl_diagnostics.py`, `round_mapping.py` (BBBFFL round → AFL round), `player_stats_context.py`, `participation.py` |
-| Season, identity, ownership | `season.py`, `identity.py`, `player_pool.py`, `season_centre.py` |
+| Season, identity, ownership | `season.py`, `identity.py`, `player_pool.py`, `season_centre.py`, `provisional_players.py` (provisional player creation, Coach nomination, afl-api candidate detection and reconciliation) |
 | Drafts and trades | `draft.py`, `draft_board.py`, `preseason.py`, `midseason_draft.py`, `shortlist.py` |
 | Fixtures and ordinary rounds | `fixtures.py`, `competition_lifecycle.py`, `round_preflight.py`, `calculations.py`, `round_review.py`, `ladder.py` |
 | Coach lineups | `lineups.py`, `lineup_validation.py`, `coach_lineup.py`, `carry_forward.py`, `lineup_proxy.py`, `lineup_correction.py`, `lineup_adjudication.py`, `opening_round.py`, `lockouts.py` |

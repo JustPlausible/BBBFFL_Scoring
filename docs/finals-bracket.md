@@ -138,7 +138,12 @@ re-verifies every prerequisite under its own locks. It always seeds from the
 live ladder (`seed_source == "ladder"`) and refuses outright for a season
 carrying a 2026 historical `finals_seeding_snapshot`. An unresolved ladder
 equality is refused with the same diagnosis as before; no tie policy is
-invented.
+invented -- and it is no longer a permanent block: issue #241's
+`app.ladder_tie_ruling` (the Scorer Operations "Ladder tie ruling" page,
+`/scorer/ladder-tie-ruling/{season_id}`) is the audited recovery path,
+consulted transparently by `_resolve_seed`/`preview_ladder_seed` before
+either raises `UnresolvedLadderTieError`. See
+[`ladder-progression.md`](ladder-progression.md#unresolved-exact-ties-audited-manual-ruling-issue-241).
 
 ## CLI
 

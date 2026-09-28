@@ -51,6 +51,43 @@ mid-season draft order, finals qualification/seeding, or another downstream
 ruling. Those future aggregates must retain the ladder snapshot/provenance they
 were frozen from and require their own explicit correction workflow.
 
+## Unresolved exact ties: audited manual ruling (issue #241)
+
+Sporting order still has exactly three criteria (above), applied first and
+always authoritative wherever they resolve the order. `app.ladder` itself
+never gains a fourth mathematical tiebreaker, and it never will: if
+competition points, percentage and PF leave two or more entries exactly
+equal, that stays a genuine, reported tie (`LadderRow.tied`/`tie_group`).
+
+Some downstream consumers need a *deterministic* order regardless -- Finals
+seeding (`app.finals`/`app.finals_seeding`) needs a full ranking over every
+entry, and the Wooden Spoon (`app.season_awards`) needs a single last-placed
+entry. Neither invents an ordering from an exact tie. Both fail closed
+(`UnresolvedLadderTieError`/`UnresolvedWoodenSpoonTieError`) unless
+`app.ladder_tie_ruling` already holds an audited manual resolution for that
+*exact* tied group -- never falling back to team name, `season_entry_id`,
+insertion/database order, or any other incidental field.
+
+`app.ladder_tie_ruling.LadderTieRulingRepository.record_ruling` is the one
+way such a resolution is created: an authorised Scorer/Administrator
+supplies the decided best-to-worst order for a group the ladder, recomputed
+under the season's write lock at the moment of recording, actually reports
+as exactly tied, together with a mandatory reason. The ruling is scoped to
+`(season_id, competition_id, through_round, tie_group)` and freezes the
+exact `(matchup_id, official_version)` set the ladder was computed from at
+that moment; `resolve_tie`/`resolve_full_ladder_order` compare that frozen
+set against the current ladder's own references and treat any difference as
+staleness -- the ruling stops applying, without being deleted, until a fresh
+one replaces it. Because the scope is the tie itself rather than a specific
+caller, the identical ruling is transparently reused by every consumer that
+resolves the same tie -- Finals seeding and the Wooden Spoon both consume
+one persisted decision, never separate overrides. See `app.ladder_tie_ruling`'s
+module docstring for the full mechanism, and the Scorer Operations
+"Ladder tie ruling" page (`/scorer/ladder-tie-ruling/{season_id}`) for the
+operator-facing workflow. This mechanism never rewrites a match result,
+win/loss, percentage or points figure -- it only records a relative order
+for entries the mathematical ladder cannot separate on its own.
+
 ## 2026 evidence boundary
 
 The repository does not contain the 2026 workbook itself. The preserved

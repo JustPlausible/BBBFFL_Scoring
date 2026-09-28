@@ -8,7 +8,8 @@ item 10 (production deployment/readiness/backup/rollback baseline) updated
 27 September 2026 for issue #243; remaining item 11 (live `afl-api`
 deployment validation) updated 27 September 2026 for issue #244; remaining
 item 4 (season completion/archival production path) updated 28 September
-2026 for issue #240.
+2026 for issue #240; remaining item 7 (audited resolution for an exact
+ladder tie) resolved 28 September 2026 by issue #241.
 **Supersedes:** the current-state claims in
 [`docs/roadmap/2027-season-roadmap.md`](roadmap/2027-season-roadmap.md),
 which is now a historical planning baseline from 23 August 2026 -- see that
@@ -216,7 +217,7 @@ remain v0.2 candidates.
 | Capability | Status | Evidence |
 |---|---|---|
 | Points/percentage/PF ordering (no exact equality encountered) | Replay-proven | Both `round-results.md` records; ladder order verified round-by-round, every 2026 replay ladder resolved without an exact tie at any boundary that mattered |
-| Any exact ladder equality, anywhere on the ladder, once Finals seeding must fall back to the mathematical ladder (no 2026-style snapshot) | **Outstanding / blocks v0.1 if it occurs** | Not replay-proven, and not resolvable through any current surface. `app.finals.FinalsBracketRepository._resolve_seed` collects every tied `LadderRow` across all ten teams and raises `UnresolvedLadderTieError` if that list is non-empty at all -- an exact tie anywhere on the ladder blocks bracket creation via the ladder-seed path, not only a tie at the finals-qualification cutoff. `app.season_awards`'s wooden-spoon derivation separately refuses specifically on a last-place tie, blocking season completion. Both explicitly state resolution "requires an explicit, audited Scorer/competition-governance decision", but no such recording mechanism exists anywhere in the codebase (browser, CLI, or bare domain function). Found by Codex review on this PR (P2, then a second P2 round correcting the scope from "cutoff/last-place only" to "anywhere on the ladder"); confirmed by inspecting `_resolve_seed`'s full tied-row collection. |
+| Any exact ladder equality, anywhere on the ladder, once Finals seeding must fall back to the mathematical ladder (no 2026-style snapshot), or at last place for the Wooden Spoon -- **resolved by issue #241** | Automated-test-proven; **staging/rehearsal-needed** | `app.ladder_tie_ruling` (migration `0037_ladder_tie_ruling`) is the audited manual-resolution path both `app.finals`/`app.finals_seeding` (via `resolve_full_ladder_order`) and `app.season_awards` (via `resolve_tie`) now consult before raising `UnresolvedLadderTieError`/`UnresolvedWoodenSpoonTieError` -- neither exception's raise condition changed (an exact tie with no fresh ruling still fails closed exactly as before), only the recovery path was added. An authorised Scorer/Administrator records the decided best-to-worst order for the exact tied group, with a mandatory reason, through the Scorer Operations "Ladder tie ruling" page (`/scorer/ladder-tie-ruling/{season_id}`, `app/routes/ladder_tie_ruling.py`) or its JSON API; the ruling is scoped to `(season_id, competition_id, through_round, tie_group)` and detects staleness by comparing its frozen `(matchup_id, official_version)` result-reference set against the ladder's current one, the same technique `app.finals`/`app.finals_seeding` already use for their own staleness checks. One recorded ruling is transparently reused by every consumer of that exact tie (Finals seeding and the Wooden Spoon alike) -- never a second mathematical tiebreaker, and never a fallback to team name, `season_entry_id`, or database order. Covered by `tests/test_ladder_tie_ruling.py`, `tests/test_ladder_tie_ruling_api.py`, and new cases in `tests/test_finals.py`/`tests/test_finals_seeding.py`/`tests/test_season_completion.py`/`tests/test_scorer_dashboard.py`. See [`ladder-progression.md`](ladder-progression.md#unresolved-exact-ties-audited-manual-ruling-issue-241). Not yet exercised against a real production deployment or a non-technical operator -- no 2026 replay ladder happened to reach this state, so this remains automated-test-proven only. |
 | Public ladder future-round subtitle correctness | Replay-proven | Issue #180 |
 | PPG display without becoming a tiebreak criterion | Deferred / v0.2 (guard against regression) | `2026-first-half-replay/ux-findings.md` |
 
@@ -236,7 +237,7 @@ auto-pick automation are v0.2.
 | Bracket seeding from the 2026-only historical snapshot | Replay-proven, but **not the path any future season uses** | `2026-finals-replay/provenance-manifest.md` records `seed_source: snapshot`; `scripts/finals_bracket_2026.py` explicitly refuses to create a bracket unless that snapshot already exists |
 | Bracket seeding from the live mathematical ladder (the path every 2027 season without a 2026-style historical snapshot will actually use) | **Automated-test-proven only; not replay-proven** | `app.finals.FinalsBracketRepository.create_bracket`'s ladder fallback (`_resolve_seed`, `seed_source == "ladder"`) was never exercised by the 2026 replay -- `scripts/finals_bracket_2026.py` deliberately refuses to take that branch. Only `tests/test_finals*.py` cover it. Found by Codex review on this PR (P2); an earlier draft of this document conflated the two seed sources under one "replay-proven" row. |
 | Finals preflight discoverability and the paired Finals+SuperScore weekly open action | Replay-proven | Issue #211/#221, exercised as part of the same replay |
-| **Finals competition-stream and bracket creation** (the first entry into Finals from a live, completed ladder) | **Automated-test-proven + clean-database acceptance run (issue #237); staging/rehearsal-needed** | The Season setup page's Finals step (`FinalsBracketRepository.preview_ladder_seed` -> `ensure_finals_stream` -> `create_bracket`) is available only once every regular-season round is final and the live mathematical ladder is untied; it always seeds from the ladder and refuses a season carrying the 2026 historical snapshot. The existing fail-closed exact-tie behaviour is preserved (still a separate outstanding item below). Not replay-proven: no live season has yet reached this boundary. |
+| **Finals competition-stream and bracket creation** (the first entry into Finals from a live, completed ladder) | **Automated-test-proven + clean-database acceptance run (issue #237); staging/rehearsal-needed** | The Season setup page's Finals step (`FinalsBracketRepository.preview_ladder_seed` -> `ensure_finals_stream` -> `create_bracket`) is available only once every regular-season round is final and the live mathematical ladder is untied; it always seeds from the ladder and refuses a season carrying the 2026 historical snapshot. The existing fail-closed exact-tie behaviour is preserved, now with an audited recovery path (item 7, resolved by issue #241) rather than a permanent block. Not replay-proven: no live season has yet reached this boundary. |
 | Coach weekly-selection chronology across ordinary/Finals/SuperScore | Deferred / v0.2 | `2026-finals-replay/ux-findings.md` |
 | Not re-run in the current-code regression | Staging/rehearsal-needed if a future change touches this area | See "Scope note" above |
 
@@ -368,11 +369,12 @@ they touch have already passed.
    (`tests/test_season_completion.py`, `tests/test_season_completion_api.py`).
    It is **not** replay-proven or staging-proven: it has not been
    exercised against a real production deployment or a non-technical
-   operator, and it still depends on the same exact-ladder-tie policy gap
-   (item 7 below) for the rare case where a wooden-spoon tie is introduced
-   by a post-bracket-freeze result correction -- that gap is unchanged by
-   this issue, only surfaced cleanly (409, atomic, no partial write)
-   through the browser rather than as an unhandled error.
+   operator. For the rare case where a wooden-spoon tie is introduced by a
+   post-bracket-freeze result correction, it still surfaces cleanly (409,
+   atomic, no partial write) through the browser rather than as an
+   unhandled error, and now has a recovery path via item 7's audited
+   ladder-tie-ruling mechanism (resolved by issue #241) rather than being a
+   permanent block.
 5. **Issue #233 -- two Scorer UX cleanups found during the Round 10 ->
    mid-season regression:**
    - remove the obsolete `Legacy Grand Final admin` link from the ordinary
@@ -389,18 +391,25 @@ they touch have already passed.
    backup/restore runbook rehearsal against a real deployment** (as
    distinct from the replay's repeatedly-proven checkpoint mechanism).
 7. **Any exact ladder equality, anywhere on the ladder, once Finals must
-   seed from the mathematical ladder** (no 2026-style historical
-   snapshot). `_resolve_seed` refuses on *any* tied row, not only a tie at
-   the finals cutoff; a last-place tie separately blocks season completion
-   through `app.season_awards`. No 2026 replay ladder happened to land on
-   an exact tie, so this was never replay-exercised, and no domain
-   function, CLI or browser route implements the "explicit, audited
-   Scorer/competition-governance decision" both modules say resolution
-   requires. Conditional in the same sense as the Opening Round item
-   above: it only blocks a season that actually produces such a tie, but
-   that season would currently have no way through Finals or completion
-   at all. Found by Codex review on
-   this PR (P2).
+   seed from the mathematical ladder (no 2026-style historical snapshot),
+   or at last place for the Wooden Spoon -- resolved by issue #241.**
+   `app.ladder_tie_ruling` (migration `0037_ladder_tie_ruling`) is now the
+   supported, audited recovery path: `_resolve_seed`/`_resolve_ladder_seed`
+   and `app.season_awards`'s wooden-spoon derivation still fail closed on
+   an exact tie exactly as before, but now consult a persisted ruling
+   first, and the Scorer Operations "Ladder tie ruling" page
+   (`/scorer/ladder-tie-ruling/{season_id}`) is the discoverable browser
+   workflow for recording one -- no CLI or database access is needed. See
+   [`ladder-progression.md`](ladder-progression.md#unresolved-exact-ties-audited-manual-ruling-issue-241)
+   and the "Ladder and results" row above.
+
+   **Evidence level:** automated-test-proven (`tests/test_ladder_tie_ruling.py`,
+   `tests/test_ladder_tie_ruling_api.py`, plus new cases alongside the
+   existing tie coverage in `tests/test_finals.py`/`tests/test_finals_seeding.py`/
+   `tests/test_season_completion.py`/`tests/test_scorer_dashboard.py`). It
+   is **not** replay-proven or staging-proven: no 2026 replay ladder
+   happened to land on an exact tie, so a real Scorer has never recorded a
+   ruling through the browser workflow against production-shaped data.
 8. **Finals bracket seeding from the live mathematical ladder** -- the
    branch every 2027 season without a 2026-style historical snapshot will
    actually use -- is automated-test-proven only, not replay-proven; the

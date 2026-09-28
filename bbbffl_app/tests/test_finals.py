@@ -142,6 +142,52 @@ def test_create_bracket_fails_closed_on_unresolved_ladder_tie():
         _create(built)
 
 
+def test_create_bracket_fails_closed_on_a_tie_at_the_finals_cutoff_then_succeeds_once_ruled():
+    """Issue #241: an exact tie at the seed-5/seed-6 boundary blocks bracket
+    creation exactly like any other unresolved tie -- and once an audited
+    `app.ladder_tie_ruling` resolves it, the same call succeeds with the
+    decided order substituted at exactly that boundary."""
+    from app.ladder_tie_ruling import LadderTieRulingRepository
+    from tests.ladder_tie_ruling_helpers import build_tied_finals_ready_season
+
+    built = build_tied_finals_ready_season(year=2281, tied_ranks=(5, 6))
+    with pytest.raises(UnresolvedLadderTieError):
+        _create(built)
+
+    decided_order = built["tied_pair"]
+    LadderTieRulingRepository(built["database"]).record_ruling(
+        built["season"].season_id,
+        built["ordinary_competition_id"],
+        20,
+        decided_order,
+        actor=ACTOR,
+        reason="cutoff coin toss, minuted",
+    )
+
+    result = _create(built)
+    assert result["created"] is True
+    seed_order = [row.season_entry_id for row in _repo(built).list_seed_rows(result["bracket"].bracket_id)]
+    assert seed_order[4] == decided_order[0]
+    assert seed_order[5] == decided_order[1]
+    # The higher-decided of the pair qualifies for finals (top 5); the
+    # lower-decided one does not -- the ruling genuinely decided
+    # qualification, not merely cosmetic ordering.
+    seed_rows = {row.season_entry_id: row for row in _repo(built).list_seed_rows(result["bracket"].bracket_id)}
+    assert seed_rows[decided_order[0]].qualified is True
+    assert seed_rows[decided_order[1]].qualified is False
+
+
+def test_create_bracket_fails_closed_on_a_tie_away_from_any_boundary():
+    """A tie in the middle of the ladder (neither the finals cutoff nor
+    last place) still blocks bracket creation -- Finals seeding needs a
+    full deterministic order over every entry, not only the cutoff."""
+    from tests.ladder_tie_ruling_helpers import build_tied_finals_ready_season
+
+    built = build_tied_finals_ready_season(year=2282, tied_ranks=(3, 4))
+    with pytest.raises(UnresolvedLadderTieError):
+        _create(built)
+
+
 def test_create_bracket_requires_a_reason():
     built = build_finals_ready_season(year=2209)
     with pytest.raises(FinalsBracketError, match="reason"):

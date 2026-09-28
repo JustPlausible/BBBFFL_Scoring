@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BBBFFL Ladder Tie Ruling</title>
+<style>
+:root{color-scheme:dark}body{font:15px system-ui;margin:auto;max-width:960px;padding:20px;background:#0f1115;color:#e7e9ee}a{color:#79c0ff}.card{background:#171a21;border:1px solid #303744;border-radius:10px;padding:16px;margin:14px 0}.error{background:#4a1f1f}.success{background:#1f3a24}#message:empty{display:none}input,button,textarea{font:inherit;padding:6px;border-radius:6px;background:#222733;color:inherit;border:1px solid #454d5c}textarea.reason{width:100%;min-height:3.2em}button{cursor:pointer}button.primary{background:#2869a8}button.small{padding:2px 8px;font-size:.85rem}button:disabled{opacity:.5;cursor:not-allowed}.muted{color:#aab2c0;font-size:.88rem}.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.8rem;margin-left:8px}.b-unresolved{background:#4a1f1f}.b-stale{background:#4a3a1f}.b-resolved{background:#1f3a24}ol.order{list-style:none;padding:0;margin:10px 0}ol.order li{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;margin:4px 0;background:#222733}ol.order li span.rank{width:1.6em;color:#aab2c0}.actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}dl.facts{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:8px 0}dl.facts dt{color:#aab2c0}
+</style>
+</head><body>
+<a href="/admin/season-centre/{{ season_id }}">← Season Centre</a> · <a href="/scorer">Scorer dashboard</a>
+<h1>Ladder tie ruling</h1>
+<p class="muted">Issue #241: the audited, exceptional resolution path for an exact ladder tie the configured mathematical criteria (competition points, percentage, points for) cannot separate. This never adds a new mathematical tiebreaker and never rewrites match results, wins/losses or percentage -- it records who an authorised Scorer/Administrator has decided should rank above whom, with a mandatory reason, and that single decision is reused by Finals seeding and season awards alike.</p>
+<div id="message" class="card"></div>
+<main id="app"><p>Loading ladder tie status…</p></main>
+<script>
+const seasonId={{ season_id|tojson }}; const csrf={{ csrf_token|tojson }};
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function headers(){const h={'Content-Type':'application/json','X-CSRF-Token':csrf};const t=localStorage.getItem('bbbffl_admin_token');if(t)h['X-Admin-Token']=t;return h}
+async function api(path,body){const r=await fetch(path,{method:body?'POST':'GET',headers:headers(),body:body?JSON.stringify(body):undefined});const d=await r.json().catch(()=>({detail:r.statusText}));if(!r.ok)throw Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail)||r.statusText);return d}
+function say(text,kind='error'){const e=document.querySelector('#message');e.textContent=text;e.className=`card ${kind}`;e.scrollIntoView({block:'nearest'})}
+function teamLabel(names,id){return esc(names[id]||id)}
+function badge(status){const label={unresolved:'Unresolved',stale:'Stale ruling',resolved:'Resolved'}[status]||status;return `<span class="badge b-${status}">${label}</span>`}
+function orderList(names,order,groupIndex){
+  return `<ol class="order" data-group="${groupIndex}">${order.map((id,i)=>`
+    <li data-entry="${esc(id)}"><span class="rank">${i+1}.</span> <span class="name">${teamLabel(names,id)}</span>
+      <button type="button" class="small" data-act="up" ${i===0?'disabled':''}>↑</button>
+      <button type="button" class="small" data-act="down" ${i===order.length-1?'disabled':''}>↓</button>
+    </li>`).join('')}</ol>`;
+}
+function tieCard(names,tie,groupIndex){
+  const affects=[tie.affects_finals_seeding?'Finals seeding':null,tie.affects_wooden_spoon?'Wooden Spoon / season awards':null].filter(Boolean).join(' and ');
+  const ruling=tie.ruling;
+  const currentOrder=(ruling?ruling.decided_order:tie.tie_group.slice().sort((a,b)=>(names[a]||a).localeCompare(names[b]||b)));
+  const rulingInfo=ruling?`<dl class="facts"><dt>Last recorded by</dt><dd>${esc(ruling.created_by||'unknown')}</dd><dt>Recorded at</dt><dd>${esc(ruling.created_at)}</dd><dt>Reason</dt><dd>${esc(ruling.reason)}</dd></dl>`:'';
+  return `<div class="card" data-group="${groupIndex}">
+    <h2>Rank ${tie.rank} tie ${badge(tie.status)}</h2>
+    <p class="muted">Tied on ${tie.competition_points} points, ${tie.percentage}% percentage, ${tie.points_for} points for. This tie blocks a deterministic order for: <strong>${esc(affects||'no downstream operation right now')}</strong>.</p>
+    ${tie.status==='stale'?'<p class="muted">A previous ruling exists for this exact tie group, but the underlying results have changed since it was recorded. It no longer applies -- record a fresh ruling below.</p>':''}
+    ${rulingInfo}
+    <p class="muted">Order these teams from best (1st) to worst, then give a reason. This never changes any match result, win/loss, percentage or points figure -- it only records the decided relative order for this exact tie.</p>
+    ${orderList(names,currentOrder,groupIndex)}
+    <label class="muted">Reason <textarea class="reason" data-group="${groupIndex}" placeholder="Explain the basis for this ruling (required)"></textarea></label>
+    <div class="actions"><button class="primary" data-act="record" data-group="${groupIndex}">Record ruling</button></div>
+  </div>`;
+}
+let currentState=null;
+function render(data){
+  currentState=data;
+  if(!data.open_ties.length){
+    document.querySelector('#app').innerHTML='<div class="card success"><p>No exact ladder tie is currently blocking Finals seeding or season awards for this season.</p></div>';
+    return;
+  }
+  document.querySelector('#app').innerHTML=data.open_ties.map((tie,i)=>tieCard(data.team_names,tie,i)).join('');
+  document.querySelectorAll('ol.order').forEach(list=>{
+    list.addEventListener('click',e=>{
+      const btn=e.target.closest('button[data-act]');
+      if(!btn)return;
+      const li=btn.closest('li');
+      if(btn.dataset.act==='up'&&li.previousElementSibling)list.insertBefore(li,li.previousElementSibling);
+      if(btn.dataset.act==='down'&&li.nextElementSibling)list.insertBefore(li.nextElementSibling,li);
+      list.querySelectorAll('li').forEach((item,i)=>{
+        item.querySelector('.rank').textContent=`${i+1}.`;
+        item.querySelector('[data-act="up"]').disabled=i===0;
+        item.querySelector('[data-act="down"]').disabled=i===list.children.length-1;
+      });
+    });
+  });
+  document.querySelectorAll('button[data-act="record"]').forEach(btn=>btn.onclick=()=>record(btn.dataset.group));
+}
+async function record(groupIndex){
+  const card=document.querySelector(`.card[data-group="${groupIndex}"]`);
+  const order=[...card.querySelectorAll('ol.order li')].map(li=>li.dataset.entry);
+  const reason=card.querySelector('textarea.reason').value;
+  if(!reason||!reason.trim()){say('A reason is required to record a tie ruling.');return}
+  if(!confirm('Record this decided order? This is an audited competition-governance decision and will be reused by Finals seeding and season awards for this exact tie.'))return;
+  try{
+    const result=await api(`/api/scorer/ladder-tie-ruling/${seasonId}/rulings`,{decided_order:order,reason});
+    say(result.created?'Ruling recorded.':'This ruling already matched the currently recorded one; nothing changed.','success');
+    render(result.preview);
+  }catch(e){say(e.message)}
+}
+async function load(){try{render(await api(`/api/scorer/ladder-tie-ruling/${seasonId}`))}catch(e){say(e.message)}}
+load();
+</script></body></html>

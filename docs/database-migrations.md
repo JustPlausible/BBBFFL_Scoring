@@ -166,6 +166,20 @@ columns outright with no refusal case, since they carry no BBBFFL-authored
 state -- only cached, replaceable afl-api facts, unlike this file's other
 history-preserving revisions above.
 
+Revision `0037_ladder_tie_ruling` (issue #241) adds `ladder_tie_ruling`: the
+audited, persisted manual resolution for an exact mathematical ladder tie
+the configured ladder criteria cannot separate (see
+[`ladder-progression.md`](ladder-progression.md#unresolved-exact-ties-audited-manual-ruling-issue-241)).
+One active row per `(season_id, competition_id, through_round, tie_group_key)`
+at a time (a partial unique index, `status='active'`), mirroring
+`season_award`'s (`0033`) "supersede rather than overwrite" shape -- a later
+ruling for the same exact tie flips the previous row to `status='superseded'`
+rather than rewriting it, and the full history stays queryable. `decided_order`/
+`tie_group`/`result_references` are JSON columns, the same shape `season_award.
+provenance` already uses, since each ruling's staleness fingerprint is a
+variable-length set of `(matchup_id, official_version)` pairs. Downgrade
+refuses once any ruling row exists.
+
 ## Migration authoring and rollback
 
 Every relational change must be a new ordered revision. Do not add startup DDL

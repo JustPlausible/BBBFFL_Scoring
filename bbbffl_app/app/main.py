@@ -35,6 +35,7 @@ from app.draft import (
 from app.fixtures import FixtureRepository
 from app.identity import IdentityRepository
 from app.ladder import LadderRepository
+from app.ladder_tie_ruling import LadderTieRulingConflictError
 from app.lineup_adjudication import (
     NoActivatedTriggerError,
     RoundNotEligibleForAdjudicationError,
@@ -86,6 +87,7 @@ from app.routes import delegated_operations as delegated_operations_routes
 from app.routes import draft as draft_routes
 from app.routes import finals_preflight as finals_preflight_routes
 from app.routes import fixture_setup as fixture_setup_routes
+from app.routes import ladder_tie_ruling as ladder_tie_ruling_routes
 from app.routes import lineup_adjudication as lineup_adjudication_routes
 from app.routes import lineup_correction as lineup_correction_routes
 from app.routes import lineups as lineup_routes
@@ -350,6 +352,8 @@ app.include_router(season_activation_routes.router)
 app.include_router(season_activation_routes.page_router)
 app.include_router(season_completion_routes.router)
 app.include_router(season_completion_routes.page_router)
+app.include_router(ladder_tie_ruling_routes.router)
+app.include_router(ladder_tie_ruling_routes.page_router)
 app.include_router(fixture_setup_routes.router)
 app.include_router(fixture_setup_routes.page_router)
 app.include_router(context_routes.router)
@@ -440,6 +444,18 @@ async def season_completed_error_handler(request: Request, exc: SeasonCompletedE
 # change.
 @app.exception_handler(SeasonAwardError)
 async def season_award_error_handler(request: Request, exc: SeasonAwardError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+# `app.ladder_tie_ruling.LadderTieRulingConflictError` (issue #241): the
+# ladder-tie-ruling route found that the requested tie group is not (or no
+# longer) exactly tied on the current ladder -- a resolvable operator-facing
+# conflict, never a 500. A bare `LadderTieRulingError` (missing reason, a
+# malformed decided_order) is deliberately left unregistered here and falls
+# through to the generic `ValueError` handler below (400), matching
+# `FinalsBracketError`/`FinalsSeedingError`'s identical convention.
+@app.exception_handler(LadderTieRulingConflictError)
+async def ladder_tie_ruling_conflict_error_handler(request: Request, exc: LadderTieRulingConflictError) -> JSONResponse:
     return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 

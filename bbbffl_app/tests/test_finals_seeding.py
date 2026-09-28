@@ -370,6 +370,28 @@ def test_resolve_finals_seed_order_refuses_an_unresolved_ladder_tie_without_a_sn
         resolve_finals_seed_order(ctx["database"], ctx["season"].season_id, ctx["competition"].competition_id)
 
 
+def test_resolve_finals_seed_order_uses_an_audited_tie_ruling_once_recorded():
+    """Issue #241: the mathematical-ladder fallback's `UnresolvedLadderTieError`
+    is not permanent -- once an authorised Scorer/Administrator records a
+    `app.ladder_tie_ruling` ruling for the exact tied group, the identical
+    call that used to fail closed now returns the decided order."""
+    from app.ladder_tie_ruling import LadderTieRulingRepository
+    from app.season import SeasonRepository
+
+    ctx = build_2026_replay_season(score_fn=all_draws)
+    database, season_id = ctx["database"], ctx["season"].season_id
+    competition_id = ctx["competition"].competition_id
+    SeasonRepository(database).transition_lifecycle(season_id, "active", actor=ACTOR, reason="activate")
+    decided_order = [entry.season_entry_id for entry in ctx["entries"]]
+
+    LadderTieRulingRepository(database).record_ruling(
+        season_id, competition_id, 20, decided_order, actor=ACTOR, reason="league committee coin toss, minuted"
+    )
+
+    order = resolve_finals_seed_order(database, season_id, competition_id)
+    assert order == tuple(decided_order)
+
+
 def test_resolve_finals_seed_order_from_a_snapshot_ignores_a_tied_live_ladder():
     """The historical snapshot path never touches `LadderRow.tied` -- it
     returns the already-resolved, audited historical order directly and

@@ -224,6 +224,79 @@ def test_reconcile_wooden_spoon_refuses_an_unresolved_ladder_tie():
     assert SeasonAwardRepository(database).get_active(season_id, WOODEN_SPOON) is None
 
 
+def test_reconcile_wooden_spoon_uses_an_audited_tie_ruling_once_recorded():
+    """Issue #241: once an authorised Scorer/Administrator records a ruling
+    for the exact last-place tie, the identical `reconcile_wooden_spoon`
+    call that used to fail closed now records the decided worst entry."""
+    from app.ladder_tie_ruling import LadderTieRulingRepository
+    from tests.ladder_tie_ruling_helpers import build_tied_season
+
+    built = build_tied_season(year=5131, tied_ranks=(9, 10))
+    database, season_id = built["database"], built["season"].season_id
+    SeasonRepository(database).transition_lifecycle(season_id, "active", actor=ACTOR, reason="activate")
+    decided_order = built["tied_pair"]
+
+    LadderTieRulingRepository(database).record_ruling(
+        season_id, built["ordinary_competition_id"], 20, decided_order, actor=ACTOR, reason="last-place coin toss"
+    )
+
+    award, created = reconcile_wooden_spoon(database, season_id, actor=ACTOR, reason="after ruling")
+    assert created is True
+    assert award.season_entry_id == decided_order[-1]
+    assert award.provenance["decided_order"] == decided_order
+
+
+def test_reconcile_wooden_spoon_is_unaffected_by_an_unresolved_tie_elsewhere_on_the_ladder():
+    """A tie away from last place blocks Finals seeding (it needs a full
+    order) but must never block the wooden spoon, which only cares about
+    the bottom of the ladder -- non-tied-at-the-bottom ladders behave
+    exactly as before, per issue #241's scope."""
+    from tests.ladder_tie_ruling_helpers import build_tied_season
+
+    built = build_tied_season(year=5132, tied_ranks=(3, 4))
+    database, season_id = built["database"], built["season"].season_id
+    SeasonRepository(database).transition_lifecycle(season_id, "active", actor=ACTOR, reason="activate")
+
+    award, created = reconcile_wooden_spoon(database, season_id, actor=ACTOR, reason="unaffected by mid-ladder tie")
+    assert created is True
+    assert award.season_entry_id == built["entries"][9].season_entry_id
+
+
+def test_finals_seeding_and_wooden_spoon_consume_the_identical_ruling_for_the_same_tie():
+    """Issue #241 requirement 7: one persisted ruling unblocks both
+    downstream consumers of the same exact tie -- Finals seeding and the
+    Wooden Spoon alike -- rather than each maintaining its own override."""
+    from app.finals import FinalsBracketRepository
+    from app.ladder_tie_ruling import LadderTieRulingRepository
+    from tests.ladder_tie_ruling_helpers import build_tied_finals_ready_season
+
+    built = build_tied_finals_ready_season(year=5133, tied_ranks=(9, 10))
+    database, season_id = built["database"], built["season"].season_id
+    SeasonRepository(database).transition_lifecycle(season_id, "active", actor=ACTOR, reason="activate")
+    decided_order = built["tied_pair"]
+
+    LadderTieRulingRepository(database).record_ruling(
+        season_id, built["ordinary_competition_id"], 20, decided_order, actor=ACTOR, reason="shared ruling"
+    )
+
+    bracket_result = FinalsBracketRepository(database).create_bracket(
+        season_id,
+        built["finals_competition"].competition_id,
+        built["ordinary_competition_id"],
+        actor=ACTOR,
+        reason="finals seeding consumes the shared ruling",
+    )
+    seed_rows = {
+        row.season_entry_id: row.seed_position
+        for row in FinalsBracketRepository(database).list_seed_rows(bracket_result["bracket"].bracket_id)
+    }
+    assert seed_rows[decided_order[0]] == 9
+    assert seed_rows[decided_order[1]] == 10
+
+    award, _ = reconcile_wooden_spoon(database, season_id, actor=ACTOR, reason="wooden spoon consumes same ruling")
+    assert award.season_entry_id == decided_order[-1]
+
+
 # -- Six-step atomic completion, and its fail-closed readiness gate ----------
 
 

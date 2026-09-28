@@ -116,6 +116,7 @@ EXPECTED_TABLES = {
     "superscore_official_result",
     "season_award",
     "coach_draft_shortlist",
+    "ladder_tie_ruling",
 }
 
 
@@ -1527,6 +1528,42 @@ def test_season_player_structured_names_upgrade_and_downgrade_round_trip(tmp_pat
     remaining = {c["name"] for c in inspect(engine).get_columns("season_player_pool")}
     assert "given_name" not in remaining
     assert "family_name" not in remaining
+    engine.dispose()
+    migrate(url)  # re-upgrading afterward remains harmless
+
+
+def test_ladder_tie_ruling_downgrade_refuses_loss_of_a_recorded_ruling(tmp_path):
+    """Issue #241: `ladder_tie_ruling` is an audited governance record, the
+    same "downgrade must refuse rather than lose data" convention every
+    other governance table in this history follows (`0030_finals_bracket`,
+    `0033_season_award`)."""
+    from app.audit import ActorContext
+    from app.ladder_tie_ruling import LadderTieRulingRepository
+    from tests.ladder_tie_ruling_helpers import build_tied_season
+
+    url = _url(tmp_path / "ladder-tie-ruling-downgrade.db")
+    migrate(url)
+    built = build_tied_season(database=connect(url), year=2074, tied_ranks=(9, 10))
+    database, season_id = built["database"], built["season"].season_id
+    LadderTieRulingRepository(database).record_ruling(
+        season_id,
+        built["ordinary_competition_id"],
+        20,
+        built["tied_pair"],
+        actor=ActorContext.anonymous_operator("test"),
+        reason="fixture ruling",
+    )
+
+    with pytest.raises(RuntimeError, match="0037 downgrade refused"):
+        downgrade(url, "0036_player_structured_names")
+
+
+def test_ladder_tie_ruling_downgrade_succeeds_with_no_recorded_ruling(tmp_path):
+    url = _url(tmp_path / "ladder-tie-ruling-downgrade-empty.db")
+    migrate(url)
+    downgrade(url, "0036_player_structured_names")
+    engine = create_engine(url)
+    assert "ladder_tie_ruling" not in set(inspect(engine).get_table_names())
     engine.dispose()
     migrate(url)  # re-upgrading afterward remains harmless
 

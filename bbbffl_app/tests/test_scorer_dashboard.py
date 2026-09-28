@@ -647,3 +647,48 @@ def test_midseason_handoff_absent_for_a_season_without_a_configured_midseason_dr
     assert view["round"]["round_label"] == "Round 11"
     assert view["next_action"]["code"] == "complete_preflight"
     assert _midseason_attention(view) == []
+
+
+# -- Issue #241: unresolved ladder tie visible in the attention queue -------
+
+
+def test_ladder_tie_attention_absent_before_every_regular_round_is_final():
+    """A mid-season coincidence isn't surfaced -- the tie only becomes
+    attention-worthy once the whole regular-season ladder it is computed
+    from is actually complete."""
+    from tests.ladder_tie_ruling_helpers import build_tied_season
+
+    built = build_tied_season(year=9308, tied_ranks=(9, 10), trigger_round=10, round_count=20)
+    view = _dashboard(built["database"], Facts({}), built["season"].season_id)
+    assert [item for item in view["attention"] if item["code"].startswith("ladder_tie:")] == []
+
+
+def test_ladder_tie_attention_present_once_the_regular_season_ladder_is_complete():
+    from tests.ladder_tie_ruling_helpers import build_tied_season
+
+    built = build_tied_season(year=9309, tied_ranks=(9, 10))
+    view = _dashboard(built["database"], Facts({}), built["season"].season_id)
+    [item] = [entry for entry in view["attention"] if entry["code"].startswith("ladder_tie:")]
+    assert item["category"] == "decision_required"
+    assert item["url"] == f"/scorer/ladder-tie-ruling/{built['season'].season_id}"
+    assert "Wooden Spoon" in item["detail"]
+
+
+def test_ladder_tie_attention_withdraws_once_a_ruling_resolves_it():
+    from app.ladder_tie_ruling import LadderTieRulingRepository
+    from tests.ladder_tie_ruling_helpers import build_tied_season
+
+    built = build_tied_season(year=9310, tied_ranks=(9, 10))
+    SeasonRepository(built["database"]).transition_lifecycle(
+        built["season"].season_id, "active", actor=ActorContext.anonymous_operator("test"), reason="activate"
+    )
+    LadderTieRulingRepository(built["database"]).record_ruling(
+        built["season"].season_id,
+        built["ordinary_competition_id"],
+        20,
+        built["tied_pair"],
+        actor=ActorContext.anonymous_operator("test"),
+        reason="resolved before dashboard check",
+    )
+    view = _dashboard(built["database"], Facts({}), built["season"].season_id)
+    assert [item for item in view["attention"] if item["code"].startswith("ladder_tie:")] == []

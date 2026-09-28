@@ -64,7 +64,13 @@ last place, `complete_season`'s award-derivation step (not the round-state
 readiness gate) refuses with `UnresolvedWoodenSpoonTieError`. This route
 maps that -- and the sibling `AwardNotReadyError` -- to a 409, not a 500;
 see `tests/test_season_completion_api.py`'s and `tests/test_season_
-completion.py`'s identical constructions of this scenario.
+completion.py`'s identical constructions of this scenario. This is not a
+permanent block: issue #241's `app.ladder_tie_ruling` -- the Scorer
+Operations "Ladder tie ruling" page (`/scorer/ladder-tie-ruling/{season_id}`)
+-- is the audited recovery path. Recording a ruling for the exact last-place
+tie there lets the identical `reconcile_wooden_spoon` call that raised
+`UnresolvedWoodenSpoonTieError` succeed; see
+[`ladder-progression.md`](ladder-progression.md#unresolved-exact-ties-audited-manual-ruling-issue-241).
 
 ## Completion is always explicit
 

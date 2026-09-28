@@ -65,6 +65,7 @@ from app.audit import ActorContext, append_event
 from app.db import _for_update_suffix, transaction
 from app.finals_review import _premier_for_scores
 from app.ladder import LadderRepository
+from app.ladder_tie_ruling import UnresolvedTieError, resolve_tie
 from app.season import SeasonRepository, _now
 
 PREMIERSHIP_RECORDED = "season.premiership.recorded"
@@ -89,10 +90,13 @@ class AwardNotReadyError(SeasonAwardError):
 
 class UnresolvedWoodenSpoonTieError(SeasonAwardError):
     """The live mathematical Round 20 ladder has an unresolved tie for
-    last place -- exactly `app.finals_seeding.UnresolvedLadderTieError`'s
-    reasoning applied to the bottom of the ladder instead of the top: this
-    requires an explicit, audited competition-governance determination,
-    never an arbitrary tie-break or the ladder's own serialization order."""
+    last place, with no fresh, active `app.ladder_tie_ruling` resolving it
+    -- exactly `app.finals_seeding.UnresolvedLadderTieError`'s reasoning
+    applied to the bottom of the ladder instead of the top: this requires an
+    explicit, audited competition-governance determination, never an
+    arbitrary tie-break or the ladder's own serialization order. Issue
+    #241's `app.ladder_tie_ruling` is the supported resolution path, shared
+    with `app.finals`'s ladder-seed fallback for the exact same tie group."""
 
 
 @dataclass(frozen=True)
@@ -344,11 +348,18 @@ def _resolve_effective_wooden_spoon(conn, database, season_id: str):
         raise AwardNotReadyError(f"season {season_id}'s ordinary competition has no final results yet")
     last_place = ladder.rows[-1]
     if last_place.tied:
-        raise UnresolvedWoodenSpoonTieError(
-            f"cannot derive a deterministic wooden spoon for season {season_id}: the mathematical ladder has an "
-            f"unresolved tie for last place among {last_place.tie_group} -- this requires an explicit, audited "
-            "competition-governance determination"
-        )
+        try:
+            decided_order = resolve_tie(database, ladder, last_place.tie_group)
+        except UnresolvedTieError as exc:
+            raise UnresolvedWoodenSpoonTieError(
+                f"cannot derive a deterministic wooden spoon for season {season_id}: the mathematical ladder has "
+                f"an unresolved tie for last place among {sorted(last_place.tie_group)} -- this requires an "
+                "explicit, audited competition-governance determination "
+                f"({'a prior ruling is stale' if exc.stale else 'no ruling has been recorded'})"
+            ) from exc
+        last_place_entry_id = decided_order[-1]
+    else:
+        last_place_entry_id = last_place.season_entry_id
     provenance = {
         "ordinary_competition_id": ordinary_competition_id,
         "through_round": ladder.through_round,
@@ -358,7 +369,14 @@ def _resolve_effective_wooden_spoon(conn, database, season_id: str):
             for reference in sorted(ladder.result_references, key=lambda reference: reference.matchup_id)
         ],
     }
-    return last_place.season_entry_id, provenance
+    if last_place.tied:
+        # Issue #241: the wooden spoon depended on an explicit tie ruling
+        # for last place -- recorded here too, alongside the ladder
+        # references, so the award's own provenance shows the exact
+        # governance decision it applied, not just the ladder state.
+        provenance["tie_group"] = sorted(last_place.tie_group)
+        provenance["decided_order"] = list(decided_order)
+    return last_place_entry_id, provenance
 
 
 def reconcile_wooden_spoon(database, season_id: str, *, actor: ActorContext, reason: str) -> tuple[SeasonAward, bool]:

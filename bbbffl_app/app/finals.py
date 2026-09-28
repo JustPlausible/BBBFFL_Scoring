@@ -76,6 +76,7 @@ from app.competition_lifecycle import CompetitionLifecycleRepository
 from app.db import _for_update_suffix, transaction
 from app.finals_seeding import FinalsSeedingRepository, UnresolvedLadderTieError
 from app.ladder import LadderRepository
+from app.ladder_tie_ruling import UnresolvedTieError, resolve_full_ladder_order
 from app.season import SeasonRepository
 
 __all__ = [
@@ -451,14 +452,15 @@ class FinalsBracketRepository:
                 f"ordinary_competition_id {ordinary_competition_id!r} belongs to season {ladder.season_id!r}, "
                 f"not the requested season {season_id!r}"
             )
-        tied_entries = [row.season_entry_id for row in ladder.rows if row.tied]
-        if tied_entries:
+        try:
+            seed_order = resolve_full_ladder_order(self.database, ladder)
+        except UnresolvedTieError as exc:
             raise UnresolvedLadderTieError(
                 f"cannot derive a deterministic finals seed order: the mathematical ladder has an unresolved tie "
-                f"among {tied_entries} -- this requires an explicit, audited Scorer/competition-governance "
-                "determination, never the ladder's own season_entry_id serialization order"
-            )
-        seed_order = tuple(row.season_entry_id for row in ladder.rows)
+                f"among {sorted(exc.tie_group)} -- this requires an explicit, audited Scorer/competition-governance "
+                "determination, never the ladder's own season_entry_id serialization order "
+                f"({'a prior ruling is stale' if exc.stale else 'no ruling has been recorded'})"
+            ) from exc
         return (
             seed_order,
             "ladder",

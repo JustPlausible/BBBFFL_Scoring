@@ -210,6 +210,24 @@ SUPERSCORE = {"app.superscore_round", "app.superscore_review", "app.superscore_r
 # own docstring.
 SEASON_COMPLETION = {"app.season_awards", "app.season_completion", "app.season_archival"}
 
+# Audited manual resolution of an exact mathematical ladder tie the
+# configured ladder criteria cannot separate (issue #241) -- the live-season
+# counterpart to `app.finals_seeding`'s replay-only historical-seed snapshot,
+# but general-purpose (any season, any tied rank band, not only the 2026
+# replay's Round 20 cutoff) and HTTP-routed, so it is deliberately its own
+# group rather than joining REPLAY_BOOTSTRAP. It sits directly on
+# `app.ladder` (recomputing the current tie group and its exact result-
+# version set to detect staleness) and `app.season` (`guard_writable`, the
+# shared completed-season write fence) -- the same shape `app.finals_seeding`
+# already uses over the same two dependencies. `app.finals`/`app.
+# finals_seeding` (FINALS/REPLAY_BOOTSTRAP) and `app.season_awards`
+# (SEASON_COMPLETION) all depend on it for the *same* persisted ruling --
+# neither re-implements tie resolution, and neither may be depended back on
+# by it. It is also imported directly by its own thin route (`app.routes.
+# ladder_tie_ruling`), the same shape as `app.season_activation`/`app.
+# finals_preflight` (see this file's ROUND_REVIEW comment).
+LADDER_GOVERNANCE = {"app.ladder_tie_ruling"}
+
 # Anonymous ordinary-season presentation/read service (issue #78).  It is an
 # allow-listed DTO layer above the persisted review and ladder boundaries;
 # routes may import it, while it never depends on HTTP or the composition root.
@@ -442,6 +460,7 @@ ROUTES = {
     "app.routes.season_setup",
     "app.routes.season_activation",
     "app.routes.season_completion",
+    "app.routes.ladder_tie_ruling",
 }
 
 COMPOSITION_ROOT = {"app.main"}
@@ -459,6 +478,7 @@ ALL_GROUPS = (
     | FINALS
     | SUPERSCORE
     | SEASON_COMPLETION
+    | LADDER_GOVERNANCE
     | PUBLIC_READ_MODEL
     | PUBLIC_FINALS_READ_MODEL
     | OPENING_ROUND
@@ -756,6 +776,27 @@ def test_finals_does_not_depend_on_routes_grand_final_lockouts_or_composition_ro
 
     for module in sorted(SEASON_MODEL | LOCKOUTS | WEEKLY_SUBMISSION_SOURCES | REPLAY_BOOTSTRAP):
         assert "app.finals" not in graph[module], f"{module} must not depend on app.finals"
+
+
+def test_ladder_governance_is_an_application_service(graph):
+    """`app.ladder_tie_ruling` (issue #241) sits directly on `app.ladder`
+    and `app.season` -- but must stay a sibling of the Grand Final vertical
+    and must never depend on lockouts, routes, or the composition root,
+    exactly like `app.finals_seeding`. The reverse direction also holds for
+    the season model/lockouts/weekly-submission-sources: they may not depend
+    back on it -- it is a consumer of the season model, never a dependency
+    of it. `app.finals` (FINALS), `app.finals_seeding` (REPLAY_BOOTSTRAP) and
+    `app.season_awards` (SEASON_COMPLETION) are its sanctioned consumers,
+    each resolving the *same* persisted ruling rather than re-implementing
+    tie resolution -- see this file's LADDER_GOVERNANCE comment."""
+    forbidden = GRAND_FINAL_VERTICAL | LOCKOUTS | ROUTES | COMPOSITION_ROOT
+    for module in sorted(LADDER_GOVERNANCE):
+        offending = graph[module] & forbidden
+        assert not offending, f"{module} must not depend on {sorted(offending)}"
+
+    for module in sorted(SEASON_MODEL | LOCKOUTS | WEEKLY_SUBMISSION_SOURCES):
+        offending = graph[module] & LADDER_GOVERNANCE
+        assert not offending, f"{module} must not depend on {sorted(offending)}"
 
 
 def test_superscore_does_not_depend_on_routes_grand_final_lockouts_or_composition_root(graph):

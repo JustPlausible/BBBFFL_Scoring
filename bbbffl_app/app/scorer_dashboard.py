@@ -97,6 +97,7 @@ PUBLIC_ROUND_CENTRE_URL = "/seasons/{season_id}/rounds/{round_id}"
 # week.
 SCORER_DASHBOARD_URL = "/scorer?season_id={season_id}&round_id={round_id}"
 MIDSEASON_DRAFT_URL = "/admin/midseason-draft/{season_id}"
+LADDER_TIE_RULING_URL = "/scorer/ladder-tie-ruling/{season_id}"
 
 
 @dataclass(frozen=True)
@@ -884,6 +885,83 @@ def _midseason_handoff_action(database, season_id: str) -> dict | None:
 _MIDSEASON_HANDOFF_PRECEDENCE_STATES = ("not_created", "upcoming", "final")
 
 
+def _regular_season_ladder_complete(database, season_id: str) -> bool:
+    """Whether every regular-season round of this season's one ordinary
+    competition is `final` -- the point at which the ordinary-competition
+    ladder is complete through `regular_season_round_count` and an exact
+    tie stops being a transient mid-season coincidence and starts actually
+    blocking Finals seeding/the Wooden Spoon. Unlike `_home_and_away_
+    complete_without_finals`, this stays `True` once a Finals bracket
+    exists -- the Wooden Spoon/season-completion use of the same ladder
+    matters for the whole rest of the season, not only the Finals-seeding
+    moment."""
+    season = database.execute(
+        "SELECT regular_season_round_count FROM bbbffl_season WHERE season_id=?", (season_id,)
+    ).fetchone()
+    if season is None:
+        return False
+    round_count = season["regular_season_round_count"] or 20
+    streams = database.execute(
+        "SELECT competition_id FROM competition_stream WHERE season_id=? AND stream_type='ordinary'", (season_id,)
+    ).fetchall()
+    if len(streams) != 1:
+        return False
+    final_rounds = database.execute(
+        "SELECT COUNT(*) AS n FROM bbbffl_round r JOIN bbbffl_round_lifecycle l ON l.bbbffl_round_id=r.bbbffl_round_id "
+        "WHERE r.competition_id=? AND r.sequence<=? AND l.state='final'",
+        (streams[0]["competition_id"], round_count),
+    ).fetchone()["n"]
+    return final_rounds == round_count
+
+
+def _ladder_tie_ruling_attention(database, season_id: str) -> list[dict]:
+    """Issue #241: surface any exact ladder tie that still blocks Finals
+    seeding or the Wooden Spoon/season-awards computation through the
+    Scorer Operations attention queue, once the regular-season ladder is
+    complete enough for the tie to be a real blocker rather than a
+    transient mid-season coincidence (`_regular_season_ladder_complete`).
+    Read-only -- reads `app.ladder_tie_ruling.preview`, which itself never
+    mutates or locks anything. A resolved tie (a fresh, active ruling
+    already covers it) is not surfaced here at all; only `unresolved`/
+    `stale` groups are, since a stale one is functionally unresolved again
+    until a fresh ruling replaces it."""
+    if not _regular_season_ladder_complete(database, season_id):
+        return []
+    from app.ladder_tie_ruling import preview as ladder_tie_ruling_preview
+
+    report = ladder_tie_ruling_preview(database, season_id)
+    items: list[dict] = []
+    for tie in report["open_ties"]:
+        if tie.status == "resolved":
+            continue
+        blocked = []
+        if tie.affects_finals_seeding:
+            blocked.append("Finals seeding")
+        if tie.affects_wooden_spoon:
+            blocked.append("the Wooden Spoon / season awards")
+        stale_note = (
+            " A prior ruling for this exact tie is now stale and no longer applies." if tie.status == "stale" else ""
+        )
+        items.append(
+            {
+                "category": CATEGORY_DECISION_REQUIRED,
+                "code": f"ladder_tie:{'-'.join(sorted(tie.tie_group))}",
+                "title": "Ladder tie needs a competition ruling",
+                "detail": (
+                    f"Rank {tie.rank} is exactly tied on the mathematical ladder and blocks "
+                    f"{' and '.join(blocked) or 'a downstream deterministic order'}.{stale_note} An authorised "
+                    "Scorer/Administrator must record the decided order -- see Ladder tie ruling."
+                ),
+                "state": None,
+                "timestamp": None,
+                "capability": None,
+                "url": LADDER_TIE_RULING_URL.format(season_id=season_id),
+                "diagnostics": None,
+            }
+        )
+    return items
+
+
 def _determine_next_action(
     *,
     database,
@@ -1510,6 +1588,7 @@ def _build_round_dashboard(
                 "diagnostics": None,
             }
         )
+    attention += _ladder_tie_ruling_attention(database, season.season_id)
     attention.sort(key=_sort_key)
 
     next_round = next(

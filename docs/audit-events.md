@@ -299,6 +299,12 @@ separate field on the same event, not a substitute for it.
 complete set of round ids the readiness gate verified `final` -- so a reader
 can confirm exactly what was checked without re-deriving it.
 
+### Ladder tie ruling (`app.ladder_tie_ruling`, issue #241)
+
+| Action | `entity_type` / `entity_id` | When |
+|---|---|---|
+| `ladder_tie_ruling.recorded` | `ladder.tie_ruling` / `ruling_id` | `LadderTieRulingRepository.record_ruling` idempotently creates or supersedes the audited manual resolution for one exact tie group (`app.ladder.LadderRow.tie_group`) the configured ladder criteria could not separate -- attributed to the acting Scorer/Administrator, with their mandatory reason. `payload` carries `season_id`/`competition_id`/`through_round`/`supersedes_ruling_id`; `before_state`/`after_state` carry the previous and new `decided_order` (see `docs/ladder-progression.md`'s "Unresolved exact ties" section). Consumed by `app.finals`/`app.finals_seeding` (Finals seeding) and `app.season_awards` (the Wooden Spoon) -- neither records a separate event of its own for consuming it, since the ruling itself is the one audited fact and its own consumers' existing events (`finals.bracket.created`, `season.wooden_spoon.recorded`) already record what they derived. |
+
 ## Live-season initialization action catalogue (issue #237)
 
 The production-safe [Season setup](season-setup.md) commands record these,

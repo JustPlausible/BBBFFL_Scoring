@@ -277,10 +277,19 @@ class PlayerNominationRepository:
         """`season_id` must be the season the caller's authorization covers
         (Codex review on PR #258, P1) -- see `ProvisionalPlayerRepository.
         reconcile`'s docstring for why every mutation here binds to it
-        rather than trusting the resource id alone."""
+        rather than trusting the resource id alone.
+
+        Locks the season row (`guard_writable`) *before* the nomination row
+        (Codex review on PR #258, P2, third round) -- `create` locks in
+        that same order when resolving a nomination, and the season row
+        must always be the first lock taken across every write path here
+        (see `app.season.SeasonRepository.guard_writable`'s own docstring)
+        or two concurrent requests can deadlock on PostgreSQL by acquiring
+        these two locks in opposite order."""
         if not reason or not reason.strip():
             raise ValueError("dismissing a nomination requires a reason")
         with transaction(self.database) as conn:
+            SeasonRepository(self.database).guard_writable(conn, season_id)
             nomination = conn.execute(
                 "SELECT * FROM player_nomination WHERE nomination_id=? AND season_id=?"
                 + _for_update_suffix(self.database),
@@ -288,7 +297,6 @@ class PlayerNominationRepository:
             ).fetchone()
             if not nomination:
                 raise KeyError(nomination_id)
-            SeasonRepository(self.database).guard_writable(conn, season_id)
             if nomination["status"] != "pending":
                 raise NominationStateError(f"nomination is already {nomination['status']}")
             at = _now()
@@ -505,10 +513,18 @@ class ProvisionalPlayerRepository:
         from `season_player_id`/`target_season_player_id` -- could silently
         belong to a season-scoped Scorer's *unauthorized* season. Every
         other write below fails closed (404-shaped `KeyError`) unless the
-        loaded source row actually belongs to `season_id`."""
+        loaded source row actually belongs to `season_id`.
+
+        Locks the season row (`guard_writable`) *before* the source/target
+        pool rows (Codex review on PR #258, P2, third round) -- the season
+        row must always be the first lock taken across every write path
+        here (see `app.season.SeasonRepository.guard_writable`'s own
+        docstring), or two concurrent requests can deadlock on PostgreSQL
+        by acquiring these locks in opposite order."""
         if not reason or not reason.strip():
             raise ValueError("reconciliation requires an explicit reason")
         with transaction(self.database) as conn:
+            SeasonRepository(self.database).guard_writable(conn, season_id)
             source = conn.execute(
                 "SELECT * FROM season_player_pool WHERE season_player_id=? AND season_id=?"
                 + _for_update_suffix(self.database),
@@ -516,7 +532,6 @@ class ProvisionalPlayerRepository:
             ).fetchone()
             if not source:
                 raise KeyError(season_player_id)
-            SeasonRepository(self.database).guard_writable(conn, source["season_id"])
             if source["canonical_player_id"] is not None:
                 raise NotProvisionalError("player is not provisional -- it already has a canonical afl-api identity")
             target = conn.execute(
@@ -641,10 +656,12 @@ class ProvisionalPlayerRepository:
         P1: two provisional players can share a name) -- and permanently
         excludes this exact pair from future automatic suggestion -- see
         `detect_candidates`. `season_id` must be the season the caller's
-        authorization covers (see `reconcile`'s docstring for why)."""
+        authorization covers, and is locked (`guard_writable`) before the
+        candidate row (see `reconcile`'s docstring for both)."""
         if not reason or not reason.strip():
             raise ValueError("rejecting a candidate match requires a reason")
         with transaction(self.database) as conn:
+            SeasonRepository(self.database).guard_writable(conn, season_id)
             candidate = conn.execute(
                 "SELECT * FROM provisional_match_candidate WHERE season_player_id=? AND canonical_player_id=? "
                 "AND season_id=?" + _for_update_suffix(self.database),
@@ -652,7 +669,6 @@ class ProvisionalPlayerRepository:
             ).fetchone()
             if not candidate:
                 raise KeyError((season_player_id, canonical_player_id))
-            SeasonRepository(self.database).guard_writable(conn, season_id)
             if candidate["status"] == "rejected":
                 raise ProvisionalPlayerError("candidate match is already rejected")
             at = _now()
@@ -692,9 +708,11 @@ class ProvisionalPlayerRepository:
         and deliberately not acted on yet. Purely an audit note -- neither
         the candidate row nor the quarantined pool row changes, so the
         candidate remains exactly as actionable on the next visit.
-        `season_id` must be the season the caller's authorization covers
-        (see `reconcile`'s docstring for why)."""
+        `season_id` must be the season the caller's authorization covers,
+        and is locked (`guard_writable`) before the candidate row (see
+        `reconcile`'s docstring for both)."""
         with transaction(self.database) as conn:
+            SeasonRepository(self.database).guard_writable(conn, season_id)
             candidate = conn.execute(
                 "SELECT * FROM provisional_match_candidate WHERE season_player_id=? AND canonical_player_id=? "
                 "AND season_id=?" + _for_update_suffix(self.database),
@@ -702,7 +720,6 @@ class ProvisionalPlayerRepository:
             ).fetchone()
             if not candidate:
                 raise KeyError((season_player_id, canonical_player_id))
-            SeasonRepository(self.database).guard_writable(conn, season_id)
             append_event(
                 conn,
                 actor=actor,
@@ -720,10 +737,10 @@ def detect_candidates(database, season_id: str, *, actor: ActorContext) -> int:
     this wraps in its own transaction for a standalone caller (e.g. a
     script or a test)."""
     with transaction(database) as conn:
-        return detect_candidates_in_transaction(conn, season_id, actor=actor)
+        return detect_candidates_in_transaction(conn, database, season_id, actor=actor)
 
 
-def detect_candidates_in_transaction(conn, season_id: str, *, actor: ActorContext) -> int:
+def detect_candidates_in_transaction(conn, database, season_id: str, *, actor: ActorContext) -> int:
     """As `detect_candidates`, but on the caller's own transaction-scoped
     `conn` (issue #242's afl-api candidate detection). `app.season_setup.
     refresh_player_pool` calls this in the *same* transaction as `app.
@@ -732,7 +749,16 @@ def detect_candidates_in_transaction(conn, season_id: str, *, actor: ActorContex
     provisional player is never visible to another transaction as eligible
     even momentarily -- its quarantine (below) commits atomically with its
     insertion. See the module docstring's layering note for why this lives
-    here rather than inside `app.player_pool` itself.
+    here rather than inside `app.player_pool` itself. `database` is needed
+    (separately from `conn`) only to resolve the SQL dialect for
+    `guard_writable`'s row lock, the same as every `_in_transaction` method
+    elsewhere in this module.
+
+    Locks the season row (`guard_writable`) before mutating anything (Codex
+    review on PR #258, P2, third round): this is the one mutating entry
+    point in this module that is not a `ProvisionalPlayerRepository`
+    method, so it must enforce the completed-season write fence itself
+    rather than relying on a caller that might not.
 
     Matching requires an exact, case-insensitive `given_name`+`family_name`
     match between the provisional player and an already-canonical pool row
@@ -743,15 +769,8 @@ def detect_candidates_in_transaction(conn, season_id: str, *, actor: ActorContex
     on. A pair already explicitly rejected by a Scorer/Administrator
     (`reject_candidate`) is never re-suggested. Returns the number of newly
     recorded candidate rows."""
+    SeasonRepository(database).guard_writable(conn, season_id)
     detected = 0
-    # Two different provisional players can share a name and match the same
-    # canonical row within one detection run -- quarantining it for the
-    # first would make a later `SELECT ... eligible` for the second read
-    # back the *already-quarantined* `FALSE`, corrupting the recorded
-    # "restore to" value (Codex review on PR #258, P1, second round). Cache
-    # each canonical row's original eligibility the first time it is seen
-    # this run so every candidate on it records the same, true prior value.
-    original_eligible_by_canonical: dict[int, bool] = {}
     provisional_rows = conn.execute(
         "SELECT season_player_id, given_name, family_name FROM season_player_pool "
         "WHERE season_id=? AND canonical_player_id IS NULL "
@@ -776,15 +795,31 @@ def detect_candidates_in_transaction(conn, season_id: str, *, actor: ActorContex
                 # record) or explicitly rejected (never resurrected
                 # automatically).
                 continue
-            # Codex review on PR #258 (P1, second round): record whether
-            # this row was actually eligible right before quarantine, so
-            # releasing quarantine later restores *that* value rather than
+            # Codex review on PR #258 (P1 then P2, second and third rounds):
+            # record whether this row was actually eligible right before
+            # *any* detection run ever quarantined it, so releasing
+            # quarantine later restores *that* value rather than
             # unconditionally `TRUE` -- a row already ineligible for an
             # unrelated reason must not become draftable just because an
-            # unrelated candidate suggestion was rejected.
-            if canonical_player_id not in original_eligible_by_canonical:
-                original_eligible_by_canonical[canonical_player_id] = bool(match["eligible"])
-            restore_eligible_on_release = original_eligible_by_canonical[canonical_player_id]
+            # unrelated candidate suggestion was rejected. Reusing an
+            # already-recorded value from any other candidate row on this
+            # same canonical id (this run or an earlier one) rather than
+            # reading `match["eligible"]` directly is what makes this
+            # correct across multiple detection runs -- once quarantined,
+            # the pool row's *current* `eligible` is no longer the original
+            # value, so only the first-ever candidate for a canonical id
+            # may derive it from the live row; every later one must copy
+            # the value that first candidate already recorded.
+            prior_candidate = conn.execute(
+                "SELECT restore_eligible_on_release FROM provisional_match_candidate "
+                "WHERE season_id=? AND canonical_player_id=? LIMIT 1",
+                (season_id, canonical_player_id),
+            ).fetchone()
+            restore_eligible_on_release = (
+                bool(prior_candidate["restore_eligible_on_release"])
+                if prior_candidate is not None
+                else bool(match["eligible"])
+            )
             candidate_id, detected_at = _id(), _now()
             conn.execute(
                 "INSERT INTO provisional_match_candidate "

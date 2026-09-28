@@ -288,6 +288,46 @@ def test_rejecting_a_candidate_never_makes_an_already_ineligible_row_draftable()
     assert pool.get_by_id(canonical.season_player_id).eligible is False
 
 
+def test_prior_eligibility_is_preserved_across_separate_detection_runs():
+    """Codex review on PR #258 (P2, third round): a canonical row quarantined
+    in one `detect_candidates` run must still record its *true* original
+    eligibility for a second provisional player matched to it in a *later*
+    run -- not the already-quarantined value that run would otherwise read
+    back live from the pool row."""
+    db, season, _entries = setup_domain()
+    player_a = _create(db, season.season_id, given="Jordan", family="Newrecruit")
+    pool = PlayerPoolRepository(db)
+    canonical = pool.refresh_player(
+        season.season_id, 9012, "Jordan Newrecruit", given_name="Jordan", family_name="Newrecruit"
+    )
+    detect_candidates(db, season.season_id, actor=ActorContext.system())  # run 1: quarantines 9012
+    assert pool.get_by_id(canonical.season_player_id).eligible is False
+
+    player_b = _create(db, season.season_id, given="Jordan", family="Newrecruit")
+    detect_candidates(db, season.season_id, actor=ActorContext.system())  # run 2: matches player_b too
+
+    provisional = ProvisionalPlayerRepository(db)
+    provisional.reject_candidate(season.season_id, player_a.season_player_id, 9012, actor=SCORER, reason="Not A")
+    # Still quarantined -- player_b's candidate on 9012 is still pending.
+    assert pool.get_by_id(canonical.season_player_id).eligible is False
+
+    provisional.reject_candidate(season.season_id, player_b.season_player_id, 9012, actor=SCORER, reason="Not B")
+    # Both rejected -- restored to its true original (eligible) state.
+    assert pool.get_by_id(canonical.season_player_id).eligible is True
+
+
+def test_detect_candidates_is_refused_once_season_is_completed():
+    db, season, _entries = setup_domain()
+    _create(db, season.season_id, given="Jordan", family="Newrecruit")
+    PlayerPoolRepository(db).refresh_player(
+        season.season_id, 9013, "Jordan Newrecruit", given_name="Jordan", family_name="Newrecruit"
+    )
+    with transaction(db) as conn:
+        conn.execute("UPDATE bbbffl_season SET lifecycle_state='completed' WHERE season_id=?", (season.season_id,))
+    with pytest.raises(SeasonCompletedError):
+        detect_candidates(db, season.season_id, actor=ActorContext.system())
+
+
 def test_rejecting_an_unknown_candidate_pair_fails():
     db, season, _entries = setup_domain()
     player = _create(db, season.season_id)

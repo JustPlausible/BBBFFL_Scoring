@@ -283,7 +283,7 @@ def refresh_player_pool(database, afl_client, season_id: str, afl_season_id: int
                 actor=actor,
                 reason=reason,
             )
-            detect_candidates_in_transaction(conn, season_id, actor=actor)
+            detect_candidates_in_transaction(conn, database, season_id, actor=actor)
     except ValueError as exc:
         raise SeasonSetupError(str(exc)) from exc
     return {**summary, "afl_season_id": afl_season_id}

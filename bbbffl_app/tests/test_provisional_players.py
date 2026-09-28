@@ -184,6 +184,33 @@ def test_coach_can_draft_a_provisional_player_through_the_normal_draft_workflow(
 # -- Candidate detection --------------------------------------------------------
 
 
+def test_creation_immediately_detects_an_already_existing_canonical_duplicate():
+    """Codex review on PR #258 (P2, seventh round): if a canonical pool row
+    already matches the new provisional player's structured name *before*
+    creation, waiting for the next `refresh_player_pool`/`detect_candidates`
+    call to flag it would leave both identities eligible/draftable in the
+    meantime. `create` must run the same detection immediately, in the same
+    transaction as the insert."""
+    db, season, _entries = setup_domain()
+    pool = PlayerPoolRepository(db)
+    canonical = pool.refresh_player(
+        season.season_id, 9801, "Jordan Newrecruit", given_name="Jordan", family_name="Newrecruit"
+    )
+    player = _create(db, season.season_id, given="Jordan", family="Newrecruit")
+
+    assert pool.get_by_id(canonical.season_player_id).eligible is False
+    candidate = db.execute(
+        "SELECT status FROM provisional_match_candidate WHERE season_player_id=? AND canonical_player_id=?",
+        (player.season_player_id, 9801),
+    ).fetchone()
+    assert candidate is not None
+    assert candidate["status"] == "pending"
+
+    # The newly-created provisional player itself is unaffected -- only the
+    # pre-existing canonical duplicate is quarantined.
+    assert pool.get_by_id(player.season_player_id).eligible is True
+
+
 def test_no_match_leaves_player_plainly_provisional():
     db, season, _entries = setup_domain()
     player = _create(db, season.season_id)
@@ -732,6 +759,58 @@ def test_reconciliation_does_not_reapply_a_rejected_winning_candidates_stale_eli
         season.season_id, player.season_player_id, target.season_player_id, actor=SCORER, reason="Confirmed after all"
     )
     assert reconciled.eligible is False
+
+
+def test_reconciliation_recreates_another_provisional_players_still_pending_claim_on_the_same_target():
+    """Codex review on PR #258 (P2, seventh round): if some *other*
+    provisional player still has a pending candidate naming the exact
+    canonical id being reconciled here, `fk_candidate_target_same_season`'s
+    `ON DELETE CASCADE` (triggered when the target's own pool row is
+    deleted to make way for the merge) would otherwise silently destroy
+    that unresolved suggestion and let both the merged row and the other
+    provisional player become independently draftable -- this decision
+    only establishes that *this* provisional player is the target, not
+    that the other one is not. Reconciling A must recreate B's claim
+    against the same canonical id (now held by the merged row) and keep
+    that row quarantined until B's claim is itself decided."""
+    db, season, _entries = setup_domain()
+    player_a = _create(db, season.season_id, given="Jordan", family="Newrecruit")
+    player_b = _create(db, season.season_id, given="Jordan2", family="Newrecruit2")
+    with transaction(db) as conn:
+        conn.execute(
+            "UPDATE season_player_pool SET given_name='Jordan', family_name='Newrecruit' WHERE season_player_id=?",
+            (player_b.season_player_id,),
+        )
+    pool = PlayerPoolRepository(db)
+    target = pool.refresh_player(
+        season.season_id, 9705, "Jordan Newrecruit", given_name="Jordan", family_name="Newrecruit"
+    )
+    detect_candidates(db, season.season_id, actor=ActorContext.system())
+
+    provisional = ProvisionalPlayerRepository(db)
+    reconciled = provisional.reconcile(
+        season.season_id, player_a.season_player_id, target.season_player_id, actor=SCORER, reason="Confirmed A"
+    )
+
+    # The merged row stays quarantined -- B's claim on the same canonical
+    # id is still open.
+    assert reconciled.eligible is False
+
+    # B's claim survives the cascade, now naming the merged row's canonical
+    # id.
+    remaining = db.execute(
+        "SELECT status FROM provisional_match_candidate WHERE season_player_id=? AND canonical_player_id=?",
+        (player_b.season_player_id, 9705),
+    ).fetchone()
+    assert remaining is not None
+    assert remaining["status"] == "pending"
+
+    # Deciding B's claim now correctly resolves the merged row's
+    # eligibility.
+    provisional.reject_candidate(
+        season.season_id, player_b.season_player_id, 9705, actor=SCORER, reason="Not the same person as B"
+    )
+    assert pool.get_by_id(player_a.season_player_id).eligible is True
 
 
 def test_deferring_an_already_rejected_candidate_is_refused():

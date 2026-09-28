@@ -270,3 +270,46 @@ def test_secretary_does_not_see_opening_round_link_but_admin_does(season_centre_
     # informational for a Secretary -- only the link into a page they
     # cannot use is hidden.
     assert secretary_view["readiness"]["opening_round"] is not None
+
+
+def test_secretary_does_not_see_season_activation_link_but_admin_does(season_centre_client):
+    """Issue #239 (Codex review, PR #254): season activation is Scorer/
+    Administrator only -- narrower than this page's own Secretary-or-
+    Administrator authority -- so Season Centre must hide the link for a
+    Secretary rather than send them to a page whose readiness request
+    would 403, exactly like the existing `opening_round`/`draft`
+    filtering above."""
+    client = season_centre_client
+    season_id = client.post("/api/admin/season-centre/seasons", json={"year": 2028, "label": "2028 BBBFFL"}).json()[
+        "season_id"
+    ]
+
+    admin_view = client.get(f"/api/admin/season-centre/{season_id}").json()
+    assert admin_view["links"]["season_activation"] == f"/scorer/season-activation/{season_id}"
+
+    operator = client.app.state.identities.create_coach(
+        "Authenticated Secretary 239", email="secretary-239@example.test"
+    )
+    client.app.state.credentials.set_password(operator.coach_id, "correct horse battery staple", actor=ADMIN)
+    client.app.state.role_grants.grant(operator.coach_id, "secretary", season_id=season_id, actor=ADMIN)
+
+    login_page = client.get("/login")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text).group(1)
+    login = client.post(
+        "/login",
+        data={"email": "secretary-239@example.test", "password": "correct horse battery staple", "csrf_token": token},
+        cookies=login_page.cookies,
+        follow_redirects=False,
+    )
+    session = login.cookies["bbbffl_session"]
+    account = client.get("/account", cookies={"bbbffl_session": session})
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', account.text).group(1)
+    cookies = {"bbbffl_session": session, "bbbffl_csrf": account.cookies["bbbffl_csrf"]}
+    headers = {"X-CSRF-Token": csrf}
+    assert (
+        client.post("/api/context/role", json={"role": "secretary"}, cookies=cookies, headers=headers).status_code
+        == 200
+    )
+
+    secretary_view = client.get(f"/api/admin/season-centre/{season_id}", cookies=cookies).json()
+    assert secretary_view["links"]["season_activation"] is None

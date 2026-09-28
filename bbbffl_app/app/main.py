@@ -95,6 +95,7 @@ from app.routes import public_rounds as public_round_routes
 from app.routes import round_preflight as round_preflight_routes
 from app.routes import round_review as round_review_routes
 from app.routes import scorer_dashboard as scorer_dashboard_routes
+from app.routes import season_activation as season_activation_routes
 from app.routes import season_centre as season_centre_routes
 from app.routes import season_setup as season_setup_routes
 from app.routes import shortlist as shortlist_routes
@@ -110,6 +111,7 @@ from app.scorer_decisions import (
     UnknownTeamError,
 )
 from app.season import SeasonRepository
+from app.season_activation import SeasonActivationStateError, SeasonNotReadyToActivateError
 from app.season_setup import SeasonSetupAflError, SeasonSetupError
 from app.service import PlayerIdentityCache
 from app.shortlist import ShortlistRepository
@@ -340,6 +342,8 @@ app.include_router(season_centre_routes.router)
 app.include_router(season_centre_routes.page_router)
 app.include_router(season_setup_routes.router)
 app.include_router(season_setup_routes.page_router)
+app.include_router(season_activation_routes.router)
+app.include_router(season_activation_routes.page_router)
 app.include_router(fixture_setup_routes.router)
 app.include_router(fixture_setup_routes.page_router)
 app.include_router(context_routes.router)
@@ -376,6 +380,25 @@ async def season_setup_error_handler(request: Request, exc: SeasonSetupError) ->
 @app.exception_handler(SeasonSetupAflError)
 async def season_setup_afl_error_handler(request: Request, exc: SeasonSetupAflError) -> JSONResponse:
     return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
+# Issue #239's season activation gate: a repeat activation attempt (already
+# `active`) or an attempt against a `completed`/otherwise non-`setup` season
+# is a resolvable state conflict (409), never a 500 -- matching
+# SeasonSetupError's convention above. An unready season's blocking
+# prerequisite(s) are named in the message. A bare `SeasonActivationError`
+# (e.g. a missing reason) is deliberately left unregistered here and falls
+# through to the generic `ValueError` handler below (400).
+@app.exception_handler(SeasonActivationStateError)
+async def season_activation_state_error_handler(request: Request, exc: SeasonActivationStateError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(SeasonNotReadyToActivateError)
+async def season_not_ready_to_activate_error_handler(
+    request: Request, exc: SeasonNotReadyToActivateError
+) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 
 @app.exception_handler(LineupConflictError)

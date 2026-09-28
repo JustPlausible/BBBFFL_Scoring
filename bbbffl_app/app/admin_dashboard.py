@@ -64,6 +64,7 @@ from app.scorer_dashboard import (
     ordinary_rounds_with_lifecycle,
     select_current_round,
 )
+from app.season_activation import preview_activate_season
 from app.season_centre import build_season_centre
 
 # BBBFFL is a fixed ten-team league (see `app.replay_bootstrap.TEAM_COUNT`
@@ -115,6 +116,7 @@ PRESEASON_URL = "/admin/preseason/{season_id}"
 OPENING_ROUND_URL = "/operations/seasons/{season_id}/opening-round"
 PREFLIGHT_URL = "/admin/round-preflight/{round_id}"
 MIDSEASON_DRAFT_URL = "/admin/midseason-draft/{season_id}"
+SEASON_ACTIVATION_URL = "/scorer/season-activation/{season_id}"
 
 
 def scorer_dashboard_link(season_id: str, round_id: str | None = None) -> str:
@@ -904,6 +906,24 @@ def build_admin_dashboard(
         else None
     )
 
+    # Issue #239: the same additive-only, top-level-key convention as
+    # `midseason_card` above -- never folded into `_attention_queue`'s
+    # categorised list, so it can never perturb that queue's existing
+    # category grouping/ordering. `preview_activate_season` is read-only
+    # and re-derives readiness fresh from the season model every call
+    # (issue #153); this dashboard never computes its own second "is this
+    # season ready" answer. Shown only while the season is still `setup`
+    # and every prerequisite is satisfied -- once `active`/`completed`,
+    # there is nothing further for this card to prompt.
+    activation_card = (
+        {
+            "title": "Season setup complete — activate it for live operation",
+            "url": SEASON_ACTIVATION_URL.format(season_id=season_id),
+        }
+        if season.lifecycle_state == "setup" and preview_activate_season(database, season_id).ready
+        else None
+    )
+
     attention = _attention_queue(
         season=season,
         entries=entries,
@@ -959,6 +979,7 @@ def build_admin_dashboard(
         "preflight": preflight,
         "scorer_summary": scorer_summary,
         "midseason_draft": midseason_card,
+        "season_activation": activation_card,
         "attention": attention,
         "workflow_map": workflow_map,
         "role_overview": role_overview,

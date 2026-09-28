@@ -220,6 +220,15 @@ function midseasonDraftCardHtml(card){
     </section>`;
 }
 
+function seasonActivationCardHtml(card){
+  if(!card)return '';
+  return `<section class="card" aria-labelledby="season-activation-heading">
+      <h2 id="season-activation-heading">Season activation ready</h2>
+      <p>${esc(card.title)}</p>
+      <div class="grid-links"><a href="${esc(card.url)}">Open season activation →</a></div>
+    </section>`;
+}
+
 function renderDashboard(portfolioSectionHtml,dashboard){
   if(!dashboard){
     document.querySelector('#app').innerHTML=portfolioSectionHtml+'<div class="card"><p class="muted">Select a season, or create one from the Season Centre.</p></div>';
@@ -235,6 +244,7 @@ function renderDashboard(portfolioSectionHtml,dashboard){
         ${dashboard.links.public_season?`<a href="${esc(dashboard.links.public_season)}">Public season</a>`:'<span class="disabled">Public season n/a</span>'}
       </div>
     </section>
+    ${seasonActivationCardHtml(dashboard.season_activation)}
     ${midseasonDraftCardHtml(dashboard.midseason_draft)}
     <section class="card" aria-labelledby="workflow-heading">
       <h2 id="workflow-heading">Workflow map</h2>

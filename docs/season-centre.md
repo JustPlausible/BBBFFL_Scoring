@@ -31,7 +31,12 @@ round setup -- it does not implement any of that behaviour itself. Its
 **Season setup** link (issue #237) leads to the live-season initialization
 page -- player pool from live afl-api, ordinary competition, Opening Round
 rules, squad limit and draft order, and later Finals and SuperScore -- see
-[`season-setup.md`](season-setup.md). It shows
+[`season-setup.md`](season-setup.md). Its **Season activation** link
+(issue #239) leads to the explicit `setup → active` gate -- a read-only
+readiness preview and an explicit, audited activation action, available
+only to a Scorer or an Administrator (narrower than this page's own
+Secretary-or-Administrator authority) -- see
+[`season-activation.md`](season-activation.md). It shows
 each workflow's current status (from the same repositories those workflows
 already use) and links to the existing page when one is reachable; where no
 admin page exists yet (player pool, opening squads, fixture setup), it says

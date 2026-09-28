@@ -212,7 +212,9 @@ It has not been rehearsed in a real production deployment.
 
 - Provisional (not-yet-afl-api) players.
 - Coach credential provisioning.
-- The `setup → active` gate.
+- The `setup → active` gate -- see [`season-activation.md`](season-activation.md)
+  (issue #239), a separate browser workflow with its own, narrower
+  (Scorer/Administrator-only) authorization.
 - Season completion.
 - A policy for exact ladder ties.
 

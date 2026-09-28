@@ -408,6 +408,7 @@ def test_archival_verification_after_completion_reports_the_completion_identity(
     season_id = _seed_completable(client, 8015)["season"].season_id
     complete = client.post(f"/api/scorer/season-completion/{season_id}/complete", json={"reason": "complete"})
     completion_event_id = complete.json()["completion_event_id"]
+    before_events = _audit_count(client, season_id)
 
     for _ in range(3):
         response = client.get(f"/api/scorer/season-completion/{season_id}/archival-verification")
@@ -420,7 +421,7 @@ def test_archival_verification_after_completion_reports_the_completion_identity(
     # Read-only: calling it repeatedly changes neither lifecycle state nor
     # the audit trail.
     assert _lifecycle_state(client, season_id) == "completed"
-    assert _audit_count(client, season_id) == _audit_count(client, season_id)
+    assert _audit_count(client, season_id) == before_events
 
 
 def test_archival_verification_with_a_mismatched_expected_event_id_is_409(completion_client):

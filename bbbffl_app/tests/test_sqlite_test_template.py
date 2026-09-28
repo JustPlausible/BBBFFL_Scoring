@@ -15,6 +15,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from alembic import command
 from fastapi.testclient import TestClient
 
 from app.db import connect, transaction
@@ -230,3 +231,16 @@ def test_connect_is_unaffected_for_an_already_migrated_file(template):
     SeasonRepository(connection).create_season(2034, "Direct connect")
     assert _all_rows(Path(template.path))["bbbffl_season"] == []
     connection.close()
+
+
+def test_uninstall_restores_exactly_the_upgrade_function_it_replaced():
+    # e.g. pytest.main() inside a longer-lived process: teardown must put
+    # alembic.command.upgrade back rather than leave a template wrapper.
+    before = command.upgrade
+    extra = sqlite_test_template.MigratedSQLiteTemplate(enabled=True)
+    extra.install()
+    assert command.upgrade is not before
+    extra.uninstall()
+    assert command.upgrade is before
+    extra.uninstall()  # idempotent
+    assert command.upgrade is before

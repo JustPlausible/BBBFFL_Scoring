@@ -99,6 +99,7 @@ class MigratedSQLiteTemplate:
         self.stats = TemplateStats()
         self.real_migrations_requested = False
         self._real_upgrade = command.upgrade
+        self._installed = None
         self._lock = threading.RLock()
         self._building = False
         self._directory: str | None = None
@@ -107,11 +108,16 @@ class MigratedSQLiteTemplate:
 
     # -- installation -----------------------------------------------------
     def install(self) -> None:
-        command.upgrade = self._upgrade
+        # Keep the exact object installed: every ``self._upgrade`` access
+        # creates a new bound method, so an identity check against it would
+        # never match and teardown would leave the wrapper in place.
+        self._installed = self._upgrade
+        command.upgrade = self._installed
 
     def uninstall(self) -> None:
-        if command.upgrade is self._upgrade:
+        if self._installed is not None and command.upgrade is self._installed:
             command.upgrade = self._real_upgrade
+        self._installed = None
         if self._directory is not None:
             shutil.rmtree(self._directory, ignore_errors=True)
             self._directory = None

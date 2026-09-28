@@ -186,6 +186,15 @@ Every relational change must be a new ordered revision. Do not add startup DDL
 or a parallel `create_all` schema. Test revisions on PostgreSQL and SQLite.
 Data migrations must validate inputs and favour transactional data safety.
 
+In the pytest suite, ordinary tests do not replay the history themselves:
+a fresh, to-head upgrade of an empty SQLite file is served from one real,
+session-built migrated template (issue #218, `tests/sqlite_test_template.py`;
+see [`ci-quality-gates.md`](ci-quality-gates.md#test-database-setup-218)).
+Explicit revisions, existing or legacy databases, downgrades and PostgreSQL
+always run real Alembic. A test that exercises the migration history from an
+empty database must be marked `@pytest.mark.real_migrations`, as
+`tests/test_db_migration.py` is.
+
 Downgrade exists only where data is unambiguously representable. Revision
 `0002_competition` can downgrade while all rows belong to `grand_final`; it
 refuses before schema changes if another competition key exists because the

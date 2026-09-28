@@ -334,6 +334,74 @@ from the historical logs alone, because they contain no disk metrics. The
 new `fsync_p50` / `iowait` / `io_pressure` / `steal` fields exist to confirm
 or rule it out the next time it happens.
 
+**Confirmed by PR #258** (#218 reopened). With that telemetry in place, one
+PR #258 run (`996a91f`, run 36420770117 attempt 1) was cancelled after
+1h48m at 58% of the suite, still progressing. Every heartbeat showed
+`proc_cpu` 6-10%, `iowait` 22-23% and `io_pressure_avg60` 39-47%. IO
+pressure was already 28% at session start, against 2.3% on the rerun.
+DB-backed files ran a median **6.4x** slower than in the rerun (x1.5-13.8),
+while files with no database work were not slower. The rerun on the same
+commit finished in 29m33s (2,462 passed, 79 skipped). The process was
+waiting on the disk, not computing.
+
+### Test database setup (#218)
+
+The suite used to amplify slow disks. Almost every test built its database
+by replaying the whole Alembic history on an empty SQLite file: through
+`tests/db_helpers.migrated_connection`, or through app startup in the HTTP
+fixtures. `strace` shows each such fresh migration issues **~1,000 `fsync`
+calls and ~3,800 writes**, and the tests' own commits `fsync` again. In a
+traced 137-test sample, 175,468 `fsync` calls were made (~1,280 per test):
+73% in migrations, 27% in test commits. On a disk that throttles or queues
+synchronous writes, every one of those waits.
+
+`tests/sqlite_test_template.py` (test-only, loaded by `tests/conftest.py`)
+removes both, without changing what any test asserts:
+
+- **Pre-migrated template.** At session start the real
+  `app.migrations.migrate` runs once into a template file. The template is
+  verified: at `HEAD`, no journal/WAL sidecar, and made read-only. After
+  that, an `alembic.command.upgrade(cfg, "head")` on an *empty or absent
+  plain SQLite file* is satisfied by copying the template into place. Every
+  caller still goes through the real `migrate()`; only that final step is
+  replaced. Each test still gets its own private file, and the session fails
+  if the shared template is ever modified.
+- **Real Alembic everywhere it matters.** Explicit or older revisions,
+  existing or legacy databases (partial upgrades, idempotent re-runs),
+  downgrades, caller-supplied connections and PostgreSQL always run real
+  Alembic, as does any test marked `@pytest.mark.real_migrations`.
+  `tests/test_db_migration.py` is marked as a whole module. The PostgreSQL
+  job is unchanged.
+- **No `fsync` for test databases.** Test SQLite connections get
+  `PRAGMA synchronous = OFF`. That only affects durability if the operating
+  system crashes or loses power. Transactions, the rollback journal,
+  locking, isolation and foreign keys are unchanged, and a test pins that.
+
+A cloned database is equivalent to a real fresh migration.
+`tests/test_sqlite_test_template.py` compares the normalised schema, all
+rows and file pragmas. The comparison is normalised because Alembic's
+SQLite batch mode already emits constraints in a different order on every
+real run.
+
+| Local full suite (same container) | `main` `6204aae` | this change |
+|---|---|---|
+| result | 2,462 passed, 79 skipped | 2,474 passed (+12 new tests), 79 skipped |
+| wall time | 44m09s | **7m29s** |
+| Alembic upgrades | 1,883 (1,837 fresh, 1,897 s = 72% of the run) | 102 (53 fresh, 34.6 s) |
+| fresh databases from template | 0 | 1,797 (12.9 s total) |
+| `fsync` calls, 137-test traced sample | 175,468 | **0** |
+
+The terminal summary prints a `[db-setup]` line with these counts on every
+run, next to the `[ci-progress]` output.
+
+**Opt-outs** reproduce the old behaviour exactly. Use them to check whether
+a failure could be setup-related:
+
+```bash
+BBBFFL_TEST_DB_TEMPLATE=0 python -m pytest ...             # every fresh DB runs real Alembic
+BBBFFL_TEST_SQLITE_SYNCHRONOUS=FULL python -m pytest ...    # keep fsync
+```
+
 ### What to do with a slow run
 
 1. **Leave it running** if the heartbeat's `done` count keeps rising. This
@@ -342,6 +410,11 @@ or rule it out the next time it happens.
    `io_pressure` with no SLOW lines means the runner is slow and the suite
    is fine. It will finish, just late. You may still cancel and rerun
    (step 4) to get a faster runner. That is a time trade-off, not a fix.
+   Since #218's [test database setup](#test-database-setup-218), ordinary
+   tests no longer `fsync` or replay migrations. If a slow, iowait-bound run
+   appears anyway, first check the `[db-setup]` summary line (or a
+   cancelled run's output) to confirm the template was active and fresh
+   databases were cloned.
 2. **Look into a test** if a `SLOW:` line or `slowest durations` entry names
    the same test or fixture across runs, or the timing-report comparison
    flags specific files rather than a uniform slowdown. Treat that as
@@ -381,18 +454,17 @@ flaky failures, so the signals above are for humans to act on.
   FastAPI major-version upgrade (see above), reviewed by 2026-11-30.
   Upgrading FastAPI/Starlette is recommended as separate follow-up work, not
   part of this issue.
-- **Per-test database setup cost (#218 follow-up).** Most SQLite-backed tests
-  build a fresh database by running every Alembic migration. That happens in
-  `tests/db_helpers.migrated_connection`, in direct `migrate()` fixtures, and
-  again in app startup for HTTP tests, and it is the largest fixed cost in
-  the suite (see `--durations`: the slowest phases are `setup`). A possible
-  optimisation is to migrate one template file per session and copy it per
-  test, keeping migration tests on the real path. That would change how
-  most of the suite gets its database, so it needs its own reviewed change
-  proving schema equivalence. It is also the largest available saving: about
-  72% of local suite time is spent in migrations, and it would also shrink
-  the fsync-heavy work that makes slow runners slow. It was deliberately not bundled into #218,
-  which is about observability.
+- **Post-`v0.1.0` migration baseline (future, not #218).** Once 2026
+  historical data is formally exported and preserved, squashing the Alembic
+  history into a clean baseline would shrink the real fresh migration
+  (~0.9 s on an idle disk, ~2.4 s under contention). That time is now paid
+  only by the template build and the `real_migrations` tests. It would also
+  simplify `tests/test_db_migration.py`.
+  It is not needed for CI stability: after #218 the ordinary suite neither
+  replays the history nor `fsync`s.
+- **Temporary test databases.** Many fixtures leave their `mkstemp` SQLite
+  files in the temp directory after the run, as they did before #218. The
+  files are small and the runner is ephemeral, so this was left alone.
 - **Migration integrity** reuses the package 01/#16 test infrastructure as-is;
   this issue did not add new migration tests, since the existing SQLite
   fresh/upgrade/downgrade/refusal suite plus the PostgreSQL

@@ -150,6 +150,7 @@ The 2026 season was fully replayed through this application as historical eviden
 - **Regression tests:**
   - Write regression and boundary tests next to the existing tests for the area (`tests/test_<module>.py`, `_api.py` for HTTP, `_client_requests.py` for template JS, `_concurrency.py` / `_postgresql.py` for PostgreSQL semantics).
   - Reuse the helper modules (`db_helpers.migrated_connection`, `lineup_helpers`, `finals_helpers`, `superscore_helpers`, `round_review_helpers` and others) rather than building fixtures from scratch.
+  - Fresh SQLite test databases are cloned from a session-built migrated template rather than replaying every migration (`tests/sqlite_test_template.py`, #218). A test of migration behaviour itself on a fresh database must be marked `@pytest.mark.real_migrations`; explicit revisions, existing databases and PostgreSQL always use real Alembic.
   - Test refusals as well as successes, and check that a rejected mutation leaves domain tables and the audit trail unchanged.
 - **Keep the implementation scoped to the issue.** No unrelated refactoring, reformatting, renames or dependency upgrades. If you find an unrelated problem, mention it in the PR or report it rather than fixing it inline.
 - **Update the relevant `docs/*.md`** when behaviour, routes or workflows change.

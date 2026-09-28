@@ -20,6 +20,11 @@ from app.preseason import PreseasonRepository
 from app.round_mapping import RoundMappingRepository
 from app.season import SeasonRepository
 
+# Migration history is what this module tests, so every fresh database here
+# runs the real Alembic upgrade instead of the pre-migrated template that
+# ordinary tests clone (issue #218; see tests/sqlite_test_template.py).
+pytestmark = pytest.mark.real_migrations
+
 LEGACY_SCHEMA = """
 CREATE TABLE slot_dnp (team_key TEXT NOT NULL, slot TEXT NOT NULL, dnp INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, PRIMARY KEY (team_key, slot));
 CREATE TABLE interchange_assignment (team_key TEXT PRIMARY KEY, target_position TEXT, updated_at TEXT NOT NULL);

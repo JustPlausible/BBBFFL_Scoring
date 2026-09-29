@@ -154,7 +154,11 @@ def _public_entry(entry, snapshot, *, published, match_states):
     return {
         "rank": entry["rank"],
         "season_entry_id": entry["season_entry_id"],
-        "team_name": entry.get("team_name") or effective.get("team_name") or "Team",
+        # The effective entry is part of the authoritative persisted
+        # snapshot. In particular, a published result must keep the team
+        # name frozen with that result rather than silently adopting a later
+        # mutable identity label resolved by `leaderboard()`.
+        "team_name": effective.get("team_name") or entry.get("team_name") or "Team",
         "total_score": total,
         "total_display": format_number(total),
         "football_line": format_football_line(goals, behinds),
@@ -240,6 +244,7 @@ def build_public_superscore_round(database, afl_client, identities, season_id, w
         snapshots = [json.loads(row["snapshot"]) for row in rows]
         match_states = _current_match_states(afl_client, snapshots) if rows else {}
         scores = [float(row["total_score"]) for row in rows]
+        leading_score = max(scores) if scores else None
         current = []
         for row, snapshot in zip(rows, snapshots, strict=True):
             score = float(row["total_score"])
@@ -251,7 +256,7 @@ def build_public_superscore_round(database, afl_client, identities, season_id, w
                         "team_name": team.team_name if team else None,
                         "total_score": score,
                         "rank": 1 + sum(other > score for other in scores),
-                        "is_joint_winner": False,
+                        "is_joint_winner": score == leading_score and scores.count(score) > 1,
                     },
                     snapshot,
                     published=False,

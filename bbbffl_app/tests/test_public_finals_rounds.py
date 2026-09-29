@@ -82,11 +82,12 @@ def test_superscore_public_projection_uses_current_match_progress(match_state):
         },
     }
     projected = _public_entry(
-        {"rank": 1, "season_entry_id": "entry", "team_name": "JHAS", "total_score": 12},
+        {"rank": 1, "season_entry_id": "entry", "team_name": "Later Team Name", "total_score": 12},
         snapshot,
         published=False,
         match_states={44: match_state},
     )
+    assert projected["team_name"] == "JHAS"
     assert projected["positions"][0]["display_state"] == match_state
     assert projected["positions"][0]["football_line"] == "2.0"
     assert projected["football_line"] == "2.0"
@@ -218,6 +219,55 @@ def test_public_superscore_rechecks_official_authority_after_live_read(monkeypat
     assert result["published"] is True
     assert result["entries"][0]["team_name"] == "Frozen Team"
     assert result["entries"][0]["total_score"] == 12.0
+
+
+def test_live_superscore_marks_tied_leaders_as_joint_winners(monkeypatch):
+    snapshot = json.dumps(
+        {
+            "effective_entry": {"team_name": "Tied Team", "slots": [], "interchange": {}},
+            "entry": {"slots": []},
+        }
+    )
+
+    class Result:
+        def __init__(self, *, one=None, rows=()):
+            self.one = one
+            self.rows = rows
+
+        def fetchone(self):
+            return self.one
+
+        def fetchall(self):
+            return list(self.rows)
+
+    class Database:
+        def execute(self, query, _params):
+            if "FROM bbbffl_round sr" in query:
+                return Result(one={"bbbffl_round_id": "ss1", "label": "SS1"})
+            if "FROM bbbffl_round_lifecycle" in query:
+                return Result(one={"state": "live"})
+            if "FROM superscore_entry_calculation" in query:
+                return Result(
+                    rows=(
+                        {"season_entry_id": "a", "total_score": 12, "snapshot": snapshot},
+                        {"season_entry_id": "b", "total_score": 12, "snapshot": snapshot},
+                    )
+                )
+            raise AssertionError(query)
+
+    class LeaderboardService:
+        def __init__(self, *_args):
+            pass
+
+        def leaderboard(self, _round_id, *, include_inputs):
+            assert include_inputs is True
+            return None
+
+    monkeypatch.setattr("app.public_finals.SuperScoreLeaderboardService", LeaderboardService)
+    result = build_public_superscore_round(Database(), object(), None, "season", 1)
+
+    assert [entry["rank"] for entry in result["entries"]] == [1, 1]
+    assert all(entry["is_joint_winner"] for entry in result["entries"])
 
 
 @pytest.fixture

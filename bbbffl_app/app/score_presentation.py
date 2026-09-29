@@ -51,3 +51,40 @@ def football_score_from_total(total: Number | None) -> tuple[Number, Number] | N
         return None
     goals, behinds = divmod(total, 6)
     return format_number(goals), format_number(behinds)
+
+
+def football_score_from_evidence(
+    effective_score: Number | None,
+    *,
+    is_actual_stat_capable: bool,
+    stat_goals: Number | None = None,
+    stat_behinds: Number | None = None,
+) -> tuple[Number, Number, bool] | None:
+    """The (goals, behinds, is_actual_afl) triple for one scored position.
+
+    `is_actual_stat_capable` is whether this position can ever show a
+    player's literal AFL goals/behinds at all (only a Forward position
+    can -- Midfield/Ruck/Tackler point totals have no goals/behinds of
+    their own). When it can, and `stat_goals`/`stat_behinds` are both
+    known *and* still add up to `effective_score` (6*G + B ==
+    effective_score) -- the normal case, or an override that merely
+    corrects the total to match the player's real goals/behinds -- those
+    literal figures are shown, never divmod'd away (issue #261: a real
+    behind total of 6 or more must never be silently folded into an extra
+    goal). Otherwise (a non-Forward position, no stat line, or an override
+    that leaves the total inconsistent with the real goals/behinds) falls
+    back to `football_score_from_total`, so it is never possible for a row
+    to show 6*goals + behinds != the displayed effective total. Returns
+    ``None`` only when `effective_score` itself is unknown.
+    """
+    if effective_score is None:
+        return None
+    if (
+        is_actual_stat_capable
+        and stat_goals is not None
+        and stat_behinds is not None
+        and 6 * stat_goals + stat_behinds == effective_score
+    ):
+        return stat_goals, stat_behinds, True
+    goals, behinds = football_score_from_total(effective_score)
+    return goals, behinds, False

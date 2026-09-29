@@ -822,7 +822,17 @@ def _stat_line_for(position, canonical, score):
 
 
 def _seed_named_finals_lineup(
-    built, round_id, competition_id, entry_id, position_scores, *, label, stats, vacant_positions=(), interchange=None
+    built,
+    round_id,
+    competition_id,
+    entry_id,
+    position_scores,
+    *,
+    label,
+    stats,
+    vacant_positions=(),
+    interchange=None,
+    forward_stats=None,
 ):
     """A full 8-position finals lineup for one entry, engineered via
     `_stat_line_for` so the resulting calculated per-position scores are
@@ -830,6 +840,13 @@ def _seed_named_finals_lineup(
     `24.14 (158)` / `38.12 (240)` acceptance example precisely. Adds each
     named player's stat line into the shared `stats` dict a caller's
     `_Facts` will serve for the whole round.
+
+    `forward_stats`, when given, is `{position: (goals, behinds)}` for a
+    Forward position whose literal AFL line should be exactly that pair
+    (score = 6*goals + behinds) rather than `_stat_line_for`'s own
+    divmod-derived default -- the only way to construct a literal behind
+    total of 6 or more (Codex P2 on PR #262: such a line must never be
+    folded into an extra goal by a naive divmod of the point total).
 
     `vacant_positions` leaves those (otherwise-scorable) positions
     genuinely unselected -- distinct from a named player later ruled DNP.
@@ -889,7 +906,11 @@ def _seed_named_finals_lineup(
                 canonical = canonical_base + index
                 player_id = f"{label}-{position}"
                 _insert_player(player_id, canonical, f"{label} {position}")
-                stats[canonical] = _stat_line_for(position, canonical, position_scores[position])
+                if forward_stats and position in forward_stats:
+                    goals, behinds = forward_stats[position]
+                    stats[canonical] = PlayerStatLine(canonical, goals=goals, behinds=behinds)
+                else:
+                    stats[canonical] = _stat_line_for(position, canonical, position_scores[position])
                 selected = player_id
             conn.execute(
                 text("INSERT INTO weekly_lineup_submission_slot VALUES (:l,1,:pos,:p)"),
@@ -966,6 +987,55 @@ def test_finals_matchup_totals_render_as_goals_behinds_total_matching_the_2026_g
     assert qf["home"]["football_line"] == "24.14"
     assert qf["away"]["official_score"] == 240
     assert qf["away"]["football_line"] == "38.12"
+
+
+def test_finals_football_line_preserves_a_forwards_literal_behind_total_of_six_or_more(public_client):
+    """Codex P2 on PR #262: a Forward's literal AFL goals/behinds must be
+    preserved even when the real behind count reaches 6 or more -- a naive
+    divmod of the point total alone would wrongly fold that into an extra
+    goal (14 points -> "2.2" instead of the real "1.8"), silently losing
+    precision the established `app.presentation.football_score_for_position`
+    rule (and now `app.score_presentation.football_score_from_evidence`)
+    was written to preserve."""
+    built = build_finals_ready_season(year=8106, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    round_id = _open_week1(built, bracket, year=8106)
+    season_id = built["season"].season_id
+
+    pairing = next(p for p in _repo(built).list_pairings(bracket.bracket_id, week_number=1) if p.slot == "qf")
+    competition_id = built["finals_competition"].competition_id
+
+    # F1: 1 goal, 8 behinds = 14 points. Every other position scores zero,
+    # so the side's only points come from this one literal line.
+    scores = {"F1": 14, "F2": 0, "F3": 0, "M1": 0, "M2": 0, "M3": 0, "Ruck": 0, "Tackler": 0}
+    stats = {}
+    _seed_named_finals_lineup(
+        built,
+        round_id,
+        competition_id,
+        pairing.home_season_entry_id,
+        scores,
+        label=f"lit-home-{round_id}",
+        stats=stats,
+        forward_stats={"F1": (1, 8)},
+    )
+    _seed_named_finals_lineup(
+        built,
+        round_id,
+        competition_id,
+        pairing.away_season_entry_id,
+        scores,
+        label=f"lit-away-{round_id}",
+        stats=stats,
+    )
+    MatchupCalculationService(built["database"], _Facts(stats)).calculate_matchup(pairing.matchup_id, guard_season=True)
+    seed_official_result(built["database"], pairing.matchup_id, 14, 0)
+    _finalize_round(built["database"], round_id)
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/21").json()
+    qf = next(m for m in body["matchups"] if m["slot"] == "qf")
+    assert qf["home"]["official_score"] == 14
+    assert qf["home"]["football_line"] == "1.8"
 
 
 def test_ordinary_matchup_score_presentation_is_unaffected_by_the_finals_football_line(public_client):

@@ -10,7 +10,12 @@ from decimal import Decimal
 from app.lineups import POSITIONS
 from app.player_pool import PlayerPoolRepository
 from app.round_review import build_round_review
-from app.score_presentation import football_score_from_total, format_football_line
+from app.score_presentation import football_score_from_evidence, football_score_from_total, format_football_line
+
+# Forward slots (season-model naming) that can show a player's literal AFL
+# goals/behinds -- see `_football_line`. Midfield/Ruck/Tackler have no
+# goals/behinds of their own and always convert via divmod.
+_FORWARD_SLOTS = frozenset({"F1", "F2", "F3"})
 
 
 def _number(value):
@@ -88,17 +93,32 @@ def _slot(selection, calculated, names, interchange):
 def _football_line(slots, total):
     """The side's football-style "G.B" line for `total` (whichever of
     official/calculated score is actually being shown) -- the exact same
-    divmod-based conversion `app.presentation.football_score_for_position`
-    uses for the Grand Final/SuperScore vertical (issue #261), summed
-    across the side's scorable positions rather than a second, independent
-    conversion algorithm. Falls back to converting `total` directly when
-    the position breakdown does not reconcile with it (e.g. an official
-    result recorded without a matching calculation, as some historical/
-    test fixtures do), so the displayed line always still satisfies
-    6*goals + behinds == the displayed total."""
+    conversion `app.presentation.football_score_for_position` uses for the
+    Grand Final/SuperScore vertical (issue #261), summed across the side's
+    scorable positions rather than a second, independent conversion
+    algorithm. A Forward slot shows the named player's own literal AFL
+    goals/behinds whenever known and still consistent with its effective
+    score (never divmod'd away -- a real behind total of 6 or more must
+    never be silently folded into an extra goal); every other position
+    always converts its point total via divmod. Falls back to converting
+    `total` directly when the position breakdown does not reconcile with
+    it (e.g. an official result recorded without a matching calculation,
+    as some historical/test fixtures do), so the displayed line always
+    still satisfies 6*goals + behinds == the displayed total."""
     if total is None:
         return None
-    pairs = [football_score_from_total(slot.effective_score) for slot in slots]
+    pairs = [
+        (goals, behinds)
+        for goals, behinds, _ in (
+            football_score_from_evidence(
+                slot.effective_score,
+                is_actual_stat_capable=slot.slot in _FORWARD_SLOTS,
+                stat_goals=slot.stat_goals,
+                stat_behinds=slot.stat_behinds,
+            )
+            for slot in slots
+        )
+    ]
     if pairs and sum(goals * 6 + behinds for goals, behinds in pairs) == total:
         total_goals = sum(goals for goals, _ in pairs)
         total_behinds = sum(behinds for _, behinds in pairs)

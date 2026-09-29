@@ -9,9 +9,35 @@ const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 // Australian local time only -- the raw UTC instant this formats from stays
 // available in the JSON response for diagnostics, never shown here (#161).
 const auTime=iso=>{if(!iso)return null;try{return new Intl.DateTimeFormat('en-AU',{timeZone:'Australia/Melbourne',dateStyle:'medium',timeStyle:'short'}).format(new Date(iso))}catch(_){return null}};
-function player(p){let outcome=p.outcome==='replaced_by_interchange'?'DNP · replaced by Interchange':p.outcome==='confirmed_dnp_zero'?'Confirmed DNP · scored zero':'';let deferred=p.deferred_source?`<div class="note">↪ ${esc(p.deferred_source.label)}</div>`:'';return `<li><strong>${esc(p.position)}</strong> ${esc(p.player_name||'Vacant')} <span class="tag">${esc(p.effective_score)}</span>${outcome?`<div class="note">${esc(outcome)}</div>`:''}${deferred}</li>`}
+// Team/position football-score presentation (issue #261 scope extension)
+// -- reuses `app.public_rounds._side`/`_slot`'s `football_line` fields
+// exactly as `public_season_rounds.html`'s identical `scoreCell`/
+// `positionScoreTag`/`player` functions do, never a second conversion
+// algorithm. A `replaced_by_interchange` row shows the coach's original
+// selection (DNP'd or never named) and the interchange player who is
+// effectively scoring it, rather than reading as a bare, unexplained
+// "Vacant".
+function scoreCell(matchSide){
+  let total=matchSide.official_score??matchSide.calculated_score;
+  if(total===null||total===undefined)return '–';
+  return matchSide.football_line?`${esc(matchSide.football_line)} <span class="tag">(${esc(total)})</span>`:esc(total);
+}
+function positionScoreTag(p){
+  if(p.football_line==null)return `<span class="tag">${esc(p.effective_score)}</span>`;
+  return `<span class="tag">${esc(p.football_line)} (${esc(p.effective_score)})</span>`;
+}
+function player(p){
+  let deferred=p.deferred_source?`<div class="note">↪ ${esc(p.deferred_source.label)}</div>`:'';
+  if(p.outcome==='replaced_by_interchange'){
+    let original=p.player_name?`${esc(p.player_name)} (DNP)`:'Vacant';
+    let replacement=p.interchange_player_name?esc(p.interchange_player_name):'Interchange';
+    return `<li><strong>${esc(p.position)}</strong> ${original} → replaced by ${replacement} ${positionScoreTag(p)}<div class="note">Effective ${esc(p.position)} score via Interchange replacement</div>${deferred}</li>`;
+  }
+  let outcome=p.outcome==='confirmed_dnp_zero'?'Confirmed DNP · scored zero':'';
+  return `<li><strong>${esc(p.position)}</strong> ${esc(p.player_name||'Vacant')} ${positionScoreTag(p)}${outcome?`<div class="note">${esc(outcome)}</div>`:''}${deferred}</li>`;
+}
 function side(s){if(!s.lineup)return '<div><p>Submitted lineup not yet public.</p></div>';let interchange=s.lineup.interchange;return `<div><ul class="players">${s.lineup.players.map(player).join('')}</ul><div class="note"><strong>Interchange:</strong> ${esc(interchange.player_name||'None')}${interchange.replaces_position?` · replaces ${esc(interchange.replaces_position)}`:''}</div></div>`}
-function match(m){let published=auTime(m.published_at);return `<article id="match-${esc(m.order)}" class="card match ${esc(m.status)}"><div class="status">${esc(m.status_label)}</div><div class="scoreline"><div><strong>${esc(m.home.team.name)}</strong><div class="score">${esc(m.home.official_score??m.home.calculated_score??'–')}</div></div><span>v</span><div><strong>${esc(m.away.team.name)}</strong><div class="score">${esc(m.away.official_score??m.away.calculated_score??'–')}</div></div></div>${published?`<div class="note">Published ${esc(published)} (AEST/AEDT)</div>`:''}<div class="lineups">${side(m.home)}${side(m.away)}</div></article>`}
+function match(m){let published=auTime(m.published_at);return `<article id="match-${esc(m.order)}" class="card match ${esc(m.status)}"><div class="status">${esc(m.status_label)}</div><div class="scoreline"><div><strong>${esc(m.home.team.name)}</strong><div class="score">${scoreCell(m.home)}</div></div><span>v</span><div><strong>${esc(m.away.team.name)}</strong><div class="score">${scoreCell(m.away)}</div></div></div>${published?`<div class="note">Published ${esc(published)} (AEST/AEDT)</div>`:''}<div class="lineups">${side(m.home)}${side(m.away)}</div></article>`}
 async function load(){try{let base=`/api/public/seasons/${encodeURIComponent(season)}/rounds/${encodeURIComponent(roundId)}`;let [r,l]=await Promise.all([fetch(base),fetch(base+'/ladder')]);if(!r.ok||!l.ok)throw Error('Round data is temporarily unavailable');let d=await r.json(), ladder=await l.json();document.querySelector('#heading').textContent=`Round ${d.round_number} Centre`;document.querySelector('#browserLink').href=`/seasons/${encodeURIComponent(season)}/rounds/${d.round_number}`;document.querySelector('#matches').innerHTML=d.matchups.map(match).join('');document.querySelector('#ladder-body').innerHTML=`<table class="ladder"><thead><tr><th>#</th><th>Team</th><th>Pts</th><th>W</th><th>D</th><th>L</th><th class="wide">PF</th><th class="wide">PA</th><th>%</th></tr></thead><tbody>${ladder.rows.map(x=>`<tr><td>${x.rank}</td><td>${esc(x.team_name)}${x.tied?' =':''}</td><td>${x.competition_points}</td><td>${x.wins}</td><td>${x.draws}</td><td>${x.losses}</td><td class="wide">${x.points_for}</td><td class="wide">${x.points_against}</td><td>${Number(x.percentage).toFixed(1)}</td></tr>`).join('')}</tbody></table>`;document.querySelector('#error').textContent=''}catch(e){document.querySelector('#error').textContent=e.message}}
 load();setInterval(load,Math.max(interval,5000));
 </script></body></html>

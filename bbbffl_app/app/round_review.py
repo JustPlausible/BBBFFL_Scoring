@@ -506,6 +506,15 @@ class SlotReview:
     # remain present as secondary/diagnostic identifiers, never removed.
     player_name: str | None = None
     afl_club: str | None = None
+    # Issue #261: the player's literal AFL goals/behinds for this match,
+    # straight from the calculation snapshot's own evidence -- `None` when
+    # no stat line was resolved. Carried through so a Forward's football-
+    # score presentation can show the player's actual goals/behinds (the
+    # same rule `app.presentation.football_score_for_position` already
+    # applies) rather than always falling back to a divmod approximation,
+    # which silently loses precision once a player's real behinds reach 6+.
+    stat_goals: int | None = None
+    stat_behinds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -668,6 +677,15 @@ def _side_review(entry_id, side_snapshot, dnp_rulings, interchange_rulings, over
         )
         total_effective += effective
         player_name, afl_club = _player_label(player_labels, slot_dict["season_player_id"])
+        # Issue #261 (Codex P2 follow-up): when the Interchange is
+        # effectively scoring this position, `effective_score` comes from
+        # *their* potential score (see `base` above), so the literal
+        # goals/behinds evidence must be the Interchange's own stat line --
+        # never the original (vacant/DNP'd) starter's, which belongs to a
+        # different player entirely and would either coincidentally (and
+        # wrongly) match or correctly fail the consistency check for the
+        # wrong reason.
+        stat_line = interchange_slot.get("stats") if interchange_usable else slot_dict.get("stats")
         slot_reviews.append(
             SlotReview(
                 slot=position,
@@ -689,6 +707,8 @@ def _side_review(entry_id, side_snapshot, dnp_rulings, interchange_rulings, over
                 interchange_applied=interchange_usable,
                 player_name=player_name,
                 afl_club=afl_club,
+                stat_goals=(stat_line.get("goals") if stat_line else None),
+                stat_behinds=(stat_line.get("behinds") if stat_line else None),
             )
         )
 

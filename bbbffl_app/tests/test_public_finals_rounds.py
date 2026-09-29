@@ -28,16 +28,21 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
+from app.afl_client import PlayerStatLine
 from app.audit import ActorContext
 from app.calculations import MatchupCalculationService
 from app.finals import FinalsBracketRepository
 from app.finals_preflight import open_finals_week
+from app.finals_review import build_finals_round_review
+from app.identity import IdentityRepository
 from app.lineups import POSITIONS
 from app.public_finals import build_public_season_sequence
+from app.round_review import RoundReviewRepository
 from app.season import _now
 from tests.finals_helpers import accept_week_mapping, build_finals_ready_season, seed_official_result
 from tests.season_completion_helpers import (
     _Facts,
+    _finalize_round,
     build_completable_season,
     seed_real_finals_grand_final_calculation,
 )
@@ -793,3 +798,515 @@ def test_finals_round_page_resolves_isFinalsRound_before_any_client_fetch_could_
     is_finals_index = script.index("isFinalsRound=")
     first_fetch_index = script.index("fetch(")
     assert is_finals_index < first_fetch_index
+
+
+# -- Issue #261: historical public finals/SuperScore result presentation ---
+
+
+def _stat_line_for(position, canonical, score):
+    """A `PlayerStatLine` that, once scored through `app.scoring.
+    score_position` for `position`, produces exactly `score` -- so a test
+    can dictate a position's effective score precisely rather than
+    guessing at scoring-engine internals."""
+    if position in ("F1", "F2", "F3"):
+        goals, behinds = divmod(score, 6)
+        return PlayerStatLine(canonical, goals=goals, behinds=behinds)
+    if position in ("M1", "M2", "M3"):
+        return PlayerStatLine(canonical, disposals=score)
+    if position == "Ruck":
+        return PlayerStatLine(canonical, marks=score, hitouts=0)
+    if position == "Tackler":
+        assert score % 6 == 0, "Tackler score must be a multiple of 6 (6x tackles)"
+        return PlayerStatLine(canonical, tackles=score // 6)
+    raise ValueError(position)
+
+
+def _seed_named_finals_lineup(
+    built,
+    round_id,
+    competition_id,
+    entry_id,
+    position_scores,
+    *,
+    label,
+    stats,
+    vacant_positions=(),
+    interchange=None,
+    forward_stats=None,
+):
+    """A full 8-position finals lineup for one entry, engineered via
+    `_stat_line_for` so the resulting calculated per-position scores are
+    exactly `position_scores` -- reused to reproduce issue #261's
+    `24.14 (158)` / `38.12 (240)` acceptance example precisely. Adds each
+    named player's stat line into the shared `stats` dict a caller's
+    `_Facts` will serve for the whole round.
+
+    `forward_stats`, when given, is `{position: (goals, behinds)}` for a
+    Forward position whose literal AFL line should be exactly that pair
+    (score = 6*goals + behinds) rather than `_stat_line_for`'s own
+    divmod-derived default -- the only way to construct a literal behind
+    total of 6 or more (Codex P2 on PR #262: such a line must never be
+    folded into an extra goal by a naive divmod of the point total).
+
+    `vacant_positions` leaves those (otherwise-scorable) positions
+    genuinely unselected -- distinct from a named player later ruled DNP.
+    `interchange`, when given, is `(player_id, canonical_player_id, name,
+    stat_kwargs)` for a named Interchange player -- `stat_kwargs` are the
+    `PlayerStatLine` keyword args for their literal AFL line (e.g.
+    `{"tackles": 8}` or `{"goals": 1, "behinds": 8}`), inserted directly at
+    submission time rather than mutated in afterwards: submitted lineup
+    slots are immutable by DB trigger (see root `CLAUDE.md`'s
+    "Immutability and history"), so a DNP/interchange scenario must be
+    built into the original submission, never patched onto it."""
+    database = built["database"]
+    now = _now()
+    lineup_id = f"{label}-lineup"
+    with database.engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO weekly_lineup (lineup_id,season_id,competition_id,bbbffl_round_id,season_entry_id,"
+                "draft_revision,effective_submission_version,created_at,updated_at) "
+                "VALUES (:l,:s,:c,:r,:e,1,1,:now,:now)"
+            ),
+            {
+                "l": lineup_id,
+                "s": built["season"].season_id,
+                "c": competition_id,
+                "r": round_id,
+                "e": entry_id,
+                "now": now,
+            },
+        )
+        conn.execute(
+            text(
+                "INSERT INTO weekly_lineup_submission (lineup_id,version,based_on_draft_revision,submitted_at,"
+                "actor_type,actor_role,source_type) VALUES (:l,1,1,:now,'coach','coach','coach')"
+            ),
+            {"l": lineup_id, "now": now},
+        )
+
+        def _insert_player(player_id, canonical, name):
+            conn.execute(
+                text(
+                    "INSERT INTO season_player_pool (season_player_id,season_id,canonical_player_id,"
+                    "display_name,afl_team_id,eligible,source_provider,source_fetched_at,created_at,updated_at) "
+                    "VALUES (:p,:s,:c,:n,1,TRUE,'test',:now,:now,:now)"
+                ),
+                {"p": player_id, "s": built["season"].season_id, "c": canonical, "n": name, "now": now},
+            )
+
+        canonical_base = (abs(hash(label)) % 500_000) * 100
+        for index, position in enumerate(POSITIONS):
+            selected = None
+            if position == "Interchange":
+                if interchange is not None:
+                    player_id, canonical, name, stat_kwargs = interchange
+                    _insert_player(player_id, canonical, name)
+                    stats[canonical] = PlayerStatLine(canonical, **stat_kwargs)
+                    selected = player_id
+            elif position not in vacant_positions:
+                canonical = canonical_base + index
+                player_id = f"{label}-{position}"
+                _insert_player(player_id, canonical, f"{label} {position}")
+                if forward_stats and position in forward_stats:
+                    goals, behinds = forward_stats[position]
+                    stats[canonical] = PlayerStatLine(canonical, goals=goals, behinds=behinds)
+                else:
+                    stats[canonical] = _stat_line_for(position, canonical, position_scores[position])
+                selected = player_id
+            conn.execute(
+                text("INSERT INTO weekly_lineup_submission_slot VALUES (:l,1,:pos,:p)"),
+                {"l": lineup_id, "pos": position, "p": selected},
+            )
+
+
+def test_finals_matchup_totals_render_as_goals_behinds_total_matching_the_2026_grand_final_example(public_client):
+    """Reproduces issue #261's acceptance example exactly: Running Hots'
+    158 and Evil Absolutes' 240 must render as `24.14 (158)` and
+    `38.12 (240)` -- the established BBBFFL football-score conversion
+    (`app.score_presentation`, the same rules `app.presentation` uses for
+    the Grand Final/SuperScore vertical), summed per scorable position
+    rather than a single divmod of the raw total (which would instead show
+    the mathematically different, but equally "valid", `26.2 (158)`)."""
+    built = build_finals_ready_season(year=8100, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    round_id = _open_week1(built, bracket, year=8100)
+    season_id = built["season"].season_id
+
+    pairing = next(p for p in _repo(built).list_pairings(bracket.bracket_id, week_number=1) if p.slot == "qf")
+    competition_id = built["finals_competition"].competition_id
+
+    # 3 forwards + 3 midfields + ruck + tackler = 8 scorable positions.
+    running_hots_scores = {
+        "F1": 23,
+        "F2": 23,
+        "F3": 22,
+        "M1": 18,
+        "M2": 18,
+        "M3": 18,
+        "Ruck": 18,
+        "Tackler": 18,
+    }
+    evil_absolutes_scores = {
+        "F1": 32,
+        "F2": 32,
+        "F3": 32,
+        "M1": 32,
+        "M2": 32,
+        "M3": 32,
+        "Ruck": 24,
+        "Tackler": 24,
+    }
+    assert sum(running_hots_scores.values()) == 158
+    assert sum(evil_absolutes_scores.values()) == 240
+
+    stats = {}
+    _seed_named_finals_lineup(
+        built,
+        round_id,
+        competition_id,
+        pairing.home_season_entry_id,
+        running_hots_scores,
+        label=f"rh-{round_id}",
+        stats=stats,
+    )
+    _seed_named_finals_lineup(
+        built,
+        round_id,
+        competition_id,
+        pairing.away_season_entry_id,
+        evil_absolutes_scores,
+        label=f"ea-{round_id}",
+        stats=stats,
+    )
+    MatchupCalculationService(built["database"], _Facts(stats)).calculate_matchup(pairing.matchup_id, guard_season=True)
+    seed_official_result(built["database"], pairing.matchup_id, 158, 240)
+    _finalize_round(built["database"], round_id)
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/21").json()
+    qf = next(m for m in body["matchups"] if m["slot"] == "qf")
+    assert qf["home"]["official_score"] == 158
+    assert qf["home"]["football_line"] == "24.14"
+    assert qf["away"]["official_score"] == 240
+    assert qf["away"]["football_line"] == "38.12"
+
+
+def test_finals_football_line_preserves_a_forwards_literal_behind_total_of_six_or_more(public_client):
+    """Codex P2 on PR #262: a Forward's literal AFL goals/behinds must be
+    preserved even when the real behind count reaches 6 or more -- a naive
+    divmod of the point total alone would wrongly fold that into an extra
+    goal (14 points -> "2.2" instead of the real "1.8"), silently losing
+    precision the established `app.presentation.football_score_for_position`
+    rule (and now `app.score_presentation.football_score_from_evidence`)
+    was written to preserve."""
+    built = build_finals_ready_season(year=8106, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    round_id = _open_week1(built, bracket, year=8106)
+    season_id = built["season"].season_id
+
+    pairing = next(p for p in _repo(built).list_pairings(bracket.bracket_id, week_number=1) if p.slot == "qf")
+    competition_id = built["finals_competition"].competition_id
+
+    # F1: 1 goal, 8 behinds = 14 points. Every other position scores zero,
+    # so the side's only points come from this one literal line.
+    scores = {"F1": 14, "F2": 0, "F3": 0, "M1": 0, "M2": 0, "M3": 0, "Ruck": 0, "Tackler": 0}
+    stats = {}
+    _seed_named_finals_lineup(
+        built,
+        round_id,
+        competition_id,
+        pairing.home_season_entry_id,
+        scores,
+        label=f"lit-home-{round_id}",
+        stats=stats,
+        forward_stats={"F1": (1, 8)},
+    )
+    _seed_named_finals_lineup(
+        built,
+        round_id,
+        competition_id,
+        pairing.away_season_entry_id,
+        scores,
+        label=f"lit-away-{round_id}",
+        stats=stats,
+    )
+    MatchupCalculationService(built["database"], _Facts(stats)).calculate_matchup(pairing.matchup_id, guard_season=True)
+    seed_official_result(built["database"], pairing.matchup_id, 14, 0)
+    _finalize_round(built["database"], round_id)
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/21").json()
+    qf = next(m for m in body["matchups"] if m["slot"] == "qf")
+    assert qf["home"]["official_score"] == 14
+    assert qf["home"]["football_line"] == "1.8"
+
+
+def test_finals_football_line_for_a_forward_replaced_by_interchange_uses_the_interchanges_own_line(public_client):
+    """Codex P2 follow-up on PR #262: once the Interchange is effectively
+    scoring a Forward position, the football-score evidence must be the
+    Interchange's own literal goals/behinds -- never the original (here,
+    genuinely vacant) Forward's, which belongs to a different player
+    entirely and would either coincidentally match the wrong line or fall
+    back to a divmod approximation despite real evidence being available."""
+    built = build_finals_ready_season(year=8107, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    round_id = _open_week1(built, bracket, year=8107)
+    season_id = built["season"].season_id
+
+    pairing = next(p for p in _repo(built).list_pairings(bracket.bracket_id, week_number=1) if p.slot == "qf")
+    competition_id = built["finals_competition"].competition_id
+    entry_id = pairing.home_season_entry_id
+
+    scores = {"F1": 0, "F2": 0, "F3": 0, "M1": 0, "M2": 0, "M3": 0, "Ruck": 0, "Tackler": 0}
+    stats = {}
+    interchange_id = f"ir-home-{round_id}-Interchange"
+    interchange_canonical = (abs(hash(f"ir-home-{round_id}")) % 500_000) * 100 + 900
+    _seed_named_finals_lineup(
+        built,
+        round_id,
+        competition_id,
+        entry_id,
+        scores,
+        label=f"ir-home-{round_id}",
+        stats=stats,
+        vacant_positions=("F1",),
+        interchange=(interchange_id, interchange_canonical, "Matt Rowell", {"goals": 1, "behinds": 8}),
+    )
+    _seed_named_finals_lineup(
+        built, round_id, competition_id, pairing.away_season_entry_id, scores, label=f"ir-away-{round_id}", stats=stats
+    )
+
+    lifecycle = built["lifecycle"]
+    identities = IdentityRepository(built["database"])
+    review_repo = RoundReviewRepository(built["database"])
+    MatchupCalculationService(built["database"], _Facts(stats)).calculate_matchup(pairing.matchup_id, guard_season=True)
+    review = build_finals_round_review(lifecycle, review_repo, identities, round_id)
+    matchup_review = next(m for m in review["matchups"] if m.matchup_id == pairing.matchup_id)
+    review_repo.record_interchange_ruling(
+        pairing.matchup_id,
+        entry_id,
+        "F1",
+        expected_review_version=matchup_review.review_version,
+        actor=ACTOR,
+        reason="cover vacant forward",
+    )
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/21").json()
+    qf = next(m for m in body["matchups"] if m["slot"] == "qf")
+    side = qf["home"] if pairing.home_season_entry_id == entry_id else qf["away"]
+    f1 = next(p for p in side["lineup"]["players"] if p["position"] == "F1")
+    assert f1["outcome"] == "replaced_by_interchange"
+    assert f1["effective_score"] == 14
+    assert side["football_line"] == "1.8"
+    # Issue #261 scope extension: the per-position line (not just the side
+    # aggregate) also reflects the Interchange's own literal evidence.
+    assert f1["football_line"] == "1.8"
+    assert f1["interchange_player_name"] == "Matt Rowell"
+
+
+def test_finals_individual_positions_show_the_established_football_line(public_client):
+    """Issue #261 scope extension: individual positional presentation in
+    Finals -- a Forward's literal AFL goals/behinds and a Midfield
+    position's divmod conversion, both shown per-position via
+    `app.public_rounds._slot`'s `football_line` field."""
+    built = build_finals_ready_season(year=8108, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    round_id = _open_week1(built, bracket, year=8108)
+    season_id = built["season"].season_id
+
+    pairing = next(p for p in _repo(built).list_pairings(bracket.bracket_id, week_number=1) if p.slot == "qf")
+    competition_id = built["finals_competition"].competition_id
+
+    scores = {"F1": 23, "F2": 18, "F3": 18, "M1": 18, "M2": 18, "M3": 18, "Ruck": 18, "Tackler": 18}
+    stats = {}
+    _seed_named_finals_lineup(
+        built, round_id, competition_id, pairing.home_season_entry_id, scores, label=f"pos-home-{round_id}", stats=stats
+    )
+    _seed_named_finals_lineup(
+        built, round_id, competition_id, pairing.away_season_entry_id, scores, label=f"pos-away-{round_id}", stats=stats
+    )
+    MatchupCalculationService(built["database"], _Facts(stats)).calculate_matchup(pairing.matchup_id, guard_season=True)
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/21").json()
+    qf = next(m for m in body["matchups"] if m["slot"] == "qf")
+    home = qf["home"]
+    f1 = next(p for p in home["lineup"]["players"] if p["position"] == "F1")
+    assert f1["effective_score"] == 23
+    assert f1["football_line"] == "3.5"
+    m1 = next(p for p in home["lineup"]["players"] if p["position"] == "M1")
+    assert m1["effective_score"] == 18
+    assert m1["football_line"] == "3.0"
+
+
+def test_ordinary_matchup_score_presentation_is_unaffected_by_the_finals_football_line(public_client):
+    """Requirement 6: the ordinary Round Centre's bare point-total score
+    cards are untouched by issue #261 -- `football_line` is now present on
+    the shared `_side` DTO, but `matchCard` in the template never reads it."""
+    built = build_completable_season(year=8101, database=public_client.app.state.database)
+    season_id = built["season"].season_id
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/1").json()
+    for matchup in body["matchups"]:
+        assert isinstance(matchup["home"]["official_score"], (int, float)) or matchup["home"]["official_score"] is None
+        # The new field exists on the DTO (shared helper) but the ordinary
+        # match card template never renders it -- see the test above for
+        # the finals-only rendering behaviour.
+        assert "football_line" in matchup["home"]
+
+
+def test_superscore_integral_totals_render_without_a_trailing_zero(public_client):
+    """Issue #261: SS4's published totals (e.g. 271.0, 246.0, 227.0) must
+    carry an additive `total_display` of `271`/`246`/`227` alongside the
+    unmodified `total_score` -- the stored/API value is never altered
+    purely for display."""
+    built = build_completable_season(year=8102, database=public_client.app.state.database)
+    season_id = built["season"].season_id
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/24").json()
+    ss = body["superscore"]
+    assert ss["published"] is True
+    assert len(ss["entries"]) == 10
+    for entry in ss["entries"]:
+        if float(entry["total_score"]).is_integer():
+            assert entry["total_display"] == int(entry["total_score"])
+            assert "." not in str(entry["total_display"])
+        else:
+            assert entry["total_display"] == entry["total_score"]
+
+
+def _record_dnp_and_interchange(built, matchup_id, entry_id, position, *, review_version, reason):
+    review_repo = RoundReviewRepository(built["database"])
+    version = review_repo.record_dnp_ruling(
+        matchup_id, entry_id, position, True, expected_review_version=review_version, actor=ACTOR, reason=reason
+    )
+    review_repo.record_interchange_ruling(
+        matchup_id, entry_id, position, expected_review_version=version, actor=ACTOR, reason=reason
+    )
+
+
+def test_finals_lineup_preserves_original_dnp_player_and_names_the_interchange_replacement(public_client):
+    """Issue #261 requirement 3 / the Evil Absolutes Tackler example: a
+    named original selection who is ruled DNP and covered by the
+    Interchange must show (a) the original player's own name, (b)
+    `confirmed_dnp`, (c) the interchange player's name against that same
+    position, and (d) the effective (interchange) score -- never collapsing
+    to a bare "Vacant" the way a naive reduction would."""
+    built = build_finals_ready_season(year=8103, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    round_id = _open_week1(built, bracket, year=8103)
+    season_id = built["season"].season_id
+
+    pairing = next(p for p in _repo(built).list_pairings(bracket.bracket_id, week_number=1) if p.slot == "qf")
+    competition_id = built["finals_competition"].competition_id
+    entry_id = pairing.home_season_entry_id
+
+    scores = {"F1": 18, "F2": 18, "F3": 18, "M1": 18, "M2": 18, "M3": 18, "Ruck": 18, "Tackler": 18}
+    stats = {}
+    # The Interchange player: distinct tackles so the effective Tackler
+    # score via interchange (48) is unmistakably different from the
+    # original, DNP'd Tackler's own would-be score (18).
+    interchange_id = f"home-{round_id}-Interchange"
+    interchange_canonical = (abs(hash(f"home-{round_id}")) % 500_000) * 100 + 900
+    _seed_named_finals_lineup(
+        built,
+        round_id,
+        competition_id,
+        entry_id,
+        scores,
+        label=f"home-{round_id}",
+        stats=stats,
+        interchange=(interchange_id, interchange_canonical, "Matt Rowell", {"tackles": 8}),
+    )
+    _seed_named_finals_lineup(
+        built, round_id, competition_id, pairing.away_season_entry_id, scores, label=f"away-{round_id}", stats=stats
+    )
+
+    lifecycle = built["lifecycle"]
+    identities = IdentityRepository(built["database"])
+    review_repo = RoundReviewRepository(built["database"])
+    MatchupCalculationService(built["database"], _Facts(stats)).calculate_matchup(pairing.matchup_id, guard_season=True)
+    review = build_finals_round_review(lifecycle, review_repo, identities, round_id)
+    matchup_review = next(m for m in review["matchups"] if m.matchup_id == pairing.matchup_id)
+    _record_dnp_and_interchange(
+        built,
+        pairing.matchup_id,
+        entry_id,
+        "Tackler",
+        review_version=matchup_review.review_version,
+        reason="withdrew pregame",
+    )
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/21").json()
+    qf = next(m for m in body["matchups"] if m["slot"] == "qf")
+    side = qf["home"] if pairing.home_season_entry_id == entry_id else qf["away"]
+    tackler = next(p for p in side["lineup"]["players"] if p["position"] == "Tackler")
+
+    assert tackler["outcome"] == "replaced_by_interchange"
+    assert tackler["confirmed_dnp"] is True
+    # The coach's original selection is preserved -- never reduced to
+    # "Vacant" just because an interchange is now effectively scoring it.
+    assert tackler["player_name"] == f"home-{round_id} Tackler"
+    assert tackler["interchange_player_name"] == "Matt Rowell"
+    assert tackler["effective_score"] == 48
+
+
+def test_finals_lineup_never_shown_as_bare_vacant_when_a_genuine_vacancy_is_covered_by_interchange(public_client):
+    """The other half of requirement 3: even when the position was never
+    named at all (a genuine vacancy, not a DNP), the row must still name
+    the interchange player who is effectively covering it and show that
+    effective score -- `player_name` stays `None` (accurately: no one was
+    ever selected), but `interchange_player_name` makes clear who is
+    actually generating the shown score."""
+    built = build_finals_ready_season(year=8104, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    round_id = _open_week1(built, bracket, year=8104)
+    season_id = built["season"].season_id
+
+    pairing = next(p for p in _repo(built).list_pairings(bracket.bracket_id, week_number=1) if p.slot == "qf")
+    competition_id = built["finals_competition"].competition_id
+    entry_id = pairing.home_season_entry_id
+
+    scores = {"F1": 18, "F2": 18, "F3": 18, "M1": 18, "M2": 18, "M3": 18, "Ruck": 18, "Tackler": 18}
+    stats = {}
+    # Leave the Tackler position genuinely vacant (no coach selection) for
+    # the home entry, but still name and score an Interchange to cover it.
+    interchange_id = f"vhome-{round_id}-Interchange"
+    interchange_canonical = (abs(hash(f"vhome-{round_id}")) % 500_000) * 100 + 900
+    _seed_named_finals_lineup(
+        built,
+        round_id,
+        competition_id,
+        entry_id,
+        scores,
+        label=f"vhome-{round_id}",
+        stats=stats,
+        vacant_positions=("Tackler",),
+        interchange=(interchange_id, interchange_canonical, "Matt Rowell", {"tackles": 8}),
+    )
+    _seed_named_finals_lineup(
+        built, round_id, competition_id, pairing.away_season_entry_id, scores, label=f"vaway-{round_id}", stats=stats
+    )
+
+    lifecycle = built["lifecycle"]
+    identities = IdentityRepository(built["database"])
+    review_repo = RoundReviewRepository(built["database"])
+    MatchupCalculationService(built["database"], _Facts(stats)).calculate_matchup(pairing.matchup_id, guard_season=True)
+    review = build_finals_round_review(lifecycle, review_repo, identities, round_id)
+    matchup_review = next(m for m in review["matchups"] if m.matchup_id == pairing.matchup_id)
+    review_repo.record_interchange_ruling(
+        pairing.matchup_id,
+        entry_id,
+        "Tackler",
+        expected_review_version=matchup_review.review_version,
+        actor=ACTOR,
+        reason="cover intentional vacancy",
+    )
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/21").json()
+    qf = next(m for m in body["matchups"] if m["slot"] == "qf")
+    side = qf["home"] if pairing.home_season_entry_id == entry_id else qf["away"]
+    tackler = next(p for p in side["lineup"]["players"] if p["position"] == "Tackler")
+
+    assert tackler["outcome"] == "replaced_by_interchange"
+    assert tackler["player_name"] is None
+    assert tackler["interchange_player_name"] == "Matt Rowell"
+    assert tackler["effective_score"] == 48

@@ -65,7 +65,7 @@ function apiUrl(n){return `/api/public/seasons/${encodeURIComponent(season)}/rou
 function matchCard(m, detailRoundId){
   let scoreline='';
   if(m.status!=='scheduled'){
-    scoreline=`<div class="scoreline"><div><strong>${esc(m.home.team.name)}</strong><div class="score">${esc(m.home.official_score??m.home.calculated_score??'–')}</div></div><span>v</span><div><strong>${esc(m.away.team.name)}</strong><div class="score">${esc(m.away.official_score??m.away.calculated_score??'–')}</div></div></div>`;
+    scoreline=`<div class="scoreline"><div><strong>${esc(m.home.team.name)}</strong><div class="score">${scoreCell(m.home)}</div></div><span>v</span><div><strong>${esc(m.away.team.name)}</strong><div class="score">${scoreCell(m.away)}</div></div></div>`;
   } else {
     scoreline=`<div class="scoreline"><div><strong>${esc(m.home.team.name)}</strong></div><span>v</span><div><strong>${esc(m.away.team.name)}</strong></div></div>`;
   }
@@ -87,12 +87,41 @@ function teamLabel(team){
   return (team.seed!==null && team.seed!==undefined) ? `${team.seed}. ${esc(team.name)}` : esc(team.name);
 }
 
-// Player/lineup rendering (issue #213 Codex follow-up) -- reused verbatim
-// from public_round_centre.html's identical `player`/`side` functions:
-// finals matchup sides carry the exact same public lineup-evidence shape
-// (`app.public_rounds._side`/`_slot`) ordinary matchups already expose,
-// so the same renderer applies unchanged rather than a second one.
-function player(p){let outcome=p.outcome==='replaced_by_interchange'?'DNP · replaced by Interchange':p.outcome==='confirmed_dnp_zero'?'Confirmed DNP · scored zero':'';let deferred=p.deferred_source?`<div class="note">↪ ${esc(p.deferred_source.label)}</div>`:'';return `<li><strong>${esc(p.position)}</strong> ${esc(p.player_name||'Vacant')} <span class="tag">${esc(p.effective_score)}</span>${outcome?`<div class="note">${esc(outcome)}</div>`:''}${deferred}</li>`}
+// Player/lineup rendering (issue #213 Codex follow-up; interchange-
+// replacement wording sharpened, and per-position football-score line
+// added, by issue #261) -- finals matchup sides carry the exact same
+// public lineup-evidence shape (`app.public_rounds._side`/`_slot`)
+// ordinary matchups already expose, so the same renderer applies
+// unchanged rather than a second one.
+//
+// A `replaced_by_interchange` row must never look like the position is
+// simply vacant: `p.player_name` (the coach's *original* selection, DNP'd
+// or never named -- see `_slot`'s own comment) and `p.interchange_player_name`
+// (who is effectively scoring it now) are shown together, alongside the
+// effective score against that position -- the same original/replacement
+// distinction the established Grand Final renderer's `playerCell()` makes
+// (`public.html`), reused here as wording rather than copied as code,
+// since the two pages' DTOs differ.
+//
+// `p.football_line` is the same "G.B" notation `scoreCell` shows for a
+// team total, applied per position (issue #261 scope extension): a
+// Forward's literal AFL goals/behinds when known and consistent, divmod
+// otherwise -- `app.public_rounds._slot`'s own `football_line` field,
+// never recomputed here.
+function positionScoreTag(p){
+  if(p.football_line==null)return `<span class="tag">${esc(p.effective_score)}</span>`;
+  return `<span class="tag">${esc(p.football_line)} (${esc(p.effective_score)})</span>`;
+}
+function player(p){
+  let deferred=p.deferred_source?`<div class="note">↪ ${esc(p.deferred_source.label)}</div>`:'';
+  if(p.outcome==='replaced_by_interchange'){
+    let original=p.player_name?`${esc(p.player_name)} (DNP)`:'Vacant';
+    let replacement=p.interchange_player_name?esc(p.interchange_player_name):'Interchange';
+    return `<li><strong>${esc(p.position)}</strong> ${original} → replaced by ${replacement} ${positionScoreTag(p)}<div class="note">Effective ${esc(p.position)} score via Interchange replacement</div>${deferred}</li>`;
+  }
+  let outcome=p.outcome==='confirmed_dnp_zero'?'Confirmed DNP · scored zero':'';
+  return `<li><strong>${esc(p.position)}</strong> ${esc(p.player_name||'Vacant')} ${positionScoreTag(p)}${outcome?`<div class="note">${esc(outcome)}</div>`:''}${deferred}</li>`;
+}
 function side(s){if(!s.lineup)return '<div><p class="note">Submitted lineup not yet public.</p></div>';let interchange=s.lineup.interchange;return `<div><ul class="players">${s.lineup.players.map(player).join('')}</ul><div class="note"><strong>Interchange:</strong> ${esc(interchange.player_name||'None')}${interchange.replaces_position?` · replaces ${esc(interchange.replaces_position)}`:''}</div></div>`}
 
 // Finals matchup cards (issue #213) -- the finals-bracket analogue of
@@ -105,10 +134,24 @@ function side(s){if(!s.lineup)return '<div><p class="note">Submitted lineup not 
 // lineup-evidence shape the ordinary per-matchup detail page uses,
 // never scorer-only/unpublished state (`side()` already only ever shows
 // a lineup once a real authoritative submission exists).
+// Issue #261 (scope extension: ordinary Rounds 1-20 through Finals): a
+// matchup total is shown in the established BBBFFL football-score
+// notation ("G.B (Total)", e.g. "24.14 (158)") using `app.public_rounds.
+// _side`'s `football_line` field, reusing the exact conversion
+// `app.presentation` already uses for the Grand Final/SuperScore vertical
+// -- never a bare point total on its own, and never a second, independent
+// conversion. Used by both the ordinary `matchCard` and `finalsMatchCard`
+// below. Falls back to the bare total if a football line genuinely isn't
+// available (no calculation and no official result yet).
+function scoreCell(matchSide){
+  let total=matchSide.official_score??matchSide.calculated_score;
+  if(total===null||total===undefined)return '–';
+  return matchSide.football_line?`${esc(matchSide.football_line)} <span class="tag">(${esc(total)})</span>`:esc(total);
+}
 function finalsMatchCard(m){
   let scoreline='';
   if(m.status!=='scheduled'){
-    scoreline=`<div class="scoreline"><div><strong>${teamLabel(m.home.team)}</strong><div class="score">${esc(m.home.official_score??m.home.calculated_score??'–')}</div></div><span>v</span><div><strong>${teamLabel(m.away.team)}</strong><div class="score">${esc(m.away.official_score??m.away.calculated_score??'–')}</div></div></div>`;
+    scoreline=`<div class="scoreline"><div><strong>${teamLabel(m.home.team)}</strong><div class="score">${scoreCell(m.home)}</div></div><span>v</span><div><strong>${teamLabel(m.away.team)}</strong><div class="score">${scoreCell(m.away)}</div></div></div>`;
   } else {
     scoreline=`<div class="scoreline"><div><strong>${teamLabel(m.home.team)}</strong></div><span>v</span><div><strong>${teamLabel(m.away.team)}</strong></div></div>`;
   }
@@ -143,7 +186,12 @@ function superscoreSection(ss){
     body=`<p class="note">${esc(ss.round_label)} results have not been published yet.</p>`;
   } else {
     let published=auTime(ss.published_at);
-    let rows=ss.entries.map(e=>`<tr><td>${e.rank}${e.is_joint_winner?' =':''}</td><td>${esc(e.team_name)}</td><td>${Number(e.total_score).toFixed(1)}</td></tr>`).join('');
+    // Issue #261: `total_display` (from `app.public_finals.build_public_
+    // superscore_round`) already strips a trailing ".0" off an integral
+    // published total (e.g. 271.0 -> "271") while leaving a genuinely
+    // non-integral one shown as-is -- never a second/independent rounding
+    // rule here, and never a change to the underlying `total_score` value.
+    let rows=ss.entries.map(e=>`<tr><td>${e.rank}${e.is_joint_winner?' =':''}</td><td>${esc(e.team_name)}</td><td>${esc(e.total_display)}</td></tr>`).join('');
     body=`${published?`<p class="note">Published ${esc(published)} (AEST/AEDT)</p>`:''}<table class="ladder"><thead><tr><th>#</th><th>Team</th><th>Score</th></tr></thead><tbody>${rows}</tbody></table>`;
   }
   return `<div class="card"><h2>${esc(ss.round_label)}</h2>${body}</div>`;

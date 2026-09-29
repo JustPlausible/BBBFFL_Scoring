@@ -10,6 +10,12 @@ from decimal import Decimal
 from app.lineups import POSITIONS
 from app.player_pool import PlayerPoolRepository
 from app.round_review import build_round_review
+from app.score_presentation import football_score_from_evidence, football_score_from_total, format_football_line
+
+# Forward slots (season-model naming) that can show a player's literal AFL
+# goals/behinds -- see `_football_line`. Midfield/Ruck/Tackler have no
+# goals/behinds of their own and always convert via divmod.
+_FORWARD_SLOTS = frozenset({"F1", "F2", "F3"})
 
 
 def _number(value):
@@ -39,6 +45,30 @@ def _deferred_source(scoring_source, source_afl_round_id):
     }
 
 
+def _position_football_score(slot):
+    """The (goals, behinds) pair for one scorable position's effective
+    score -- the exact same conversion `app.presentation.
+    football_score_for_position` uses for the Grand Final/SuperScore
+    vertical (issue #261, extended to individual positions by its scope
+    extension). A Forward slot shows the named player's own literal AFL
+    goals/behinds whenever known and still consistent with its effective
+    score (never divmod'd away -- a real behind total of 6 or more must
+    never be silently folded into an extra goal, and when the Interchange
+    is effectively scoring the position, `slot.stat_goals`/`stat_behinds`
+    are already the Interchange's own line -- see `app.round_review.
+    _side_review`); every other position always converts its point total
+    via divmod. Shared by `_slot` (the per-position display) and
+    `_football_line` (the side's aggregate) so the two can never disagree
+    about how any one position converts."""
+    goals, behinds, _ = football_score_from_evidence(
+        slot.effective_score,
+        is_actual_stat_capable=slot.slot in _FORWARD_SLOTS,
+        stat_goals=slot.stat_goals,
+        stat_behinds=slot.stat_behinds,
+    )
+    return goals, behinds
+
+
 def _slot(selection, calculated, names, interchange):
     if calculated is None:
         return {
@@ -48,6 +78,8 @@ def _slot(selection, calculated, names, interchange):
             "effective_score": None,
             "outcome": "awaiting_score" if selection["season_player_id"] else "vacant",
             "confirmed_dnp": False,
+            "interchange_player_name": None,
+            "football_line": None,
             "deferred_source": None,
         }
     if calculated.interchange_applied:
@@ -61,21 +93,60 @@ def _slot(selection, calculated, names, interchange):
         if calculated.interchange_applied
         else _deferred_source(calculated.scoring_source, calculated.source_afl_round_id)
     )
+    goals, behinds = _position_football_score(calculated)
     return {
         "position": calculated.slot,
+        # The coach's own original selection for this position -- never
+        # replaced by the interchange player's name here, so a DNP'd or
+        # genuinely vacant original selection stays visible alongside
+        # `interchange_player_name` below rather than being collapsed
+        # into "no one selected" (issue #261).
         "player_name": names.get(calculated.season_player_id),
         "participation": "deferred_source" if effective_deferred else calculated.participation_state,
         "effective_score": calculated.effective_score,
         "outcome": outcome,
         "confirmed_dnp": calculated.dnp_ruling is True,
+        # Issue #261: name the interchange player directly on the position
+        # row it is effectively scoring, so the row stays self-describing
+        # (original selection + DNP state + who effectively replaced them
+        # + the effective score) without requiring the reader to
+        # cross-reference the separate `lineup.interchange` summary below.
+        "interchange_player_name": interchange.player_name if calculated.interchange_applied else None,
+        # Issue #261 scope extension: the established football-score line
+        # ("G.B") for this position's own effective score, applied to
+        # ordinary rounds and Finals alike -- see `_position_football_score`.
+        "football_line": format_football_line(goals, behinds),
         "deferred_source": effective_deferred,
     }
+
+
+def _football_line(slots, total):
+    """The side's football-style "G.B" line for `total` (whichever of
+    official/calculated score is actually being shown) -- summed across
+    the side's scorable positions via `_position_football_score` (never a
+    second, independent conversion algorithm; issue #261). Falls back to
+    converting `total` directly when the position breakdown does not
+    reconcile with it (e.g. an official result recorded without a
+    matching calculation, as some historical/test fixtures do), so the
+    displayed line always still satisfies 6*goals + behinds == the
+    displayed total."""
+    if total is None:
+        return None
+    pairs = [_position_football_score(slot) for slot in slots]
+    if pairs and sum(goals * 6 + behinds for goals, behinds in pairs) == total:
+        total_goals = sum(goals for goals, _ in pairs)
+        total_behinds = sum(behinds for _, behinds in pairs)
+    else:
+        total_goals, total_behinds = football_score_from_total(total)
+    return format_football_line(total_goals, total_behinds)
 
 
 def _side(side, submitted, names, official_score, has_calculation):
     interchange = side.interchange
     calculated_by_position = {slot.slot: slot for slot in side.slots}
     interchange_selection = next((slot for slot in submitted or [] if slot["position"] == "Interchange"), None)
+    calculated_score = side.effective_score if has_calculation else None
+    official = _number(official_score) if official_score is not None else None
     return {
         "team": {"name": side.team_name or "Team"},
         "lineup": {
@@ -94,8 +165,12 @@ def _side(side, submitted, names, official_score, has_calculation):
         }
         if submitted
         else None,
-        "calculated_score": side.effective_score if has_calculation else None,
-        "official_score": _number(official_score) if official_score is not None else None,
+        "calculated_score": calculated_score,
+        "official_score": official,
+        # Issue #261: the established BBBFFL football-score presentation
+        # ("G.B (Total)") for whichever total is actually shown -- never a
+        # second, independent conversion; see `_football_line`.
+        "football_line": _football_line(side.slots, official if official is not None else calculated_score),
     }
 
 

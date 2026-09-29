@@ -2221,3 +2221,11 @@ future season.
 - No fresh finals database/season bootstrap. Every new table/repository is
   keyed by the same `season_id` the completed Rounds 1-20 replay already
   uses.
+
+## Public SuperScore projection (issue #263)
+
+The public Finals read model presents current and historical SuperScore detail without a second store or a legacy JSON dependency. Before publication it reads the latest `superscore_entry_calculation.snapshot`; after publication it switches completely to `superscore_official_result.input_snapshot`, including frozen player evidence. Published totals and ranks therefore cannot be changed by a later calculation or AFL correction.
+
+The browser never receives either raw snapshot. `app.public_finals` creates an explicit allow-listed DTO containing team/rank/total presentation, eight position rows, and the Interchange summary. It omits ruling reasons, overrides' reasons, review metadata, fingerprints, publication actors, and audit data. `effective_entry` determines what counted (including DNP and Interchange), while the corresponding calculation slot supplies only public AFL scoring evidence. Forward rows use frozen goals and behinds when they reconcile to the effective score; other positions use the shared `score_presentation` conversion.
+
+For an unpublished round, match progress is resolved through the configured AFL client from each calculated slot's persisted source round/match identity. The existing Finals-page polling refreshes the one combined response, including rankings, totals, status dots, and expanded detail; the client retains the expanded entry identifier across refreshes. Published rounds make no AFL call for their player presentation and display every frozen position as completed (apart from explicit DNP/vacant states).

@@ -23,6 +23,21 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def test_superscore_player_detail_stacks_at_the_mobile_breakpoint():
+    """The five detail fields must not retain the desktop five-column grid
+    on the common 320--375px viewport range (PR #264 review)."""
+    template = (Path(__file__).parents[1] / "app" / "templates" / "public_season_rounds.html").read_text(
+        encoding="utf-8"
+    )
+    mobile = template[template.index("@media(max-width:640px)") : template.index("</style>")]
+
+    assert ".superscore-player{grid-template-columns:minmax(0,1fr) auto" in mobile
+    assert ".superscore-player>strong,.superscore-player>span:nth-child(2)" in mobile
+    assert ".superscore-player>span:nth-child(5){grid-column:1/-1" in mobile
+    assert "overflow-wrap:anywhere" in mobile
+    assert ".superscore-detail{padding:0 0 12px}" in mobile
+
+
 @pytest.fixture
 def rendered_script(monkeypatch):
     """The literal inline `<script>` from a real, server-rendered
@@ -285,8 +300,68 @@ def test_superscore_table_shows_integral_totals_without_a_trailing_zero(rendered
 console.log(superscoreSection({json.dumps(ss)}));
 """
     stdout = _run(script, tmp_path, "superscore_integral").strip()
-    assert ">271<" in stdout
-    assert ">246<" in stdout
-    assert ">227.5<" in stdout
+    assert "(271)" in stdout
+    assert "(246)" in stdout
+    assert "(227.5)" in stdout
     assert "271.0" not in stdout
     assert "246.0" not in stdout
+
+
+def test_superscore_entry_is_an_accessible_inline_expander_with_progress(rendered_script, tmp_path):
+    entry = {
+        "rank": 1,
+        "season_entry_id": "entry-a",
+        "team_name": "JHAS",
+        "total_display": 12,
+        "football_line": "2.0",
+        "is_joint_winner": False,
+        "positions": [
+            {
+                "slot": "F1",
+                "label": "Forward 1",
+                "player_name": "Mitch Lewis",
+                "afl_club": "Hawthorn",
+                "display_state": "completed",
+                "effective_score": 12,
+                "football_line": "2.0",
+                "interchange_applied": False,
+            }
+        ],
+        "interchange": {"player_name": None, "afl_club": None, "display_state": "vacant", "target_position": None},
+    }
+    script = f"""
+{rendered_script}
+expandedSuperScoreEntry='entry-a';
+console.log(superScoreEntry({json.dumps(entry)}));
+"""
+    stdout = _run(script, tmp_path, "superscore_expander").strip()
+    assert '<button type="button"' in stdout
+    assert 'aria-expanded="true"' in stdout
+    assert 'aria-controls="superscore-detail-entry-a"' in stdout
+    assert 'class="superscore-dot completed"' in stdout
+    assert "Mitch Lewis" in stdout
+    assert "Hawthorn" in stdout
+    assert "2.0" in stdout
+
+
+def test_vacant_position_covered_by_interchange_is_not_mislabeled_dnp(rendered_script, tmp_path):
+    position = {
+        "label": "Forward 1",
+        "player_name": None,
+        "afl_club": None,
+        "display_state": "completed",
+        "effective_score": 12,
+        "football_line": "2.0",
+        "interchange_applied": True,
+        "confirmed_dnp": False,
+        "replacement_player_name": "Bench Player",
+        "replacement_afl_club": "Hawthorn",
+    }
+    script = f"""
+{rendered_script}
+console.log(superScorePlayer({json.dumps(position)}));
+"""
+    stdout = _run(script, tmp_path, "superscore_vacant_interchange").strip()
+    assert "Vacant" in stdout
+    assert "replaced by Bench Player" in stdout
+    assert "DNP" not in stdout

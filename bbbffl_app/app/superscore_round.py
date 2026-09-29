@@ -372,6 +372,50 @@ def confirm_afl_mapping(
     return repo.correct(bbbffl_round_id, afl_season_id, afl_round_id, validator, actor=actor, reason=reason)
 
 
+def confirm_afl_mapping_locked(
+    conn,
+    database,
+    validator: AflReferenceValidator,
+    bbbffl_round_id: str,
+    afl_season_id: int,
+    afl_round_id: int,
+    *,
+    actor: ActorContext = ActorContext.anonymous_operator("admin"),
+    reason: str,
+) -> RoundMapping:
+    """Issue #214: the transaction-aware counterpart of `confirm_afl_mapping`
+    -- identical accept-or-correct decision, against the same
+    `app.round_mapping` boundary, but run against an already-open
+    `conn`/transaction rather than opening its own. This is what lets
+    `app.finals_superscore_open`'s paired synchronisation correct SS's
+    mapping in the *same* transaction as its lockout-trigger writes and its
+    summary audit event, so all of it commits together or none of it does --
+    see that module's `_synchronise_locked` for the full contract (which
+    round/lifecycle rows must already be locked before this is called, and
+    why).
+
+    `existing`/`round_exists` are both re-read/re-checked here, never
+    trusted from an earlier, unlocked caller: the caller is expected to have
+    already acquired `bbbffl_round_id`'s own row lock (and re-validated any
+    frozen lifecycle mapping) before calling this, exactly as `confirm_afl_
+    mapping`'s own callers rely on `RoundMappingRepository.accept`/`correct`
+    to lock it themselves. The `validator.round_exists` afl-api call still
+    only runs when a mutation actually turns out to be necessary (identical
+    to `confirm_afl_mapping`'s own no-op-if-unchanged short circuit) -- it
+    now happens from inside the caller's lock rather than outside it, a
+    deliberate trade documented in `_synchronise_locked`'s own docstring."""
+    repo = RoundMappingRepository(database)
+    existing = repo.resolve_locked(conn, bbbffl_round_id)
+    if existing is not None and existing.afl_season_id == afl_season_id and existing.afl_round_id == afl_round_id:
+        return existing
+    if not validator.round_exists(afl_season_id, afl_round_id):
+        raise ValueError("AFL season/round reference does not exist")
+    correction = existing is not None
+    return repo._activate_locked(
+        conn, bbbffl_round_id, afl_season_id, afl_round_id, "afl-api-v1", actor, reason, correction
+    )
+
+
 _ROUND_KEY_TO_WEEK = {label.lower(): number for number, label in ROUND_LABELS.items()}
 
 

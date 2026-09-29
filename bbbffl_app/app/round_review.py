@@ -677,7 +677,15 @@ def _side_review(entry_id, side_snapshot, dnp_rulings, interchange_rulings, over
         )
         total_effective += effective
         player_name, afl_club = _player_label(player_labels, slot_dict["season_player_id"])
-        stat_line = slot_dict.get("stats")
+        # Issue #261 (Codex P2 follow-up): when the Interchange is
+        # effectively scoring this position, `effective_score` comes from
+        # *their* potential score (see `base` above), so the literal
+        # goals/behinds evidence must be the Interchange's own stat line --
+        # never the original (vacant/DNP'd) starter's, which belongs to a
+        # different player entirely and would either coincidentally (and
+        # wrongly) match or correctly fail the consistency check for the
+        # wrong reason.
+        stat_line = interchange_slot.get("stats") if interchange_usable else slot_dict.get("stats")
         slot_reviews.append(
             SlotReview(
                 slot=position,

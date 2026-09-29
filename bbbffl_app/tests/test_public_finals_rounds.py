@@ -851,7 +851,9 @@ def _seed_named_finals_lineup(
     `vacant_positions` leaves those (otherwise-scorable) positions
     genuinely unselected -- distinct from a named player later ruled DNP.
     `interchange`, when given, is `(player_id, canonical_player_id, name,
-    tackles)` for a named Interchange player, inserted directly at
+    stat_kwargs)` for a named Interchange player -- `stat_kwargs` are the
+    `PlayerStatLine` keyword args for their literal AFL line (e.g.
+    `{"tackles": 8}` or `{"goals": 1, "behinds": 8}`), inserted directly at
     submission time rather than mutated in afterwards: submitted lineup
     slots are immutable by DB trigger (see root `CLAUDE.md`'s
     "Immutability and history"), so a DNP/interchange scenario must be
@@ -898,9 +900,9 @@ def _seed_named_finals_lineup(
             selected = None
             if position == "Interchange":
                 if interchange is not None:
-                    player_id, canonical, name, tackles = interchange
+                    player_id, canonical, name, stat_kwargs = interchange
                     _insert_player(player_id, canonical, name)
-                    stats[canonical] = PlayerStatLine(canonical, tackles=tackles)
+                    stats[canonical] = PlayerStatLine(canonical, **stat_kwargs)
                     selected = player_id
             elif position not in vacant_positions:
                 canonical = canonical_base + index
@@ -1038,6 +1040,65 @@ def test_finals_football_line_preserves_a_forwards_literal_behind_total_of_six_o
     assert qf["home"]["football_line"] == "1.8"
 
 
+def test_finals_football_line_for_a_forward_replaced_by_interchange_uses_the_interchanges_own_line(public_client):
+    """Codex P2 follow-up on PR #262: once the Interchange is effectively
+    scoring a Forward position, the football-score evidence must be the
+    Interchange's own literal goals/behinds -- never the original (here,
+    genuinely vacant) Forward's, which belongs to a different player
+    entirely and would either coincidentally match the wrong line or fall
+    back to a divmod approximation despite real evidence being available."""
+    built = build_finals_ready_season(year=8107, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    round_id = _open_week1(built, bracket, year=8107)
+    season_id = built["season"].season_id
+
+    pairing = next(p for p in _repo(built).list_pairings(bracket.bracket_id, week_number=1) if p.slot == "qf")
+    competition_id = built["finals_competition"].competition_id
+    entry_id = pairing.home_season_entry_id
+
+    scores = {"F1": 0, "F2": 0, "F3": 0, "M1": 0, "M2": 0, "M3": 0, "Ruck": 0, "Tackler": 0}
+    stats = {}
+    interchange_id = f"ir-home-{round_id}-Interchange"
+    interchange_canonical = (abs(hash(f"ir-home-{round_id}")) % 500_000) * 100 + 900
+    _seed_named_finals_lineup(
+        built,
+        round_id,
+        competition_id,
+        entry_id,
+        scores,
+        label=f"ir-home-{round_id}",
+        stats=stats,
+        vacant_positions=("F1",),
+        interchange=(interchange_id, interchange_canonical, "Matt Rowell", {"goals": 1, "behinds": 8}),
+    )
+    _seed_named_finals_lineup(
+        built, round_id, competition_id, pairing.away_season_entry_id, scores, label=f"ir-away-{round_id}", stats=stats
+    )
+
+    lifecycle = built["lifecycle"]
+    identities = IdentityRepository(built["database"])
+    review_repo = RoundReviewRepository(built["database"])
+    MatchupCalculationService(built["database"], _Facts(stats)).calculate_matchup(pairing.matchup_id, guard_season=True)
+    review = build_finals_round_review(lifecycle, review_repo, identities, round_id)
+    matchup_review = next(m for m in review["matchups"] if m.matchup_id == pairing.matchup_id)
+    review_repo.record_interchange_ruling(
+        pairing.matchup_id,
+        entry_id,
+        "F1",
+        expected_review_version=matchup_review.review_version,
+        actor=ACTOR,
+        reason="cover vacant forward",
+    )
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/21").json()
+    qf = next(m for m in body["matchups"] if m["slot"] == "qf")
+    side = qf["home"] if pairing.home_season_entry_id == entry_id else qf["away"]
+    f1 = next(p for p in side["lineup"]["players"] if p["position"] == "F1")
+    assert f1["outcome"] == "replaced_by_interchange"
+    assert f1["effective_score"] == 14
+    assert side["football_line"] == "1.8"
+
+
 def test_ordinary_matchup_score_presentation_is_unaffected_by_the_finals_football_line(public_client):
     """Requirement 6: the ordinary Round Centre's bare point-total score
     cards are untouched by issue #261 -- `football_line` is now present on
@@ -1115,7 +1176,7 @@ def test_finals_lineup_preserves_original_dnp_player_and_names_the_interchange_r
         scores,
         label=f"home-{round_id}",
         stats=stats,
-        interchange=(interchange_id, interchange_canonical, "Matt Rowell", 8),
+        interchange=(interchange_id, interchange_canonical, "Matt Rowell", {"tackles": 8}),
     )
     _seed_named_finals_lineup(
         built, round_id, competition_id, pairing.away_season_entry_id, scores, label=f"away-{round_id}", stats=stats
@@ -1181,7 +1242,7 @@ def test_finals_lineup_never_shown_as_bare_vacant_when_a_genuine_vacancy_is_cove
         label=f"vhome-{round_id}",
         stats=stats,
         vacant_positions=("Tackler",),
-        interchange=(interchange_id, interchange_canonical, "Matt Rowell", 8),
+        interchange=(interchange_id, interchange_canonical, "Matt Rowell", {"tackles": 8}),
     )
     _seed_named_finals_lineup(
         built, round_id, competition_id, pairing.away_season_entry_id, scores, label=f"vaway-{round_id}", stats=stats

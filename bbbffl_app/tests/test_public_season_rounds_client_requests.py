@@ -327,3 +327,26 @@ console.log(superScoreEntry({json.dumps(entry)}));
     assert "Mitch Lewis" in stdout
     assert "Hawthorn" in stdout
     assert "2.0" in stdout
+
+
+def test_vacant_position_covered_by_interchange_is_not_mislabeled_dnp(rendered_script, tmp_path):
+    position = {
+        "label": "Forward 1",
+        "player_name": None,
+        "afl_club": None,
+        "display_state": "completed",
+        "effective_score": 12,
+        "football_line": "2.0",
+        "interchange_applied": True,
+        "confirmed_dnp": False,
+        "replacement_player_name": "Bench Player",
+        "replacement_afl_club": "Hawthorn",
+    }
+    script = f"""
+{rendered_script}
+console.log(superScorePlayer({json.dumps(position)}));
+"""
+    stdout = _run(script, tmp_path, "superscore_vacant_interchange").strip()
+    assert "Vacant" in stdout
+    assert "replaced by Bench Player" in stdout
+    assert "DNP" not in stdout

@@ -206,7 +206,10 @@ function superscoreSection(ss){
 
 function superScorePlayer(p){
   let player=esc(p.player_name||'Vacant');
-  if(p.interchange_applied)player+=` <span class="note">(DNP) → ${esc(p.replacement_player_name||'Interchange')}</span>`;
+  if(p.interchange_applied){
+    let reason=p.confirmed_dnp?' (DNP)':'';
+    player+=` <span class="note">${reason} → replaced by ${esc(p.replacement_player_name||'Interchange')}</span>`;
+  }
   let score=p.football_line==null?esc(p.effective_score):`${esc(p.football_line)} <span class="tag">(${esc(p.effective_score)})</span>`;
   return `<div class="superscore-player"><strong>${esc(p.label)}</strong><span>${player}</span><span>${esc(p.interchange_applied?p.replacement_afl_club:p.afl_club)||'—'}</span><span class="state">${esc(p.display_state.replaceAll('_',' '))}</span><span>${score}</span></div>`;
 }

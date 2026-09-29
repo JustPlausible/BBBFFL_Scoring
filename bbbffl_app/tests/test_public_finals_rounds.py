@@ -37,7 +37,7 @@ from app.finals_preflight import open_finals_week
 from app.finals_review import build_finals_round_review
 from app.identity import IdentityRepository
 from app.lineups import POSITIONS
-from app.public_finals import _public_entry, build_public_season_sequence
+from app.public_finals import _public_entry, build_public_season_sequence, build_public_superscore_round
 from app.round_review import RoundReviewRepository
 from app.season import _now
 from tests.finals_helpers import accept_week_mapping, build_finals_ready_season, seed_official_result
@@ -157,6 +157,67 @@ def test_superscore_projection_exposes_non_playing_states(slot, expected):
         match_states={},
     )
     assert projected["positions"][0]["display_state"] == expected
+
+
+def test_public_superscore_rechecks_official_authority_after_live_read(monkeypatch):
+    """A publication committing during a live request must replace the
+    mutable calculation view before that response is returned."""
+
+    class Result:
+        def __init__(self, *, one=None, all_rows=()):
+            self.one = one
+            self.all_rows = all_rows
+
+        def fetchone(self):
+            return self.one
+
+        def fetchall(self):
+            return list(self.all_rows)
+
+    class Database:
+        def execute(self, query, _params):
+            if "FROM bbbffl_round sr" in query:
+                return Result(one={"bbbffl_round_id": "ss1", "label": "SS1"})
+            if "FROM bbbffl_round_lifecycle" in query:
+                return Result(one={"state": "live"})
+            if "FROM superscore_entry_calculation" in query:
+                return Result(all_rows=())
+            raise AssertionError(query)
+
+    published = {
+        "published_at": "2026-09-01T00:00:00+00:00",
+        "entries": [
+            {
+                "rank": 1,
+                "season_entry_id": "entry-a",
+                "team_name": "Frozen Team",
+                "total_score": 12.0,
+                "input_snapshot": {
+                    "effective_entry": {"slots": [], "interchange": {}},
+                    "calculation": {"entry": {"slots": []}},
+                },
+            }
+        ],
+    }
+
+    class LeaderboardService:
+        calls = 0
+
+        def __init__(self, *_args):
+            pass
+
+        def leaderboard(self, _round_id, *, include_inputs):
+            assert include_inputs is True
+            self.__class__.calls += 1
+            return None if self.calls == 1 else published
+
+    monkeypatch.setattr("app.public_finals.SuperScoreLeaderboardService", LeaderboardService)
+    result = build_public_superscore_round(Database(), object(), None, "season", 1)
+
+    assert LeaderboardService.calls == 2
+    assert result["published"] is True
+    assert result["entries"][0]["team_name"] == "Frozen Team"
+    assert result["entries"][0]["total_score"] == 12.0
 
 
 @pytest.fixture

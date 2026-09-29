@@ -229,9 +229,8 @@ def build_public_superscore_round(database, afl_client, identities, season_id, w
         "SELECT state FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?", (round_id,)
     ).fetchone()
     lifecycle_state = lifecycle["state"] if lifecycle else "upcoming"
-    leaderboard = SuperScoreLeaderboardService(database, afl_client, identities).leaderboard(
-        round_id, include_inputs=True
-    )
+    leaderboard_service = SuperScoreLeaderboardService(database, afl_client, identities)
+    leaderboard = leaderboard_service.leaderboard(round_id, include_inputs=True)
     if leaderboard is None:
         rows = database.execute(
             "SELECT season_entry_id,total_score,snapshot FROM superscore_entry_calculation "
@@ -260,16 +259,24 @@ def build_public_superscore_round(database, afl_client, identities, season_id, w
                 )
             )
         current.sort(key=lambda item: (item["rank"], item["team_name"], item["season_entry_id"]))
-        return {
-            "available": True,
-            "week_number": week_number,
-            "round_id": round_id,
-            "round_label": round_label,
-            "lifecycle_status": lifecycle_state,
-            "published": False,
-            "published_at": None,
-            "entries": current,
-        }
+        # Publication can commit while the public request is resolving live
+        # match states. Re-check after that comparatively slow external read
+        # so a newly available frozen leaderboard wins over the replaceable
+        # calculation rows. This gives the response a clear linearization
+        # point and prevents mutable detail being returned after publication
+        # became visible during this request.
+        leaderboard = leaderboard_service.leaderboard(round_id, include_inputs=True)
+        if leaderboard is None:
+            return {
+                "available": True,
+                "week_number": week_number,
+                "round_id": round_id,
+                "round_label": round_label,
+                "lifecycle_status": lifecycle_state,
+                "published": False,
+                "published_at": None,
+                "entries": current,
+            }
     return {
         "available": True,
         "week_number": week_number,

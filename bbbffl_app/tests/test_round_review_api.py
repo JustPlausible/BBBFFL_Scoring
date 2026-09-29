@@ -17,6 +17,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from app.afl_client import PlayerStatLine
 from app.audit import ActorContext
 from app.authorization import Principal, Role
 from app.calculations import MatchupCalculationService
@@ -720,3 +721,133 @@ def test_final_scorer_round_centre_has_terminal_published_presentation(review_cl
     assert "Published successfully" in page.text
     assert "no further sign-off is required" in page.text
     assert "d.ready_for_signoff&&!final" in page.text
+
+
+# -- Issue #261 scope extension: football-score presentation for ordinary --
+# -- Round 1-20 matchups, applied to both team totals and individual      --
+# -- scoring positions, the same established rules the Finals view uses.  --
+
+
+def _stat_override(canonical_by_slot, entry_id, position, stats, **stat_kwargs):
+    """Overwrite one already-seeded player's stat line in `stats` (from
+    `full_round`) with an explicit literal AFL line, keyed by
+    `canonical_by_slot[(entry_id, position)]` -- so a test can dictate one
+    position's exact literal evidence without guessing at `full_round`'s
+    internal canonical-numbering scheme. `full_round`/`canonical_by_slot`
+    are the same objects `tests/test_round_review.py` already builds
+    fixtures from."""
+    canonical = canonical_by_slot[(entry_id, position)]
+    stats[canonical] = PlayerStatLine(canonical, **stat_kwargs)
+    return canonical
+
+
+def test_public_ordinary_matchup_team_totals_render_as_goals_behinds_total(review_client):
+    """Issue #261 scope extension: an ordinary Round 1-20 matchup's team
+    total uses the same established football-score presentation
+    ("G.B (Total)") the Finals view already does -- `app.public_rounds.
+    _side`'s shared `football_line` field, never a second conversion path."""
+    client = review_client
+    round_, lifecycle, entries, canon = _seed(client, 8790)
+    round_id = round_.bbbffl_round_id
+    matchup = lifecycle.list_matchups(round_id)[0]
+    home = _public_home(client, _public_api(client, lifecycle, round_id), order=matchup.matchup_order)
+    assert home["football_line"] is not None
+    goals, behinds = (int(part) for part in home["football_line"].split("."))
+    assert 6 * goals + behinds == home["calculated_score"]
+
+
+def test_public_ordinary_position_shows_the_established_football_line(review_client):
+    """Issue #261 scope extension: individual positional presentation in
+    an ordinary round -- a Forward's literal AFL goals/behinds shown
+    alongside its effective score, and a Midfield position's divmod
+    conversion of its own point total."""
+    client = review_client
+    round_, lifecycle, entries, canon = _seed(client, 8791)
+    round_id = round_.bbbffl_round_id
+    matchup = lifecycle.list_matchups(round_id)[0]
+    home = _public_home(client, _public_api(client, lifecycle, round_id), order=matchup.matchup_order)
+    # full_round()'s default stat line: 3 goals, 2 behinds = 20 points.
+    f1 = next(p for p in home["lineup"]["players"] if p["position"] == "F1")
+    assert f1["football_line"] == "3.2"
+    assert f1["effective_score"] == 20
+    # Midfield has no literal goals/behinds of its own -- divmod(18, 6).
+    m1 = next(p for p in home["lineup"]["players"] if p["position"] == "M1")
+    assert m1["football_line"] == "3.0"
+    assert m1["effective_score"] == 18
+
+
+def test_public_ordinary_forward_preserves_a_literal_behind_total_of_six_or_more(review_client):
+    """Codex P2 precedent from PR #262 applied to ordinary rounds: a
+    Forward's real behind total of 6 or more must never be folded into an
+    extra goal by a naive divmod of the point total -- 1 goal + 8 behinds
+    = 14 points must stay "1.8", never "2.2"."""
+    client = review_client
+    database = client.app.state.database
+    _, lifecycle, round_, entries, stats, canon = full_round(database, year=8792)
+    round_id = round_.bbbffl_round_id
+    matchup = lifecycle.list_matchups(round_id)[0]
+    entry_id = matchup.home_season_entry_id
+    _stat_override(canon, entry_id, "F1", stats, goals=1, behinds=8)
+    progress_to_review(lifecycle, round_id)
+    MatchupCalculationService(database, Facts(stats)).calculate_round(round_id)
+
+    home = _public_home(client, _public_api(client, lifecycle, round_id), order=matchup.matchup_order)
+    f1 = next(p for p in home["lineup"]["players"] if p["position"] == "F1")
+    assert f1["effective_score"] == 14
+    assert f1["football_line"] == "1.8"
+
+
+def test_public_ordinary_interchange_replacing_a_forward_uses_the_interchanges_own_line(review_client):
+    """Codex P2 precedent from PR #262 applied to ordinary rounds: when the
+    Interchange effectively scores a replaced (here, genuinely vacant)
+    Forward, the football-score evidence must be the Interchange's own
+    literal line -- never the original starter's -- while the original
+    (vacant) selection stays visibly distinct rather than collapsing into
+    a misleading match between `player_name` and the shown score."""
+    client = review_client
+    database = client.app.state.database
+    _, lifecycle, round_, entries, stats, canon = full_round(database, year=8793, vacant_slots={(0, "F1")})
+    round_id = round_.bbbffl_round_id
+    matchup = lifecycle.list_matchups(round_id)[0]
+    entry_id = matchup.home_season_entry_id
+    _stat_override(canon, entry_id, "Interchange", stats, goals=1, behinds=8)
+    progress_to_review(lifecycle, round_id)
+    MatchupCalculationService(database, Facts(stats)).calculate_round(round_id)
+
+    reviewed = _reviewed_matchup(client, round_id, matchup.matchup_id)
+    response = client.post(
+        f"/api/admin/round-review/{round_id}/interchange",
+        json={
+            "matchup_id": matchup.matchup_id,
+            "season_entry_id": entry_id,
+            "target_position": "F1",
+            "expected_review_version": reviewed["review_version"],
+        },
+    )
+    assert response.status_code == 200
+
+    home = _public_home(client, _public_api(client, lifecycle, round_id), order=matchup.matchup_order)
+    f1 = next(p for p in home["lineup"]["players"] if p["position"] == "F1")
+    assert f1["outcome"] == "replaced_by_interchange"
+    assert f1["effective_score"] == 14
+    assert f1["football_line"] == "1.8"
+    assert f1["interchange_player_name"] is not None
+    # The original selection was a genuine vacancy -- preserved as such,
+    # never misrepresented as the interchange player's own name.
+    assert f1["player_name"] is None
+
+
+def test_public_ordinary_result_fields_unaffected_by_the_new_football_line(review_client):
+    """Requirement 6: existing ordinary public fields keep working exactly
+    as before -- `football_line`/`interchange_player_name` are additive."""
+    client = review_client
+    round_, lifecycle, entries, canon = _seed(client, 8794)
+    round_id = round_.bbbffl_round_id
+    body = client.get(_public_api(client, lifecycle, round_id)).json()
+    assert len(body["matchups"]) == 5
+    for matchup in body["matchups"]:
+        for side in (matchup["home"], matchup["away"]):
+            assert side["lineup"]["submission_version"] == 1
+            assert len(side["lineup"]["players"]) == 8
+            assert all(p["player_name"] for p in side["lineup"]["players"])
+            assert all(p["effective_score"] is not None for p in side["lineup"]["players"])

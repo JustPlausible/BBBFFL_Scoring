@@ -1097,6 +1097,44 @@ def test_finals_football_line_for_a_forward_replaced_by_interchange_uses_the_int
     assert f1["outcome"] == "replaced_by_interchange"
     assert f1["effective_score"] == 14
     assert side["football_line"] == "1.8"
+    # Issue #261 scope extension: the per-position line (not just the side
+    # aggregate) also reflects the Interchange's own literal evidence.
+    assert f1["football_line"] == "1.8"
+    assert f1["interchange_player_name"] == "Matt Rowell"
+
+
+def test_finals_individual_positions_show_the_established_football_line(public_client):
+    """Issue #261 scope extension: individual positional presentation in
+    Finals -- a Forward's literal AFL goals/behinds and a Midfield
+    position's divmod conversion, both shown per-position via
+    `app.public_rounds._slot`'s `football_line` field."""
+    built = build_finals_ready_season(year=8108, database=public_client.app.state.database)
+    bracket = _create_bracket(built)
+    round_id = _open_week1(built, bracket, year=8108)
+    season_id = built["season"].season_id
+
+    pairing = next(p for p in _repo(built).list_pairings(bracket.bracket_id, week_number=1) if p.slot == "qf")
+    competition_id = built["finals_competition"].competition_id
+
+    scores = {"F1": 23, "F2": 18, "F3": 18, "M1": 18, "M2": 18, "M3": 18, "Ruck": 18, "Tackler": 18}
+    stats = {}
+    _seed_named_finals_lineup(
+        built, round_id, competition_id, pairing.home_season_entry_id, scores, label=f"pos-home-{round_id}", stats=stats
+    )
+    _seed_named_finals_lineup(
+        built, round_id, competition_id, pairing.away_season_entry_id, scores, label=f"pos-away-{round_id}", stats=stats
+    )
+    MatchupCalculationService(built["database"], _Facts(stats)).calculate_matchup(pairing.matchup_id, guard_season=True)
+
+    body = public_client.get(f"/api/public/seasons/{season_id}/rounds/21").json()
+    qf = next(m for m in body["matchups"] if m["slot"] == "qf")
+    home = qf["home"]
+    f1 = next(p for p in home["lineup"]["players"] if p["position"] == "F1")
+    assert f1["effective_score"] == 23
+    assert f1["football_line"] == "3.5"
+    m1 = next(p for p in home["lineup"]["players"] if p["position"] == "M1")
+    assert m1["effective_score"] == 18
+    assert m1["football_line"] == "3.0"
 
 
 def test_ordinary_matchup_score_presentation_is_unaffected_by_the_finals_football_line(public_client):

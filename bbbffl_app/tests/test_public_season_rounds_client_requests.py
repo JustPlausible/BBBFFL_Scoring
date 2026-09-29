@@ -97,6 +97,38 @@ console.log(scoreCell({json.dumps(side)}));
     assert stdout.strip() == "100"
 
 
+def test_ordinary_match_card_also_renders_goals_behinds_total(rendered_script, tmp_path):
+    """Issue #261 scope extension: `matchCard` (the ordinary Round 1-20
+    card, not just `finalsMatchCard`) now shows the same "G.B (Total)"
+    presentation via the identical shared `scoreCell` -- never a second
+    conversion path for ordinary rounds."""
+    match = {
+        "status": "official",
+        "status_label": "Official final",
+        "order": 1,
+        "published_at": None,
+        "home": {
+            "team": {"name": "Home Team"},
+            "official_score": 158,
+            "calculated_score": None,
+            "football_line": "24.14",
+        },
+        "away": {
+            "team": {"name": "Away Team"},
+            "official_score": 96,
+            "calculated_score": None,
+            "football_line": "16.0",
+        },
+    }
+    script = f"""
+{rendered_script}
+console.log(matchCard({json.dumps(match)}, null));
+"""
+    stdout = re.sub(r"<[^>]+>", "|", _run(script, tmp_path, "ordinary_match_card").strip())
+    assert "24.14" in stdout and "(158)" in stdout
+    assert "16.0" in stdout and "(96)" in stdout
+
+
 # -- Requirement 3: DNP/interchange replacement clarity ----------------------
 
 
@@ -178,6 +210,53 @@ console.log(player({json.dumps(dnp_zero)}));
     assert "24" in lines[0]
     assert "Withdrew Player" in lines[1]
     assert "Confirmed DNP" in lines[1]
+
+
+def test_player_row_shows_the_per_position_football_line(rendered_script, tmp_path):
+    """Issue #261 scope extension: individual positional presentation --
+    `player()` shows the position's own "G.B (Total)" line
+    (`p.football_line`, from `app.public_rounds._slot`), not just the bare
+    effective score."""
+    slot = {
+        "position": "F1",
+        "player_name": "Some Forward",
+        "effective_score": 14,
+        "outcome": "scored",
+        "confirmed_dnp": False,
+        "interchange_player_name": None,
+        "football_line": "1.8",
+        "deferred_source": None,
+    }
+    script = f"""
+{rendered_script}
+console.log(player({json.dumps(slot)}));
+"""
+    stdout = _run(script, tmp_path, "player_position_football_line").strip()
+    assert "1.8" in stdout
+    assert "(14)" in stdout
+    assert "2.2" not in stdout  # the naive divmod approximation must never appear
+
+
+def test_player_row_omits_the_line_when_no_calculation_exists_yet(rendered_script, tmp_path):
+    """A slot with no calculation (`football_line` is `null`, mirroring
+    `app.public_rounds._slot`'s `calculated is None` branch) falls back to
+    the bare effective score exactly as before this scope extension."""
+    slot = {
+        "position": "F1",
+        "player_name": "Some Forward",
+        "effective_score": None,
+        "outcome": "awaiting_score",
+        "confirmed_dnp": False,
+        "interchange_player_name": None,
+        "football_line": None,
+        "deferred_source": None,
+    }
+    script = f"""
+{rendered_script}
+console.log(player({json.dumps(slot)}));
+"""
+    stdout = _run(script, tmp_path, "player_no_football_line").strip()
+    assert "Some Forward" in stdout
 
 
 # -- Requirement 1: SuperScore integral totals -------------------------------

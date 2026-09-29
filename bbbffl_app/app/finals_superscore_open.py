@@ -26,9 +26,12 @@ implementation of any of it:
   to find the exact concurrent finals week and its frozen AFL mapping --
   the same season/week-number derivation `confirm_afl_mapping`'s own
   docstring already recommends sourcing from;
-- `app.superscore_round.confirm_afl_mapping` (unchanged) to accept/correct
-  SS's own AFL mapping onto that same evidence -- SS retains its own
-  persisted `round_afl_mapping` row throughout, never the finals week's;
+- `app.superscore_round.confirm_afl_mapping_locked` (issue #214's
+  transaction-aware counterpart of `confirm_afl_mapping`, sharing this
+  module's own orchestration transaction -- see "Transaction and locking
+  contract" below) to accept/correct SS's own AFL mapping onto that same
+  evidence -- SS retains its own persisted `round_afl_mapping` row
+  throughout, never the finals week's;
 - `app.lockouts.LockoutTriggerRepository.list_triggers`/`.configure`
   (unchanged) to read the finals week's current trigger definitions and
   persist SS's own trigger-revision rows from them -- SS keeps a fully
@@ -92,35 +95,63 @@ transition. "Paired" describes only this operator workflow's single web
 action; the underlying domain model is exactly as separate as it was
 before this module existed.
 
-## Current operational constraint (issue #214)
+## Transaction and locking contract (issue #214)
 
-`_synchronise_triggers_locked` serialises the trigger-plan read/validate/
-write against both rounds' own row locks (issue #211, Codex review,
-rounds 6-8), but that boundary does not yet also cover `confirm_afl_mapping`
-(SS's mutable mapping head) or SS's *frozen* `bbbffl_round_lifecycle`
-mapping (only ever written once, by `app.superscore_round.setup_round` ->
-`create_non_ordinary_round`). A `setup_round()` freezing SS's mapping
-concurrently with this module's own unlocked `frozen_round` pre-check in
-`synchronise_lockout_plan_from_finals`, or a mapping correction committing
-just before the final locked trigger recheck detects a concurrent trigger
-divergence, are both real, narrow, low-likelihood races this module does
-not yet close -- see issue #214 for the full analysis and the desired
-broader transaction-boundary redesign (mapping + frozen lifecycle state +
-trigger plan, all one serialised decision). Deliberately not chased
-further here: closing it needs a higher-level orchestration boundary
-across `app.round_mapping`, `app.competition_lifecycle` and
-`app.lockouts` together, not another piecemeal per-repository lock.
+`synchronise_lockout_plan_from_finals`'s actual decision -- whether SS's
+mutable mapping head needs correcting, whether SS's *frozen*
+`bbbffl_round_lifecycle` mapping has already diverged, and which
+lockout-trigger writes/removals the plan requires -- is made and applied
+entirely inside `_synchronise_locked`, a single orchestration transaction,
+never split across several independently-committing ones. This is the
+resolution of what used to be issue #214's open problem (a separate,
+already-committed `confirm_afl_mapping` transaction, followed by a
+separate `_synchronise_triggers_locked` transaction, with a real gap
+between them); see `_synchronise_locked`'s own docstring for the detailed
+mechanics. In summary:
 
-**Until #214 lands, treat paired Finals/SuperScore opening as a
-single-operator administrative action**: do not run it concurrently with
-a separate `setup_round()`, mapping correction, or lockout-trigger
-configuration call for either member of the same paired week. This
-matches the current 2026 replay's actual operating model (one operator,
-sequential administrative actions), under which this module's fixed races
-(issue #211, Codex review, rounds 2-8: frozen-mapping divergence,
-main-trigger/coverage validation, activation preflight, stale-evidence
-rejection, atomic multi-trigger writes, and the two round-lock TOCTOU
-closures) are the ones that actually matter.
+- **What is covered.** One transaction locks both rounds' `bbbffl_round`
+  rows first (fixed order: finals, then SS), then re-reads and
+  re-validates, fresh under that lock: SS's frozen lifecycle mapping (if
+  any), SS's mutable mapping head, and both rounds' current
+  lockout-trigger plans. Any mapping correction, any trigger
+  configure/remove this decision requires, and the summary
+  `superscore.lockout_plan.synchronised_from_finals` audit event all
+  execute -- and commit -- inside that same transaction.
+- **What concurrent callers must do.** Nothing extra: every other writer
+  this decision must be safe against already acquires the same round-row
+  lock before it writes -- `app.superscore_round.setup_round` (via
+  `create_non_ordinary_round`), `app.round_mapping.RoundMappingRepository.
+  accept`/`correct`, and `LockoutTriggerRepository.configure`/`remove` all
+  do, unchanged. A concurrent call to any of these for either round in the
+  pair simply blocks until this transaction ends, then proceeds against
+  whatever this transaction actually left behind.
+- **What happens on conflict.** A genuine, irreconcilable divergence still
+  fails closed with the same errors as before (`FrozenMappingDivergedError`,
+  `LockoutPlanDivergedError`) and mutates nothing -- now backed by an actual
+  transactional guarantee rather than by careful sequencing between
+  separate transactions. A trigger activated concurrently mid-write (the
+  one race no round-row lock alone can close, since activation only locks
+  its own trigger header row) still rolls the *entire* transaction back,
+  mapping correction included, and is reported as `LockoutPlanDivergedError`.
+- **Finals and SuperScore remain independent.** This transaction is purely
+  an orchestration boundary: Finals keeps its own `bbbffl_round_lifecycle`
+  row, its own `round_afl_mapping`, its own lockout-trigger rows and its
+  own audit trail throughout, and so does SuperScore -- nothing here
+  merges them into a shared row or a joint lifecycle. "Atomic" describes
+  only how this one cross-domain *decision* is made and applied, not a
+  change to either domain's own persisted shape.
+
+Paired Finals/SuperScore opening no longer needs to be treated as a
+single-operator-only administrative action to stay correct: the previously
+open concurrency windows issue #214 tracked (a `setup_round()` racing this
+module's own frozen-mapping check; a mapping correction committing ahead of
+a trigger-plan divergence discovered moments later) are closed by this
+transaction boundary, not merely narrowed. `setup_round`/`open_round`
+themselves remain separate, idempotent transactions run *after* this one
+commits (see `open_finals_and_superscore_week` below) -- safe because they
+each independently re-validate the state they need (an already-created
+lifecycle row, a complete review-state set, an unchanged frozen mapping)
+rather than trusting anything this transaction computed.
 """
 
 from contextlib import nullcontext
@@ -133,7 +164,12 @@ from app.finals import FinalsBracketRepository
 from app.finals_preflight import build_finals_week_preflight, open_finals_week
 from app.lockouts import LockoutTriggerRepository, TriggerAlreadyActivatedError, TriggerAlreadyRemovedError
 from app.round_mapping import AflApiReferenceValidator, AflReferenceValidator, RoundMappingRepository
-from app.superscore_round import confirm_afl_mapping, open_round, resolve_concurrent_finals_afl_mapping, setup_round
+from app.superscore_round import (
+    confirm_afl_mapping_locked,
+    open_round,
+    resolve_concurrent_finals_afl_mapping,
+    setup_round,
+)
 
 __all__ = [
     "FrozenMappingDivergedError",
@@ -456,47 +492,76 @@ def _apply_trigger_removals(conn, trigger_repo, ss_round_id, keys_to_remove, ss_
     return removed_trigger_keys
 
 
-def _synchronise_triggers_locked(
-    database, trigger_repo, ss_round_id, finals_round_id, ss_mapping_revision, actor, reason
+def _synchronise_locked(
+    database,
+    trigger_repo,
+    ss_round_id,
+    finals_round_id,
+    finals_mapping,
+    validator,
+    actor,
+    reason,
 ):
-    """The actual, race-safe trigger synchronisation: reads SS's and
-    finals' current trigger sets, validates/plans, and writes -- all
-    under one transaction that locks *both* round rows first, before any
-    of those reads. Issue #211 P1 (Codex review, round 7): the caller
-    (`synchronise_lockout_plan_from_finals`) also runs an unlocked
-    pre-check, purely as a fast-fail for the ordinary, uncontended case
-    so an already-broken plan never wastes a mapping mutation (issue #211
-    P2, Codex review, round 3) -- but that pre-check's read is not itself
-    protected by any lock, so a genuinely concurrent trigger change (a
-    different operator's `configure()` call, or one inserting a brand-new
-    SS-only trigger) landing in the narrow window right after it returns
-    would otherwise go undetected: `ordered_plan` would still reflect the
-    stale snapshot, and the actual writes below would silently miss it.
-    Any concurrent `configure()`/`_configure_locked` call for either round
-    must itself acquire that exact round's own row lock first (see
-    `LockoutTriggerRepository.configure`'s own docstring), so once this
-    transaction holds both, nothing else can change either trigger set
-    this function reads until this transaction ends -- this is the read
-    that actually decides what gets written, never the caller's own
-    earlier, merely-advisory one.
+    """Issue #214: the single, fully serialised orchestration transaction
+    this module's paired synchronisation decision runs inside -- SS's
+    frozen lifecycle mapping, SS's mutable mapping head, and both rounds'
+    lockout-trigger plans are all re-read, re-validated and (if needed)
+    rewritten here, under one lock, so the whole decision commits together
+    or none of it does. This replaces the previous two-transaction design
+    (a separate `confirm_afl_mapping` transaction, committed independently
+    before a separate trigger-synchronisation transaction even began) that
+    issue #214 identified as unsafe: that gap is what let a mapping
+    correction commit and then have the trigger plan's own recheck fail
+    afterwards, leaving a partial synchronisation outcome despite each
+    half's own fail-closed contract -- see this module's "Transaction and
+    locking contract (issue #214)" section for the full writeup.
 
-    Issue #211 P1 (Codex review, round 8): round 7 locked only SS's round
-    -- a scorer revising a *finals* trigger (via `app.round_preflight.
-    configure_preflight_trigger`, itself layered over this same
-    `LockoutTriggerRepository.configure`) immediately after this read
-    could still leave this transaction copying an already-stale finals
-    snapshot onto SS. Locking finals' round row too, in a fixed order
-    (finals, then SS -- nothing else in this codebase locks both a finals
-    and a SuperScore round together, so picking one order and always
-    using it is what keeps this from ever deadlocking against itself),
-    closes that the same way the SS-side lock already closes the
-    SS-side one.
+    Locks *both* rounds' `bbbffl_round` rows first, before any other read,
+    in the fixed order finals-then-SS issue #211 review (round 8)
+    established (nothing else in this codebase locks both a finals and a
+    SuperScore round together, so picking one order and always using it is
+    what keeps this from ever deadlocking against itself). Every other
+    writer this decision must be safe against acquires that same lock
+    before it writes:
+
+    - `app.superscore_round.setup_round` (-> `create_non_ordinary_round`)
+      locks SS's `bbbffl_round` row before it ever freezes
+      `bbbffl_round_lifecycle`'s mapping snapshot -- so once this
+      transaction holds it, a concurrent `setup_round()` for this exact
+      round is blocked until this transaction ends, and this function's own
+      fresh read of that frozen row below can never be invalidated by one
+      landing in some unlocked gap (the race issue #214 was filed to
+      close: "paired synchronisation checks SS and sees no frozen mapping,
+      a concurrent `setup_round()` freezes the old mapping, synchronisation
+      corrects the mutable head anyway").
+    - `app.round_mapping.RoundMappingRepository.accept`/`correct` (used by
+      any other, non-paired mapping correction, e.g. via round preflight)
+      locks the same row first, for the same reason.
+    - `LockoutTriggerRepository.configure`/`_configure_locked`/`remove`/
+      `_remove_locked` all lock their own round's row first (issue #211
+      review, rounds 6-8) -- unchanged by this function, which reuses them
+      exactly as before.
 
     A concurrent trigger *activation* (`app.lockouts`'s own
     `_materialize_round_triggers`, which locks only one trigger's own
     header row, not either round-level one) discovered while writing is
     still handled exactly as `_apply_trigger_sync`'s own docstring
-    describes: the whole transaction rolls back together."""
+    describes: the whole transaction -- mapping correction included, now
+    that it shares this one transaction rather than its own -- rolls back
+    together, translated into `LockoutPlanDivergedError` below.
+
+    `validator.round_exists` (an afl-api call) only ever runs from inside
+    this lock, via `app.superscore_round.confirm_afl_mapping_locked`, and
+    only when a mapping mutation is actually about to happen -- never for
+    the common, already-synchronised case, which needs no afl-api call at
+    all. This is a deliberate trade, not an oversight: the AFL reference
+    being validated is only known to still be the one to trust once this
+    transaction's own frozen-mapping recheck below has already passed, so
+    validating it any earlier (outside this lock) cannot itself close the
+    frozen-mapping race this function exists to close. The cost is that a
+    real mapping correction (a rare, explicit administrative event, never a
+    per-request or high-frequency path) holds both round locks for the
+    duration of one afl-api round-lookup call."""
     try:
         with transaction(database) as conn:
             conn.execute(
@@ -507,6 +572,35 @@ def _synchronise_triggers_locked(
                 "SELECT 1 FROM bbbffl_round WHERE bbbffl_round_id=?" + _for_update_suffix(database),
                 (ss_round_id,),
             )
+
+            # Re-check SS's frozen lifecycle mapping (issue #214) fresh,
+            # now that SS's own `bbbffl_round` row lock is held -- see this
+            # function's own docstring for why this closes the race the
+            # caller's own unlocked pre-check cannot.
+            frozen_row = conn.execute(
+                "SELECT afl_season_id, afl_round_id FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?",
+                (ss_round_id,),
+            ).fetchone()
+            if frozen_row is not None and (
+                frozen_row["afl_season_id"] != finals_mapping.afl_season_id
+                or frozen_row["afl_round_id"] != finals_mapping.afl_round_id
+            ):
+                raise FrozenMappingDivergedError(
+                    f"SS round {ss_round_id} already has a frozen AFL mapping (season "
+                    f"{frozen_row['afl_season_id']}, round {frozen_row['afl_round_id']}) that diverges from the "
+                    f"concurrent finals week's current mapping (season {finals_mapping.afl_season_id}, round "
+                    f"{finals_mapping.afl_round_id}). Correcting only the mutable mapping head would not update "
+                    "the frozen snapshot calculations actually use -- resolve this divergence directly before "
+                    "synchronisation can proceed."
+                )
+
+            mapping_repo = RoundMappingRepository(database)
+            existing_ss_mapping = mapping_repo.resolve_locked(conn, ss_round_id)
+            mapping_synced = existing_ss_mapping is None or (
+                existing_ss_mapping.afl_season_id != finals_mapping.afl_season_id
+                or existing_ss_mapping.afl_round_id != finals_mapping.afl_round_id
+            )
+
             finals_triggers = trigger_repo.list_triggers(finals_round_id)
             # Issue #219: `include_removed=True` here (unlike every other
             # `list_triggers` call in this module) is deliberate -- this is
@@ -549,6 +643,28 @@ def _synchronise_triggers_locked(
             ordered_plan, unchanged_trigger_keys, keys_to_remove = _validate_trigger_sync_plan(
                 ss_round_id, finals_triggers, ss_triggers_by_key, activated_ss_trigger_ids, finals_removed_keys
             )
+
+            # The mapping correction happens *after* trigger-plan validation
+            # (a pure, no-I/O check) but *before* the trigger writes below --
+            # preserving issue #211 P2's "validate before mutating the
+            # mapping" ordering, and now additionally sharing this same
+            # transaction with the trigger writes it feeds
+            # (`expected_mapping_revision` below), so a trigger-side failure
+            # rolls the mapping change back too (issue #214's other gap).
+            if mapping_synced:
+                ss_mapping = confirm_afl_mapping_locked(
+                    conn,
+                    database,
+                    validator,
+                    ss_round_id,
+                    finals_mapping.afl_season_id,
+                    finals_mapping.afl_round_id,
+                    actor=actor,
+                    reason=reason,
+                )
+            else:
+                ss_mapping = existing_ss_mapping
+
             removed_trigger_keys = _apply_trigger_removals(
                 conn, trigger_repo, ss_round_id, keys_to_remove, ss_triggers_by_key, actor, reason
             )
@@ -558,18 +674,50 @@ def _synchronise_triggers_locked(
                 ss_round_id,
                 ordered_plan,
                 ss_triggers_including_removed_by_key,
-                ss_mapping_revision,
+                ss_mapping.revision,
                 actor,
                 reason,
+            )
+
+            changed = mapping_synced or bool(synced_trigger_keys) or bool(removed_trigger_keys)
+            # The summary audit event now commits in this same transaction
+            # too (issue #214) -- previously a third, independent
+            # transaction after both the mapping and trigger writes had
+            # already committed, which could in principle record this
+            # event without ever having actually happened, or vice versa.
+            append_event(
+                conn,
+                actor=actor,
+                action="superscore.lockout_plan.synchronised_from_finals",
+                entity_type="superscore.round",
+                entity_id=ss_round_id,
+                entity_version=str(len(synced_trigger_keys)),
+                reason=reason,
+                after_state={
+                    "finals_round_id": finals_round_id,
+                    "synced_trigger_keys": synced_trigger_keys,
+                    "unchanged_trigger_keys": unchanged_trigger_keys,
+                    "removed_trigger_keys": removed_trigger_keys,
+                    "mapping_synced": mapping_synced,
+                },
+                payload={"changed": changed},
             )
     except (TriggerAlreadyActivatedError, TriggerAlreadyRemovedError) as exc:
         raise LockoutPlanDivergedError(
             f"SS round {ss_round_id} cannot be synchronised automatically: a trigger activated or was removed "
             "concurrently, between this synchronisation's own validation and its writes -- nothing from this "
-            f"synchronisation attempt was applied (rolled back together). Reconcile the resulting divergence "
-            f"directly. ({exc})"
+            f"synchronisation attempt was applied (rolled back together, including any mapping correction it "
+            f"would otherwise have made). Reconcile the resulting divergence directly. ({exc})"
         ) from exc
-    return synced_trigger_keys, unchanged_trigger_keys, removed_trigger_keys
+    return {
+        "ss_round_id": ss_round_id,
+        "finals_round_id": finals_round_id,
+        "mapping_synced": mapping_synced,
+        "synced_trigger_keys": synced_trigger_keys,
+        "unchanged_trigger_keys": unchanged_trigger_keys,
+        "removed_trigger_keys": removed_trigger_keys,
+        "changed": changed,
+    }
 
 
 def synchronise_lockout_plan_from_finals(
@@ -593,8 +741,12 @@ def synchronise_lockout_plan_from_finals(
     # its AFL mapping is frozen onto its own `bbbffl_round_lifecycle` row --
     # see `FrozenMappingDivergedError`'s own docstring for why correcting
     # only the mutable mapping head below would silently misreport success
-    # while calculations kept consuming the stale frozen snapshot. Checked
-    # before any mutation, so a divergence here mutates nothing.
+    # while calculations kept consuming the stale frozen snapshot. This is
+    # an unlocked fast-fail pre-check only (purely to avoid opening the real
+    # transaction below for the ordinary, obviously-invalid case): issue
+    # #214 closed the race this unlocked read cannot -- see
+    # `_synchronise_locked`'s own docstring for the authoritative, locked
+    # recheck that actually decides.
     frozen_round = CompetitionLifecycleRepository(database).get_round(ss_round_id)
     if frozen_round is not None and (
         frozen_round.afl_season_id != finals_mapping.afl_season_id
@@ -608,21 +760,15 @@ def synchronise_lockout_plan_from_finals(
             "divergence directly before synchronisation can proceed."
         )
 
-    existing_ss_mapping = RoundMappingRepository(database).resolve(ss_round_id)
-    mapping_synced = existing_ss_mapping is None or (
-        existing_ss_mapping.afl_season_id != finals_mapping.afl_season_id
-        or existing_ss_mapping.afl_round_id != finals_mapping.afl_round_id
-    )
-
     # Issue #211 P2 (Codex review, round 3): an unlocked pre-check of the
     # *entire* trigger plan -- including the obsolete-key/cycle/activation
-    # checks -- before mutating the mapping below, purely as a fast-fail
-    # for the ordinary, uncontended case: raising `LockoutPlanDivergedError`
-    # only after `confirm_afl_mapping` had already committed left the
-    # mapping silently advanced despite that error's own nothing-mutated
-    # contract. This read is not itself protected by any lock, though --
-    # see `_synchronise_triggers_locked`'s own docstring (issue #211 P1,
-    # Codex review, round 7) for why the real, race-safe decision is the
+    # checks -- before mutating anything below, purely as a fast-fail for
+    # the ordinary, uncontended case: raising `LockoutPlanDivergedError`
+    # only after the mapping had already committed left it silently
+    # advanced despite that error's own nothing-mutated contract. This read
+    # is not itself protected by any lock, though -- see
+    # `_synchronise_locked`'s own docstring (issue #211 P1, Codex review,
+    # round 7; issue #214) for why the real, race-safe decision is the
     # fresh, locked re-read/re-validation that function performs, never
     # this one.
     trigger_repo = LockoutTriggerRepository(database)
@@ -650,48 +796,9 @@ def synchronise_lockout_plan_from_finals(
         ss_round_id, finals_triggers, ss_triggers_by_key, activated_ss_trigger_ids, finals_removed_keys
     )
 
-    ss_mapping = confirm_afl_mapping(
-        database,
-        validator,
-        ss_round_id,
-        finals_mapping.afl_season_id,
-        finals_mapping.afl_round_id,
-        actor=actor,
-        reason=default_reason,
+    return _synchronise_locked(
+        database, trigger_repo, ss_round_id, finals_round_id, finals_mapping, validator, actor, default_reason
     )
-
-    synced_trigger_keys, unchanged_trigger_keys, removed_trigger_keys = _synchronise_triggers_locked(
-        database, trigger_repo, ss_round_id, finals_round_id, ss_mapping.revision, actor, default_reason
-    )
-
-    changed = mapping_synced or bool(synced_trigger_keys) or bool(removed_trigger_keys)
-    with transaction(database) as conn:
-        append_event(
-            conn,
-            actor=actor,
-            action="superscore.lockout_plan.synchronised_from_finals",
-            entity_type="superscore.round",
-            entity_id=ss_round_id,
-            entity_version=str(len(synced_trigger_keys)),
-            reason=default_reason,
-            after_state={
-                "finals_round_id": finals_round_id,
-                "synced_trigger_keys": synced_trigger_keys,
-                "unchanged_trigger_keys": unchanged_trigger_keys,
-                "removed_trigger_keys": removed_trigger_keys,
-                "mapping_synced": mapping_synced,
-            },
-            payload={"changed": changed},
-        )
-    return {
-        "ss_round_id": ss_round_id,
-        "finals_round_id": finals_round_id,
-        "mapping_synced": mapping_synced,
-        "synced_trigger_keys": synced_trigger_keys,
-        "unchanged_trigger_keys": unchanged_trigger_keys,
-        "removed_trigger_keys": removed_trigger_keys,
-        "changed": changed,
-    }
 
 
 def _authoritative_season_id(database, round_id: str) -> str | None:

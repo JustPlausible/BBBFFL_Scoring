@@ -831,6 +831,147 @@ def test_synchronise_lockout_plan_locked_recheck_uses_the_fresh_finals_trigger_s
     assert ss_main.afl_match_ids == (8888,)
 
 
+def test_synchronise_lockout_plan_rolls_back_a_mapping_correction_when_a_trigger_activates_mid_transaction(
+    monkeypatch,
+):
+    """Issue #214: before this issue's fix, `synchronise_lockout_plan_
+    from_finals` corrected SS's mapping in its own, separately-committing
+    transaction, *then* opened a second transaction for the trigger
+    writes. A `TriggerAlreadyActivatedError` discovered by that second
+    transaction (a trigger divergence discovered only after the mapping
+    had already been decided/written) left the mapping correction
+    permanently committed despite the overall call raising
+    `LockoutPlanDivergedError` -- a real partial-synchronisation outcome.
+
+    `_synchronise_locked` now runs the mapping correction and every
+    trigger write inside the same transaction, so a trigger activation
+    discovered while writing must roll the mapping correction back too,
+    not just the triggers it directly touches. This is exactly what this
+    test proves: SS both needs a genuine mapping correction *and* has a
+    trigger ("main") that a concurrent lockout evaluation activates in the
+    narrow window between this synchronisation's own trigger-plan
+    validation and its actual trigger write -- test setup performs that
+    activation from inside `confirm_afl_mapping_locked` itself (the exact
+    point between validation and the trigger writes), mirroring how
+    `test_apply_trigger_sync_rolls_back_the_whole_plan_on_a_concurrent_
+    activation_mid_loop` simulates a concurrent write deterministically
+    without real threads."""
+    database = _database_for_test(9525)
+    built = _seed(database, 9525, with_lockout_triggers=False)
+    afl_round_id = built["afl_round_id"]
+    ss_round_id = built["ss1_round_id"]
+    finals_round_id = built["week1_round_id"]
+    trigger_repo = LockoutTriggerRepository(database)
+    trigger_repo.configure(finals_round_id, "main", "main", 1, [9999], actor=ACTOR, reason="main")
+    open_finals_week(database, built["bracket"].bracket_id, 1, actor=ACTOR)
+
+    # An initial, uncontended synchronisation gives SS a matching mapping
+    # and an unactivated "main" trigger -- ordinary setup, not the
+    # scenario under test.
+    synchronise_lockout_plan_from_finals(database, KnownRound({(9525, afl_round_id)}), ss_round_id, actor=ACTOR)
+    ss_main_before = trigger_repo.get(ss_round_id, "main")
+    assert ss_main_before.afl_match_ids == (9999,)
+    mapping_before = RoundMappingRepository(database).resolve(ss_round_id)
+    assert mapping_before.afl_round_id == afl_round_id
+
+    # An operator manually moves SS's own mapping away (SS has no frozen
+    # lifecycle row yet -- `setup_round` was never called -- so this is an
+    # ordinary, legal correction) and finals' "main" trigger's coverage
+    # changes too, so the *next* synchronisation must correct both the
+    # mapping and "main"'s configuration.
+    other_afl_round_id = afl_round_id + 1
+    confirm_afl_mapping(
+        database,
+        KnownRound({(9525, other_afl_round_id)}),
+        ss_round_id,
+        9525,
+        other_afl_round_id,
+        reason="operator moved SS's mapping away ahead of the next sync",
+    )
+    trigger_repo.configure(finals_round_id, "main", "main", 1, [8888], actor=ACTOR, reason="main changed")
+
+    import app.finals_superscore_open as fso_module
+
+    real_confirm = fso_module.confirm_afl_mapping_locked
+
+    def _inject_concurrent_activation(conn, database_, validator, round_id, season, afl_round, *, actor, reason):
+        mapping = real_confirm(conn, database_, validator, round_id, season, afl_round, actor=actor, reason=reason)
+        # Simulate a concurrent lockout evaluation activating SS's "main"
+        # trigger *after* this synchronisation's own trigger-plan
+        # validation already ran (it saw "main" as still pending, not yet
+        # activated) but *before* the write loop below reaches it -- test
+        # setup (a direct row insert), not the code under test.
+        conn.execute(
+            "INSERT INTO bbbffl_round_lockout_trigger_activation "
+            "(trigger_id, revision, afl_match_id, observed_status, effective_lock_at, activation_reason, "
+            "evaluated_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                ss_main_before.trigger_id,
+                ss_main_before.revision,
+                9999,
+                "LIVE",
+                "2026-01-01T00:00:00+00:00",
+                "match_status_live",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        return mapping
+
+    monkeypatch.setattr(fso_module, "confirm_afl_mapping_locked", _inject_concurrent_activation)
+
+    with pytest.raises(LockoutPlanDivergedError, match="main"):
+        synchronise_lockout_plan_from_finals(
+            database, KnownRound({(9525, afl_round_id), (9525, other_afl_round_id)}), ss_round_id, actor=ACTOR
+        )
+
+    # Nothing was applied: not just "main"'s trigger configuration, but
+    # also the mapping correction that had already been decided (and,
+    # before issue #214's fix, would already have been permanently
+    # committed at this point) rolled back together with it.
+    mapping_after = RoundMappingRepository(database).resolve(ss_round_id)
+    assert mapping_after.afl_round_id == other_afl_round_id
+    ss_main_after = trigger_repo.get(ss_round_id, "main")
+    assert ss_main_after.afl_match_ids == (9999,)
+    assert ss_main_after.revision == ss_main_before.revision
+
+
+def test_synchronise_lockout_plan_never_touches_finals_own_mapping_or_trigger_rows():
+    """Acceptance criterion (issue #214): Finals and SuperScore retain
+    fully separate mapping and lockout-trigger revision history throughout
+    a paired synchronisation -- SS's own rows are corrected/created, but
+    finals' own `round_afl_mapping`/lockout-trigger revisions are never
+    read-then-written, aliased, or otherwise disturbed by synchronising
+    from them."""
+    database = _database_for_test(9526)
+    built = _seed(database, 9526, with_lockout_triggers=False)
+    afl_round_id = built["afl_round_id"]
+    ss_round_id = built["ss1_round_id"]
+    finals_round_id = built["week1_round_id"]
+    trigger_repo = LockoutTriggerRepository(database)
+    trigger_repo.configure(finals_round_id, "s1", "selective", 1, [1111], actor=ACTOR, reason="s1")
+    trigger_repo.configure(finals_round_id, "main", "main", 2, [9999], actor=ACTOR, reason="main")
+    open_finals_week(database, built["bracket"].bracket_id, 1, actor=ACTOR)
+
+    finals_mapping_before = RoundMappingRepository(database).resolve(finals_round_id)
+    finals_triggers_before = {t.trigger_key: t.revision for t in trigger_repo.list_triggers(finals_round_id)}
+
+    synchronise_lockout_plan_from_finals(database, KnownRound({(9526, afl_round_id)}), ss_round_id, actor=ACTOR)
+
+    finals_mapping_after = RoundMappingRepository(database).resolve(finals_round_id)
+    finals_triggers_after = {t.trigger_key: t.revision for t in trigger_repo.list_triggers(finals_round_id)}
+    assert finals_mapping_after == finals_mapping_before
+    assert finals_triggers_after == finals_triggers_before
+
+    # SS, meanwhile, has its own fully independent rows -- distinct mapping
+    # id and distinct trigger ids from finals', never shared/aliased.
+    ss_mapping = RoundMappingRepository(database).resolve(ss_round_id)
+    assert ss_mapping.mapping_id != finals_mapping_before.mapping_id
+    ss_triggers = {t.trigger_key: t for t in trigger_repo.list_triggers(ss_round_id)}
+    finals_triggers = {t.trigger_key: t for t in trigger_repo.list_triggers(finals_round_id)}
+    assert ss_triggers["main"].trigger_id != finals_triggers["main"].trigger_id
+
+
 def test_open_paired_route_returns_409_not_500_for_a_diverged_lockout_plan(finals_client):
     """Issue #211 P2 (Codex review, round 2): `LockoutPlanDivergedError`
     reaching this route must translate to the same 409 every other

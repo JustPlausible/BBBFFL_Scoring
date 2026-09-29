@@ -250,6 +250,23 @@ class RoundMappingRepository:
         ).fetchone()
         return _mapping(row) if row else None
 
+    def resolve_locked(self, conn: ConnectionLike, bbbffl_round_id: str) -> RoundMapping | None:
+        """`resolve`'s counterpart for a caller that already holds
+        `bbbffl_round_id`'s own row lock inside an already-open `conn`
+        (issue #214) -- used by `app.finals_superscore_open`'s paired
+        synchronisation, which must decide whether SS's mapping needs
+        correcting from data that cannot change out from under it between
+        this read and the write that follows, rather than `resolve`'s own
+        short-lived, unlocked read on a separate connection. Read-only:
+        takes no lock of its own, relying entirely on the caller already
+        holding the parent `bbbffl_round` lock that every writer of
+        `round_afl_mapping` for this round (`_activate`/`_activate_locked`)
+        also acquires first."""
+        row = conn.execute(
+            self._select() + " WHERE m.bbbffl_round_id=? AND r.state='accepted'", (bbbffl_round_id,)
+        ).fetchone()
+        return _mapping(row) if row else None
+
     def history(self, bbbffl_round_id: str) -> list[RoundMapping]:
         rows = self.database.execute(
             self._select(False) + " WHERE m.bbbffl_round_id=? ORDER BY r.revision", (bbbffl_round_id,)
@@ -268,74 +285,101 @@ class RoundMappingRepository:
         expected_revision: int | None = None,
     ) -> RoundMapping:
         with transaction(self.database) as conn:
-            # Lock the stable `bbbffl_round` row *first* -- a brand-new
-            # mapping has no `round_afl_mapping` row yet to lock, so two
-            # concurrent first-time accepts would otherwise both see no
-            # header, both pass the expected_revision==0 check below, and
-            # race each other on the INSERT (one losing with a raw
-            # IntegrityError instead of the promised StaleMappingRevisionError).
-            # Locking this always-present parent row instead serializes
-            # every accept/correct for one round through this transaction,
-            # regardless of whether a mapping row exists yet (issue #152
-            # review, second pass).
-            conn.execute(
-                "SELECT 1 FROM bbbffl_round WHERE bbbffl_round_id=?" + _for_update_suffix(self.database), (round_id,)
+            return self._activate_locked(
+                conn, round_id, season, afl_round, provider, actor, reason, correction, expected_revision
             )
-            head = conn.execute(
-                "SELECT * FROM round_afl_mapping WHERE bbbffl_round_id=?" + _for_update_suffix(self.database),
-                (round_id,),
-            ).fetchone()
-            # Checked immediately after acquiring the row lock above (or
-            # establishing there is no row yet), before any write: this is
-            # what makes stale-revision protection atomic with the write
-            # that would otherwise silently outrun it (issue #152 review).
-            if expected_revision is not None:
-                current_revision = head["current_revision"] if head else 0
-                if current_revision != expected_revision:
-                    raise StaleMappingRevisionError(
-                        f"This mapping has changed since it was loaded (expected revision {expected_revision}, "
-                        f"current revision {current_revision}). Reload the current authoritative mapping before "
-                        "deciding."
-                    )
-            if not head:
-                if correction:
-                    raise ValueError("correction requires an accepted mapping")
-                mapping_id, revision, before = _id(), 1, None
-                conn.execute(
-                    "INSERT INTO round_afl_mapping VALUES (?, ?, ?, ?)", (mapping_id, round_id, revision, _now())
+
+    def _activate_locked(
+        self,
+        conn: ConnectionLike,
+        round_id: str,
+        season: int,
+        afl_round: int,
+        provider: str,
+        actor: ActorContext,
+        reason: str | None,
+        correction: bool,
+        expected_revision: int | None = None,
+    ) -> RoundMapping:
+        """The validated accept-or-correct write `_activate` performs,
+        factored out (issue #214) to run against an already-open
+        transaction/connection `conn` rather than opening its own -- used by
+        `app.superscore_round.confirm_afl_mapping_locked`, which
+        `app.finals_superscore_open`'s paired synchronisation calls from
+        inside its own single orchestration transaction so a mapping
+        correction and the lockout-trigger writes it must stay consistent
+        with commit or roll back together, never as two independently
+        committing transactions (see that module's own docstring for the
+        full contract). The caller must already hold `round_id`'s own
+        `bbbffl_round` row lock -- every write path here (`accept`/
+        `correct`, and now this) always re-acquires it first regardless, so
+        calling this from within a transaction that already holds it is
+        simply a harmless no-op re-lock, never a behavioural difference
+        from `_activate`'s own standalone transaction."""
+        # Lock the stable `bbbffl_round` row *first* -- a brand-new
+        # mapping has no `round_afl_mapping` row yet to lock, so two
+        # concurrent first-time accepts would otherwise both see no
+        # header, both pass the expected_revision==0 check below, and
+        # race each other on the INSERT (one losing with a raw
+        # IntegrityError instead of the promised StaleMappingRevisionError).
+        # Locking this always-present parent row instead serializes
+        # every accept/correct for one round through this transaction,
+        # regardless of whether a mapping row exists yet (issue #152
+        # review, second pass).
+        conn.execute(
+            "SELECT 1 FROM bbbffl_round WHERE bbbffl_round_id=?" + _for_update_suffix(self.database), (round_id,)
+        )
+        head = conn.execute(
+            "SELECT * FROM round_afl_mapping WHERE bbbffl_round_id=?" + _for_update_suffix(self.database),
+            (round_id,),
+        ).fetchone()
+        # Checked immediately after acquiring the row lock above (or
+        # establishing there is no row yet), before any write: this is
+        # what makes stale-revision protection atomic with the write
+        # that would otherwise silently outrun it (issue #152 review).
+        if expected_revision is not None:
+            current_revision = head["current_revision"] if head else 0
+            if current_revision != expected_revision:
+                raise StaleMappingRevisionError(
+                    f"This mapping has changed since it was loaded (expected revision {expected_revision}, "
+                    f"current revision {current_revision}). Reload the current authoritative mapping before "
+                    "deciding."
                 )
-            else:
-                mapping_id = head["mapping_id"]
-                old = self._current(conn, mapping_id)
-                if correction != (old["state"] == "accepted"):
-                    raise ValueError(
-                        "use correction for an accepted mapping"
-                        if old["state"] == "accepted"
-                        else "correction requires an accepted mapping"
-                    )
-                revision = head["current_revision"] + 1
-                before = {
-                    "state": old["state"],
-                    "afl_season_id": old["afl_season_id"],
-                    "afl_round_id": old["afl_round_id"],
-                }
-                conn.execute(
-                    "UPDATE round_afl_mapping SET current_revision=? WHERE mapping_id=?", (revision, mapping_id)
+        if not head:
+            if correction:
+                raise ValueError("correction requires an accepted mapping")
+            mapping_id, revision, before = _id(), 1, None
+            conn.execute("INSERT INTO round_afl_mapping VALUES (?, ?, ?, ?)", (mapping_id, round_id, revision, _now()))
+        else:
+            mapping_id = head["mapping_id"]
+            old = self._current(conn, mapping_id)
+            if correction != (old["state"] == "accepted"):
+                raise ValueError(
+                    "use correction for an accepted mapping"
+                    if old["state"] == "accepted"
+                    else "correction requires an accepted mapping"
                 )
-            self._insert_revision(conn, mapping_id, revision, "accepted", provider, season, afl_round, actor, reason)
-            after = {"state": "accepted", "afl_season_id": season, "afl_round_id": afl_round}
-            append_event(
-                conn,
-                actor=actor,
-                action=MAPPING_CORRECTED if correction else MAPPING_ACCEPTED,
-                entity_type="round.afl_mapping",
-                entity_id=mapping_id,
-                entity_version=str(revision),
-                before_state=before,
-                after_state=after,
-                reason=reason,
-            )
-            return self._get(conn, mapping_id)
+            revision = head["current_revision"] + 1
+            before = {
+                "state": old["state"],
+                "afl_season_id": old["afl_season_id"],
+                "afl_round_id": old["afl_round_id"],
+            }
+            conn.execute("UPDATE round_afl_mapping SET current_revision=? WHERE mapping_id=?", (revision, mapping_id))
+        self._insert_revision(conn, mapping_id, revision, "accepted", provider, season, afl_round, actor, reason)
+        after = {"state": "accepted", "afl_season_id": season, "afl_round_id": afl_round}
+        append_event(
+            conn,
+            actor=actor,
+            action=MAPPING_CORRECTED if correction else MAPPING_ACCEPTED,
+            entity_type="round.afl_mapping",
+            entity_id=mapping_id,
+            entity_version=str(revision),
+            before_state=before,
+            after_state=after,
+            reason=reason,
+        )
+        return self._get(conn, mapping_id)
 
     @staticmethod
     def _insert_revision(

@@ -50,6 +50,12 @@ FOUNDATION = {
     # function over strings, with no internal dependency of its own -- see
     # its own module docstring.
     "app.stream_presentation",
+    # BBBFFL football-score ("Goals.Behinds (Total)") display formatting
+    # (issue #261): a pure, dependency-free leaf extracted from
+    # `app.presentation` so the season model's public read models can reuse
+    # the identical formatting rules without depending on the Grand Final/
+    # SuperScore vertical -- see its own module docstring.
+    "app.score_presentation",
 }
 
 # Persistence core: the only place SQL/transaction plumbing lives.

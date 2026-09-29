@@ -53,6 +53,7 @@ from app.public_rounds import (
     authoritative_submissions,
     match_score_state,
 )
+from app.score_presentation import format_number
 from app.stream_presentation import humanize_round_label
 from app.superscore_results import SuperScoreLeaderboardService
 
@@ -119,7 +120,14 @@ def build_public_superscore_round(database, afl_client, identities, season_id, w
         "round_label": round_label,
         "published": True,
         "published_at": leaderboard["published_at"],
-        "entries": leaderboard["entries"],
+        # Issue #261: `total_score` itself is left exactly as published
+        # (never altered for display) -- `total_display` is an additive,
+        # display-only field so a mathematically integral total (e.g.
+        # 271.0) renders as "271" rather than "271.0", while a genuinely
+        # non-integral one is shown unchanged.
+        "entries": [
+            {**entry, "total_display": format_number(entry["total_score"])} for entry in leaderboard["entries"]
+        ],
     }
 
 

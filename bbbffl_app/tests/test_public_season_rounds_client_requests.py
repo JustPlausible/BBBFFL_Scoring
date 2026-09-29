@@ -23,6 +23,21 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def test_superscore_player_detail_stacks_at_the_mobile_breakpoint():
+    """The five detail fields must not retain the desktop five-column grid
+    on the common 320--375px viewport range (PR #264 review)."""
+    template = (Path(__file__).parents[1] / "app" / "templates" / "public_season_rounds.html").read_text(
+        encoding="utf-8"
+    )
+    mobile = template[template.index("@media(max-width:640px)") : template.index("</style>")]
+
+    assert ".superscore-player{grid-template-columns:minmax(0,1fr) auto" in mobile
+    assert ".superscore-player>strong,.superscore-player>span:nth-child(2)" in mobile
+    assert ".superscore-player>span:nth-child(5){grid-column:1/-1" in mobile
+    assert "overflow-wrap:anywhere" in mobile
+    assert ".superscore-detail{padding:0 0 12px}" in mobile
+
+
 @pytest.fixture
 def rendered_script(monkeypatch):
     """The literal inline `<script>` from a real, server-rendered

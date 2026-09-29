@@ -36,7 +36,14 @@
 .superscore-rank{font-weight:700}.superscore-total{font-weight:750}.superscore-dots{grid-column:2/4;display:flex;gap:6px}
 .superscore-dot{width:11px;height:11px;border-radius:50%;background:#aab2bb}.superscore-dot.live{background:#d1242f}.superscore-dot.postgame{background:#bf6a02}.superscore-dot.completed{background:#238636}.superscore-dot.dnp{background:#8250df}.superscore-dot.vacant,.superscore-dot.unnamed{background:#57606a}
 .superscore-detail{padding:0 4px 12px 36px}.superscore-player{display:grid;grid-template-columns:minmax(80px,.8fr) minmax(120px,1.3fr) minmax(100px,1fr) auto auto;gap:8px;padding:6px 0;border-top:1px solid #e7eaee;align-items:center}.superscore-player .state{text-transform:capitalize;font-size:.8rem;color:#575f68}
-@media(max-width:640px){.matches{grid-template-columns:1fr}.card{padding:11px}.wide{display:none}.lineups{grid-template-columns:1fr}}
+@media(max-width:640px){
+  .matches{grid-template-columns:1fr}.card{padding:11px}.wide{display:none}.lineups{grid-template-columns:1fr}
+  .superscore-detail{padding:0 0 12px}
+  .superscore-player{grid-template-columns:minmax(0,1fr) auto;gap:4px 8px}
+  .superscore-player>strong,.superscore-player>span:nth-child(2),.superscore-player>span:nth-child(5){grid-column:1/-1;min-width:0;overflow-wrap:anywhere}
+  .superscore-player>span:nth-child(3){min-width:0;overflow-wrap:anywhere}
+  .superscore-player>span:nth-child(4){text-align:right}
+}
 </style></head><body>
 <header><div><strong>BBBFFL</strong><div id="heading">Season</div></div><nav><a href="/">Home</a></nav></header>
 <main>

@@ -285,8 +285,45 @@ def test_superscore_table_shows_integral_totals_without_a_trailing_zero(rendered
 console.log(superscoreSection({json.dumps(ss)}));
 """
     stdout = _run(script, tmp_path, "superscore_integral").strip()
-    assert ">271<" in stdout
-    assert ">246<" in stdout
-    assert ">227.5<" in stdout
+    assert "(271)" in stdout
+    assert "(246)" in stdout
+    assert "(227.5)" in stdout
     assert "271.0" not in stdout
     assert "246.0" not in stdout
+
+
+def test_superscore_entry_is_an_accessible_inline_expander_with_progress(rendered_script, tmp_path):
+    entry = {
+        "rank": 1,
+        "season_entry_id": "entry-a",
+        "team_name": "JHAS",
+        "total_display": 12,
+        "football_line": "2.0",
+        "is_joint_winner": False,
+        "positions": [
+            {
+                "slot": "F1",
+                "label": "Forward 1",
+                "player_name": "Mitch Lewis",
+                "afl_club": "Hawthorn",
+                "display_state": "completed",
+                "effective_score": 12,
+                "football_line": "2.0",
+                "interchange_applied": False,
+            }
+        ],
+        "interchange": {"player_name": None, "afl_club": None, "display_state": "vacant", "target_position": None},
+    }
+    script = f"""
+{rendered_script}
+expandedSuperScoreEntry='entry-a';
+console.log(superScoreEntry({json.dumps(entry)}));
+"""
+    stdout = _run(script, tmp_path, "superscore_expander").strip()
+    assert '<button type="button"' in stdout
+    assert 'aria-expanded="true"' in stdout
+    assert 'aria-controls="superscore-detail-entry-a"' in stdout
+    assert 'class="superscore-dot completed"' in stdout
+    assert "Mitch Lewis" in stdout
+    assert "Hawthorn" in stdout
+    assert "2.0" in stdout

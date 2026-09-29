@@ -21,6 +21,7 @@ created) and `tests.season_completion_helpers.build_completable_season`
 published SuperScore leaderboards) -- never a fresh simulation of either.
 """
 
+import json
 import tempfile
 from pathlib import Path
 
@@ -36,7 +37,7 @@ from app.finals_preflight import open_finals_week
 from app.finals_review import build_finals_round_review
 from app.identity import IdentityRepository
 from app.lineups import POSITIONS
-from app.public_finals import build_public_season_sequence
+from app.public_finals import _public_entry, build_public_season_sequence
 from app.round_review import RoundReviewRepository
 from app.season import _now
 from tests.finals_helpers import accept_week_mapping, build_finals_ready_season, seed_official_result
@@ -48,6 +49,114 @@ from tests.season_completion_helpers import (
 )
 
 ACTOR = ActorContext.anonymous_operator("test")
+
+
+@pytest.mark.parametrize("match_state", ["yet_to_play", "live", "postgame", "completed"])
+def test_superscore_public_projection_uses_current_match_progress(match_state):
+    snapshot = {
+        "effective_entry": {
+            "team_name": "JHAS",
+            "slots": [
+                {
+                    "slot": "F1",
+                    "season_player_id": "original",
+                    "player_name": "Mitch Lewis",
+                    "afl_club": "Hawthorn",
+                    "effective_score": 12,
+                    "effective_source": "starter",
+                    "dnp_ruling": False,
+                    "interchange_applied": False,
+                }
+            ],
+            "interchange": {"season_player_id": None, "player_name": None},
+        },
+        "entry": {
+            "slots": [
+                {
+                    "position": "F1",
+                    "afl_match_id": 44,
+                    "source_afl_round_id": 9,
+                    "stats": {"goals": 2, "behinds": 0},
+                }
+            ]
+        },
+    }
+    projected = _public_entry(
+        {"rank": 1, "season_entry_id": "entry", "team_name": "JHAS", "total_score": 12},
+        snapshot,
+        published=False,
+        match_states={44: match_state},
+    )
+    assert projected["positions"][0]["display_state"] == match_state
+    assert projected["positions"][0]["football_line"] == "2.0"
+    assert projected["football_line"] == "2.0"
+
+
+def test_superscore_projection_preserves_original_dnp_when_interchange_replaces_it():
+    snapshot = {
+        "effective_entry": {
+            "slots": [
+                {
+                    "slot": "Tackler",
+                    "season_player_id": "starter",
+                    "player_name": "Original Player",
+                    "afl_club": "Original Club",
+                    "effective_score": 18,
+                    "effective_source": "interchange",
+                    "dnp_ruling": True,
+                    "interchange_applied": True,
+                }
+            ],
+            "interchange": {
+                "season_player_id": "bench",
+                "player_name": "Replacement Player",
+                "afl_club": "Replacement Club",
+                "target_position": "Tackler",
+            },
+        },
+        "entry": {
+            "slots": [
+                {"position": "Tackler", "afl_match_id": 1, "stats": None},
+                {"position": "Interchange", "afl_match_id": 2, "stats": {"tackles": 3}},
+            ]
+        },
+    }
+    projected = _public_entry(
+        {"rank": 1, "season_entry_id": "entry", "total_score": 18},
+        snapshot,
+        published=False,
+        match_states={2: "live"},
+    )
+    position = projected["positions"][0]
+    assert position["player_name"] == "Original Player"
+    assert position["confirmed_dnp"] is True
+    assert position["replacement_player_name"] == "Replacement Player"
+    assert position["replacement_afl_club"] == "Replacement Club"
+    assert position["display_state"] == "live"
+    assert position["football_line"] == "3.0"
+
+
+@pytest.mark.parametrize(
+    ("slot", "expected"),
+    [
+        ({"season_player_id": "p", "player_name": "DNP", "dnp_ruling": True}, "dnp"),
+        ({"season_player_id": None, "player_name": None}, "vacant"),
+        ({"season_player_id": None, "player_name": "Unresolved"}, "unnamed"),
+    ],
+)
+def test_superscore_projection_exposes_non_playing_states(slot, expected):
+    slot = {"slot": "F1", "effective_score": 0, "interchange_applied": False, **slot}
+    snapshot = {
+        "effective_entry": {"slots": [slot], "interchange": {}},
+        "entry": {"slots": [{"position": "F1", "stats": None}]},
+    }
+    projected = _public_entry(
+        {"rank": 1, "season_entry_id": "entry", "total_score": 0},
+        snapshot,
+        published=False,
+        match_states={},
+    )
+    assert projected["positions"][0]["display_state"] == expected
 
 
 @pytest.fixture
@@ -1171,6 +1280,53 @@ def test_superscore_integral_totals_render_without_a_trailing_zero(public_client
             assert "." not in str(entry["total_display"])
         else:
             assert entry["total_display"] == entry["total_score"]
+        assert entry["official"] is True
+        assert entry["football_line"]
+        assert len(entry["positions"]) == 8
+        assert "input_snapshot" not in entry
+        assert "rulings" not in entry
+        assert "override_reason" not in str(entry)
+
+    # The fixture's only selected scorer is a Forward.  Its literal frozen
+    # AFL goals/behinds are preserved rather than divmodding the point total.
+    first = ss["entries"][0]
+    f1 = next(position for position in first["positions"] if position["slot"] == "F1")
+    assert f1["football_line"] == f"{first['total_score'] // 6:.0f}.0"
+    assert f1["display_state"] == "completed"
+
+
+def test_published_superscore_detail_and_rank_ignore_later_mutable_calculation(public_client):
+    """Published totals, ranks and player evidence come exclusively from
+    `superscore_official_result.input_snapshot`, even if the replaceable
+    calculation row later diverges."""
+    built = build_completable_season(year=8109, database=public_client.app.state.database)
+    database = public_client.app.state.database
+    season_id = built["season"].season_id
+    before = public_client.get(f"/api/public/seasons/{season_id}/rounds/24").json()["superscore"]
+    winner = before["entries"][0]
+
+    row = database.execute(
+        "SELECT snapshot FROM superscore_entry_calculation WHERE bbbffl_round_id=? AND season_entry_id=?",
+        (before["round_id"], winner["season_entry_id"]),
+    ).fetchone()
+    snapshot = json.loads(row["snapshot"])
+    snapshot["effective_entry"]["slots"][0]["player_name"] = "Mutable impostor"
+    snapshot["effective_entry"]["slots"][0]["effective_score"] = 999
+    with database.engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE superscore_entry_calculation SET total_score=999,snapshot=:snapshot "
+                "WHERE bbbffl_round_id=:round_id AND season_entry_id=:entry_id"
+            ),
+            {"snapshot": json.dumps(snapshot), "round_id": before["round_id"], "entry_id": winner["season_entry_id"]},
+        )
+
+    after = public_client.get(f"/api/public/seasons/{season_id}/rounds/24").json()["superscore"]
+    same = next(entry for entry in after["entries"] if entry["season_entry_id"] == winner["season_entry_id"])
+    assert same["rank"] == winner["rank"]
+    assert same["total_score"] == winner["total_score"]
+    assert "Mutable impostor" not in str(same)
+    assert 999 not in [position["effective_score"] for position in same["positions"]]
 
 
 def _record_dnp_and_interchange(built, matchup_id, entry_id, position, *, review_version, reason):

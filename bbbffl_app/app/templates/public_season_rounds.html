@@ -31,6 +31,11 @@
 .players{list-style:none;padding:0;margin:8px 0}
 .players li{padding:6px 0;border-top:1px solid #e7eaee}
 .tag{font-size:.8rem;font-weight:700}
+.superscore-entry{border-top:1px solid #e1e5e9}.superscore-entry:first-child{border-top:0}
+.superscore-team{width:100%;display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;padding:11px 4px;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.superscore-rank{font-weight:700}.superscore-total{font-weight:750}.superscore-dots{grid-column:2/4;display:flex;gap:6px}
+.superscore-dot{width:11px;height:11px;border-radius:50%;background:#aab2bb}.superscore-dot.live{background:#d1242f}.superscore-dot.postgame{background:#bf6a02}.superscore-dot.completed{background:#238636}.superscore-dot.dnp{background:#8250df}.superscore-dot.vacant,.superscore-dot.unnamed{background:#57606a}
+.superscore-detail{padding:0 4px 12px 36px}.superscore-player{display:grid;grid-template-columns:minmax(80px,.8fr) minmax(120px,1.3fr) minmax(100px,1fr) auto auto;gap:8px;padding:6px 0;border-top:1px solid #e7eaee;align-items:center}.superscore-player .state{text-transform:capitalize;font-size:.8rem;color:#575f68}
 @media(max-width:640px){.matches{grid-template-columns:1fr}.card{padding:11px}.wide{display:none}.lineups{grid-template-columns:1fr}}
 </style></head><body>
 <header><div><strong>BBBFFL</strong><div id="heading">Season</div></div><nav><a href="/">Home</a></nav></header>
@@ -49,6 +54,7 @@
 <script>
 const season={{ season_id|tojson }};
 let roundNumber={{ round_number|tojson }};
+let expandedSuperScoreEntry=null;
 const pollIntervalMs={{ poll_interval_seconds|tojson }}*1000;
 // Known server-side without any client fetch (a round_number's stream
 // never changes), so polling can be scheduled independently of whether
@@ -182,7 +188,7 @@ function superscoreSection(ss){
   let body;
   if(!ss.available){
     body=`<p class="note">${esc(ss.round_label)} is not yet configured for this finals week.</p>`;
-  } else if(!ss.published){
+  } else if(!ss.published && !ss.entries.length){
     body=`<p class="note">${esc(ss.round_label)} results have not been published yet.</p>`;
   } else {
     let published=auTime(ss.published_at);
@@ -191,11 +197,36 @@ function superscoreSection(ss){
     // published total (e.g. 271.0 -> "271") while leaving a genuinely
     // non-integral one shown as-is -- never a second/independent rounding
     // rule here, and never a change to the underlying `total_score` value.
-    let rows=ss.entries.map(e=>`<tr><td>${e.rank}${e.is_joint_winner?' =':''}</td><td>${esc(e.team_name)}</td><td>${esc(e.total_display)}</td></tr>`).join('');
-    body=`${published?`<p class="note">Published ${esc(published)} (AEST/AEDT)</p>`:''}<table class="ladder"><thead><tr><th>#</th><th>Team</th><th>Score</th></tr></thead><tbody>${rows}</tbody></table>`;
+    let rows=ss.entries.map(superScoreEntry).join('');
+    let status=ss.published?(published?`Published ${esc(published)} (AEST/AEDT)`:'Official final'):'Live/current scores — unofficial';
+    body=`<p class="note">${status}</p><div class="superscore-list">${rows}</div>`;
   }
   return `<div class="card"><h2>${esc(ss.round_label)}</h2>${body}</div>`;
 }
+
+function superScorePlayer(p){
+  let player=esc(p.player_name||'Vacant');
+  if(p.interchange_applied)player+=` <span class="note">(DNP) → ${esc(p.replacement_player_name||'Interchange')}</span>`;
+  let score=p.football_line==null?esc(p.effective_score):`${esc(p.football_line)} <span class="tag">(${esc(p.effective_score)})</span>`;
+  return `<div class="superscore-player"><strong>${esc(p.label)}</strong><span>${player}</span><span>${esc(p.interchange_applied?p.replacement_afl_club:p.afl_club)||'—'}</span><span class="state">${esc(p.display_state.replaceAll('_',' '))}</span><span>${score}</span></div>`;
+}
+function superScoreEntry(e){
+  const id=String(e.season_entry_id);const open=expandedSuperScoreEntry===id;
+  const positions=e.positions||[];
+  const dots=positions.map(p=>`<span class="superscore-dot ${esc(p.display_state)}" title="${esc(p.label)}: ${esc(p.display_state.replaceAll('_',' '))}"></span>`).join('');
+  const interchange=e.interchange||{};
+  const detail=`<div class="superscore-detail" id="superscore-detail-${esc(id)}"${open?'':' hidden'}>${positions.map(superScorePlayer).join('')}<div class="superscore-player"><strong>Interchange</strong><span>${esc(interchange.player_name||'Vacant')}</span><span>${esc(interchange.afl_club)||'—'}</span><span class="state">${esc((interchange.display_state||'vacant').replaceAll('_',' '))}</span><span>${interchange.target_position?`Replaces ${esc(interchange.target_position)}`:'—'}</span></div></div>`;
+  return `<div class="superscore-entry"><button type="button" class="superscore-team" data-superscore-entry="${esc(id)}" aria-expanded="${open}" aria-controls="superscore-detail-${esc(id)}"><span class="superscore-rank">${e.rank}${e.is_joint_winner?' =':''}.</span><strong>${esc(e.team_name)}</strong><span class="superscore-total">${e.football_line?`${esc(e.football_line)} `:''}<span class="tag">(${esc(e.total_display)})</span></span><span class="superscore-dots" aria-label="Player progress">${dots}</span></button>${detail}</div>`;
+}
+
+document.querySelector('#superscore').addEventListener('click',event=>{
+  const button=event.target.closest('[data-superscore-entry]');if(!button)return;
+  expandedSuperScoreEntry=button.getAttribute('data-superscore-entry')===expandedSuperScoreEntry?null:button.getAttribute('data-superscore-entry');
+  document.querySelectorAll('[data-superscore-entry]').forEach(item=>{
+    const open=item.getAttribute('data-superscore-entry')===expandedSuperScoreEntry;
+    item.setAttribute('aria-expanded',String(open));item.nextElementSibling.hidden=!open;
+  });
+});
 
 function renderRoundOptions(rounds){
   const select=document.querySelector('#roundSelect');

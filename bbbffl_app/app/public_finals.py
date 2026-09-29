@@ -32,12 +32,12 @@ Reuses, never reimplements:
   week's "defined but not yet opened" placeholder reuses the identical
   policy an ordinary round's does, rather than a second copy of it.
 
-Never reads a scorer-only table (`superscore_entry_review_state`,
-`superscore_entry_calculation`, DNP/interchange rulings, override
-reasons) and never exposes an internal id as primary UI content beyond
-the same `bbbffl_round_id`/`season_entry_id` public routes already key
-on.
+SuperScore player detail is an explicit public projection of the calculated
+snapshot while a round is current, or the frozen official input snapshot
+after publication.  Snapshot dictionaries are never returned wholesale.
 """
+
+import json
 
 from app.finals import SLOT_LABELS, WEEK_LABELS, FinalsBracketRepository
 from app.finals_review import build_finals_round_review
@@ -53,11 +53,135 @@ from app.public_rounds import (
     authoritative_submissions,
     match_score_state,
 )
-from app.score_presentation import format_number
+from app.score_presentation import (
+    football_score_from_evidence,
+    football_score_from_total,
+    format_football_line,
+    format_number,
+)
 from app.stream_presentation import humanize_round_label
 from app.superscore_results import SuperScoreLeaderboardService
 
 SCHEDULED_STATUS_LABEL = "Scheduled — not yet started; lineups and scores are not yet available."
+_FORWARD_SLOTS = frozenset({"F1", "F2", "F3"})
+_SLOT_LABELS = {
+    "F1": "Forward 1",
+    "F2": "Forward 2",
+    "F3": "Forward 3",
+    "M1": "Midfield 1",
+    "M2": "Midfield 2",
+    "M3": "Midfield 3",
+    "Ruck": "Ruck",
+    "Tackler": "Tackler",
+}
+
+
+def _football_line(score, slot, evidence):
+    if score is None:
+        return None
+    stats = (evidence or {}).get("stats") or {}
+    goals, behinds, _ = football_score_from_evidence(
+        score,
+        is_actual_stat_capable=slot in _FORWARD_SLOTS,
+        stat_goals=stats.get("goals"),
+        stat_behinds=stats.get("behinds"),
+    )
+    return format_football_line(goals, behinds)
+
+
+def _display_state(slot, evidence, match_states, *, published):
+    if not slot.get("season_player_id") and not slot.get("interchange_applied"):
+        return "vacant" if slot.get("player_name") is None else "unnamed"
+    if slot.get("dnp_ruling") and not slot.get("interchange_applied"):
+        return "dnp"
+    if published:
+        return "completed"
+    match_id = (evidence or {}).get("afl_match_id") or slot.get("source_afl_match_id")
+    return match_states.get(match_id, "yet_to_play")
+
+
+def _public_entry(entry, snapshot, *, published, match_states):
+    """Allow-list one persisted snapshot for public display.
+
+    `effective_entry` is authoritative for what counted.  Raw calculation
+    slots are consulted only for public scoring evidence and original
+    selections; rulings, reasons, fingerprints and publication actors never
+    cross this boundary.
+    """
+    effective = snapshot.get("effective_entry") or {}
+    calculation = snapshot.get("calculation") or snapshot
+    raw_entry = calculation.get("entry") or {}
+    evidence_by_slot = {item.get("position"): item for item in raw_entry.get("slots") or []}
+    interchange = effective.get("interchange") or {}
+    interchange_evidence = evidence_by_slot.get("Interchange") or {}
+    positions = []
+    score_pairs = []
+    for slot in effective.get("slots") or []:
+        name = slot.get("slot")
+        evidence = interchange_evidence if slot.get("interchange_applied") else evidence_by_slot.get(name, {})
+        score = slot.get("effective_score")
+        stats = (evidence or {}).get("stats") or {}
+        pair = football_score_from_evidence(
+            score,
+            is_actual_stat_capable=name in _FORWARD_SLOTS,
+            stat_goals=stats.get("goals"),
+            stat_behinds=stats.get("behinds"),
+        )
+        if pair is not None:
+            score_pairs.append(pair[:2])
+        positions.append(
+            {
+                "slot": name,
+                "label": _SLOT_LABELS.get(name, name),
+                "player_name": slot.get("player_name"),
+                "afl_club": slot.get("afl_club"),
+                "display_state": _display_state(slot, evidence, match_states, published=published),
+                "effective_score": format_number(score) if score is not None else None,
+                "football_line": _football_line(score, name, evidence),
+                "effective_source": slot.get("effective_source"),
+                "confirmed_dnp": slot.get("dnp_ruling") is True,
+                "interchange_applied": slot.get("interchange_applied") is True,
+                "replacement_player_name": interchange.get("player_name") if slot.get("interchange_applied") else None,
+                "replacement_afl_club": interchange.get("afl_club") if slot.get("interchange_applied") else None,
+            }
+        )
+    total = entry["total_score"]
+    if score_pairs and sum(g * 6 + b for g, b in score_pairs) == total:
+        goals, behinds = sum(g for g, _ in score_pairs), sum(b for _, b in score_pairs)
+    else:
+        goals, behinds = football_score_from_total(total)
+    interchange_state = _display_state(interchange, interchange_evidence, match_states, published=published)
+    return {
+        "rank": entry["rank"],
+        "season_entry_id": entry["season_entry_id"],
+        "team_name": entry.get("team_name") or effective.get("team_name") or "Team",
+        "total_score": total,
+        "total_display": format_number(total),
+        "football_line": format_football_line(goals, behinds),
+        "is_joint_winner": entry.get("is_joint_winner", False),
+        "official": published,
+        "positions": positions,
+        "interchange": {
+            "player_name": interchange.get("player_name"),
+            "afl_club": interchange.get("afl_club"),
+            "display_state": interchange_state,
+            "target_position": interchange.get("target_position"),
+        },
+    }
+
+
+def _current_match_states(afl_client, snapshots):
+    round_ids = {
+        item.get("source_afl_round_id")
+        for snapshot in snapshots
+        for item in ((snapshot.get("entry") or {}).get("slots") or [])
+        if item.get("source_afl_round_id") is not None
+    }
+    states = {}
+    for round_id in round_ids:
+        for match in afl_client.get_matches(round_id):
+            states[match.match_id] = match.state
+    return states
 
 
 def finals_competition_id(database, season_id):
@@ -84,9 +208,9 @@ def build_public_superscore_round(database, afl_client, identities, season_id, w
     """The public DTO for the SuperScore round concurrent with one finals
     week -- entry-based (all ten season entries), never a fabricated
     opponent/matchup. ``available`` is false only when SS{week_number}
-    has not been provisioned for this season at all; once provisioned but
-    not yet published, ``entries`` stays empty rather than exposing any
-    draft/calculated score."""
+    has not been provisioned for this season at all. Before publication,
+    entries are projected from persisted calculations as explicitly
+    unofficial; after publication, only frozen official rows are used."""
     fallback_label = f"SuperScore {week_number}"
     round_row = _superscore_round_row(database, season_id, week_number)
     if round_row is None:
@@ -100,24 +224,58 @@ def build_public_superscore_round(database, afl_client, identities, season_id, w
             "entries": [],
         }
     round_label = humanize_round_label("superscore", round_row["label"]) or fallback_label
+    round_id = round_row["bbbffl_round_id"]
+    lifecycle = database.execute(
+        "SELECT state FROM bbbffl_round_lifecycle WHERE bbbffl_round_id=?", (round_id,)
+    ).fetchone()
+    lifecycle_state = lifecycle["state"] if lifecycle else "upcoming"
     leaderboard = SuperScoreLeaderboardService(database, afl_client, identities).leaderboard(
-        round_row["bbbffl_round_id"]
+        round_id, include_inputs=True
     )
     if leaderboard is None:
+        rows = database.execute(
+            "SELECT season_entry_id,total_score,snapshot FROM superscore_entry_calculation "
+            "WHERE bbbffl_round_id=? ORDER BY season_entry_id",
+            (round_id,),
+        ).fetchall()
+        snapshots = [json.loads(row["snapshot"]) for row in rows]
+        match_states = _current_match_states(afl_client, snapshots) if rows else {}
+        scores = [float(row["total_score"]) for row in rows]
+        current = []
+        for row, snapshot in zip(rows, snapshots, strict=True):
+            score = float(row["total_score"])
+            team = identities.get_public_team(row["season_entry_id"]) if identities is not None else None
+            current.append(
+                _public_entry(
+                    {
+                        "season_entry_id": row["season_entry_id"],
+                        "team_name": team.team_name if team else None,
+                        "total_score": score,
+                        "rank": 1 + sum(other > score for other in scores),
+                        "is_joint_winner": False,
+                    },
+                    snapshot,
+                    published=False,
+                    match_states=match_states,
+                )
+            )
+        current.sort(key=lambda item: (item["rank"], item["team_name"], item["season_entry_id"]))
         return {
             "available": True,
             "week_number": week_number,
-            "round_id": round_row["bbbffl_round_id"],
+            "round_id": round_id,
             "round_label": round_label,
+            "lifecycle_status": lifecycle_state,
             "published": False,
             "published_at": None,
-            "entries": [],
+            "entries": current,
         }
     return {
         "available": True,
         "week_number": week_number,
-        "round_id": round_row["bbbffl_round_id"],
+        "round_id": round_id,
         "round_label": round_label,
+        "lifecycle_status": lifecycle_state,
         "published": True,
         "published_at": leaderboard["published_at"],
         # Issue #261: `total_score` itself is left exactly as published
@@ -126,7 +284,8 @@ def build_public_superscore_round(database, afl_client, identities, season_id, w
         # 271.0) renders as "271" rather than "271.0", while a genuinely
         # non-integral one is shown unchanged.
         "entries": [
-            {**entry, "total_display": format_number(entry["total_score"])} for entry in leaderboard["entries"]
+            _public_entry(entry, entry["input_snapshot"], published=True, match_states={})
+            for entry in leaderboard["entries"]
         ],
     }
 

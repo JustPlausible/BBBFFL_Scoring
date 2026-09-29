@@ -36,7 +36,7 @@ from app.migrations import migrate
 from app.round_mapping import AflApiReferenceValidator, RoundMappingRepository
 from app.superscore_round import confirm_afl_mapping, setup_round
 from tests.finals_helpers import KnownRound
-from tests.test_finals_superscore_open import ACTOR, _StubAflClient, _seed
+from tests.test_finals_superscore_open import ACTOR, _seed, _StubAflClient
 
 
 @pytest.fixture(scope="module")
@@ -122,9 +122,7 @@ def test_concurrent_setup_round_freezing_a_stale_mapping_is_caught_not_silently_
     assert frozen.afl_round_id == stale_afl_round_id
 
 
-def test_concurrent_direct_mapping_correction_serializes_against_paired_synchronisation(
-    postgres_database, monkeypatch
-):
+def test_concurrent_direct_mapping_correction_serializes_against_paired_synchronisation(postgres_database, monkeypatch):
     """A different operator correcting SS's mapping directly (e.g. via the
     round-preflight UI's mapping-correction form,
     `app.round_mapping.RoundMappingRepository.correct`) while a paired
